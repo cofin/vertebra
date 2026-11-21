@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlspec import SQLResult
 from sqlspec.core import SQL, ParameterStyle, StatementConfig
 from sqlspec.driver import validate_savepoint_name
+from sqlspec.driver._common import cache_hit_hooks_unchanged
 from sqlspec.exceptions import DialectNotSupportedError
 from sqlspec.storage import StorageBridgeJob
 
@@ -23,8 +25,6 @@ from vertebra.extensions.sqlspec.adapters.oracle.core import (
     apply_oracle_transaction_priority,
     build_oracle_statement_config,
     map_oracle_exception,
-    normalize_oracle_many_parameters,
-    normalize_oracle_parameters,
     validate_sessionless_execution_options,
     validate_sessionless_transaction_args,
 )
@@ -41,12 +41,6 @@ __all__ = ("OracleAsyncDriver", "OracleSyncDriver")
 _SESSIONLESS_UNSUPPORTED_MSG = (
     "Oracle 26ai sessionless transactions are not supported by the underlying native Oracle driver"
 )
-
-
-def _extract_oracle_features(connection: Any) -> Any:
-    """Resolve `OracleDriverFeatures` from the native Oracle connection configuration."""
-    cfg = getattr(connection, "config", None)
-    return getattr(cfg, "driver_features", None) if cfg is not None else None
 
 
 def _extract_tenant_context_args(connection: Any) -> tuple[str, str | None]:
@@ -272,8 +266,14 @@ class OracleSyncDriver(BaseSyncDriver):
             self._sessionless_transaction_id = None
         return result
 
+    @contextmanager
+    def with_cursor(self, connection: Any) -> Iterator[Any]:
+        """Enter `connection.checkout_cursor()` for native Oracle drivers."""
+        with connection.checkout_cursor() as cursor:
+            yield cursor
+
     def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a single compiled Oracle statement, forwarding `suspend_on_success` when supported."""
+        """Execute a single compiled Oracle statement on the native cursor or sessionless connection."""
         effective_config = getattr(statement, "statement_config", None) or self.statement_config
         exec_args = getattr(effective_config, "execution_args", None) or {}
         if (
@@ -281,7 +281,7 @@ class OracleSyncDriver(BaseSyncDriver):
             and not statement.returns_rows()
             and _execute_accepts_suspend_on_success(cursor)
         ):
-            sql, params = self._compile_for_native(statement)
+            sql, params = self._compiled_sql(statement, effective_config)
             raw = (
                 cursor.execute(sql, params, suspend_on_success=True)
                 if params is not None
@@ -289,19 +289,73 @@ class OracleSyncDriver(BaseSyncDriver):
             )
             rowcount = len(raw) if isinstance(raw, list) else (int(raw) if raw is not None else 0)
             return self.create_execution_result(cursor, rowcount_override=rowcount)
-        return super().dispatch_execute(cursor, statement)
+        sql, params = self._compiled_sql(statement, effective_config)
+        out_binds = exec_args.get("out_binds")
+        if out_binds is not None:
+            cursor.execute(sql, params or (), out_binds=out_binds)
+        else:
+            cursor.execute(sql, params or ())
+        if hasattr(self.connection, "_last_out_binds"):
+            self.connection._last_out_binds = cursor.out_binds
+        description = cursor.description
+        if description is not None:
+            rows = cursor.fetchall()
+            return self.create_execution_result(
+                cursor,
+                selected_data=rows,
+                column_names=[column[0] for column in description],
+                data_row_count=len(rows),
+                is_select_result=True,
+                row_format="tuple",
+                last_inserted_id=cursor.lastrowid,
+            )
+        rowcount = cursor.rowcount
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=rowcount if rowcount > 0 else 0,
+            last_inserted_id=cursor.lastrowid,
+        )
 
     @classmethod
     def _default_statement_config(cls) -> StatementConfig:
         """Build default Oracle `StatementConfig` targeting `:name` and `:1` binds."""
         return build_oracle_statement_config()
 
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the cursor-checkout callables the cache-hit executor calls, or `None` to register no executor."""
+        if not cache_hit_hooks_unchanged(type(self), OracleSyncDriver):
+            return None
+        if self.statement_config.execution_args:
+            return None
+        if not callable(getattr(self.native_driver, "checkout_cursor", None)):
+            return None
+        return self._cached_fetch_rows, self._cached_run_dml
+
+    def _record_out_binds(self, cursor: Any) -> None:
+        """Copy the cursor's out-bind values to the connection when it tracks them."""
+        if hasattr(self.connection, "_last_out_binds"):
+            self.connection._last_out_binds = cursor.out_binds
+
+    def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run a cached row-returning statement on one checked-out cursor and return `(rows, names)`."""
+        with self.connection.checkout_cursor() as cursor:
+            cursor.execute(sql, params)
+            self._record_out_binds(cursor)
+            description = cursor.description
+            if description is None:
+                return [], ()
+            return cursor.fetchall(), tuple(column[0] for column in description)
+
+    def _cached_run_dml(self, sql: str, params: Any = ()) -> tuple[int, Any]:
+        """Run a cached statement without rows on one checked-out cursor and return `(rowcount, lastrowid)`."""
+        with self.connection.checkout_cursor() as cursor:
+            cursor.execute(sql, params)
+            self._record_out_binds(cursor)
+            rowcount = cursor.rowcount
+            return (rowcount if rowcount > 0 else 0), cursor.lastrowid
+
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_oracle_exception(exc)
-
-    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
-        _ = statement
-        return sql, normalize_oracle_parameters(params, features=_extract_oracle_features(self.connection))
 
     def load_from_arrow(
         self,
@@ -383,22 +437,18 @@ class OracleSyncDriver(BaseSyncDriver):
             return
         self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
 
-    def dispatch_execute_many(self, cursor: Any, statement: SQL) -> Any:
-        """Execute batched Oracle DML across unwrapped and coerced parameter sets."""
+    def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
+        """Execute batched Oracle DML directly on the native cursor."""
         effective_config = getattr(statement, "statement_config", None) or self.statement_config
         sql, prepared = self._compiled_sql(statement, effective_config)
-        param_sets = normalize_oracle_many_parameters(prepared, features=_extract_oracle_features(self.connection))
-        if not param_sets:
+        if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
-        if callable(exec_many_fn):
-            rows_affected = exec_many_fn(sql, param_sets)
-            return self.create_execution_result(
-                cursor,
-                rowcount_override=int(rows_affected) if isinstance(rows_affected, int) else len(param_sets),
-                is_many_result=True,
-            )
-        return super().dispatch_execute_many(cursor, statement)
+        cursor.executemany(sql, prepared)
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=max(cursor.rowcount, 0),
+            is_many_result=True,
+        )
 
     def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
         """Bind Oracle session VPD context via `DBMS_SESSION` or package proc and return predicate SQL."""
@@ -609,8 +659,14 @@ class OracleAsyncDriver(BaseAsyncDriver):
             self._sessionless_transaction_id = None
         return result
 
+    @asynccontextmanager
+    async def with_cursor(self, connection: Any) -> AsyncIterator[Any]:
+        """Enter `connection.checkout_cursor()` asynchronously for native Oracle drivers."""
+        async with connection.checkout_cursor() as cursor:
+            yield cursor
+
     async def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Asynchronously execute a compiled Oracle statement, forwarding `suspend_on_success`."""
+        """Asynchronously execute a compiled Oracle statement on the native cursor or sessionless connection."""
         effective_config = getattr(statement, "statement_config", None) or self.statement_config
         exec_args = getattr(effective_config, "execution_args", None) or {}
         if (
@@ -618,7 +674,7 @@ class OracleAsyncDriver(BaseAsyncDriver):
             and not statement.returns_rows()
             and _execute_accepts_suspend_on_success(cursor)
         ):
-            sql, params = self._compile_for_native(statement)
+            sql, params = self._compiled_sql(statement, effective_config)
             raw = (
                 await cursor.execute(sql, params, suspend_on_success=True)
                 if params is not None
@@ -626,19 +682,73 @@ class OracleAsyncDriver(BaseAsyncDriver):
             )
             rowcount = len(raw) if isinstance(raw, list) else (int(raw) if raw is not None else 0)
             return self.create_execution_result(cursor, rowcount_override=rowcount)
-        return await super().dispatch_execute(cursor, statement)
+        sql, params = self._compiled_sql(statement, effective_config)
+        out_binds = exec_args.get("out_binds")
+        if out_binds is not None:
+            await cursor.execute(sql, params or (), out_binds=out_binds)
+        else:
+            await cursor.execute(sql, params or ())
+        if hasattr(self.connection, "_last_out_binds"):
+            self.connection._last_out_binds = cursor.out_binds
+        description = cursor.description
+        if description is not None:
+            rows = await cursor.fetchall()
+            return self.create_execution_result(
+                cursor,
+                selected_data=rows,
+                column_names=[column[0] for column in description],
+                data_row_count=len(rows),
+                is_select_result=True,
+                row_format="tuple",
+                last_inserted_id=cursor.lastrowid,
+            )
+        rowcount = cursor.rowcount
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=rowcount if rowcount > 0 else 0,
+            last_inserted_id=cursor.lastrowid,
+        )
 
     @classmethod
     def _default_statement_config(cls) -> StatementConfig:
         """Build default Oracle `StatementConfig` targeting `:name` and `:1` binds."""
         return build_oracle_statement_config()
 
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the cursor-checkout callables the cache-hit executor awaits, or `None` to register no executor."""
+        if not cache_hit_hooks_unchanged(type(self), OracleAsyncDriver):
+            return None
+        if self.statement_config.execution_args:
+            return None
+        if not callable(getattr(self.native_driver, "checkout_cursor", None)):
+            return None
+        return self._cached_fetch_rows, self._cached_run_dml
+
+    def _record_out_binds(self, cursor: Any) -> None:
+        """Copy the cursor's out-bind values to the connection when it tracks them."""
+        if hasattr(self.connection, "_last_out_binds"):
+            self.connection._last_out_binds = cursor.out_binds
+
+    async def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run a cached row-returning statement on one checked-out async cursor and return `(rows, names)`."""
+        async with self.connection.checkout_cursor() as cursor:
+            await cursor.execute(sql, params)
+            self._record_out_binds(cursor)
+            description = cursor.description
+            if description is None:
+                return [], ()
+            return await cursor.fetchall(), tuple(column[0] for column in description)
+
+    async def _cached_run_dml(self, sql: str, params: Any = ()) -> tuple[int, Any]:
+        """Run a cached statement without rows on one checked-out async cursor and return `(rowcount, lastrowid)`."""
+        async with self.connection.checkout_cursor() as cursor:
+            await cursor.execute(sql, params)
+            self._record_out_binds(cursor)
+            rowcount = cursor.rowcount
+            return (rowcount if rowcount > 0 else 0), cursor.lastrowid
+
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_oracle_exception(exc)
-
-    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
-        _ = statement
-        return sql, normalize_oracle_parameters(params, features=_extract_oracle_features(self.connection))
 
     async def load_from_arrow(
         self,
@@ -720,22 +830,18 @@ class OracleAsyncDriver(BaseAsyncDriver):
             return
         await self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
 
-    async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> Any:
-        """Asynchronously execute batched Oracle DML across coerced parameter sets."""
+    async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
+        """Asynchronously execute batched Oracle DML directly on the native cursor."""
         effective_config = getattr(statement, "statement_config", None) or self.statement_config
         sql, prepared = self._compiled_sql(statement, effective_config)
-        param_sets = normalize_oracle_many_parameters(prepared, features=_extract_oracle_features(self.connection))
-        if not param_sets:
+        if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
-        if callable(exec_many_fn):
-            rows_affected = await cast("Any", exec_many_fn)(sql, param_sets)
-            return self.create_execution_result(
-                cursor,
-                rowcount_override=int(rows_affected) if isinstance(rows_affected, int) else len(param_sets),
-                is_many_result=True,
-            )
-        return await super().dispatch_execute_many(cursor, statement)
+        await cursor.executemany(sql, prepared)
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=max(cursor.rowcount, 0),
+            is_many_result=True,
+        )
 
     async def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
         """Asynchronously bind Oracle VPD context and return tenant predicate SQL."""

@@ -5,11 +5,7 @@ from __future__ import annotations
 import datetime
 import re
 from collections.abc import Mapping, Sequence
-from decimal import Decimal
-from typing import Any, Final
-from uuid import UUID
-
-import msgspec
+from typing import Any
 
 from vertebra.db.driver import (
     ConnectionFailure,
@@ -24,14 +20,11 @@ from vertebra.db.driver import (
 )
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.schema import to_value_type
-from vertebra.utils.serializers import encode_json
 
 __all__ = (
     "MYSQL_TRANSIENT_ERRNOS",
     "MySQLCore",
     "build_mysql_connect_kwargs",
-    "coerce_mysql_param",
-    "compile_mysql_statement",
     "map_mysql_exception",
     "normalize_mysql_rows",
 )
@@ -61,8 +54,6 @@ MYSQL_TRANSIENT_ERRNOS: frozenset[int] = frozenset(
         2013,
     }
 )
-
-_LITERAL_COMMENT_PREFIXES: Final[frozenset[str]] = frozenset({"'", '"', "`", "-", "#", "/"})
 
 _INTEGRITY_ERRNOS: frozenset[int] = frozenset({1048, 1062, 1216, 1217, 1364, 1451, 1452, 3819, 4025})
 _SERIALIZATION_ERRNOS: frozenset[int] = frozenset({1205, 1213})
@@ -112,69 +103,15 @@ class MySQLCore:
     """Core statement compilation, parameter coercion, row normalization, and error mapping for MySQL."""
 
     @staticmethod
-    def coerce_param(value: Any) -> Any:
-        """Coerce a Python bind value into a MySQL-compatible parameter value."""
-        if value is None or isinstance(
-            value,
-            (
-                bool,
-                int,
-                float,
-                str,
-                bytes,
-                Decimal,
-                datetime.datetime,
-                datetime.date,
-                datetime.time,
-                datetime.timedelta,
-            ),
-        ):
-            return value
-        if isinstance(value, (bytearray, memoryview)):
-            return bytes(value)
-        if isinstance(value, UUID):
-            return str(value)
-        if isinstance(value, (msgspec.Struct, dict, list)):
-            return encode_json(value)
-        return value
-
-    @staticmethod
-    def compile_statement(
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        target_style: str = "qmark",
-    ) -> tuple[str, tuple[Any, ...]]:
-        """Compile a SQL statement with `:name`, `%(name)s`, `%s`, or `?` binds into positional parameters."""
-        if not parameters:
-            if target_style == "format" and "?" in sql:
-                return MySQLCore._rewrite_placeholders_outside_literals(sql, "?", "%s"), ()
-            if target_style == "qmark" and "%s" in sql:
-                return MySQLCore._rewrite_placeholders_outside_literals(sql, "%s", "?"), ()
-            return sql, ()
-
-        placeholder = "%s" if target_style == "format" else "?"
-        if isinstance(parameters, Mapping):
-            compiled_sql, ordered_values = MySQLCore._compile_named_mysql_binds(sql, parameters, placeholder)
-            return compiled_sql, tuple(MySQLCore.coerce_param(v) for v in ordered_values)
-
-        if target_style == "format":
-            rewritten_sql = MySQLCore._rewrite_placeholders_outside_literals(sql, "?", "%s") if "?" in sql else sql
-        else:
-            rewritten_sql = MySQLCore._rewrite_placeholders_outside_literals(sql, "%s", "?") if "%s" in sql else sql
-        return rewritten_sql, tuple(MySQLCore.coerce_param(v) for v in parameters)
-
-    @staticmethod
     def compile_for_driver(
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> tuple[str, tuple[Any, ...]]:
-        """Compile named binds via `compile_statement` while preserving positional SQL placeholders."""
+        """Compile named or positional MySQL binds via `vertebra._mysql.compile_binds`."""
         if not parameters:
             return sql, ()
-        if isinstance(parameters, Mapping):
-            return MySQLCore.compile_statement(sql, parameters, target_style="qmark")
-        return sql, tuple(MySQLCore.coerce_param(v) for v in parameters)
+        result: tuple[str, tuple[Any, ...]] = MySQLCore.require_native_module().compile_binds(sql, parameters)
+        return result
 
     @staticmethod
     def require_native_module() -> Any:
@@ -317,122 +254,6 @@ class MySQLCore:
         mapped.vendor_code = errno
         mapped.is_transient = is_transient
         return mapped
-
-    @staticmethod
-    def _consume_literal_or_comment(sql: str, index: int, length: int) -> int | None:
-        ch = sql[index]
-        if ch in {"'", '"', "`"}:
-            quote = ch
-            cursor = index + 1
-            while cursor < length:
-                c = sql[cursor]
-                if c == "\\" and quote != "`" and cursor + 1 < length:
-                    cursor += 2
-                    continue
-                if c == quote:
-                    if cursor + 1 < length and sql[cursor + 1] == quote:
-                        cursor += 2
-                        continue
-                    return cursor + 1
-                cursor += 1
-            return length
-        if (ch == "-" and index + 1 < length and sql[index + 1] == "-") or ch == "#":
-            newline_idx = sql.find("\n", index + (2 if ch == "-" else 1))
-            return length if newline_idx == -1 else newline_idx + 1
-        if ch == "/" and index + 1 < length and sql[index + 1] == "*":
-            end_idx = sql.find("*/", index + 2)
-            return length if end_idx == -1 else end_idx + 2
-        return None
-
-    @staticmethod
-    def _rewrite_placeholders_outside_literals(sql: str, source_token: str, target_token: str) -> str:
-        out: list[str] = []
-        n = len(sql)
-        i = 0
-        src_len = len(source_token)
-        consume = MySQLCore._consume_literal_or_comment
-        prefixes = _LITERAL_COMMENT_PREFIXES
-        while i < n:
-            ch = sql[i]
-            if ch in prefixes:
-                next_i = consume(sql, i, n)
-                if next_i is not None:
-                    out.append(sql[i:next_i])
-                    i = next_i
-                    continue
-            if sql.startswith(source_token, i):
-                out.append(target_token)
-                i += src_len
-                continue
-            out.append(ch)
-            i += 1
-        return "".join(out)
-
-    @staticmethod
-    def _compile_named_mysql_binds(
-        sql: str,
-        params: Mapping[str, Any],
-        placeholder: str,
-    ) -> tuple[str, list[Any]]:
-        out: list[str] = []
-        values: list[Any] = []
-        n = len(sql)
-        i = 0
-        consume = MySQLCore._consume_literal_or_comment
-        prefixes = _LITERAL_COMMENT_PREFIXES
-        while i < n:
-            ch = sql[i]
-            if ch in prefixes:
-                next_i = consume(sql, i, n)
-                if next_i is not None:
-                    out.append(sql[i:next_i])
-                    i = next_i
-                    continue
-            if ch == "%" and i + 2 < n and sql[i + 1] == "(":
-                close_idx = sql.find(")s", i + 2)
-                if close_idx != -1:
-                    name = sql[i + 2 : close_idx]
-                    if name not in params:
-                        msg = f"Missing MySQL bind parameter {name!r}"
-                        raise ProgrammingError(msg)
-                    values.append(params[name])
-                    out.append(placeholder)
-                    i = close_idx + 2
-                    continue
-            if ch == ":" and i + 1 < n and (sql[i + 1].isalpha() or sql[i + 1] == "_"):
-                if i > 0 and sql[i - 1] == ":":
-                    out.append(ch)
-                    i += 1
-                    continue
-                j = i + 2
-                while j < n and (sql[j].isalnum() or sql[j] == "_"):
-                    j += 1
-                name = sql[i + 1 : j]
-                if name not in params:
-                    msg = f"Missing MySQL bind parameter {name!r}"
-                    raise ProgrammingError(msg)
-                values.append(params[name])
-                out.append(placeholder)
-                i = j
-                continue
-            out.append(ch)
-            i += 1
-        return "".join(out), values
-
-
-def coerce_mysql_param(value: Any) -> Any:
-    """Coerce a Python bind value into a MySQL-compatible parameter value."""
-    return MySQLCore.coerce_param(value)
-
-
-def compile_mysql_statement(
-    sql: str,
-    parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    *,
-    target_style: str = "qmark",
-) -> tuple[str, tuple[Any, ...]]:
-    """Compile a SQL statement into positional parameters."""
-    return MySQLCore.compile_statement(sql, parameters, target_style=target_style)
 
 
 def normalize_mysql_rows(

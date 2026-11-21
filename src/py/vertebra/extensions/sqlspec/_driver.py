@@ -5,8 +5,8 @@ from __future__ import annotations
 import contextlib
 import inspect
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager, contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
 import msgspec
@@ -44,9 +44,9 @@ from vertebra.utils.serializers import ZeroCopyCodecRegistry
 try:
     from sqlspec import SQLResult, StackResult, StatementStack
     from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
-    from sqlspec.core import SQL, ParameterStyle, ParameterStyleConfig, StatementConfig, TypedParameter
+    from sqlspec.core import SQL, ParameterStyle, ParameterStyleConfig, StatementConfig
     from sqlspec.core.cache import get_cache_config
-    from sqlspec.core.result._base import ArrowResult, create_arrow_result
+    from sqlspec.core.result._base import ArrowResult, DMLResult, create_arrow_result
     from sqlspec.driver import (
         AsyncDriverAdapterBase,
         AsyncRowStream,
@@ -54,7 +54,7 @@ try:
         SyncDriverAdapterBase,
         SyncRowStream,
     )
-    from sqlspec.driver._common import validate_savepoint_name
+    from sqlspec.driver._common import cache_hit_hooks_unchanged, validate_savepoint_name
     from sqlspec.driver._exception_handler import BaseAsyncExceptionHandler, BaseSyncExceptionHandler
     from sqlspec.exceptions import (
         CheckViolationError,
@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from sqlspec.core import StatementFilter
+    from sqlspec.core.cache import CachedQuery
     from sqlspec.driver._routing import AsyncRoutingSession, SyncRoutingSession
     from sqlspec.storage import StorageBridgeJob, StorageDestination, StorageFormat, StorageTelemetry
     from sqlspec.storage.pipeline import AsyncStoragePipeline, SyncStoragePipeline
@@ -98,6 +99,7 @@ __all__ = (
 )
 
 type ExceptionMapper = Callable[[BaseException], Exception | None]
+type _CacheHitState = tuple[Callable[..., Any], Callable[..., Any], ExceptionMapper]
 
 
 class LazyStoreAttr:
@@ -234,10 +236,60 @@ class _VertebraAsyncRowSource:
         self._iterator = None
 
 
+class _NativeSyncCursorContext(AbstractContextManager[Any]):
+    """Context manager opening one native cursor on a driver and closing it on exit."""
+
+    __slots__ = ("_cursor", "_driver")
+
+    def __init__(self, driver: Any) -> None:
+        self._driver = driver
+        self._cursor: Any = None
+
+    def __enter__(self) -> Any:
+        self._cursor = self._driver.cursor()
+        return self._cursor
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        cursor = self._cursor
+        if cursor is not None:
+            self._cursor = None
+            cursor.close()
+
+
+class _NativeAsyncCursorContext:
+    """Async context manager opening one native async cursor on a driver and closing it on exit."""
+
+    __slots__ = ("_cursor", "_driver")
+
+    def __init__(self, driver: Any) -> None:
+        self._driver = driver
+        self._cursor: Any = None
+
+    async def __aenter__(self) -> Any:
+        self._cursor = self._driver.cursor()
+        return self._cursor
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        cursor = self._cursor
+        if cursor is not None:
+            self._cursor = None
+            await cursor.close()
+
+
 class BaseSyncDriver(SyncDriverAdapterBase):
     """Base synchronous SQLSpec adapter implementing template-method execution over Vertebra drivers."""
 
-    __slots__ = ("_driver_closed", "_shared_pool", "native_driver")
+    __slots__ = ("_driver_closed", "_exception_handler", "_shared_pool", "native_driver")
 
     dialect: Any = "generic"
     _execution_parameter_style: ClassVar[ParameterStyle | None] = None
@@ -264,37 +316,11 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         self.native_driver: Any = connection
         self._shared_pool: bool = shared_pool
         self._driver_closed: bool = False
-
-    @staticmethod
-    def _unwrap_typed_parameters(bound: Any) -> Any:
-        """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
-        if isinstance(bound, dict):
-            return {key: BaseSyncDriver._unwrap_typed_parameters(value) for key, value in bound.items()}
-        if isinstance(bound, tuple):
-            return tuple(BaseSyncDriver._unwrap_typed_parameters(value) for value in bound)
-        if isinstance(bound, list):
-            return [BaseSyncDriver._unwrap_typed_parameters(value) for value in bound]
-        if isinstance(bound, TypedParameter):
-            return bound.value
-        return bound
-
-    @staticmethod
-    def _normalize_bound_params(params: Any) -> Any:
-        """Normalize empty bound containers to `None` while keeping populated payloads intact."""
-        if params is None:
-            return None
-        if isinstance(params, (dict, list, tuple)) and len(params) == 0:
-            return None
-        return params
-
-    @staticmethod
-    def _normalize_statement_params(parameters: tuple[Any, ...]) -> Any:
-        """Normalize positional vararg tuples into single dicts/sequences or tuples."""
-        if not parameters:
-            return None
-        if len(parameters) == 1 and isinstance(parameters[0], (dict, list, tuple)):
-            return parameters[0]
-        return parameters
+        self._exception_handler: _DeferredSyncExceptionHandler = _DeferredSyncExceptionHandler(self._map_exception)
+        callables = self._cache_hit_callables()
+        if callables is not None:
+            self._cache_hit_executor = BaseSyncDriver._run_cached_statement
+            self._cache_hit_state = (callables[0], callables[1], self._map_exception)
 
     @staticmethod
     def _merge_statement_config(
@@ -520,90 +546,134 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         _ = exc
         return None
 
+    @staticmethod
+    def _single_call_pair(
+        target: Any, fetch_name: str, dml_name: str
+    ) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the two bound single-call methods of `target`, or `None` when either is missing."""
+        fetch_rows = getattr(target, fetch_name, None)
+        run_dml = getattr(target, dml_name, None)
+        if not callable(fetch_rows) or not callable(run_dml):
+            return None
+        return fetch_rows, run_dml
+
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the row fetch and statement run the cache-hit executor calls.
+
+        Returns:
+            The native driver's `execute_with_description` and `execute_dml`, or `None` to register no executor.
+        """
+        if not cache_hit_hooks_unchanged(type(self), BaseSyncDriver):
+            return None
+        return self._single_call_pair(self.native_driver, "execute_with_description", "execute_dml")
+
+    @staticmethod
+    def _run_cached_statement(
+        connection: Any,
+        sql: str,
+        params: Any,
+        cached: CachedQuery,
+        statement_config: StatementConfig,
+        state: _CacheHitState,
+    ) -> SQLResult:
+        """Run a cached statement with one driver call and build its result.
+
+        Args:
+            connection: The native driver. Unused; the callables in `state` are bound to it.
+            sql: Raw SQL text the caller passed.
+            params: Parameters the caller passed, already valid for the compiled SQL.
+            cached: Cached compilation of `sql`.
+            statement_config: Statement configuration the result uses to rebuild its statement.
+            state: Row fetch, statement run, and error mapper chosen at construction.
+
+        Returns:
+            The statement result.
+
+        Raises:
+            SQLSpecError: Mapped from a native error, with the native error as its cause.
+        """
+        _ = connection
+        compiled_sql = cached.compiled_sql
+        try:
+            if cached.operation_profile.returns_rows:
+                rows, names = state[0](compiled_sql, params or ())
+                return SQLResult.create_cached_select(
+                    sql,
+                    statement_config,
+                    cached.processed_state,
+                    compiled_sql,
+                    params,
+                    rows,
+                    list(names),
+                    len(rows),
+                    "tuple",
+                    None,
+                )
+            rowcount, lastrowid = state[1](compiled_sql, params or ())
+        except Exception as exc:
+            if isinstance(exc, SQLSpecError):
+                raise
+            mapped = state[2](exc)
+            if mapped is None:
+                mapped = BaseSyncDriver._map_native_database_exception(exc)
+            if mapped is None:
+                raise
+            raise mapped from exc
+        operation_type = cached.operation_type
+        if operation_type != "INSERT" or rowcount == 0:
+            return DMLResult(operation_type, rowcount, None)
+        return DMLResult(operation_type, rowcount, lastrowid)
+
     def handle_database_exceptions(self) -> _DeferredSyncExceptionHandler:
         """Return synchronous deferred exception handler compatible with SQLSpec's dispatcher."""
-        return _DeferredSyncExceptionHandler(self._map_exception)
+        self._exception_handler.pending_exception = None
+        return self._exception_handler
 
-    @contextmanager
-    def with_cursor(self, connection: Any) -> Iterator[Any]:
-        """Yield `connection` directly so `cursor is self.connection` routes cache hits through `dispatch_execute`."""
-        yield connection
+    def with_cursor(self, connection: Any) -> AbstractContextManager[Any]:
+        """Return a native cursor context opening one cursor on `connection`."""
+        return _NativeSyncCursorContext(connection)
 
     def _connection_in_transaction(self) -> bool:
         """Report whether the wrapped native driver currently has an active transaction."""
         return bool(getattr(self.connection, "in_transaction", False))
 
-    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
-        """Allow subclasses to adjust final compiled SQL and unwrapped bind parameters before driver dispatch."""
-        _ = statement
-        return sql, params
-
-    def _compile_for_native(self, statement: SQL) -> tuple[str, Any]:
-        """Compile `statement` honoring its effective `StatementConfig` and unwrap `TypedParameter` nodes."""
-        effective_config = getattr(statement, "statement_config", None) or self.statement_config
-        sql, prepared = self._compiled_sql(statement, effective_config)
-        params = self._normalize_bound_params(self._unwrap_typed_parameters(prepared))
-        return self._prepare_native_parameters(sql, params, statement)
-
-    def _fetch_rows_with_columns(self, cursor: Any, sql: str, params: Any) -> tuple[list[dict[str, Any]], list[str]]:
-        """Execute a row-returning query preserving ordered column names even on empty result sets."""
-        query_fn = getattr(cursor, "query_with_columns", None)
-        if callable(query_fn):
-            typed_query_fn = cast("Callable[..., tuple[Iterable[dict[str, Any]], Iterable[str]]]", query_fn)
-            rows, cols = typed_query_fn(sql, params) if params is not None else typed_query_fn(sql)
-            return list(rows), list(cols)
-        desc_fn = getattr(cursor, "execute_with_description", None)
-        if callable(desc_fn):
-            typed_desc_fn = cast("Callable[..., tuple[Iterable[Any], Iterable[Any]]]", desc_fn)
-            raw_rows, raw_cols = typed_desc_fn(sql, params) if params is not None else typed_desc_fn(sql)
-            cols = [str(col) for col in raw_cols]
-            hydrate_fn = getattr(cursor, "hydrate_rows", None)
-            rows = (
-                cast("Callable[..., Iterable[dict[str, Any]]]", hydrate_fn)(raw_rows, cols, None)
-                if callable(hydrate_fn)
-                else [dict(zip(cols, row, strict=False)) for row in raw_rows]
-            )
-            return list(rows), cols
-        raw_rows = cursor.select(sql, params) if params is not None else cursor.select(sql)
-        rows = list(raw_rows)
-        cols = list(rows[0].keys()) if rows and isinstance(rows[0], dict) else []
-        return rows, cols
-
     def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a single compiled statement against the Vertebra native driver."""
-        sql, params = self._compile_for_native(statement)
-        if statement.returns_rows():
-            rows, cols = self._fetch_rows_with_columns(cursor, sql, params)
+        """Execute a single compiled statement against the Vertebra native cursor."""
+        effective_config = getattr(statement, "statement_config", None) or self.statement_config
+        sql, params = self._compiled_sql(statement, effective_config)
+        cursor.execute(sql, params or ())
+        description = cursor.description
+        if description is not None:
+            rows = cursor.fetchall()
             return self.create_execution_result(
                 cursor,
                 selected_data=rows,
-                column_names=cols,
+                column_names=[column[0] for column in description],
                 data_row_count=len(rows),
                 is_select_result=True,
-                row_format="dict",
+                row_format="tuple",
+                last_inserted_id=cursor.lastrowid,
             )
-        raw = cursor.execute(sql, params) if params is not None else cursor.execute(sql)
-        rowcount = len(raw) if isinstance(raw, list) else (int(raw) if raw is not None else 0)
-        return self.create_execution_result(cursor, rowcount_override=rowcount)
+        rowcount = cursor.rowcount
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=rowcount if rowcount > 0 else 0,
+            last_inserted_id=cursor.lastrowid,
+        )
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a single statement across multiple compiled parameter sets."""
         effective_config = getattr(statement, "statement_config", None) or self.statement_config
         sql, prepared = self._compiled_sql(statement, effective_config)
-        unwrapped = self._unwrap_typed_parameters(prepared)
-        param_sets = list(unwrapped) if unwrapped is not None else []
-        if not param_sets:
+        if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
-        if callable(exec_many_fn):
-            res: Any = exec_many_fn(sql, param_sets)
-            rowcount = int(res) if res is not None else 0
-        else:
-            rowcount = 0
-            for item in param_sets:
-                res = cursor.execute(sql, item)
-                rowcount += len(res) if isinstance(res, list) else (int(res) if res is not None else 0)
-        return self.create_execution_result(cursor, rowcount_override=rowcount, is_many_result=True)
+        cursor.executemany(sql, prepared)
+        rowcount = cursor.rowcount
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=rowcount if rowcount > 0 else 0,
+            is_many_result=True,
+        )
 
     def dispatch_execute_script(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Split a SQL script via SQLGlot dialect rules and dispatch each statement sequentially."""
@@ -613,8 +683,9 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         """Return a native chunked `SyncRowStream` when the underlying driver provides `stream_arrow_batches`."""
         if self._prefer_row_arrow_fallback or not callable(getattr(self.connection, "stream_arrow_batches", None)):
             return None
-        sql, params = self._compile_for_native(statement)
-        return SyncRowStream(_VertebraSyncRowSource(self.connection, sql, params, chunk_size))
+        effective_config = getattr(statement, "statement_config", None) or self.statement_config
+        sql, params = self._compiled_sql(statement, effective_config)
+        return SyncRowStream(_VertebraSyncRowSource(self.connection, sql, params or None, chunk_size))
 
     def execute_many(
         self,
@@ -670,7 +741,9 @@ class BaseSyncDriver(SyncDriverAdapterBase):
             )
             if not sql_statement.is_processed:
                 sql_statement.compile()
-            sql, params = self._compile_for_native(sql_statement)
+            effective_config = getattr(sql_statement, "statement_config", None) or self.statement_config
+            sql, compiled_params = self._compiled_sql(sql_statement, effective_config)
+            params = compiled_params or None
             raw = arrow_fn(sql, params) if params is not None else arrow_fn(sql)
             arrow_data = self._coerce_arrow_payload(
                 raw,
@@ -750,7 +823,9 @@ class BaseSyncDriver(SyncDriverAdapterBase):
             statement_config=statement_config or self.statement_config,
             kwargs=kwargs,
         )
-        sql, params = self._compile_for_native(sql_statement)
+        effective_config = getattr(sql_statement, "statement_config", None) or self.statement_config
+        sql, compiled_params = self._compiled_sql(sql_statement, effective_config)
+        params = compiled_params or None
         stream_fn = getattr(self.connection, "stream_arrow_batches", None)
         if callable(stream_fn):
             yield from cast("Iterator[Any]", stream_fn(sql, params, batch_size=batch_size))
@@ -790,8 +865,9 @@ class BaseSyncDriver(SyncDriverAdapterBase):
                     statement_config=stmt_cfg or self.statement_config,
                     kwargs=op_kwargs,
                 )
-                sql, params = self._compile_for_native(prepared_stmt)
-                prepared.append((prepared_stmt, sql, params))
+                effective_config = getattr(prepared_stmt, "statement_config", None) or self.statement_config
+                sql, compiled_params = self._compiled_sql(prepared_stmt, effective_config)
+                prepared.append((prepared_stmt, sql, compiled_params or None))
             exc_handler = self.handle_database_exceptions()
             with exc_handler, self.connection.pipeline() as pipe:
                 for prepared_stmt, sql, params in prepared:
@@ -880,18 +956,16 @@ class BaseSyncDriver(SyncDriverAdapterBase):
             close_fn()
 
     def collect_rows(self, cursor: Any, fetched: list[Any]) -> tuple[list[Any], list[str], int]:
-        """Collect already-hydrated rows for direct cache-hit paths."""
-        _ = cursor
-        if not fetched:
+        """Collect rows and column names from a native cursor for direct cache-hit paths."""
+        description = cursor.description
+        if description is None:
             return [], [], 0
-        if isinstance(fetched[0], dict):
-            return fetched, list(fetched[0].keys()), len(fetched)
-        return fetched, [], len(fetched)
+        return fetched, [column[0] for column in description], len(fetched)
 
     def resolve_rowcount(self, cursor: Any) -> int:
         """Resolve affected row count from native driver cursor attributes."""
-        raw = getattr(cursor, "rowcount", 0)
-        return int(raw) if isinstance(raw, int) and raw >= 0 else 0
+        rowcount = cursor.rowcount
+        return int(rowcount) if rowcount > 0 else 0
 
     @classmethod
     def _default_statement_config(cls) -> StatementConfig:
@@ -916,7 +990,7 @@ class BaseSyncDriver(SyncDriverAdapterBase):
 class BaseAsyncDriver(AsyncDriverAdapterBase):
     """Base asynchronous SQLSpec adapter implementing template-method execution over Vertebra drivers."""
 
-    __slots__ = ("_driver_closed", "_shared_pool", "native_driver")
+    __slots__ = ("_driver_closed", "_exception_handler", "_shared_pool", "native_driver")
 
     dialect: Any = "generic"
     _execution_parameter_style: ClassVar[ParameterStyle | None] = None
@@ -943,16 +1017,11 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         self.native_driver: Any = connection
         self._shared_pool: bool = shared_pool
         self._driver_closed: bool = False
-
-    @staticmethod
-    def _unwrap_typed_parameters(bound: Any) -> Any:
-        """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
-        return BaseSyncDriver._unwrap_typed_parameters(bound)
-
-    @staticmethod
-    def _normalize_bound_params(params: Any) -> Any:
-        """Normalize empty bound containers to `None` while keeping populated payloads intact."""
-        return BaseSyncDriver._normalize_bound_params(params)
+        self._exception_handler: _DeferredAsyncExceptionHandler = _DeferredAsyncExceptionHandler(self._map_exception)
+        callables = self._cache_hit_callables()
+        if callables is not None:
+            self._cache_hit_executor = BaseAsyncDriver._run_cached_statement
+            self._cache_hit_state = (callables[0], callables[1], self._map_exception)
 
     @property
     def data_dictionary(self) -> Any:
@@ -964,92 +1033,123 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         _ = exc
         return None
 
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the row fetch and statement run the cache-hit executor awaits.
+
+        Returns:
+            The native driver's `execute_with_description` and `execute_dml`, or `None` to register no executor.
+        """
+        if not cache_hit_hooks_unchanged(type(self), BaseAsyncDriver):
+            return None
+        return BaseSyncDriver._single_call_pair(self.native_driver, "execute_with_description", "execute_dml")
+
+    @staticmethod
+    async def _run_cached_statement(
+        connection: Any,
+        sql: str,
+        params: Any,
+        cached: CachedQuery,
+        statement_config: StatementConfig,
+        state: _CacheHitState,
+    ) -> SQLResult:
+        """Run a cached statement by awaiting one driver call and build its result.
+
+        Args:
+            connection: The native driver. Unused; the callables in `state` are bound to it.
+            sql: Raw SQL text the caller passed.
+            params: Parameters the caller passed, already valid for the compiled SQL.
+            cached: Cached compilation of `sql`.
+            statement_config: Statement configuration the result uses to rebuild its statement.
+            state: Row fetch, statement run, and error mapper chosen at construction.
+
+        Returns:
+            The statement result.
+
+        Raises:
+            SQLSpecError: Mapped from a native error, with the native error as its cause.
+        """
+        _ = connection
+        compiled_sql = cached.compiled_sql
+        try:
+            if cached.operation_profile.returns_rows:
+                rows, names = await state[0](compiled_sql, params or ())
+                return SQLResult.create_cached_select(
+                    sql,
+                    statement_config,
+                    cached.processed_state,
+                    compiled_sql,
+                    params,
+                    rows,
+                    list(names),
+                    len(rows),
+                    "tuple",
+                    None,
+                )
+            rowcount, lastrowid = await state[1](compiled_sql, params or ())
+        except Exception as exc:
+            if isinstance(exc, SQLSpecError):
+                raise
+            mapped = state[2](exc)
+            if mapped is None:
+                mapped = BaseSyncDriver._map_native_database_exception(exc)
+            if mapped is None:
+                raise
+            raise mapped from exc
+        operation_type = cached.operation_type
+        if operation_type != "INSERT" or rowcount == 0:
+            return DMLResult(operation_type, rowcount, None)
+        return DMLResult(operation_type, rowcount, lastrowid)
+
     def handle_database_exceptions(self) -> _DeferredAsyncExceptionHandler:
         """Return asynchronous deferred exception handler compatible with SQLSpec's dispatcher."""
-        return _DeferredAsyncExceptionHandler(self._map_exception)
+        self._exception_handler.pending_exception = None
+        return self._exception_handler
 
-    @asynccontextmanager
-    async def with_cursor(self, connection: Any) -> AsyncIterator[Any]:
-        """Yield `connection` directly so `cursor is self.connection` routes cache hits through `dispatch_execute`."""
-        yield connection
+    def with_cursor(self, connection: Any) -> AbstractAsyncContextManager[Any]:
+        """Return a native async cursor context opening one cursor on `connection`."""
+        return _NativeAsyncCursorContext(connection)
 
     def _connection_in_transaction(self) -> bool:
         """Report whether the wrapped async native driver currently has an active transaction."""
         return bool(getattr(self.connection, "in_transaction", False))
 
-    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
-        """Allow subclasses to adjust final compiled SQL and unwrapped bind parameters before driver dispatch."""
-        _ = statement
-        return sql, params
-
-    def _compile_for_native(self, statement: SQL) -> tuple[str, Any]:
-        """Compile `statement` honoring its effective `StatementConfig` and unwrap `TypedParameter` nodes."""
-        effective_config = getattr(statement, "statement_config", None) or self.statement_config
-        sql, prepared = self._compiled_sql(statement, effective_config)
-        params = self._normalize_bound_params(self._unwrap_typed_parameters(prepared))
-        return self._prepare_native_parameters(sql, params, statement)
-
-    async def _fetch_rows_with_columns(
-        self, cursor: Any, sql: str, params: Any
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """Execute an async row-returning query preserving ordered column names on empty result sets."""
-        query_fn = getattr(cursor, "query_with_columns", None)
-        if callable(query_fn):
-            typed_query_fn = cast("Callable[..., Awaitable[tuple[Iterable[dict[str, Any]], Iterable[str]]]]", query_fn)
-            rows, cols = await (typed_query_fn(sql, params) if params is not None else typed_query_fn(sql))
-            return list(rows), list(cols)
-        desc_fn = getattr(cursor, "execute_with_description", None)
-        if callable(desc_fn):
-            typed_desc_fn = cast("Callable[..., Awaitable[tuple[Iterable[Any], Iterable[Any]]]]", desc_fn)
-            raw_rows, raw_cols = await (typed_desc_fn(sql, params) if params is not None else typed_desc_fn(sql))
-            cols = [str(col) for col in raw_cols]
-            hydrate_fn = getattr(cursor, "hydrate_rows", None)
-            rows = (
-                cast("Callable[..., Iterable[dict[str, Any]]]", hydrate_fn)(raw_rows, cols, None)
-                if callable(hydrate_fn)
-                else [dict(zip(cols, row, strict=False)) for row in raw_rows]
-            )
-            return list(rows), cols
-        raw_rows = await (cursor.select(sql, params) if params is not None else cursor.select(sql))
-        rows = list(raw_rows)
-        cols = list(rows[0].keys()) if rows and isinstance(rows[0], dict) else []
-        return rows, cols
-
     async def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a single compiled statement asynchronously against the Vertebra native driver."""
-        sql, params = self._compile_for_native(statement)
-        if statement.returns_rows():
-            rows, cols = await self._fetch_rows_with_columns(cursor, sql, params)
+        """Execute a single compiled statement asynchronously against the Vertebra native cursor."""
+        effective_config = getattr(statement, "statement_config", None) or self.statement_config
+        sql, params = self._compiled_sql(statement, effective_config)
+        await cursor.execute(sql, params or ())
+        description = cursor.description
+        if description is not None:
+            rows = await cursor.fetchall()
             return self.create_execution_result(
                 cursor,
                 selected_data=rows,
-                column_names=cols,
+                column_names=[column[0] for column in description],
                 data_row_count=len(rows),
                 is_select_result=True,
-                row_format="dict",
+                row_format="tuple",
+                last_inserted_id=cursor.lastrowid,
             )
-        raw = await (cursor.execute(sql, params) if params is not None else cursor.execute(sql))
-        rowcount = len(raw) if isinstance(raw, list) else (int(raw) if raw is not None else 0)
-        return self.create_execution_result(cursor, rowcount_override=rowcount)
+        rowcount = cursor.rowcount
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=rowcount if rowcount > 0 else 0,
+            last_inserted_id=cursor.lastrowid,
+        )
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a single statement asynchronously across multiple compiled parameter sets."""
         effective_config = getattr(statement, "statement_config", None) or self.statement_config
         sql, prepared = self._compiled_sql(statement, effective_config)
-        unwrapped = self._unwrap_typed_parameters(prepared)
-        param_sets = list(unwrapped) if unwrapped is not None else []
-        if not param_sets:
+        if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
-        if callable(exec_many_fn):
-            res: Any = await cast("Awaitable[Any]", exec_many_fn(sql, param_sets))
-            rowcount = int(res) if res is not None else 0
-        else:
-            rowcount = 0
-            for item in param_sets:
-                res = await cursor.execute(sql, item)
-                rowcount += len(res) if isinstance(res, list) else (int(res) if res is not None else 0)
-        return self.create_execution_result(cursor, rowcount_override=rowcount, is_many_result=True)
+        await cursor.executemany(sql, prepared)
+        rowcount = cursor.rowcount
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=rowcount if rowcount > 0 else 0,
+            is_many_result=True,
+        )
 
     async def dispatch_execute_script(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Split a SQL script via SQLGlot dialect rules and dispatch each statement sequentially."""
@@ -1059,8 +1159,9 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         """Return a native chunked `AsyncRowStream` when the underlying driver provides `stream_arrow_batches`."""
         if self._prefer_row_arrow_fallback or not callable(getattr(self.connection, "stream_arrow_batches", None)):
             return None
-        sql, params = self._compile_for_native(statement)
-        return AsyncRowStream(_VertebraAsyncRowSource(self.connection, sql, params, chunk_size))
+        effective_config = getattr(statement, "statement_config", None) or self.statement_config
+        sql, params = self._compiled_sql(statement, effective_config)
+        return AsyncRowStream(_VertebraAsyncRowSource(self.connection, sql, params or None, chunk_size))
 
     async def execute_many(
         self,
@@ -1116,7 +1217,9 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
             )
             if not sql_statement.is_processed:
                 sql_statement.compile()
-            sql, params = self._compile_for_native(sql_statement)
+            effective_config = getattr(sql_statement, "statement_config", None) or self.statement_config
+            sql, compiled_params = self._compiled_sql(sql_statement, effective_config)
+            params = compiled_params or None
             raw = await cast("Awaitable[Any]", arrow_fn(sql, params) if params is not None else arrow_fn(sql))
             arrow_data = BaseSyncDriver._coerce_arrow_payload(
                 raw,
@@ -1200,7 +1303,9 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
             statement_config=statement_config or self.statement_config,
             kwargs=kwargs,
         )
-        sql, params = self._compile_for_native(sql_statement)
+        effective_config = getattr(sql_statement, "statement_config", None) or self.statement_config
+        sql, compiled_params = self._compiled_sql(sql_statement, effective_config)
+        params = compiled_params or None
         stream_fn = getattr(self.connection, "stream_arrow_batches", None)
         if callable(stream_fn):
             async for batch in cast("AsyncIterator[Any]", stream_fn(sql, params, batch_size=batch_size)):
@@ -1242,8 +1347,9 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
                     statement_config=stmt_cfg or self.statement_config,
                     kwargs=op_kwargs,
                 )
-                sql, params = self._compile_for_native(prepared_stmt)
-                prepared.append((prepared_stmt, sql, params))
+                effective_config = getattr(prepared_stmt, "statement_config", None) or self.statement_config
+                sql, compiled_params = self._compiled_sql(prepared_stmt, effective_config)
+                prepared.append((prepared_stmt, sql, compiled_params or None))
             exc_handler = self.handle_database_exceptions()
             async with exc_handler, self.connection.pipeline() as pipe:
                 for prepared_stmt, sql, params in prepared:
@@ -1334,18 +1440,16 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
                 await res
 
     def collect_rows(self, cursor: Any, fetched: list[Any]) -> tuple[list[Any], list[str], int]:
-        """Collect already-hydrated rows for direct cache-hit paths."""
-        _ = cursor
-        if not fetched:
+        """Collect rows and column names from a native cursor for direct cache-hit paths."""
+        description = cursor.description
+        if description is None:
             return [], [], 0
-        if isinstance(fetched[0], dict):
-            return fetched, list(fetched[0].keys()), len(fetched)
-        return fetched, [], len(fetched)
+        return fetched, [column[0] for column in description], len(fetched)
 
     def resolve_rowcount(self, cursor: Any) -> int:
         """Resolve affected row count from native driver cursor attributes."""
-        raw = getattr(cursor, "rowcount", 0)
-        return int(raw) if isinstance(raw, int) and raw >= 0 else 0
+        rowcount = cursor.rowcount
+        return int(rowcount) if rowcount > 0 else 0
 
     @classmethod
     def _default_statement_config(cls) -> StatementConfig:

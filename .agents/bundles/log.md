@@ -1,5 +1,15 @@
 # Bundle Activity Log
 
+- **2026-11-21 `archive` (`native-cursor-data-path`)**: Completed, reviewed, and archived `native-cursor-data-path` (6 chapters, 119 completed tasks + 1 user-deferred task `embedded:t11` across unified native PyO3 cursors, single-call `execute_fetch*`/`execute_dml` paths, PostgreSQL persistent asyncio loop reader and binary wire codecs, Oracle reset-relay opt-in and `OracleOutBindVar`, MySQL/MSSQL/SQLite/DuckDB/Spanner/BigQuery cursor and SQLSpec/DB-API/SQLAlchemy fastpaths, 8-engine empty-fetch parity, and all 13 release acceptance benchmark reports passing `tools.benchmarks.adapters.sql check`), recorded ADR-006 and updated knowledge chapters (`database-drivers-and-dialers.md`, `database-driver-limitations.md`, `postgres-native-driver.md`, `sqlspec-alchemy-and-dialects.md`, `sqlspec-limitations.md`, `benchmarks-and-free-threaded.md`, `polyglot-test-matrix.md`), and contracted `.agents/bundles/specs/` back to lazy mode.
+
+- 2026-11-21 `sync`: Closed 0 task(s), recorded 0 commit(s), freed 0 claim(s), updated 1 file(s).
+
+- 2026-11-21 `sync`: Closed 0 task(s), recorded 0 commit(s), freed 0 claim(s), updated 3 file(s).
+
+- **2026-11-19 `archive` (`integrated-benchmarks`)**: Completed, reviewed, and archived `integrated-benchmarks` (3 chapters, 16 tasks closed across DuckDB matrix store/reports, closed-loop + open-loop load drivers (`oha -q`, `h2load`, `ghz`, `k6`) with `make bench-tools`, `ServerRunner` `BrokerHost` lifecycle hooks, isolated `[dependency-groups].bench-comparators`, `pytest-databases` `tmpfs` Docker fixtures using RustFS/Floci/Azurite/Local/Memory with zero MinIO, standalone SQL/cache/storage/ORM comparators, and full-stack Native/RSGI/ASGI/WSGI/gRPC + Django-Bolt/Spikard/Litestar/FastAPI/Django/Flask matrix apps and CLI filters), updated `knowledge/testing/benchmarks-and-free-threaded.md`, and contracted `.agents/bundles/specs/` back to lazy mode.
+
+- 2026-11-19 `sync`: Closed 0 task(s), recorded 15 commit(s), freed 0 claim(s), updated 4 file(s).
+
 - **2026-11-19 `archive` (`runtime-hardening-and-zpages`)**: Completed and archived `runtime-hardening-and-zpages` (4 chapters, 19 tasks closed across MySQL `cloudsql://` DSN parsing in Python and Rust, atomic create-only multipart storage writes on `file://` and `memory://`, release `panic = "unwind"` and single-pass `CompiledIpcLayout` Arrow IPC hardening with overflow and signal guards, and opt-in HTTP Z-Pages with Embedded/SHM dispatch and `--worker-only` loop telemetry), and contracted `.agents/bundles/specs/` back to lazy mode.
 
 - 2026-11-19 `sync`: Closed 0 task(s), recorded 19 commit(s), freed 0 claim(s), updated 5 file(s).

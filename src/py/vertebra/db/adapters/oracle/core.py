@@ -57,7 +57,6 @@ _CERT_DN_RE = re.compile(r'\(\s*SSL_SERVER_CERT_DN\s*=\s*"?([^")]+)"?\s*\)', re.
 _RETRY_COUNT_RE = re.compile(r"\(\s*RETRY_COUNT\s*=\s*(\d+)\s*\)", re.IGNORECASE)
 _RETRY_DELAY_RE = re.compile(r"\(\s*RETRY_DELAY\s*=\s*(\d+)\s*\)", re.IGNORECASE)
 _CONNECT_TIMEOUT_RE = re.compile(r"\(\s*(?:TRANSPORT_)?CONNECT_TIMEOUT\s*=\s*(\d+)\s*\)", re.IGNORECASE)
-_NAMED_PARAM_RE = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
 
 
 _DEFAULT_TENANT_SCOPE = TenantScopeConfig()
@@ -715,41 +714,6 @@ class OracleCore:
         return value
 
     @staticmethod
-    def normalize_sql(
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None,
-    ) -> tuple[str, tuple[Any, ...]]:
-        """Normalize `:1` or `:name` placeholders into positional parameters."""
-        if not params:
-            return sql, ()
-        if isinstance(params, Mapping):
-            cleaned_map = {str(k).lstrip(":"): v for k, v in params.items()}
-            ordered: list[Any] = []
-
-            def _replace_named(match: re.Match[str]) -> str:
-                name = match.group(1)
-                ordered.append(cleaned_map.get(name))
-                return "?"
-
-            return _NAMED_PARAM_RE.sub(_replace_named, sql), tuple(ordered)
-
-        seq = tuple(params)
-        rewritten = re.sub(r":(\d+)", "?", sql)
-        return rewritten, seq
-
-    @staticmethod
-    def is_dml_or_plsql(sql: str) -> bool:
-        """Return `True` when `sql` begins with a DML, DDL, or PL/SQL keyword rather than `SELECT`/`WITH`."""
-        trimmed = sql.lstrip()
-        while trimmed.startswith("/*"):
-            end = trimmed.find("*/")
-            if end == -1:
-                break
-            trimmed = trimmed[end + 2 :].lstrip()
-        upper = trimmed.upper()
-        return not (upper.startswith("SELECT") or upper.startswith("WITH"))
-
-    @staticmethod
     def is_fatal_transport_error(exc: BaseException) -> bool:
         """Return `True` when `exc` indicates a broken transport session (`08006` or fatal ORA codes)."""
         sqlstate = getattr(exc, "sqlstate", None)
@@ -880,93 +844,6 @@ class OracleCore:
         return [], cols
 
     @staticmethod
-    def split_out_bind_parameters(
-        parameters: Sequence[Any] | Mapping[str, Any] | None,
-        out_binds: Any = None,
-    ) -> tuple[
-        Sequence[Any] | Mapping[str, Any] | None,
-        Any,
-        dict[str, tuple[Any, str]] | list[tuple[Any, str]],
-    ]:
-        """Separate PEP 249 `cursor.var()` placeholders from input parameters into native `out_binds` hints."""
-        if parameters is None:
-            return None, out_binds, {}
-        if isinstance(parameters, Mapping):
-            if not any(OracleCore._is_out_bind_var(v) for v in parameters.values()):
-                return parameters, out_binds, {}
-            in_params: dict[str, Any] = {}
-            out_vars: dict[str, tuple[Any, str]] = {}
-            derived_out: dict[str, str] = dict(out_binds) if isinstance(out_binds, Mapping) else {}
-            for k, v in parameters.items():
-                clean_k = str(k).lstrip(":")
-                if OracleCore._is_out_bind_var(v):
-                    hint = str(derived_out.get(clean_k) or OracleCore._out_bind_type_hint(v))
-                    derived_out[clean_k] = hint
-                    out_vars[clean_k] = (v, hint)
-                else:
-                    in_params[str(k)] = v
-            return in_params, derived_out, out_vars
-        if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray)):
-            if not any(OracleCore._is_out_bind_var(v) for v in parameters):
-                return parameters, out_binds, []
-            in_seq: list[Any] = []
-            out_seq: list[tuple[Any, str]] = []
-            derived_seq: list[str] = (
-                [str(item) for item in out_binds]
-                if isinstance(out_binds, Sequence) and not isinstance(out_binds, (str, bytes, bytearray))
-                else []
-            )
-            for v in parameters:
-                if OracleCore._is_out_bind_var(v):
-                    hint = OracleCore._out_bind_type_hint(v)
-                    derived_seq.append(hint)
-                    out_seq.append((v, hint))
-                else:
-                    in_seq.append(v)
-            return in_seq, derived_seq, out_seq
-        return parameters, out_binds, {}
-
-    @staticmethod
-    def populate_out_bind_vars(
-        out_vars: dict[str, tuple[Any, str]] | list[tuple[Any, str]],
-        result: Any,
-        *,
-        features: OracleDriverFeatures,
-    ) -> Any:
-        """Populate `cursor.var()` placeholders and return coerced `out_binds` from a native query result."""
-        raw_out = getattr(result, "out_binds", None)
-        if raw_out is None:
-            return None
-        if isinstance(raw_out, Mapping):
-            lower_map = {str(k).lstrip(":").lower(): v for k, v in raw_out.items()}
-            coerced_map: dict[str, Any] = {}
-            if isinstance(out_vars, dict) and out_vars:
-                for clean_k, (var, hint) in out_vars.items():
-                    raw_val = raw_out.get(clean_k, lower_map.get(clean_k.lower()))
-                    coerced_val = OracleCore.coerce_row_cell(raw_val, hint, features=features)
-                    var.setvalue(0, coerced_val)
-                    coerced_map[clean_k] = coerced_val
-                for k, v in raw_out.items():
-                    norm_k = str(k).lstrip(":")
-                    if norm_k not in coerced_map:
-                        coerced_map[norm_k] = OracleCore.coerce_row_cell(v, None, features=features)
-                return coerced_map
-            return {
-                str(k).lstrip(":"): OracleCore.coerce_row_cell(v, None, features=features) for k, v in raw_out.items()
-            }
-        if isinstance(raw_out, Sequence) and not isinstance(raw_out, (str, bytes, bytearray)):
-            var_list = out_vars if isinstance(out_vars, list) else list(out_vars.values())
-            coerced_list: list[Any] = []
-            for idx, raw_val in enumerate(raw_out):
-                seq_hint: str | None = var_list[idx][1] if idx < len(var_list) else None
-                coerced_val = OracleCore.coerce_row_cell(raw_val, seq_hint, features=features)
-                if idx < len(var_list):
-                    var_list[idx][0].setvalue(0, coerced_val)
-                coerced_list.append(coerced_val)
-            return tuple(coerced_list)
-        return raw_out
-
-    @staticmethod
     def track_session_context_sql(
         session_context: dict[tuple[str, str], str],
         sql: str,
@@ -1014,28 +891,3 @@ class OracleCore:
         if fmt != expected_fmt:
             raise OracleCore._data_error(f"Oracle VECTOR format mismatch: expected {expected_fmt}, got {fmt}")
         return dims, memoryview(buf)[8:]
-
-    @staticmethod
-    def _is_out_bind_var(value: Any) -> bool:
-        return callable(getattr(value, "setvalue", None)) and hasattr(value, "type_code")
-
-    @staticmethod
-    def _out_bind_type_hint(var: Any) -> str:
-        type_code = getattr(var, "type_code", None)
-        raw_name = getattr(type_code, "_name", None)
-        if raw_name is None:
-            raw_name = type_code.__name__ if isinstance(type_code, type) else str(type_code or "")
-        upper = str(raw_name).upper()
-        if upper == "BLOB":
-            return "BLOB"
-        if upper in {"CLOB", "NCLOB"}:
-            return "CLOB"
-        if upper in {"BINARY", "BFILE", "BYTES", "RAW"}:
-            return "RAW"
-        if upper in {"NUMBER", "INT", "FLOAT", "DECIMAL"}:
-            return "NUMBER"
-        if upper in {"DATETIME", "DATE", "TIMESTAMP"}:
-            return "TIMESTAMP"
-        if upper in {"BOOL", "BOOLEAN"}:
-            return "BOOLEAN"
-        return "VARCHAR2"

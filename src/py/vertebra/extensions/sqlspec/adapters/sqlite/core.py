@@ -14,7 +14,6 @@ from sqlspec.core import (
     ParameterStyle,
     ParameterStyleConfig,
     StatementConfig,
-    TypedParameter,
     build_statement_config_from_profile,
 )
 from sqlspec.core.cache import get_cache_config
@@ -68,8 +67,6 @@ __all__ = (
     "list_sqlite_available_features",
     "map_sqlite_exception",
     "native_statement_config",
-    "normalize_sqlite_many_parameters",
-    "normalize_sqlite_parameters",
     "normalize_sqlite_schema_name",
     "pack_embedding",
     "render_pragmas",
@@ -81,7 +78,6 @@ __all__ = (
     "sqlite_object_ddl_result",
     "sqlite_schema_ddl_results",
     "unpack_embedding",
-    "unwrap_typed_parameters",
     "validate_fts_options",
 )
 
@@ -100,23 +96,7 @@ _EXTENSION_PRAGMA_PROFILE: tuple[tuple[str, str], ...] = (
     ("mmap_size", "30000000"),
     ("journal_size_limit", "67108864"),
 )
-_QUOTED_SQL_SEGMENT = re.compile(
-    r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|--[^\n]*|/\*[\s\S]*?\*/|(?<!:):([A-Za-z_][A-Za-z0-9_]*)"
-)
 _EPOCH_UNIX = datetime(1970, 1, 1, tzinfo=UTC)
-
-
-def unwrap_typed_parameters(bound: Any) -> Any:
-    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
-    if isinstance(bound, dict):
-        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
-    if isinstance(bound, tuple):
-        return tuple(unwrap_typed_parameters(value) for value in bound)
-    if isinstance(bound, list):
-        return [unwrap_typed_parameters(value) for value in bound]
-    if isinstance(bound, TypedParameter):
-        return unwrap_typed_parameters(bound.value)
-    return bound
 
 
 def native_statement_config(
@@ -161,15 +141,15 @@ def native_statement_config(
 
 
 def driver_profile() -> DriverParameterProfile:
-    """Build the SQLite driver parameter profile preserving `?` and `:name` bind styles."""
-    decimal_converter = build_decimal_converter(mode="str")
+    """Build the SQLite driver parameter profile accepting `?` and `:name` input and executing as `?`."""
+    decimal_converter = build_decimal_converter(mode="string")
     type_handlers = {**build_uuid_coercions(native=False)}
     return DriverParameterProfile(
         name="vertebra_sqlite",
         default_style=ParameterStyle.QMARK,
         supported_styles={ParameterStyle.QMARK, ParameterStyle.NAMED_COLON},
         default_execution_style=ParameterStyle.QMARK,
-        supported_execution_styles={ParameterStyle.QMARK, ParameterStyle.NAMED_COLON},
+        supported_execution_styles={ParameterStyle.QMARK},
         has_native_list_expansion=False,
         preserve_parameter_format=True,
         needs_static_script_compilation=False,
@@ -185,59 +165,14 @@ def driver_profile() -> DriverParameterProfile:
 
 
 def default_statement_config() -> StatementConfig:
-    """Return the default SQLite `StatementConfig` accepting both QMARK `?` and NAMED_COLON `:name`."""
+    """Return the default SQLite `StatementConfig` accepting `?` and `:name` input and executing as `?`."""
     _ = build_statement_config_from_profile
     return native_statement_config(
         "sqlite",
         ParameterStyle.QMARK,
         supported_styles={ParameterStyle.QMARK, ParameterStyle.NAMED_COLON},
-        supported_execution_styles={ParameterStyle.QMARK, ParameterStyle.NAMED_COLON},
+        supported_execution_styles={ParameterStyle.QMARK},
     )
-
-
-def _extract_named_colon_placeholders(sql: str) -> set[str]:
-    """Extract unquoted `:name` placeholder identifiers referenced in a SQLite statement."""
-    names: set[str] = set()
-    for match in _QUOTED_SQL_SEGMENT.finditer(sql):
-        name = match.group(1)
-        if name is not None:
-            names.add(name)
-    return names
-
-
-def normalize_sqlite_parameters(sql: str, params: Any) -> Any:
-    """Normalize bind parameters for Vertebra's `_sqlite` Rust driver.
-
-    Unwraps `TypedParameter` markers, converts empty mappings or tuples cleanly,
-    and ensures named parameter dictionaries carry leading colons matching only
-    placeholders actually referenced in `sql`.
-    """
-    unwrapped = unwrap_typed_parameters(params)
-    if unwrapped is None:
-        return None
-    if isinstance(unwrapped, Mapping):
-        if not unwrapped:
-            return None
-        referenced = _extract_named_colon_placeholders(sql)
-        if not referenced:
-            return None
-        normalized: dict[str, Any] = {}
-        for key, value in unwrapped.items():
-            raw_name = str(key)
-            bare_name = raw_name[1:] if raw_name.startswith(":") else raw_name
-            if bare_name in referenced:
-                normalized[f":{bare_name}"] = value
-        return normalized or None
-    if isinstance(unwrapped, (list, tuple)):
-        return list(unwrapped)
-    return unwrapped
-
-
-def normalize_sqlite_many_parameters(sql: str, param_sets: Any) -> list[Any]:
-    """Normalize a batch of parameter sets for `execute_many` against `_sqlite`."""
-    if not param_sets:
-        return []
-    return [normalize_sqlite_parameters(sql, item) for item in param_sets]
 
 
 def datetime_to_julian(dt: datetime | None) -> float | None:

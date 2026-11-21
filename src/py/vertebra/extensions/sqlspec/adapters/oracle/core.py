@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import array
 import contextlib
 import re
 import threading
@@ -58,7 +57,6 @@ from vertebra._vertebra import DataError as NativeDataError
 from vertebra._vertebra import IntegrityError as NativeIntegrityError
 from vertebra._vertebra import NotFoundError as NativeNotFoundError
 from vertebra._vertebra import OperationalError as NativeOperationalError
-from vertebra.db.adapters.oracle.config import OracleDriverFeatures
 from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json, encode_json
@@ -86,8 +84,6 @@ __all__ = (
     "map_native_database_exception",
     "map_oracle_exception",
     "native_statement_config",
-    "normalize_oracle_many_parameters",
-    "normalize_oracle_parameters",
     "normalize_oracle_transaction_priority",
     "oracle_ensure_utc",
     "oracle_identifier",
@@ -100,7 +96,6 @@ __all__ = (
     "oracle_table_feature_clause",
     "oracle_table_ref",
     "sanitize_oracle_text_query",
-    "unwrap_typed_parameters",
     "validate_oracle_table_name",
     "validate_sessionless_execution_options",
     "validate_sessionless_transaction_args",
@@ -114,7 +109,6 @@ ORACLE_SESSIONLESS_TXN_ID_MAX_BYTES: Final[int] = 64
 
 _ORACLE_IDENT_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
 _ORA_CODE_RE: Final[re.Pattern[str]] = re.compile(r"ORA-(\d{5})")
-_ORACLE_DEFAULT_FEATURES: Final[OracleDriverFeatures] = OracleDriverFeatures()
 _VALID_TRANSACTION_PRIORITIES: Final[frozenset[str]] = frozenset({"DEFAULT", "LOW", "MEDIUM", "HIGH"})
 
 
@@ -193,26 +187,12 @@ def escape_oracle_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
-def unwrap_typed_parameters(bound: Any) -> Any:
-    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
-    if isinstance(bound, dict):
-        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
-    if isinstance(bound, tuple):
-        return tuple(unwrap_typed_parameters(value) for value in bound)
-    if isinstance(bound, list):
-        return [unwrap_typed_parameters(value) for value in bound]
-    if isinstance(bound, TypedParameter):
-        return unwrap_typed_parameters(bound.value)
-    return bound
-
-
-def _normalize_bound_params(params: Any) -> Any:
-    """Normalize empty bound containers to `None` while keeping populated payloads intact."""
-    if params is None:
-        return None
-    if isinstance(params, (dict, list, tuple)) and len(params) == 0:
-        return None
-    return params
+def _unwrap_typed_parameter(value: TypedParameter) -> Any:
+    """Unwrap nested `TypedParameter` wrappers during SQLSpec parameter coercion."""
+    unwrapped: Any = value
+    while isinstance(unwrapped, TypedParameter):
+        unwrapped = unwrapped.value
+    return unwrapped
 
 
 def native_statement_config(
@@ -351,6 +331,8 @@ def build_oracle_statement_config(statement_config: StatementConfig | None = Non
         preserve_parameter_format=False,
     )
     param_cfg: ParameterStyleConfig = config.parameter_config
+    type_coercion_map = dict(param_cfg.type_coercion_map or {})
+    type_coercion_map[TypedParameter] = _unwrap_typed_parameter
     return config.replace(
         parameter_config=ParameterStyleConfig(
             default_parameter_style=param_cfg.default_parameter_style,
@@ -360,67 +342,11 @@ def build_oracle_statement_config(statement_config: StatementConfig | None = Non
                 ParameterStyle.NAMED_COLON,
                 ParameterStyle.POSITIONAL_COLON,
             },
-            type_coercion_map=param_cfg.type_coercion_map,
+            type_coercion_map=type_coercion_map,
             preserve_parameter_format=False,
             allow_mixed_parameter_styles=True,
         )
     )
-
-
-def _unwrap_oracle_scalar(value: Any) -> Any:
-    """Recursively unwrap `TypedParameter` before `OracleCore` coercion."""
-    if isinstance(value, TypedParameter):
-        return _unwrap_oracle_scalar(value.value)
-    if isinstance(value, array.array):
-        return value
-    if isinstance(value, list):
-        return [_unwrap_oracle_scalar(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_unwrap_oracle_scalar(item) for item in value)
-    if isinstance(value, Mapping):
-        return {key: _unwrap_oracle_scalar(val) for key, val in value.items()}
-    return value
-
-
-def normalize_oracle_parameters(
-    params: Any,
-    *,
-    features: OracleDriverFeatures | None = None,
-) -> Any:
-    """Unwrap `TypedParameter` values and apply `OracleCore` JSON/`VECTOR` coercion."""
-    normalized = _normalize_bound_params(params)
-    if normalized is None:
-        return None
-    unwrapped = _unwrap_oracle_scalar(unwrap_typed_parameters(normalized))
-    effective_features = features if features is not None else _ORACLE_DEFAULT_FEATURES
-    if isinstance(unwrapped, Mapping):
-        cleaned = {str(k).lstrip(":"): v for k, v in unwrapped.items()}
-        return OracleCore.coerce_parameters(cleaned, features=effective_features)
-    if isinstance(unwrapped, (tuple, list)):
-        coerced = OracleCore.coerce_parameters(list(unwrapped), features=effective_features)
-        if coerced is None:
-            return None
-        return tuple(coerced) if isinstance(unwrapped, tuple) else list(coerced)
-    coerced_single = OracleCore.coerce_parameters([unwrapped], features=effective_features)
-    return tuple(coerced_single) if coerced_single is not None else None
-
-
-def normalize_oracle_many_parameters(
-    params: Any,
-    *,
-    features: OracleDriverFeatures | None = None,
-) -> list[Any]:
-    """Normalize batched bind parameters for Oracle `execute_many`."""
-    if params is None:
-        return []
-    if isinstance(params, Sequence) and not isinstance(params, (str, bytes, bytearray)):
-        result: list[Any] = []
-        for entry in params:
-            norm = normalize_oracle_parameters(entry, features=features)
-            if norm is not None:
-                result.append(norm)
-        return result
-    return []
 
 
 def _extract_ora_code(exc: BaseException) -> int | None:

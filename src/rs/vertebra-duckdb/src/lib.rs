@@ -1,18 +1,19 @@
 //! Native DuckDB 2.0 client extension for Vertebra (`vertebra._duckdb`).
 //!
-//! Provides [`SyncDuckDBClient`] (bridged through [`SyncCompletionQueue`]) and
+//! Provides [`SyncDuckDBClient`] (executed on the calling thread with the GIL released) and
 //! [`AsyncDuckDBClient`] (bridged through [`AsyncCompletionQueue`] + [`Notifier`]
 //! via `vertebra_db::py_async::spawn_rust_db_task_with_attr` with
 //! `"_vertebra_duckdb_completion_drainer"`), zero-copy `VTBARROW` shared-memory
 //! Arrow IPC cursors, and native `duckdb::Appender` bulk ingestion.
 
+mod cursor;
 pub mod errors;
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, mpsc};
-use std::thread::{self, JoinHandle};
+use std::sync::{Arc, Mutex, RwLock};
 
 use arrow_array::RecordBatch;
 use arrow_ipc::reader::{FileReader, StreamReader};
@@ -23,11 +24,11 @@ use duckdb::{AccessMode, Config, Connection, InterruptHandle, params_from_iter};
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyCapsule, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
+    PyBool, PyByteArray, PyBytes, PyCapsule, PyDict, PyFloat, PyInt, PyList, PyMapping, PyString,
+    PyTuple,
 };
 use vertebra_core::broker::DIALECT_TAG_DUCKDB;
 use vertebra_core::dbrpc::DbRpcOp;
-use vertebra_core::notify::SyncCompletionQueue;
 use vertebra_core::shm::ShmRegion;
 use vertebra_core::text::classify_sql_statement;
 use vertebra_db::arrow_shm::{
@@ -43,10 +44,15 @@ use vertebra_db::{
     normalize_placeholders,
 };
 
+pub use crate::cursor::{AsyncDuckDBCursor, SyncDuckDBCursor};
+use crate::cursor::{outcome_to_dicts, outcome_to_dml, outcome_to_rows, outcome_to_value};
 use crate::errors::DuckDBClientError;
 
 const DUCKDB_COMPLETION_DRAINER_ATTR: &str = "_vertebra_duckdb_completion_drainer";
 static ARROW_SHM_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Maximum number of distinct SQL texts whose facts a pool caches before the cache is cleared.
+pub const STATEMENT_FACTS_CAPACITY: usize = 256;
 
 /// Whether this build targets free-threaded Python (3.14t+).
 #[cfg(Py_GIL_DISABLED)]
@@ -84,6 +90,48 @@ pub struct QueryResultSet {
     pub columns: Vec<String>,
     /// Row values aligned with `columns`.
     pub rows: Vec<Vec<DuckValue>>,
+}
+
+/// Facts derived from one SQL text, scanned once and cached per pool.
+#[derive(Clone, Debug)]
+pub struct StatementFacts {
+    /// The statement only reads and may run on a reader worker.
+    pub read_only: bool,
+    /// The statement changes data or catalog state.
+    pub mutating: bool,
+    /// The statement produces a result set.
+    pub returns_rows: bool,
+    /// The leading keyword may start a transaction-control statement.
+    pub maybe_tx_control: bool,
+    /// The SQL text with `:name` placeholders rewritten to `$name`.
+    pub named_sql: Arc<str>,
+}
+
+impl StatementFacts {
+    fn scan(sql: &str) -> Self {
+        let maybe_tx_control = matches!(
+            leading_sql_keyword(sql).as_str(),
+            "BEGIN" | "START" | "COMMIT" | "END" | "ROLLBACK" | "ABORT" | "SAVEPOINT" | "RELEASE"
+        );
+        Self {
+            read_only: is_read_only_sql(sql),
+            mutating: is_mutating_sql(sql),
+            returns_rows: sql_returns_rows(sql),
+            maybe_tx_control,
+            named_sql: Arc::from(normalize_named_sql(sql)),
+        }
+    }
+}
+
+/// Columns, rows, and changed-row count of one statement execution.
+#[derive(Clone, Debug)]
+pub struct StatementOutcome {
+    /// Ordered column names, or `None` when the statement produces no result set.
+    pub columns: Option<Vec<String>>,
+    /// Row values aligned with `columns`.
+    pub rows: Vec<Vec<DuckValue>>,
+    /// Changed-row count, or `-1` for a non-mutating result set.
+    pub rowcount: i64,
 }
 
 /// Unregistered or inline Arrow IPC payload ready to wrap into `ArrowCursor`.
@@ -125,40 +173,21 @@ pub enum BulkLoadSource {
     },
 }
 
-enum WorkerTask {
-    Run(Box<dyn FnOnce(&mut Connection) + Send + 'static>),
-    Shutdown,
-}
-
 struct WorkerSlot {
-    sender: mpsc::Sender<WorkerTask>,
+    conn: Mutex<Option<Connection>>,
     interrupt_handle: Arc<InterruptHandle>,
     busy: AtomicBool,
     active_cancel: Mutex<Option<Arc<AtomicBool>>>,
-    join_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl WorkerSlot {
-    fn spawn(mut conn: Connection) -> Self {
+    fn spawn(conn: Connection) -> Self {
         let interrupt_handle = conn.interrupt_handle();
-        let (tx, rx) = mpsc::channel::<WorkerTask>();
-        let join_handle = thread::Builder::new()
-            .name("vtb-duckdb-worker".to_string())
-            .spawn(move || {
-                while let Ok(task) = rx.recv() {
-                    match task {
-                        WorkerTask::Run(job) => job(&mut conn),
-                        WorkerTask::Shutdown => break,
-                    }
-                }
-            })
-            .expect("failed to spawn vtb-duckdb-worker thread");
         Self {
-            sender: tx,
+            conn: Mutex::new(Some(conn)),
             interrupt_handle,
             busy: AtomicBool::new(false),
             active_cancel: Mutex::new(None),
-            join_handle: Mutex::new(Some(join_handle)),
         }
     }
 
@@ -190,40 +219,33 @@ impl WorkerSlot {
 
     fn execute<T, F>(&self, cancel_flag: &Arc<AtomicBool>, f: F) -> Result<T, DuckDBClientError>
     where
-        T: Send + 'static,
-        F: FnOnce(&mut Connection) -> Result<T, DuckDBClientError> + Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, DuckDBClientError>,
     {
         if cancel_flag.load(Ordering::Acquire) {
             return Err(DuckDBClientError::QueryTimeout(
                 "DuckDB query cancelled before execution".to_string(),
             ));
         }
-        let completion = Arc::new(SyncCompletionQueue::<Result<T, DuckDBClientError>>::new());
-        let completion_writer = Arc::clone(&completion);
-        let flag_clone = Arc::clone(cancel_flag);
+        let mut conn_guard = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(conn) = conn_guard.as_mut() else {
+            return Err(DuckDBClientError::Operational(
+                "DuckDB worker connection is closed".to_string(),
+            ));
+        };
+        if cancel_flag.load(Ordering::Acquire) {
+            return Err(DuckDBClientError::QueryTimeout(
+                "DuckDB query interrupted".to_string(),
+            ));
+        }
         self.busy.store(true, Ordering::Release);
         *self
             .active_cancel
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(cancel_flag));
-        let send_res = self.sender.send(WorkerTask::Run(Box::new(move |conn| {
-            let outcome = if flag_clone.load(Ordering::Acquire) {
-                Err(DuckDBClientError::QueryTimeout(
-                    "DuckDB query interrupted".to_string(),
-                ))
-            } else {
-                f(conn)
-            };
-            completion_writer.push(outcome);
-        })));
-        if send_res.is_err() {
-            self.clear_active_cancel(cancel_flag);
-            self.busy.store(false, Ordering::Release);
-            return Err(DuckDBClientError::Operational(
-                "DuckDB worker thread is closed".to_string(),
-            ));
-        }
-        let outcome = completion.pop_blocking();
+        let outcome = f(conn);
         self.clear_active_cancel(cancel_flag);
         self.busy.store(false, Ordering::Release);
         if outcome.is_err() && cancel_flag.load(Ordering::Acquire) {
@@ -236,15 +258,11 @@ impl WorkerSlot {
 
     fn shutdown(&self) {
         self.interrupt_handle.interrupt();
-        let _ = self.sender.send(WorkerTask::Shutdown);
-        if let Some(handle) = self
-            .join_handle
+        let _ = self
+            .conn
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            let _ = handle.join();
-        }
+            .take();
     }
 }
 
@@ -285,6 +303,7 @@ pub struct DuckDBInner {
     closed: AtomicBool,
     active_cancels: Mutex<Vec<Arc<AtomicBool>>>,
     tx_journal: Mutex<TxJournal>,
+    statement_facts: RwLock<HashMap<Box<str>, StatementFacts>>,
 }
 
 impl std::fmt::Debug for DuckDBInner {
@@ -460,12 +479,13 @@ impl DuckDBInner {
             closed: AtomicBool::new(false),
             active_cancels: Mutex::new(Vec::new()),
             tx_journal: Mutex::new(TxJournal::default()),
+            statement_facts: RwLock::new(HashMap::new()),
         }))
     }
 
     fn ensure_open(&self) -> Result<(), DuckDBClientError> {
         if self.closed.load(Ordering::Acquire) {
-            return Err(DuckDBClientError::Operational(
+            return Err(DuckDBClientError::InvalidInput(
                 "DuckDB client is closed".to_string(),
             ));
         }
@@ -572,6 +592,81 @@ impl DuckDBInner {
         worker.execute(cancel_flag, f)
     }
 
+    /// Return the cached facts for `sql`, scanning the text only on a cache miss.
+    pub fn statement_facts(&self, sql: &str) -> StatementFacts {
+        {
+            let cache = self
+                .statement_facts
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(facts) = cache.get(sql) {
+                return facts.clone();
+            }
+        }
+        let facts = StatementFacts::scan(sql);
+        let mut cache = self
+            .statement_facts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.len() >= STATEMENT_FACTS_CAPACITY && !cache.contains_key(sql) {
+            cache.clear();
+        }
+        cache.insert(Box::from(sql), facts.clone());
+        facts
+    }
+
+    /// Number of SQL texts currently held in the facts cache.
+    pub fn statement_facts_len(&self) -> usize {
+        self.statement_facts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Run one statement and report its columns, rows, and changed-row count.
+    pub fn run_statement(
+        &self,
+        sql: String,
+        params: BoundParams,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<StatementOutcome, DuckDBClientError> {
+        let facts = self.statement_facts(&sql);
+        if !facts.returns_rows {
+            let changed = self.execute_sql(sql, params, cancel_flag)?;
+            return Ok(StatementOutcome {
+                columns: None,
+                rows: Vec::new(),
+                rowcount: changed,
+            });
+        }
+        let result = self.query_sql(sql, params, cancel_flag)?;
+        let rowcount = if facts.mutating {
+            i64::try_from(result.rows.len()).unwrap_or(i64::MAX)
+        } else {
+            -1
+        };
+        Ok(StatementOutcome {
+            columns: Some(result.columns),
+            rows: result.rows,
+            rowcount,
+        })
+    }
+
+    /// Run one statement once per parameter set and report the total changed-row count.
+    pub fn run_statement_many(
+        &self,
+        sql: String,
+        param_sets: Vec<BoundParams>,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<StatementOutcome, DuckDBClientError> {
+        let total = self.execute_many_sql(sql, param_sets, cancel_flag)?;
+        Ok(StatementOutcome {
+            columns: None,
+            rows: Vec::new(),
+            rowcount: total,
+        })
+    }
+
     pub fn execute_sql(
         &self,
         sql: String,
@@ -584,11 +679,43 @@ impl DuckDBInner {
                 "SQL statement must not contain NUL bytes".to_string(),
             ));
         }
-        if self.read_only && is_mutating_sql(&sql) {
+        let facts = self.statement_facts(&sql);
+        if self.read_only && facts.mutating {
             return Err(DuckDBClientError::Programming(
                 "Cannot execute mutating SQL statement in read-only mode".to_string(),
             ));
         }
+        if facts.maybe_tx_control && self.run_tx_control(&sql, cancel_flag)? {
+            return Ok(0);
+        }
+
+        let is_read = facts.read_only;
+        let is_mut = facts.mutating;
+        let named_sql = facts.named_sql;
+        let needs_tx_log = (is_mut || !is_read) && self.in_transaction.load(Ordering::Acquire);
+        let log_payload = if needs_tx_log {
+            Some((sql.clone(), params.clone()))
+        } else {
+            None
+        };
+        let changed = self.run_on_pool(is_read, cancel_flag, move |conn| {
+            execute_statement_on_conn(conn, &sql, &named_sql, &params)
+        })?;
+        if let Some((log_sql, log_params)) = log_payload {
+            self.record_tx_op(TxLogOp::Execute {
+                sql: log_sql,
+                params: log_params,
+            });
+        }
+        Ok(changed)
+    }
+
+    /// Handle `sql` as a transaction-control statement, returning whether it was one.
+    fn run_tx_control(
+        &self,
+        sql: &str,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<bool, DuckDBClientError> {
         let trimmed = sql.trim().trim_end_matches(';').trim();
         let trimmed_upper = trimmed.to_ascii_uppercase();
         if trimmed_upper == "BEGIN"
@@ -596,20 +723,20 @@ impl DuckDBInner {
             || trimmed_upper == "START TRANSACTION"
         {
             self.begin_tx(cancel_flag)?;
-            return Ok(0);
+            return Ok(true);
         }
         if trimmed_upper == "COMMIT" || trimmed_upper == "END TRANSACTION" {
             self.commit_tx(cancel_flag)?;
-            return Ok(0);
+            return Ok(true);
         }
         if trimmed_upper == "ROLLBACK" || trimmed_upper == "ABORT" {
             self.rollback_tx(cancel_flag)?;
-            return Ok(0);
+            return Ok(true);
         }
         if trimmed_upper.starts_with("SAVEPOINT ") {
             let sp_name = trimmed["SAVEPOINT ".len()..].trim();
             self.savepoint_tx(sp_name)?;
-            return Ok(0);
+            return Ok(true);
         }
         if trimmed_upper.starts_with("ROLLBACK TO ") {
             let after_to = trimmed["ROLLBACK TO ".len()..].trim();
@@ -619,7 +746,7 @@ impl DuckDBInner {
                 after_to
             };
             self.rollback_to_savepoint_tx(sp_name, cancel_flag)?;
-            return Ok(0);
+            return Ok(true);
         }
         if trimmed_upper.starts_with("RELEASE ") {
             let after_rel = trimmed["RELEASE ".len()..].trim();
@@ -629,23 +756,9 @@ impl DuckDBInner {
                 after_rel
             };
             self.release_savepoint_tx(sp_name)?;
-            return Ok(0);
+            return Ok(true);
         }
-
-        let is_read = is_read_only_sql(&sql);
-        let is_mut = is_mutating_sql(&sql);
-        let log_sql = sql.clone();
-        let log_params = params.clone();
-        let changed = self.run_on_pool(is_read, cancel_flag, move |conn| {
-            execute_statement_on_conn(conn, &sql, &params)
-        })?;
-        if is_mut || !is_read {
-            self.record_tx_op(TxLogOp::Execute {
-                sql: log_sql,
-                params: log_params,
-            });
-        }
-        Ok(changed)
+        Ok(false)
     }
 
     pub fn execute_many_sql(
@@ -660,7 +773,8 @@ impl DuckDBInner {
                 "SQL statement must not contain NUL bytes".to_string(),
             ));
         }
-        if self.read_only && is_mutating_sql(&sql) {
+        let facts = self.statement_facts(&sql);
+        if self.read_only && facts.mutating {
             return Err(DuckDBClientError::Programming(
                 "Cannot execute mutating SQL statement in read-only mode".to_string(),
             ));
@@ -668,6 +782,7 @@ impl DuckDBInner {
         if param_sets.is_empty() {
             return Ok(0);
         }
+        let named_sql = facts.named_sql;
         let log_sql = sql.clone();
         let log_sets = param_sets.clone();
         let flag_for_worker = Arc::clone(cancel_flag);
@@ -679,7 +794,7 @@ impl DuckDBInner {
                         "DuckDB execute_many interrupted".to_string(),
                     ));
                 }
-                total += execute_statement_on_conn(conn, &sql, params)?;
+                total += execute_statement_on_conn(conn, &sql, &named_sql, params)?;
             }
             Ok(total)
         })?;
@@ -702,20 +817,26 @@ impl DuckDBInner {
                 "SQL statement must not contain NUL bytes".to_string(),
             ));
         }
-        if self.read_only && is_mutating_sql(&sql) {
+        let facts = self.statement_facts(&sql);
+        if self.read_only && facts.mutating {
             return Err(DuckDBClientError::Programming(
                 "Cannot execute mutating SQL statement in read-only mode".to_string(),
             ));
         }
-        let is_read = is_read_only_sql(&sql);
-        let is_mut = is_mutating_sql(&sql);
-        let log_sql = sql.clone();
-        let log_params = params.clone();
+        let is_read = facts.read_only;
+        let is_mut = facts.mutating;
+        let named_sql = facts.named_sql;
+        let needs_tx_log = is_mut && self.in_transaction.load(Ordering::Acquire);
+        let log_payload = if needs_tx_log {
+            Some((sql.clone(), params.clone()))
+        } else {
+            None
+        };
         let flag_for_worker = Arc::clone(cancel_flag);
         let res = self.run_on_pool(is_read, cancel_flag, move |conn| {
-            query_rows_on_conn(conn, &sql, &params, &flag_for_worker)
+            query_rows_on_conn(conn, &sql, &named_sql, &params, &flag_for_worker)
         })?;
-        if is_mut {
+        if let Some((log_sql, log_params)) = log_payload {
             self.record_tx_op(TxLogOp::Execute {
                 sql: log_sql,
                 params: log_params,
@@ -1001,18 +1122,31 @@ impl DuckDBInner {
             journal.ops.truncate(target_op_len);
             journal.ops.clone()
         };
+        let replay_ops: Vec<(TxLogOp, Option<Arc<str>>)> = replay_ops
+            .into_iter()
+            .map(|op| {
+                let named_sql = match &op {
+                    TxLogOp::Execute { sql, .. } | TxLogOp::ExecuteMany { sql, .. } => {
+                        Some(self.statement_facts(sql).named_sql)
+                    }
+                    TxLogOp::LoadArrow { .. } => None,
+                };
+                (op, named_sql)
+            })
+            .collect();
         let flag_for_worker = Arc::clone(cancel_flag);
         self.workers[0].execute(cancel_flag, move |conn| {
             conn.execute_batch("ROLLBACK; BEGIN TRANSACTION")
                 .map_err(DuckDBClientError::from_duckdb)?;
-            for op in replay_ops {
+            for (op, named_sql) in replay_ops {
+                let named_sql = named_sql.as_deref().unwrap_or_default();
                 match op {
                     TxLogOp::Execute { sql, params } => {
-                        execute_statement_on_conn(conn, &sql, &params)?;
+                        execute_statement_on_conn(conn, &sql, named_sql, &params)?;
                     }
                     TxLogOp::ExecuteMany { sql, param_sets } => {
                         for params in &param_sets {
-                            execute_statement_on_conn(conn, &sql, params)?;
+                            execute_statement_on_conn(conn, &sql, named_sql, params)?;
                         }
                     }
                     TxLogOp::LoadArrow {
@@ -1411,16 +1545,17 @@ fn resolve_ordered_params<'a>(
 fn execute_statement_on_conn(
     conn: &mut Connection,
     sql: &str,
+    named_sql: &str,
     params: &BoundParams,
 ) -> Result<i64, DuckDBClientError> {
     let effective_sql = match params {
-        BoundParams::Named(_) => normalize_named_sql(sql),
-        _ => sql.to_string(),
+        BoundParams::Named(_) => named_sql,
+        _ => sql,
     };
-    let mut stmt = match conn.prepare(&effective_sql) {
+    let mut stmt = match conn.prepare(effective_sql) {
         Ok(s) => s,
         Err(duckdb::Error::MultipleStatement) if params.is_empty() => {
-            conn.execute_batch(&effective_sql)
+            conn.execute_batch(effective_sql)
                 .map_err(DuckDBClientError::from_duckdb)?;
             return Ok(0);
         }
@@ -1436,15 +1571,16 @@ fn execute_statement_on_conn(
 fn query_rows_on_conn(
     conn: &mut Connection,
     sql: &str,
+    named_sql: &str,
     params: &BoundParams,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<QueryResultSet, DuckDBClientError> {
     let effective_sql = match params {
-        BoundParams::Named(_) => normalize_named_sql(sql),
-        _ => sql.to_string(),
+        BoundParams::Named(_) => named_sql,
+        _ => sql,
     };
     let mut stmt = conn
-        .prepare(&effective_sql)
+        .prepare(effective_sql)
         .map_err(DuckDBClientError::from_duckdb)?;
     let ordered = resolve_ordered_params(&stmt, params)?;
     let mut rows = stmt
@@ -1452,16 +1588,29 @@ fn query_rows_on_conn(
         .map_err(DuckDBClientError::from_duckdb)?;
 
     let mut out_rows = Vec::new();
+    let mut null_columns: Option<Vec<bool>> = None;
     while let Some(row) = rows.next().map_err(DuckDBClientError::from_duckdb)? {
         if cancel_flag.load(Ordering::Acquire) {
             return Err(DuckDBClientError::QueryTimeout(
                 "DuckDB query interrupted while fetching rows".to_string(),
             ));
         }
+        let is_null_col = null_columns.get_or_insert_with(|| {
+            row.as_ref()
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| matches!(field.data_type(), DataType::Null))
+                .collect()
+        });
         let row_col_count = row.as_ref().column_count();
         let mut row_vals = Vec::with_capacity(row_col_count);
         for idx in 0..row_col_count {
-            let val: DuckValue = row.get(idx).map_err(DuckDBClientError::from_duckdb)?;
+            let val: DuckValue = if is_null_col.get(idx).copied().unwrap_or(false) {
+                DuckValue::Null
+            } else {
+                row.get(idx).map_err(DuckDBClientError::from_duckdb)?
+            };
             row_vals.push(val);
         }
         out_rows.push(row_vals);
@@ -2044,6 +2193,14 @@ fn py_to_duck_value(obj: &Bound<'_, PyAny>) -> Result<DuckValue, DuckDBClientErr
         };
         return Ok(DuckValue::Text(serialized));
     }
+    if obj
+        .get_type()
+        .name()
+        .is_ok_and(|name| name == "TypedParameter")
+        && let Ok(inner) = obj.getattr("value")
+    {
+        return py_to_duck_value(&inner);
+    }
     if obj.hasattr("isoformat").unwrap_or(false) {
         let iso: String = obj
             .call_method0("isoformat")
@@ -2067,6 +2224,58 @@ fn extract_bound_params(
     if obj.is_none() {
         return Ok(BoundParams::Empty);
     }
+    if let Ok(tup) = obj.cast_exact::<PyTuple>() {
+        if tup.is_empty() {
+            return Ok(BoundParams::Empty);
+        }
+        let mut vals = Vec::with_capacity(tup.len());
+        for item in tup.iter() {
+            vals.push(py_to_duck_value(&item)?);
+        }
+        return Ok(BoundParams::Positional(vals));
+    }
+    if let Ok(list) = obj.cast_exact::<PyList>() {
+        if list.is_empty() {
+            return Ok(BoundParams::Empty);
+        }
+        let mut vals = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            vals.push(py_to_duck_value(&item)?);
+        }
+        return Ok(BoundParams::Positional(vals));
+    }
+    if let Ok(dict) = obj.cast_exact::<PyDict>() {
+        if dict.is_empty() {
+            return Ok(BoundParams::Empty);
+        }
+        let map = RefCell::new(HashMap::with_capacity(dict.len()));
+        let first_err = RefCell::new(None);
+        if let Err(py_err) = dict.locked_for_each(|k, v| {
+            let key: String = match k.extract::<String>() {
+                Ok(key) => key,
+                Err(e) => {
+                    *first_err.borrow_mut() = Some(DuckDBClientError::InvalidInput(e.to_string()));
+                    return Err(e);
+                }
+            };
+            match py_to_duck_value(&v) {
+                Ok(val) => {
+                    map.borrow_mut().insert(key, val);
+                    Ok(())
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    *first_err.borrow_mut() = Some(e);
+                    Err(pyo3::exceptions::PyValueError::new_err(msg))
+                }
+            }
+        }) {
+            return Err(first_err
+                .into_inner()
+                .unwrap_or_else(|| DuckDBClientError::InvalidInput(py_err.to_string())));
+        }
+        return Ok(BoundParams::Named(map.into_inner()));
+    }
     if let Ok(dict) = obj.cast::<PyDict>() {
         if dict.is_empty() {
             return Ok(BoundParams::Empty);
@@ -2081,6 +2290,9 @@ fn extract_bound_params(
         return Ok(BoundParams::Named(map));
     }
     if let Ok(list) = obj.cast::<PyList>() {
+        if list.is_empty() {
+            return Ok(BoundParams::Empty);
+        }
         let mut vals = Vec::with_capacity(list.len());
         for item in list.iter() {
             vals.push(py_to_duck_value(&item)?);
@@ -2088,11 +2300,33 @@ fn extract_bound_params(
         return Ok(BoundParams::Positional(vals));
     }
     if let Ok(tup) = obj.cast::<PyTuple>() {
+        if tup.is_empty() {
+            return Ok(BoundParams::Empty);
+        }
         let mut vals = Vec::with_capacity(tup.len());
         for item in tup.iter() {
             vals.push(py_to_duck_value(&item)?);
         }
         return Ok(BoundParams::Positional(vals));
+    }
+    if let Ok(mapping) = obj.cast::<PyMapping>() {
+        let keys = mapping
+            .keys()
+            .map_err(|e| DuckDBClientError::InvalidInput(e.to_string()))?;
+        if keys.is_empty() {
+            return Ok(BoundParams::Empty);
+        }
+        let mut map = HashMap::with_capacity(keys.len());
+        for k in keys.iter() {
+            let key: String = k
+                .extract::<String>()
+                .map_err(|e| DuckDBClientError::InvalidInput(e.to_string()))?;
+            let val = mapping
+                .get_item(&k)
+                .map_err(|e| DuckDBClientError::InvalidInput(e.to_string()))?;
+            map.insert(key, py_to_duck_value(&val)?);
+        }
+        return Ok(BoundParams::Named(map));
     }
     let iter = obj.try_iter().map_err(|_| {
         DuckDBClientError::InvalidInput(
@@ -2347,75 +2581,6 @@ fn duck_value_to_py(py: Python<'_>, val: DuckValue) -> PyResult<Py<PyAny>> {
     }
 }
 
-fn result_set_to_py_dicts(py: Python<'_>, result: QueryResultSet) -> PyResult<Py<PyAny>> {
-    let py_list = PyList::empty(py);
-    let col_names: Vec<Bound<'_, PyString>> = result
-        .columns
-        .iter()
-        .map(|c| PyString::new(py, c))
-        .collect();
-    for row in result.rows {
-        let dict = PyDict::new(py);
-        for (idx, val) in row.into_iter().enumerate() {
-            if let Some(key) = col_names.get(idx) {
-                dict.set_item(key, duck_value_to_py(py, val)?)?;
-            }
-        }
-        py_list.append(dict)?;
-    }
-    Ok(py_list.into_any().unbind())
-}
-
-fn result_set_to_py_tuples(py: Python<'_>, result: QueryResultSet) -> PyResult<Py<PyAny>> {
-    let py_list = PyList::empty(py);
-    for row in result.rows {
-        let mut items = Vec::with_capacity(row.len());
-        for val in row {
-            items.push(duck_value_to_py(py, val)?);
-        }
-        py_list.append(PyTuple::new(py, items)?)?;
-    }
-    Ok(py_list.into_any().unbind())
-}
-
-fn result_set_to_py_with_description(
-    py: Python<'_>,
-    result: QueryResultSet,
-) -> PyResult<Py<PyAny>> {
-    let cols_tuple = PyTuple::new(py, &result.columns)?;
-    let rows_list = result_set_to_py_tuples(py, result)?;
-    let pair = PyTuple::new(py, [rows_list.bind(py), cols_tuple.as_any()])?;
-    Ok(pair.into_any().unbind())
-}
-
-fn result_set_to_single_dict(
-    py: Python<'_>,
-    mut result: QueryResultSet,
-    optional: bool,
-) -> PyResult<Py<PyAny>> {
-    if result.rows.is_empty() {
-        if optional {
-            return Ok(py.None());
-        }
-        return Err(
-            DuckDBClientError::NotFound("Query returned no rows".to_string()).into_py_err(py),
-        );
-    }
-    if result.rows.len() > 1 {
-        return Err(DuckDBClientError::Data(format!(
-            "Expected at most 1 row, got {}",
-            result.rows.len()
-        ))
-        .into_py_err(py));
-    }
-    let row = result.rows.swap_remove(0);
-    let dict = PyDict::new(py);
-    for (col, val) in result.columns.into_iter().zip(row) {
-        dict.set_item(col, duck_value_to_py(py, val)?)?;
-    }
-    Ok(dict.into_any().unbind())
-}
-
 fn arrow_result_payload_to_py_cursor(
     py: Python<'_>,
     payload: ArrowResultPayload,
@@ -2475,10 +2640,26 @@ impl Drop for CancelOnDropGuard {
     }
 }
 
-/// Native synchronous DuckDB 2.0 client bridged via [`SyncCompletionQueue`].
+/// Native synchronous DuckDB 2.0 client executed on the calling thread.
 #[pyclass(frozen, immutable_type)]
 pub struct SyncDuckDBClient {
     inner: Arc<DuckDBInner>,
+}
+
+impl SyncDuckDBClient {
+    fn run_once(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<StatementOutcome> {
+        let bound = extract_bound_params(params).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        py.detach(move || inner.run_statement(sql_owned, bound, &cancel_flag))
+            .map_err(|e| e.into_py_err(py))
+    }
 }
 
 #[pymethods]
@@ -2599,115 +2780,6 @@ impl SyncDuckDBClient {
         let cancel_flag = inner.register_cancel_flag();
         py.detach(move || inner.execute_many_sql(sql_owned, bound_sets, &cancel_flag))
             .map_err(|e| e.into_py_err(py))
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn execute_tuples(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let res = py
-            .detach(move || inner.query_sql(sql_owned, bound, &cancel_flag))
-            .map_err(|e| e.into_py_err(py))?;
-        result_set_to_py_tuples(py, res)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn execute_with_description(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let res = py
-            .detach(move || inner.query_sql(sql_owned, bound, &cancel_flag))
-            .map_err(|e| e.into_py_err(py))?;
-        result_set_to_py_with_description(py, res)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn fetch_all(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let res = py
-            .detach(move || inner.query_sql(sql_owned, bound, &cancel_flag))
-            .map_err(|e| e.into_py_err(py))?;
-        result_set_to_py_dicts(py, res)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn fetch_one(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let res = py
-            .detach(move || inner.query_sql(sql_owned, bound, &cancel_flag))
-            .map_err(|e| e.into_py_err(py))?;
-        result_set_to_single_dict(py, res, false)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn fetch_optional(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let res = py
-            .detach(move || inner.query_sql(sql_owned, bound, &cancel_flag))
-            .map_err(|e| e.into_py_err(py))?;
-        result_set_to_single_dict(py, res, true)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn select_value(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut res = py
-            .detach(move || inner.query_sql(sql_owned, bound, &cancel_flag))
-            .map_err(|e| e.into_py_err(py))?;
-        if res.rows.is_empty() || res.rows[0].is_empty() {
-            return Err(
-                DuckDBClientError::NotFound("Query returned no scalar value".to_string())
-                    .into_py_err(py),
-            );
-        }
-        let val = res.rows.swap_remove(0).swap_remove(0);
-        duck_value_to_py(py, val)
     }
 
     #[pyo3(signature = (sql, parameters=None, *, batch_size=65536, threshold_rows=0))]
@@ -2855,6 +2927,55 @@ impl SyncDuckDBClient {
         }
     }
 
+    #[pyo3(signature = (*, lazy_begin = false))]
+    pub fn cursor(&self, lazy_begin: bool) -> SyncDuckDBCursor {
+        SyncDuckDBCursor::new(Arc::clone(&self.inner), lazy_begin)
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_rows<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyTuple>)> {
+        let outcome = self.run_once(py, sql, params)?;
+        outcome_to_rows(py, outcome)
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_dicts<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let outcome = self.run_once(py, sql, params)?;
+        outcome_to_dicts(py, outcome)
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let outcome = self.run_once(py, sql, params)?;
+        outcome_to_value(py, outcome)
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(i64, Option<i64>)> {
+        let outcome = self.run_once(py, sql, params)?;
+        Ok(outcome_to_dml(&outcome))
+    }
+
     pub fn __repr__(&self) -> String {
         format!(
             "SyncDuckDBClient(database={:?}, read_only={}, max_connections={}, in_transaction={}, closed={})",
@@ -2886,6 +3007,40 @@ impl SyncDuckDBClient {
 #[pyclass(frozen, immutable_type)]
 pub struct AsyncDuckDBClient {
     inner: Arc<DuckDBInner>,
+}
+
+impl AsyncDuckDBClient {
+    fn spawn_single_call<M>(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        map_ok: M,
+    ) -> PyResult<RustDbTaskAwaitable>
+    where
+        M: FnOnce(Python<'_>, StatementOutcome) -> PyResult<Py<PyAny>> + Send + 'static,
+    {
+        let bound = extract_bound_params(params).map_err(|e| e.into_py_err(py))?;
+        let inner = Arc::clone(&self.inner);
+        let sql_owned = sql.to_string();
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    inner.run_statement(sql_owned, bound, &cancel_flag)
+                })
+                .await
+                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            map_ok,
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
 }
 
 #[pymethods]
@@ -3031,189 +3186,6 @@ impl AsyncDuckDBClient {
                 res
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn execute_tuples(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.query_sql(sql_owned, bound, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
-            result_set_to_py_tuples,
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn execute_with_description(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.query_sql(sql_owned, bound, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
-            result_set_to_py_with_description,
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn fetch_all(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.query_sql(sql_owned, bound, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
-            result_set_to_py_dicts,
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn fetch_one(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.query_sql(sql_owned, bound, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
-            |py, result_set| result_set_to_single_dict(py, result_set, false),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn fetch_optional(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.query_sql(sql_owned, bound, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
-            |py, result_set| result_set_to_single_dict(py, result_set, true),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn select_value(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.query_sql(sql_owned, bound, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
-            |py, mut result_set| {
-                if result_set.rows.is_empty() || result_set.rows[0].is_empty() {
-                    return Err(DuckDBClientError::NotFound(
-                        "Query returned no scalar value".to_string(),
-                    )
-                    .into_py_err(py));
-                }
-                let val = result_set.rows.swap_remove(0).swap_remove(0);
-                duck_value_to_py(py, val)
-            },
             |py, err| err.into_py_err(py),
             DUCKDB_COMPLETION_DRAINER_ATTR,
         )
@@ -3477,6 +3449,61 @@ impl AsyncDuckDBClient {
         SyncDuckDBClient {
             inner: Arc::clone(&self.inner),
         }
+    }
+
+    #[pyo3(signature = (*, lazy_begin = false))]
+    pub fn cursor(&self, lazy_begin: bool) -> AsyncDuckDBCursor {
+        AsyncDuckDBCursor::new(Arc::clone(&self.inner), lazy_begin)
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_rows(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.spawn_single_call(py, sql, params, |py, outcome| {
+            let (rows, names) = outcome_to_rows(py, outcome)?;
+            Ok((rows, names).into_pyobject(py)?.into_any().unbind())
+        })
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_dicts(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.spawn_single_call(py, sql, params, |py, outcome| {
+            Ok(outcome_to_dicts(py, outcome)?.into_any().unbind())
+        })
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.spawn_single_call(py, sql, params, outcome_to_value)
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.spawn_single_call(py, sql, params, |py, outcome| {
+            Ok(outcome_to_dml(&outcome)
+                .into_pyobject(py)?
+                .into_any()
+                .unbind())
+        })
     }
 
     pub fn __repr__(&self) -> String {
@@ -3903,13 +3930,17 @@ pub fn _duckdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(broker_engine_capsule, m)?)?;
     m.add_class::<SyncDuckDBClient>()?;
     m.add_class::<AsyncDuckDBClient>()?;
+    m.add_class::<SyncDuckDBCursor>()?;
+    m.add_class::<AsyncDuckDBCursor>()?;
     m.add(
         "__all__",
         vec![
             "FREE_THREADED",
             "GIL_USED",
             "AsyncDuckDBClient",
+            "AsyncDuckDBCursor",
             "SyncDuckDBClient",
+            "SyncDuckDBCursor",
             "__version__",
             "broker_engine_capsule",
         ],
@@ -4201,5 +4232,381 @@ mod tests {
             );
             assert_eq!(res.rows[0][1], DuckValue::Text("http".to_string()));
         }
+    }
+
+    fn run(pool: &DuckDBInner, sql: &str, params: BoundParams) -> StatementOutcome {
+        let flag = pool.register_cancel_flag();
+        pool.run_statement(sql.to_string(), params, &flag)
+            .unwrap_or_else(|err| panic!("{sql} should succeed: {err}"))
+    }
+
+    #[test]
+    fn test_run_statement_outcomes() {
+        let pool = make_pool(2);
+
+        let query = run(&pool, "SELECT 1 AS a", BoundParams::Empty);
+        assert_eq!(query.columns, Some(vec!["a".to_string()]));
+        assert_eq!(query.rows.len(), 1);
+        assert_eq!(query.rowcount, -1);
+
+        let ddl = run(
+            &pool,
+            "CREATE TABLE outcome_tbl (id INTEGER PRIMARY KEY, label VARCHAR)",
+            BoundParams::Empty,
+        );
+        assert_eq!(ddl.columns, None);
+        assert!(ddl.rows.is_empty());
+        assert_eq!(ddl.rowcount, 0);
+
+        let empty = run(
+            &pool,
+            "SELECT id, label FROM outcome_tbl WHERE 1 = 0",
+            BoundParams::Empty,
+        );
+        assert_eq!(
+            empty.columns,
+            Some(vec!["id".to_string(), "label".to_string()])
+        );
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.rowcount, -1);
+
+        let insert = run(
+            &pool,
+            "INSERT INTO outcome_tbl VALUES (1, 'a'), (2, 'b')",
+            BoundParams::Empty,
+        );
+        assert_eq!(insert.columns, None);
+        assert!(insert.rows.is_empty());
+        assert_eq!(insert.rowcount, 2);
+
+        let returning = run(
+            &pool,
+            "INSERT INTO outcome_tbl VALUES (3, 'c'), (4, 'd') RETURNING id",
+            BoundParams::Empty,
+        );
+        assert_eq!(returning.columns, Some(vec!["id".to_string()]));
+        assert_eq!(returning.rows.len(), 2);
+        assert_eq!(returning.rowcount, 2);
+
+        let mut named = HashMap::new();
+        named.insert("v".to_string(), DuckValue::Int(7));
+        let named_res = run(&pool, "SELECT $v AS v", BoundParams::Named(named));
+        assert_eq!(named_res.columns, Some(vec!["v".to_string()]));
+        assert_eq!(named_res.rows, vec![vec![DuckValue::Int(7)]]);
+
+        let mut colon_named = HashMap::new();
+        colon_named.insert("min_id".to_string(), DuckValue::Int(3));
+        let colon_res = run(
+            &pool,
+            "SELECT id FROM outcome_tbl WHERE id >= :min_id ORDER BY id",
+            BoundParams::Named(colon_named),
+        );
+        assert_eq!(colon_res.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_run_statement_transaction_control_and_many() {
+        let pool = make_pool(2);
+        run(
+            &pool,
+            "CREATE TABLE tx_tbl (id INTEGER PRIMARY KEY)",
+            BoundParams::Empty,
+        );
+
+        let begin = run(&pool, "BEGIN", BoundParams::Empty);
+        assert_eq!(begin.columns, None);
+        assert_eq!(begin.rowcount, 0);
+        assert!(pool.in_transaction.load(Ordering::Acquire));
+        let inserted = run(&pool, "INSERT INTO tx_tbl VALUES (1)", BoundParams::Empty);
+        assert_eq!(inserted.rowcount, 1);
+        let rollback = run(&pool, "ROLLBACK;", BoundParams::Empty);
+        assert_eq!(rollback.columns, None);
+        assert_eq!(rollback.rowcount, 0);
+        assert!(!pool.in_transaction.load(Ordering::Acquire));
+        let count = run(&pool, "SELECT COUNT(*) FROM tx_tbl", BoundParams::Empty);
+        assert_eq!(count.rows[0][0], DuckValue::BigInt(0));
+
+        let flag = pool.register_cancel_flag();
+        let sets = (1..=3)
+            .map(|id| BoundParams::Positional(vec![DuckValue::Int(id)]))
+            .collect();
+        let many = pool
+            .run_statement_many("INSERT INTO tx_tbl VALUES (?)".to_string(), sets, &flag)
+            .expect("run_statement_many should succeed");
+        assert_eq!(many.columns, None);
+        assert!(many.rows.is_empty());
+        assert_eq!(many.rowcount, 3);
+
+        let none = pool
+            .run_statement_many(
+                "INSERT INTO tx_tbl VALUES (?)".to_string(),
+                Vec::new(),
+                &flag,
+            )
+            .expect("empty run_statement_many should succeed");
+        assert_eq!(none.rowcount, 0);
+        let count = run(&pool, "SELECT COUNT(*) FROM tx_tbl", BoundParams::Empty);
+        assert_eq!(count.rows[0][0], DuckValue::BigInt(3));
+    }
+
+    #[test]
+    fn test_run_statement_rejects_mutation_on_read_only_database() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("ro.duckdb");
+        let path_str = path.to_str().expect("tempdir path should be UTF-8");
+        let open = |read_only: bool| {
+            DuckDBInner::open(
+                path_str, read_only, 1, None, None, None, true, true, true, None, None, None,
+            )
+            .expect("file-backed pool should open")
+        };
+        let writer = open(false);
+        run(
+            &writer,
+            "CREATE TABLE ro_tbl (id INTEGER)",
+            BoundParams::Empty,
+        );
+        writer.close_all();
+        drop(writer);
+
+        let reader = open(true);
+        let flag = reader.register_cancel_flag();
+        for sql in [
+            "INSERT INTO ro_tbl VALUES (1)",
+            "INSERT INTO ro_tbl VALUES (1) RETURNING id",
+        ] {
+            let err = reader
+                .run_statement(sql.to_string(), BoundParams::Empty, &flag)
+                .unwrap_err();
+            assert!(
+                matches!(err, DuckDBClientError::Programming(_)),
+                "{sql}: {err}"
+            );
+        }
+        let many_err = reader
+            .run_statement_many(
+                "INSERT INTO ro_tbl VALUES (?)".to_string(),
+                vec![BoundParams::Positional(vec![DuckValue::Int(1)])],
+                &flag,
+            )
+            .unwrap_err();
+        assert!(matches!(many_err, DuckDBClientError::Programming(_)));
+        let rows = run(&reader, "SELECT COUNT(*) FROM ro_tbl", BoundParams::Empty);
+        assert_eq!(rows.rows[0][0], DuckValue::BigInt(0));
+    }
+
+    #[test]
+    fn test_statement_facts_cache() {
+        let pool = make_pool(1);
+        assert_eq!(pool.statement_facts_len(), 0);
+        run(&pool, "SELECT 1 AS a", BoundParams::Empty);
+        run(&pool, "SELECT 1 AS a", BoundParams::Empty);
+        assert_eq!(pool.statement_facts_len(), 1);
+
+        let select = pool.statement_facts("SELECT :v AS v");
+        assert!(select.read_only && select.returns_rows);
+        assert!(!select.mutating && !select.maybe_tx_control);
+        assert_eq!(&*select.named_sql, "SELECT $v AS v");
+        let insert = pool.statement_facts("INSERT INTO t VALUES (1)");
+        assert!(insert.mutating && !insert.read_only && !insert.returns_rows);
+        for sql in [
+            "BEGIN",
+            "START TRANSACTION",
+            "COMMIT",
+            "END TRANSACTION",
+            "ROLLBACK TO sp",
+            "ABORT",
+            "SAVEPOINT sp",
+            "RELEASE sp",
+        ] {
+            assert!(pool.statement_facts(sql).maybe_tx_control, "{sql}");
+        }
+
+        let fresh = make_pool(1);
+        for idx in 0..=STATEMENT_FACTS_CAPACITY {
+            fresh.statement_facts(&format!("SELECT {idx}"));
+        }
+        assert_eq!(fresh.statement_facts_len(), 1);
+    }
+
+    #[test]
+    fn test_extract_bound_params_exact_containers() {
+        Python::attach(|py| {
+            let expected_positional = vec![DuckValue::BigInt(1), DuckValue::Text("a".to_string())];
+            for expr in [c"(1, 'a')", c"[1, 'a']"] {
+                let obj = py.eval(expr, None, None).expect("eval should succeed");
+                let bound = extract_bound_params(Some(&obj))
+                    .expect("exact tuple/list extraction should succeed");
+                match bound {
+                    BoundParams::Positional(vals) => assert_eq!(vals, expected_positional),
+                    other => panic!("expected Positional for {expr:?}, got {other:?}"),
+                }
+            }
+
+            let dict_obj = py
+                .eval(c"{'k': 1}", None, None)
+                .expect("eval should succeed");
+            let bound = extract_bound_params(Some(&dict_obj))
+                .expect("exact dict extraction should succeed");
+            match bound {
+                BoundParams::Named(map) => {
+                    assert_eq!(map.len(), 1);
+                    assert_eq!(map.get("k"), Some(&DuckValue::BigInt(1)));
+                }
+                other => panic!("expected Named for exact dict, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_extract_bound_params_empty_containers_are_empty() {
+        Python::attach(|py| {
+            let none_bound = extract_bound_params(None).expect("None option should succeed");
+            assert!(
+                matches!(none_bound, BoundParams::Empty),
+                "expected Empty for None option, got {none_bound:?}"
+            );
+
+            for expr in [c"()", c"[]", c"{}", c"None"] {
+                let obj = py.eval(expr, None, None).expect("eval should succeed");
+                let bound = extract_bound_params(Some(&obj))
+                    .expect("empty container extraction should succeed");
+                assert!(
+                    matches!(bound, BoundParams::Empty),
+                    "expected Empty for {expr:?}, got {bound:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_extract_bound_params_subclasses_and_mappings() {
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                c"
+import collections, types
+
+Pair = collections.namedtuple('Pair', ['x', 'y'])
+named_tup = Pair(1, 'a')
+EmptyTup = collections.namedtuple('EmptyTup', [])
+empty_named_tup = EmptyTup()
+
+class MyList(list):
+    pass
+
+sub_list = MyList([1, 'a'])
+empty_sub_list = MyList()
+
+class MyDict(dict):
+    pass
+
+sub_dict = MyDict(k=1)
+empty_sub_dict = MyDict()
+
+proxy = types.MappingProxyType({'k': 1})
+empty_proxy = types.MappingProxyType({})
+",
+                None,
+                Some(&locals),
+            )
+            .expect("python setup should succeed");
+
+            let expected_pos = vec![DuckValue::BigInt(1), DuckValue::Text("a".to_string())];
+            for name in ["named_tup", "sub_list"] {
+                let obj = locals
+                    .get_item(name)
+                    .expect("lookup should succeed")
+                    .expect("key should exist");
+                let bound = extract_bound_params(Some(&obj))
+                    .unwrap_or_else(|err| panic!("{name} extraction should succeed: {err}"));
+                match bound {
+                    BoundParams::Positional(vals) => assert_eq!(vals, expected_pos, "{name}"),
+                    other => panic!("expected Positional for {name}, got {other:?}"),
+                }
+            }
+
+            for name in ["sub_dict", "proxy"] {
+                let obj = locals
+                    .get_item(name)
+                    .expect("lookup should succeed")
+                    .expect("key should exist");
+                let bound = extract_bound_params(Some(&obj))
+                    .unwrap_or_else(|err| panic!("{name} extraction should succeed: {err}"));
+                match bound {
+                    BoundParams::Named(map) => {
+                        assert_eq!(map.len(), 1, "{name}");
+                        assert_eq!(map.get("k"), Some(&DuckValue::BigInt(1)), "{name}");
+                    }
+                    other => panic!("expected Named for {name}, got {other:?}"),
+                }
+            }
+
+            for name in [
+                "empty_named_tup",
+                "empty_sub_list",
+                "empty_sub_dict",
+                "empty_proxy",
+            ] {
+                let obj = locals
+                    .get_item(name)
+                    .expect("lookup should succeed")
+                    .expect("key should exist");
+                let bound = extract_bound_params(Some(&obj))
+                    .unwrap_or_else(|err| panic!("{name} extraction should succeed: {err}"));
+                assert!(
+                    matches!(bound, BoundParams::Empty),
+                    "expected Empty for {name}, got {bound:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_extract_bound_params_generator_and_bad_key() {
+        Python::attach(|py| {
+            let generator = py
+                .eval(c"(x for x in [1])", None, None)
+                .expect("eval should succeed");
+            let bound = extract_bound_params(Some(&generator)).expect("generator should succeed");
+            match bound {
+                BoundParams::Positional(vals) => assert_eq!(vals, vec![DuckValue::BigInt(1)]),
+                other => panic!("expected Positional for generator, got {other:?}"),
+            }
+
+            let bad_dict = py
+                .eval(c"{1: 'a'}", None, None)
+                .expect("eval should succeed");
+            let bad_dict_err = extract_bound_params(Some(&bad_dict)).unwrap_err();
+            assert!(
+                matches!(bad_dict_err, DuckDBClientError::InvalidInput(_)),
+                "expected InvalidInput for non-str dict key, got {bad_dict_err:?}"
+            );
+
+            let bad_proxy = py
+                .eval(
+                    c"__import__('types').MappingProxyType({1: 'a'})",
+                    None,
+                    None,
+                )
+                .expect("eval should succeed");
+            let bad_proxy_err = extract_bound_params(Some(&bad_proxy)).unwrap_err();
+            assert!(
+                matches!(bad_proxy_err, DuckDBClientError::InvalidInput(_)),
+                "expected InvalidInput for non-str mapping key, got {bad_proxy_err:?}"
+            );
+
+            let bad_int = py.eval(c"5", None, None).expect("eval should succeed");
+            let bad_int_err = extract_bound_params(Some(&bad_int)).unwrap_err();
+            match bad_int_err {
+                DuckDBClientError::InvalidInput(msg) => {
+                    assert!(
+                        msg.contains("sequence (list/tuple) or mapping (dict)"),
+                        "unexpected message: {msg}"
+                    );
+                }
+                other => panic!("expected InvalidInput for integer 5, got {other:?}"),
+            }
+        });
     }
 }

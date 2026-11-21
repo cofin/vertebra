@@ -11,8 +11,6 @@ from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver
 from vertebra.extensions.sqlspec.adapters.mysql.core import (
     default_statement_config,
     map_mysql_exception,
-    normalize_mysql_many_parameters,
-    normalize_mysql_parameters,
 )
 from vertebra.extensions.sqlspec.adapters.mysql.data_dictionary import (
     MySQLAsyncDataDictionary,
@@ -67,27 +65,14 @@ class MySQLSyncDriver(BaseSyncDriver):
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_mysql_exception(exc)
 
-    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
-        _ = statement
-        return sql, normalize_mysql_parameters(params)
-
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a MySQL statement repeatedly across normalized positional parameter tuples."""
+        """Execute a MySQL statement repeatedly directly on the native cursor."""
         effective_config = getattr(statement, "statement_config", None) or self.statement_config
         sql, prepared = self._compiled_sql(statement, effective_config)
-        param_sets = normalize_mysql_many_parameters(prepared)
-        if not param_sets:
+        if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
-        if callable(exec_many_fn):
-            res = cast("Any", exec_many_fn)(sql, param_sets)
-            rowcount = int(res) if res is not None else 0
-        else:
-            rowcount = 0
-            for item in param_sets:
-                res = cursor.execute(sql, item)
-                rowcount += len(res) if isinstance(res, list) else (int(res) if res is not None else 0)
-        return self.create_execution_result(cursor, rowcount_override=rowcount, is_many_result=True)
+        cursor.executemany(sql, prepared)
+        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0), is_many_result=True)
 
 
 class MySQLAsyncDriver(BaseAsyncDriver):
@@ -132,24 +117,11 @@ class MySQLAsyncDriver(BaseAsyncDriver):
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_mysql_exception(exc)
 
-    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
-        _ = statement
-        return sql, normalize_mysql_parameters(params)
-
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a MySQL statement repeatedly asynchronously across normalized parameter tuples."""
+        """Execute a MySQL statement repeatedly asynchronously directly on the native cursor."""
         effective_config = getattr(statement, "statement_config", None) or self.statement_config
         sql, prepared = self._compiled_sql(statement, effective_config)
-        param_sets = normalize_mysql_many_parameters(prepared)
-        if not param_sets:
+        if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
-        if callable(exec_many_fn):
-            res = await cast("Any", exec_many_fn)(sql, param_sets)
-            rowcount = int(res) if res is not None else 0
-        else:
-            rowcount = 0
-            for item in param_sets:
-                res = await cursor.execute(sql, item)
-                rowcount += len(res) if isinstance(res, list) else (int(res) if res is not None else 0)
-        return self.create_execution_result(cursor, rowcount_override=rowcount, is_many_result=True)
+        await cursor.executemany(sql, prepared)
+        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0), is_many_result=True)

@@ -16,6 +16,8 @@ pub struct SpannerExceptionTypes {
     pub auth: Py<PyType>,
     pub spanner: Py<PyType>,
     pub spanner_aborted: Py<PyType>,
+    pub interface: Py<PyType>,
+    pub programming: Py<PyType>,
 }
 
 static SPANNER_EXCEPTION_TYPES: PyOnceLock<SpannerExceptionTypes> = PyOnceLock::new();
@@ -67,14 +69,19 @@ fn stand_in_exception_types(py: Python<'_>) -> PyResult<SpannerExceptionTypes> {
         "SpannerAbortedError",
         &PyTuple::new(py, [spanner.bind(py), serialization_failure.bind(py)])?,
     )?;
+    let interface = new_stand_in_class(py, "InterfaceError", &PyTuple::new(py, [&root])?)?;
+    let programming =
+        new_stand_in_class(py, "ProgrammingError", &PyTuple::new(py, [db.bind(py)])?)?;
     Ok(SpannerExceptionTypes {
         auth,
         spanner,
         spanner_aborted,
+        interface,
+        programming,
     })
 }
 
-fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static SpannerExceptionTypes> {
+pub(crate) fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static SpannerExceptionTypes> {
     SPANNER_EXCEPTION_TYPES.get_or_try_init(py, || match py.import("vertebra._vertebra") {
         Ok(core_mod) => {
             let auth = core_mod
@@ -89,10 +96,20 @@ fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static SpannerException
                 .getattr("SpannerAbortedError")?
                 .cast_into::<PyType>()?
                 .unbind();
+            let interface = core_mod
+                .getattr("InterfaceError")?
+                .cast_into::<PyType>()?
+                .unbind();
+            let programming = core_mod
+                .getattr("ProgrammingError")?
+                .cast_into::<PyType>()?
+                .unbind();
             Ok(SpannerExceptionTypes {
                 auth,
                 spanner,
                 spanner_aborted,
+                interface,
+                programming,
             })
         }
         Err(err) if err.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py) => {

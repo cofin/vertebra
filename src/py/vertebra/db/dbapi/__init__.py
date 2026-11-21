@@ -9,7 +9,6 @@ from vertebra.utils.module_loader import lazy_exports
 if TYPE_CHECKING:
     from vertebra.db.dbapi._async import (
         AsyncDBAPIConnection,
-        AsyncDBAPICursor,
         AsyncDBAPIModule,
         AsyncSQLDriverProtocol,
     )
@@ -37,7 +36,6 @@ if TYPE_CHECKING:
         OperationalError,
         ProgrammingError,
         SyncDBAPIConnection,
-        SyncDBAPICursor,
         SyncDBAPIModule,
         SyncSQLDriverProtocol,
         Time,
@@ -47,7 +45,6 @@ if TYPE_CHECKING:
         Warning,
         apilevel,
         connect,
-        is_row_returning_sql,
         paramstyle,
         threadsafety,
     )
@@ -64,7 +61,6 @@ __all__ = (
     "ROWID",
     "STRING",
     "AsyncDBAPIConnection",
-    "AsyncDBAPICursor",
     "AsyncDBAPIModule",
     "AsyncSQLDriverProtocol",
     "Binary",
@@ -80,7 +76,6 @@ __all__ = (
     "OperationalError",
     "ProgrammingError",
     "SyncDBAPIConnection",
-    "SyncDBAPICursor",
     "SyncDBAPIModule",
     "SyncSQLDriverProtocol",
     "Time",
@@ -90,14 +85,12 @@ __all__ = (
     "Warning",
     "apilevel",
     "connect",
-    "is_row_returning_sql",
     "paramstyle",
     "threadsafety",
 )
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "AsyncDBAPIConnection": ("vertebra.db.dbapi._async", "AsyncDBAPIConnection"),
-    "AsyncDBAPICursor": ("vertebra.db.dbapi._async", "AsyncDBAPICursor"),
     "AsyncDBAPIModule": ("vertebra.db.dbapi._async", "AsyncDBAPIModule"),
     "AsyncSQLDriverProtocol": ("vertebra.db.dbapi._async", "AsyncSQLDriverProtocol"),
     "BFILE": ("vertebra.db.dbapi._sync", "BFILE"),
@@ -123,7 +116,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ROWID": ("vertebra.db.dbapi._sync", "ROWID"),
     "STRING": ("vertebra.db.dbapi._sync", "STRING"),
     "SyncDBAPIConnection": ("vertebra.db.dbapi._sync", "SyncDBAPIConnection"),
-    "SyncDBAPICursor": ("vertebra.db.dbapi._sync", "SyncDBAPICursor"),
     "SyncDBAPIModule": ("vertebra.db.dbapi._sync", "SyncDBAPIModule"),
     "SyncSQLDriverProtocol": ("vertebra.db.dbapi._sync", "SyncSQLDriverProtocol"),
     "Time": ("vertebra.db.dbapi._sync", "Time"),
@@ -133,7 +125,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "Warning": ("vertebra.db.dbapi._sync", "Warning"),
     "apilevel": ("vertebra.db.dbapi._sync", "apilevel"),
     "connect": ("vertebra.db.dbapi._sync", "connect"),
-    "is_row_returning_sql": ("vertebra.db.dbapi._sync", "is_row_returning_sql"),
     "paramstyle": ("vertebra.db.dbapi._sync", "paramstyle"),
     "threadsafety": ("vertebra.db.dbapi._sync", "threadsafety"),
 }

@@ -13,7 +13,9 @@ __all__ = [
     "FREE_THREADED",
     "GIL_USED",
     "AsyncDuckDBClient",
+    "AsyncDuckDBCursor",
     "SyncDuckDBClient",
+    "SyncDuckDBCursor",
     "__version__",
     "broker_engine_capsule",
 ]
@@ -84,48 +86,6 @@ class SyncDuckDBClient:
     ) -> int:
         """Execute a statement across multiple parameter sets and return total affected rows."""
         ...
-    def fetch_all(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
-        """Execute a query and return all rows as dictionaries."""
-        ...
-    def fetch_one(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Execute a query and return exactly one row dictionary, raising `NotFoundError` when empty."""
-        ...
-    def fetch_optional(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
-        """Execute a query and return a single row dictionary or `None` when empty."""
-        ...
-    def execute_tuples(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> list[tuple[Any, ...]]:
-        """Execute a query and return positional row tuples."""
-        ...
-    def execute_with_description(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-        """Execute SQL and return `(rows, column_names)` preserving column metadata on empty results."""
-        ...
-    def select_value(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Any:
-        """Execute a scalar query and return the first column of the first row."""
-        ...
     def select_to_arrow(
         self,
         sql: str,
@@ -185,6 +145,37 @@ class SyncDuckDBClient:
     def to_async(self) -> AsyncDuckDBClient:
         """Return an `AsyncDuckDBClient` sharing the same worker pool."""
         ...
+    def cursor(self, *, lazy_begin: bool = False) -> SyncDuckDBCursor:
+        """Return a PEP 249 cursor sharing the underlying worker pool."""
+        ...
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run one statement and return its rows and column names."""
+        ...
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> list[dict[str, Any]]:
+        """Run one statement and return each row as a dictionary keyed by column name."""
+        ...
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Any:
+        """Run one statement and return the first column of the first row."""
+        ...
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> tuple[int, int | None]:
+        """Run one statement and return the changed-row count and `None`."""
+        ...
     def __repr__(self) -> str: ...
     def __enter__(self) -> SyncDuckDBClient: ...
     def __exit__(
@@ -193,6 +184,51 @@ class SyncDuckDBClient:
         _exc_val: Any = None,
         _exc_tb: Any = None,
     ) -> None: ...
+
+@final
+class SyncDuckDBCursor:
+    """Synchronous PEP 249 cursor over a native DuckDB worker pool."""
+
+    arraysize: int
+
+    @property
+    def description(self) -> tuple[tuple[str, None, None, None, None, None, None], ...] | None:
+        """Return the column descriptions of the current result set, or `None`."""
+        ...
+
+    @property
+    def rowcount(self) -> int:
+        """Return the changed-row count of the last statement, or `-1`."""
+        ...
+
+    @property
+    def lastrowid(self) -> int | None:
+        """Return `None`; DuckDB reports no inserted rowid."""
+        ...
+
+    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = ()) -> SyncDuckDBCursor:
+        """Run one statement and buffer its result on this cursor."""
+        ...
+
+    def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]]) -> SyncDuckDBCursor:
+        """Run one statement once per parameter set."""
+        ...
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next buffered row, or `None` when the result set is exhausted."""
+        ...
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to `size` buffered rows, defaulting to `arraysize`."""
+        ...
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return every remaining buffered row."""
+        ...
+
+    def close(self) -> None:
+        """Close the cursor and drop its buffered rows."""
+        ...
 
 @final
 class AsyncDuckDBClient:
@@ -258,48 +294,6 @@ class AsyncDuckDBClient:
     ) -> Awaitable[int]:
         """Execute a statement across multiple parameter sets asynchronously."""
         ...
-    def fetch_all(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Awaitable[list[dict[str, Any]]]:
-        """Execute a query asynchronously and return all rows as dictionaries."""
-        ...
-    def fetch_one(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Awaitable[dict[str, Any]]:
-        """Execute a query asynchronously and return one row dictionary, raising `NotFoundError` when empty."""
-        ...
-    def fetch_optional(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Awaitable[dict[str, Any] | None]:
-        """Execute a query asynchronously and return one row dictionary or `None` when empty."""
-        ...
-    def execute_tuples(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Awaitable[list[tuple[Any, ...]]]:
-        """Execute a query asynchronously and return positional row tuples."""
-        ...
-    def execute_with_description(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Awaitable[tuple[list[tuple[Any, ...]], tuple[str, ...]]]:
-        """Execute SQL asynchronously and return `(rows, column_names)`."""
-        ...
-    def select_value(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Awaitable[Any]:
-        """Execute a scalar query asynchronously and return the first column of the first row."""
-        ...
     def select_to_arrow(
         self,
         sql: str,
@@ -359,6 +353,37 @@ class AsyncDuckDBClient:
     def to_sync(self) -> SyncDuckDBClient:
         """Return a `SyncDuckDBClient` sharing the same worker pool."""
         ...
+    def cursor(self, *, lazy_begin: bool = False) -> AsyncDuckDBCursor:
+        """Return an awaitable PEP 249-shaped cursor sharing the underlying worker pool."""
+        ...
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Awaitable[tuple[list[tuple[Any, ...]], tuple[str, ...]]]:
+        """Run one statement asynchronously and return the rows alongside their column names."""
+        ...
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Awaitable[list[dict[str, Any]]]:
+        """Run one statement asynchronously and return each row as a dictionary keyed by column name."""
+        ...
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Awaitable[Any]:
+        """Run one statement asynchronously and return the first column of the first row."""
+        ...
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Awaitable[tuple[int, int | None]]:
+        """Run one statement asynchronously and return the changed-row count and `None`."""
+        ...
     def __repr__(self) -> str: ...
     def __aenter__(self) -> Awaitable[AsyncDuckDBClient]: ...
     def __aexit__(
@@ -367,3 +392,50 @@ class AsyncDuckDBClient:
         _exc_val: Any = None,
         _exc_tb: Any = None,
     ) -> Awaitable[None]: ...
+
+@final
+class AsyncDuckDBCursor:
+    """Awaitable PEP 249-shaped cursor over a native DuckDB worker pool."""
+
+    arraysize: int
+
+    @property
+    def description(self) -> tuple[tuple[str, None, None, None, None, None, None], ...] | None:
+        """Return the column descriptions of the current result set, or `None`."""
+        ...
+
+    @property
+    def rowcount(self) -> int:
+        """Return the changed-row count of the last statement, or `-1`."""
+        ...
+
+    @property
+    def lastrowid(self) -> int | None:
+        """Return `None`; DuckDB reports no inserted rowid."""
+        ...
+
+    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = ()) -> Awaitable[AsyncDuckDBCursor]:
+        """Run one statement and buffer its result on this cursor."""
+        ...
+
+    def executemany(
+        self, sql: str, seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]]
+    ) -> Awaitable[AsyncDuckDBCursor]:
+        """Run one statement once per parameter set."""
+        ...
+
+    def fetchone(self) -> Awaitable[tuple[Any, ...] | None]:
+        """Return the next buffered row, or `None` when the result set is exhausted."""
+        ...
+
+    def fetchmany(self, size: int | None = None) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return up to `size` buffered rows, defaulting to `arraysize`."""
+        ...
+
+    def fetchall(self) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return every remaining buffered row."""
+        ...
+
+    def close(self) -> Awaitable[None]:
+        """Close the cursor and drop its buffered rows."""
+        ...

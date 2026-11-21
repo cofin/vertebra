@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import asyncio
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from sqlspec.core import SQL, ArrowResult, ParameterStyle, StackResult, StatementConfig, StatementStack
 from sqlspec.driver import ExecutionResult
+from sqlspec.driver._common import cache_hit_hooks_unchanged
 from sqlspec.storage import StorageBridgeJob
 
 from vertebra.db.adapters.spanner import (
@@ -14,15 +17,16 @@ from vertebra.db.adapters.spanner import (
     MutationGroup,
     StalenessBound,
 )
+from vertebra.db.adapters.spanner.core import SpannerCore
 from vertebra.db.driver import NotSupportedError
 from vertebra.extensions.sqlspec._driver import (
     BaseAsyncDriver,
     BaseSyncDriver,
 )
 from vertebra.extensions.sqlspec.adapters.spanner.core import (
+    compile_spanner_statement,
     default_statement_config,
     encode_spanner_batch_parameters,
-    encode_spanner_parameters,
     map_spanner_exception,
     normalize_spanner_dialect,
     sqlspec_dialect_name,
@@ -34,6 +38,7 @@ from vertebra.extensions.sqlspec.adapters.spanner.data_dictionary import (
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_pyarrow
+from vertebra.utils.serializers import decode_json
 
 if TYPE_CHECKING:
     from sqlspec.storage import StorageDestination, StorageFormat, StorageTelemetry
@@ -78,29 +83,6 @@ def _infer_spanner_dialect(
     return "googlesql"
 
 
-def _normalize_row_dicts(
-    raw_rows: Any,
-    column_names: Sequence[str] | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    rows_list = list(raw_rows) if raw_rows is not None else []
-    names = list(column_names) if column_names else []
-    if not rows_list:
-        return [], names
-    first = rows_list[0]
-    if isinstance(first, Mapping):
-        if not names:
-            names = [str(key) for key in first]
-        return [dict(row) for row in rows_list], names
-    if isinstance(first, (tuple, list)):
-        if not names:
-            names = [f"col_{idx}" for idx in range(len(first))]
-        dict_rows = [{names[idx]: val for idx, val in enumerate(row)} for row in rows_list]
-        return dict_rows, names
-    if not names:
-        names = ["value"]
-    return [{names[0]: row} for row in rows_list], names
-
-
 def _arrow_cursor_to_pyarrow(arrow_cursor: Any, return_format: str) -> tuple[Any, int]:
     pa = ensure_pyarrow()
     table = arrow_cursor.to_arrow_table() if hasattr(arrow_cursor, "to_arrow_table") else arrow_cursor
@@ -126,88 +108,67 @@ def _is_ddl_sql(sql: str) -> bool:
     return sql.lstrip().upper().startswith(_DDL_PREFIXES)
 
 
-def _execute_sync_select(
-    cursor: Any,
-    sql: str,
-    params: Any,
-    *,
-    staleness: StalenessBound | None = None,
-    active_snapshot: Any | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    if active_snapshot is not None:
-        snap_desc = getattr(active_snapshot, "execute_with_description", None)
-        if callable(snap_desc):
-            raw_rows, col_names = cast("Any", snap_desc)(sql, params)
-            return _normalize_row_dicts(raw_rows, col_names)
-        snap_query = getattr(active_snapshot, "query", None)
-        if callable(snap_query):
-            raw_rows = snap_query(sql, params)
-            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
-        snap_select = getattr(active_snapshot, "select", None)
-        if callable(snap_select):
-            raw_rows = snap_select(sql, params)
-            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
-    desc_fn = getattr(cursor, "execute_with_description", None)
-    if callable(desc_fn):
-        if staleness is not None:
-            raw_rows, col_names = cast("Any", desc_fn)(sql, params, staleness=staleness)
-        else:
-            raw_rows, col_names = cast("Any", desc_fn)(sql, params)
-        return _normalize_row_dicts(raw_rows, col_names)
-    if callable(getattr(cursor, "select", None)):
-        if staleness is not None:
-            raw_rows = cursor.select(sql, params, staleness=staleness)
-        else:
-            raw_rows = cursor.select(sql, params)
-        return _normalize_row_dicts(raw_rows, getattr(cursor, "last_column_names", None))
-    cursor.execute(sql, params)
-    description = getattr(cursor, "description", None)
-    col_names = [str(col[0]) for col in description] if description else None
-    fetchall = getattr(cursor, "fetchall", None)
-    raw_rows = fetchall() if callable(fetchall) else []
-    return _normalize_row_dicts(raw_rows, col_names)
+def _is_read_sql(sql: str) -> bool:
+    text = sql.lstrip()
+    while text:
+        if text.startswith("--"):
+            newline = text.find("\n")
+            text = "" if newline < 0 else text[newline + 1 :].lstrip()
+            continue
+        if text.startswith("/*"):
+            end = text.find("*/")
+            text = "" if end < 0 else text[end + 2 :].lstrip()
+            continue
+        if text.startswith("@{"):
+            depth = 1
+            idx = 2
+            while idx < len(text) and depth > 0:
+                ch = text[idx]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                idx += 1
+            text = text[idx:].lstrip()
+            continue
+        break
+    upper = text.upper()
+    return upper.startswith(("SELECT", "WITH", "GRAPH"))
 
 
-async def _execute_async_select(
-    cursor: Any,
-    sql: str,
-    params: Any,
-    *,
-    staleness: StalenessBound | None = None,
-    active_snapshot: Any | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    if active_snapshot is not None:
-        snap_desc = getattr(active_snapshot, "execute_with_description", None)
-        if callable(snap_desc):
-            raw_rows, col_names = await cast("Any", snap_desc)(sql, params)
-            return _normalize_row_dicts(raw_rows, col_names)
-        snap_query = getattr(active_snapshot, "query", None)
-        if callable(snap_query):
-            raw_rows = await cast("Any", snap_query)(sql, params)
-            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
-        snap_select = getattr(active_snapshot, "select", None)
-        if callable(snap_select):
-            raw_rows = await cast("Any", snap_select)(sql, params)
-            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
-    desc_fn = getattr(cursor, "execute_with_description", None)
-    if callable(desc_fn):
-        if staleness is not None:
-            raw_rows, col_names = await cast("Any", desc_fn)(sql, params, staleness=staleness)
-        else:
-            raw_rows, col_names = await cast("Any", desc_fn)(sql, params)
-        return _normalize_row_dicts(raw_rows, col_names)
-    if callable(getattr(cursor, "select", None)):
-        if staleness is not None:
-            raw_rows = await cursor.select(sql, params, staleness=staleness)
-        else:
-            raw_rows = await cursor.select(sql, params)
-        return _normalize_row_dicts(raw_rows, getattr(cursor, "last_column_names", None))
-    await cursor.execute(sql, params)
-    description = getattr(cursor, "description", None)
-    col_names = [str(col[0]) for col in description] if description else None
-    fetchall = getattr(cursor, "fetchall", None)
-    raw_rows = await cast("Any", fetchall)() if callable(fetchall) else []
-    return _normalize_row_dicts(raw_rows, col_names)
+def _decode_compiled_params(params_json: str | None) -> Any:
+    if params_json is None:
+        return None
+    return decode_json(params_json)
+
+
+class _ThreadedAsyncCursor:
+    """Async adapter offloading a synchronous Spanner cursor onto worker threads."""
+
+    __slots__ = ("_cursor",)
+
+    def __init__(self, cursor: Any) -> None:
+        self._cursor = cursor
+
+    @property
+    def description(self) -> Any:
+        return self._cursor.description
+
+    @property
+    def rowcount(self) -> int:
+        return int(self._cursor.rowcount)
+
+    async def execute(self, sql: str, params: Any = None) -> Any:
+        return await asyncio.to_thread(self._cursor.execute, sql, params)
+
+    async def executemany(self, sql: str, seq_of_params: Any) -> Any:
+        return await asyncio.to_thread(self._cursor.executemany, sql, seq_of_params)
+
+    async def fetchall(self) -> list[Any]:
+        return list(await asyncio.to_thread(self._cursor.fetchall))
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._cursor.close)
 
 
 class _DriverDialectDescriptor:
@@ -326,13 +287,66 @@ class SpannerSyncDriver(BaseSyncDriver):
         """Return the Spanner synchronous data dictionary."""
         return self._data_dictionary
 
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the session-aware callables the cache-hit executor calls, or `None` to register no executor."""
+        if not cache_hit_hooks_unchanged(type(self), SpannerSyncDriver):
+            return None
+        if not callable(getattr(self.native_driver, "cursor", None)):
+            return None
+        return self._cached_fetch_rows, self._cached_run_dml
+
+    def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run a cached row-returning statement on a session-configured cursor and return `(rows, names)`."""
+        if self._read_only and not _is_read_sql(sql):
+            self._require_writable("DML/DDL")
+        cursor = self.connection.cursor(**self._cursor_kwargs())
+        try:
+            cursor.execute(sql, params)
+            description = cursor.description
+            if description is None:
+                return [], ()
+            return cursor.fetchall(), tuple(column[0] for column in description)
+        finally:
+            cursor.close()
+
+    def _cached_run_dml(self, sql: str, params: Any = ()) -> tuple[int, Any]:
+        """Run a cached statement without rows on a session-configured cursor and return `(rowcount, None)`."""
+        if self._read_only and not _is_read_sql(sql):
+            self._require_writable("DML/DDL")
+        cursor = self.connection.cursor(**self._cursor_kwargs())
+        try:
+            cursor.execute(sql, params)
+            return max(cursor.rowcount, 0), None
+        finally:
+            cursor.close()
+
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_spanner_exception(exc)
 
-    def _compile_for_native(self, statement: SQL) -> tuple[str, Any]:
-        effective_config = getattr(statement, "statement_config", None) or self.statement_config
-        sql, prepared = self._compiled_sql(statement, effective_config)
-        return sql, encode_spanner_parameters(prepared, dialect=self._spanner_dialect)
+    def _cursor_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        staleness = (
+            self._staleness if self._staleness is not None else getattr(self._active_snapshot, "staleness", None)
+        )
+        if staleness is not None:
+            kwargs["staleness"] = staleness
+        features = self.driver_features or {}
+        request_tag = features.get("request_tag")
+        if request_tag is not None:
+            kwargs["request_tag"] = request_tag
+        transaction_tag = features.get("transaction_tag")
+        if transaction_tag is not None:
+            kwargs["transaction_tag"] = transaction_tag
+        return kwargs
+
+    @contextmanager
+    def with_cursor(self, connection: Any) -> Iterator[Any]:
+        """Yield a native Spanner cursor configured with session staleness and tags, closing on exit."""
+        cursor = connection.cursor(**self._cursor_kwargs())
+        try:
+            yield cursor
+        finally:
+            cursor.close()
 
     def _require_writable(self, action: str) -> None:
         if self._read_only:
@@ -340,55 +354,41 @@ class SpannerSyncDriver(BaseSyncDriver):
             raise ImproperConfigurationError(msg)
 
     def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a compiled query, DML, or DDL statement respecting snapshot read-only bounds."""
-        sql, params = self._compile_for_native(statement)
-        if statement.returns_rows():
-            dict_rows, col_names = _execute_sync_select(
-                cursor,
-                sql,
-                params,
-                staleness=self._staleness,
-                active_snapshot=self._active_snapshot,
-            )
+        """Execute a compiled query, DML, or DDL statement through the native cursor."""
+        sql, params_json = compile_spanner_statement(statement, dialect=self.dialect)
+        if self._read_only and not _is_read_sql(sql):
+            self._require_writable("DML/DDL")
+        self._cache_statement(statement)
+        cursor.execute(sql, params_json)
+        description = cursor.description
+        if description is not None:
+            rows = cursor.fetchall()
             return self.create_execution_result(
                 cursor,
-                selected_data=dict_rows,
-                column_names=col_names,
-                data_row_count=len(dict_rows),
+                selected_data=rows,
+                column_names=[column[0] for column in description],
+                data_row_count=len(rows),
                 is_select_result=True,
-                row_format="dict",
+                row_format="tuple",
             )
-        self._require_writable("DML/DDL")
-        affected = cursor.execute(sql, params)
-        rowcount = int(affected) if isinstance(affected, int) else 0
-        return self.create_execution_result(cursor, rowcount_override=rowcount)
+        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a parameterized batch via Spanner ``ExecuteBatchDml``."""
+        """Execute a parameterized batch via the native cursor ``executemany`` path."""
         self._require_writable("ExecuteBatchDml")
-        effective_config = getattr(statement, "statement_config", None) or self.statement_config
-        sql, prepared = self._compiled_sql(statement, effective_config)
+        sql, prepared = statement.compile()
         param_sets = encode_spanner_batch_parameters(prepared, dialect=self._spanner_dialect)
         if not param_sets:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        batch_fn = getattr(cursor, "execute_batch_dml", None)
-        if callable(batch_fn):
-            counts = cast("Sequence[Any]", batch_fn([(sql, param_set) for param_set in param_sets]))
-            total = sum(int(c) for c in counts)
-            return self.create_execution_result(cursor, rowcount_override=total, is_many_result=True)
-        execute_many_fn = getattr(cursor, "execute_many", None)
-        if callable(execute_many_fn):
-            affected = execute_many_fn(sql, param_sets)
-            return self.create_execution_result(
-                cursor,
-                rowcount_override=int(affected) if isinstance(affected, int) else len(param_sets),
-                is_many_result=True,
-            )
-        total_affected = 0
-        for param_set in param_sets:
-            res = cursor.execute(sql, param_set)
-            total_affected += int(res) if isinstance(res, int) else 1
-        return self.create_execution_result(cursor, rowcount_override=total_affected, is_many_result=True)
+        json_sets = [
+            SpannerCore.encode_parameters_json(param_set, dialect=self._spanner_dialect) for param_set in param_sets
+        ]
+        cursor.executemany(sql, json_sets)
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=max(cursor.rowcount, 0),
+            is_many_result=True,
+        )
 
     def dispatch_execute_script(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a script of Spanner DDL and/or DML statements."""
@@ -398,10 +398,10 @@ class SpannerSyncDriver(BaseSyncDriver):
                 cursor, statement_count=0, successful_statements=0, is_script_result=True
             )
         ddl_batch = [stmt for stmt in statements if _is_ddl_sql(stmt)]
-        if ddl_batch or any(not stmt.lstrip().upper().startswith(("SELECT", "WITH", "GRAPH")) for stmt in statements):
+        if ddl_batch or any(not _is_read_sql(stmt) for stmt in statements):
             self._require_writable("script DML/DDL")
+        update_ddl_fn = getattr(self.connection, "update_ddl", None)
         if ddl_batch and len(ddl_batch) == len(statements):
-            update_ddl_fn = getattr(cursor, "update_ddl", None)
             if callable(update_ddl_fn):
                 update_ddl_fn(ddl_batch)
             else:
@@ -414,8 +414,8 @@ class SpannerSyncDriver(BaseSyncDriver):
                 is_script_result=True,
             )
         for stmt in statements:
-            if _is_ddl_sql(stmt) and callable(getattr(cursor, "update_ddl", None)):
-                cursor.update_ddl([stmt])
+            if _is_ddl_sql(stmt) and callable(update_ddl_fn):
+                update_ddl_fn([stmt])
             else:
                 cursor.execute(stmt, None)
         return self.create_execution_result(
@@ -460,8 +460,8 @@ class SpannerSyncDriver(BaseSyncDriver):
                 if prepared_stmt.returns_rows() or _is_ddl_sql(prepared_stmt.raw_sql):
                     all_dml = False
                     break
-                sql, params = self._compile_for_native(prepared_stmt)
-                compiled_batch.append((sql, params))
+                sql, params_json = compile_spanner_statement(prepared_stmt, dialect=self.dialect)
+                compiled_batch.append((sql, _decode_compiled_params(params_json)))
             if all_dml and compiled_batch:
                 exc_handler = self.handle_database_exceptions()
                 with exc_handler:
@@ -484,7 +484,8 @@ class SpannerSyncDriver(BaseSyncDriver):
             if isinstance(statement, SQL)
             else SQL(statement, parameters, statement_config=self.statement_config)
         )
-        sql, params = self._compile_for_native(sql_obj)
+        sql, params_json = compile_spanner_statement(sql_obj, dialect=self.dialect)
+        params = _decode_compiled_params(params_json)
         pdml_kwargs: dict[str, Any] = {}
         if exclude_txn_from_change_streams:
             pdml_kwargs["exclude_txn_from_change_streams"] = True
@@ -503,10 +504,13 @@ class SpannerSyncDriver(BaseSyncDriver):
     ) -> list[int]:
         """Execute multiple DML statements in a single ``ExecuteBatchDml`` RPC."""
         self._require_writable("ExecuteBatchDml")
-        compiled = [
-            self._compile_for_native(SQL(sql, params, statement_config=self.statement_config))
-            for sql, params in statements
-        ]
+        compiled: list[tuple[str, Any]] = []
+        for sql, params in statements:
+            compiled_sql, params_json = compile_spanner_statement(
+                SQL(sql, params, statement_config=self.statement_config),
+                dialect=self.dialect,
+            )
+            compiled.append((compiled_sql, _decode_compiled_params(params_json)))
         batch_kwargs: dict[str, Any] = {}
         if request_tag is not None:
             batch_kwargs["request_tag"] = request_tag
@@ -629,9 +633,8 @@ class SpannerSyncDriver(BaseSyncDriver):
                 statement_config=statement_config or self.statement_config,
                 kwargs=stmt_kwargs,
             )
-            if not prepared.is_processed:
-                prepared.compile()
-            sql, params = self._compile_for_native(prepared)
+            sql, params_json = compile_spanner_statement(prepared, dialect=self.dialect)
+            params = _decode_compiled_params(params_json)
             exc_handler = self.handle_database_exceptions()
             with exc_handler:
                 cursor = native_arrow_fn(sql, params, **native_kwargs)
@@ -855,13 +858,75 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         """Return the Spanner asynchronous data dictionary."""
         return self._data_dictionary
 
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the session-aware callables the cache-hit executor calls, or `None` to register no executor."""
+        if not cache_hit_hooks_unchanged(type(self), SpannerAsyncDriver):
+            return None
+        if not callable(getattr(self.native_driver, "cursor", None)):
+            return None
+        return self._cached_fetch_rows, self._cached_run_dml
+
+    async def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run a cached row-returning statement on a session-configured cursor and return `(rows, names)`."""
+        if self._read_only and not _is_read_sql(sql):
+            self._require_writable("DML/DDL")
+        cursor = self.connection.cursor(**self._cursor_kwargs())
+        try:
+            await cursor.execute(sql, params)
+            description = cursor.description
+            if description is None:
+                return [], ()
+            return await cursor.fetchall(), tuple(column[0] for column in description)
+        finally:
+            await cursor.close()
+
+    async def _cached_run_dml(self, sql: str, params: Any = ()) -> tuple[int, Any]:
+        """Run a cached statement without rows on a session-configured cursor and return `(rowcount, None)`."""
+        if self._read_only and not _is_read_sql(sql):
+            self._require_writable("DML/DDL")
+        cursor = self.connection.cursor(**self._cursor_kwargs())
+        try:
+            await cursor.execute(sql, params)
+            return max(cursor.rowcount, 0), None
+        finally:
+            await cursor.close()
+
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_spanner_exception(exc)
 
-    def _compile_for_native(self, statement: SQL) -> tuple[str, Any]:
-        effective_config = getattr(statement, "statement_config", None) or self.statement_config
-        sql, prepared = self._compiled_sql(statement, effective_config)
-        return sql, encode_spanner_parameters(prepared, dialect=self._spanner_dialect)
+    def _cursor_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        staleness = (
+            self._staleness if self._staleness is not None else getattr(self._active_snapshot, "staleness", None)
+        )
+        if staleness is not None:
+            kwargs["staleness"] = staleness
+        features = self.driver_features or {}
+        request_tag = features.get("request_tag")
+        if request_tag is not None:
+            kwargs["request_tag"] = request_tag
+        transaction_tag = features.get("transaction_tag")
+        if transaction_tag is not None:
+            kwargs["transaction_tag"] = transaction_tag
+        return kwargs
+
+    @asynccontextmanager
+    async def with_cursor(self, connection: Any) -> AsyncIterator[Any]:
+        """Yield an async native Spanner cursor configured with session staleness and tags, closing on exit."""
+        cursor_fn = getattr(connection, "cursor", None)
+        cursor: Any
+        if callable(cursor_fn):
+            cursor = cursor_fn(**self._cursor_kwargs())
+        else:
+            sync_conn = getattr(connection, "_sync", None)
+            if sync_conn is None or not callable(getattr(sync_conn, "cursor", None)):
+                msg = f"{type(connection).__name__} does not provide cursor()"
+                raise AttributeError(msg)
+            cursor = _ThreadedAsyncCursor(sync_conn.cursor(**self._cursor_kwargs()))
+        try:
+            yield cursor
+        finally:
+            await cursor.close()
 
     def _require_writable(self, action: str) -> None:
         if self._read_only:
@@ -869,55 +934,41 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             raise ImproperConfigurationError(msg)
 
     async def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Asynchronously execute a compiled query, DML, or DDL statement respecting snapshot read-only bounds."""
-        sql, params = self._compile_for_native(statement)
-        if statement.returns_rows():
-            dict_rows, col_names = await _execute_async_select(
-                cursor,
-                sql,
-                params,
-                staleness=self._staleness,
-                active_snapshot=self._active_snapshot,
-            )
+        """Asynchronously execute a compiled query, DML, or DDL statement through the native cursor."""
+        sql, params_json = compile_spanner_statement(statement, dialect=self.dialect)
+        if self._read_only and not _is_read_sql(sql):
+            self._require_writable("DML/DDL")
+        self._cache_statement(statement)
+        await cursor.execute(sql, params_json)
+        description = cursor.description
+        if description is not None:
+            rows = await cursor.fetchall()
             return self.create_execution_result(
                 cursor,
-                selected_data=dict_rows,
-                column_names=col_names,
-                data_row_count=len(dict_rows),
+                selected_data=rows,
+                column_names=[column[0] for column in description],
+                data_row_count=len(rows),
                 is_select_result=True,
-                row_format="dict",
+                row_format="tuple",
             )
-        self._require_writable("DML/DDL")
-        affected = await cursor.execute(sql, params)
-        rowcount = int(affected) if isinstance(affected, int) else 0
-        return self.create_execution_result(cursor, rowcount_override=rowcount)
+        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Asynchronously execute a parameterized batch via Spanner ``ExecuteBatchDml``."""
+        """Asynchronously execute a parameterized batch via the native cursor ``executemany`` path."""
         self._require_writable("ExecuteBatchDml")
-        effective_config = getattr(statement, "statement_config", None) or self.statement_config
-        sql, prepared = self._compiled_sql(statement, effective_config)
+        sql, prepared = statement.compile()
         param_sets = encode_spanner_batch_parameters(prepared, dialect=self._spanner_dialect)
         if not param_sets:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        batch_fn = getattr(cursor, "execute_batch_dml", None)
-        if callable(batch_fn):
-            counts = await cast("Any", batch_fn)([(sql, param_set) for param_set in param_sets])
-            total = sum(int(c) for c in counts)
-            return self.create_execution_result(cursor, rowcount_override=total, is_many_result=True)
-        execute_many_fn = getattr(cursor, "execute_many", None)
-        if callable(execute_many_fn):
-            affected = await cast("Any", execute_many_fn)(sql, param_sets)
-            return self.create_execution_result(
-                cursor,
-                rowcount_override=int(affected) if isinstance(affected, int) else len(param_sets),
-                is_many_result=True,
-            )
-        total_affected = 0
-        for param_set in param_sets:
-            res = await cursor.execute(sql, param_set)
-            total_affected += int(res) if isinstance(res, int) else 1
-        return self.create_execution_result(cursor, rowcount_override=total_affected, is_many_result=True)
+        json_sets = [
+            SpannerCore.encode_parameters_json(param_set, dialect=self._spanner_dialect) for param_set in param_sets
+        ]
+        await cursor.executemany(sql, json_sets)
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=max(cursor.rowcount, 0),
+            is_many_result=True,
+        )
 
     async def dispatch_execute_script(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Asynchronously execute a script of Spanner DDL and/or DML statements."""
@@ -927,10 +978,10 @@ class SpannerAsyncDriver(BaseAsyncDriver):
                 cursor, statement_count=0, successful_statements=0, is_script_result=True
             )
         ddl_batch = [stmt for stmt in statements if _is_ddl_sql(stmt)]
-        if ddl_batch or any(not stmt.lstrip().upper().startswith(("SELECT", "WITH", "GRAPH")) for stmt in statements):
+        if ddl_batch or any(not _is_read_sql(stmt) for stmt in statements):
             self._require_writable("script DML/DDL")
+        update_ddl_fn = getattr(self.connection, "update_ddl", None)
         if ddl_batch and len(ddl_batch) == len(statements):
-            update_ddl_fn = getattr(cursor, "update_ddl", None)
             if callable(update_ddl_fn):
                 await cast("Any", update_ddl_fn)(ddl_batch)
             else:
@@ -943,8 +994,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
                 is_script_result=True,
             )
         for stmt in statements:
-            if _is_ddl_sql(stmt) and callable(getattr(cursor, "update_ddl", None)):
-                await cursor.update_ddl([stmt])
+            if _is_ddl_sql(stmt) and callable(update_ddl_fn):
+                await cast("Any", update_ddl_fn)([stmt])
             else:
                 await cursor.execute(stmt, None)
         return self.create_execution_result(
@@ -989,8 +1040,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
                 if prepared_stmt.returns_rows() or _is_ddl_sql(prepared_stmt.raw_sql):
                     all_dml = False
                     break
-                sql, params = self._compile_for_native(prepared_stmt)
-                compiled_batch.append((sql, params))
+                sql, params_json = compile_spanner_statement(prepared_stmt, dialect=self.dialect)
+                compiled_batch.append((sql, _decode_compiled_params(params_json)))
             if all_dml and compiled_batch:
                 exc_handler = self.handle_database_exceptions()
                 async with exc_handler:
@@ -1013,7 +1064,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             if isinstance(statement, SQL)
             else SQL(statement, parameters, statement_config=self.statement_config)
         )
-        sql, params = self._compile_for_native(sql_obj)
+        sql, params_json = compile_spanner_statement(sql_obj, dialect=self.dialect)
+        params = _decode_compiled_params(params_json)
         pdml_kwargs: dict[str, Any] = {}
         if exclude_txn_from_change_streams:
             pdml_kwargs["exclude_txn_from_change_streams"] = True
@@ -1032,10 +1084,13 @@ class SpannerAsyncDriver(BaseAsyncDriver):
     ) -> list[int]:
         """Asynchronously execute multiple DML statements in a single ``ExecuteBatchDml`` RPC."""
         self._require_writable("ExecuteBatchDml")
-        compiled = [
-            self._compile_for_native(SQL(sql, params, statement_config=self.statement_config))
-            for sql, params in statements
-        ]
+        compiled: list[tuple[str, Any]] = []
+        for sql, params in statements:
+            compiled_sql, params_json = compile_spanner_statement(
+                SQL(sql, params, statement_config=self.statement_config),
+                dialect=self.dialect,
+            )
+            compiled.append((compiled_sql, _decode_compiled_params(params_json)))
         batch_kwargs: dict[str, Any] = {}
         if request_tag is not None:
             batch_kwargs["request_tag"] = request_tag
@@ -1158,9 +1213,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
                 statement_config=statement_config or self.statement_config,
                 kwargs=stmt_kwargs,
             )
-            if not prepared.is_processed:
-                prepared.compile()
-            sql, params = self._compile_for_native(prepared)
+            sql, params_json = compile_spanner_statement(prepared, dialect=self.dialect)
+            params = _decode_compiled_params(params_json)
             exc_handler = self.handle_database_exceptions()
             async with exc_handler:
                 cursor = await cast("Any", native_arrow_fn)(sql, params, **native_kwargs)

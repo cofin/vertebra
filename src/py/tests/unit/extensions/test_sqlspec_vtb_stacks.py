@@ -2,25 +2,38 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from typing import Any, ClassVar
 
 import pyarrow as pa
 import pytest
 from sqlspec import SQL, StatementStack
 from sqlspec.core.filters import NullFilter
+from sqlspec.core.parameters import TypedParameter
 from sqlspec.core.statement import StatementConfig
 from sqlspec.exceptions import DialectNotSupportedError as SQLSpecDialectNotSupportedError
+from sqlspec.exceptions import UniqueViolationError
 
+import vertebra._oracle as _oracle_native
 import vertebra.extensions.sqlspec as sqlspec_extension
+from tests.unit.db.oracle_test_doubles import (
+    _StubAsyncOracleClient,
+    _StubAsyncOraclePool,
+    _StubSyncOracleClient,
+    _StubSyncOraclePool,
+)
 from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresCluster, FakeSyncPostgresPool
+from vertebra._vertebra import IntegrityError as NativeIntegrityError
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
+from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver
 from vertebra.extensions.sqlspec.adapters import (
     MySQLAsyncConfig,
     MySQLSyncConfig,
@@ -64,6 +77,7 @@ from vertebra.extensions.sqlspec.adapters.oracle import (
 from vertebra.extensions.sqlspec.adapters.oracle import (
     OracleSyncDriver as SQLSpecOracleSyncDriver,
 )
+from vertebra.extensions.sqlspec.adapters.oracle.core import build_oracle_statement_config
 from vertebra.extensions.sqlspec.adapters.postgres import (
     PostgresAsyncConnectionContext,
     PostgresAsyncSessionContext,
@@ -423,11 +437,14 @@ class _NativeBindConnection:
     def connection(self) -> Any:
         return self
 
-    def cursor(self) -> Any:
+    def cursor(self, *, lazy_begin: bool = False) -> Any:
         port = self
         cursor = self.raw.cursor()
 
         class Cursor:
+            def __init__(self) -> None:
+                self._rows: list[Any] | None = None
+
             @property
             def description(self) -> Any:
                 return cursor.description
@@ -436,12 +453,53 @@ class _NativeBindConnection:
             def rowcount(self) -> int:
                 return cursor.rowcount
 
-            def execute(self, sql: str, params: Any = None) -> None:
+            @property
+            def lastrowid(self) -> Any:
+                return cursor.lastrowid
+
+            def execute(self, sql: str, params: Any = None) -> Cursor:
+                if lazy_begin and not port._in_tx:
+                    port.begin()
                 port.calls.append((sql, params))
                 adapted_sql, bound = port._adapt_sqlite(sql, params)
                 cursor.execute(adapted_sql, bound)
+                self._rows = list(cursor.fetchall()) if cursor.description is not None else None
+                if not lazy_begin and not port._in_tx:
+                    port.raw.commit()
+                return self
+
+            def executemany(self, sql: str, param_sets: Any) -> Cursor:
+                if lazy_begin and not port._in_tx:
+                    port.begin()
+                adapted_rows: list[Any] = []
+                adapted_sql = sql
+                for params in param_sets:
+                    port.calls.append((sql, params))
+                    adapted_sql, bound = port._adapt_sqlite(sql, params)
+                    adapted_rows.append(bound)
+                cursor.executemany(adapted_sql, adapted_rows)
+                self._rows = None
+                if not lazy_begin and not port._in_tx:
+                    port.raw.commit()
+                return self
+
+            def fetchone(self) -> Any:
+                if self._rows is not None:
+                    return self._rows.pop(0) if self._rows else None
+                return cursor.fetchone()
+
+            def fetchmany(self, size: int = 1) -> list[Any]:
+                if self._rows is not None:
+                    out = self._rows[:size]
+                    del self._rows[:size]
+                    return out
+                return cursor.fetchmany(size)
 
             def fetchall(self) -> list[Any]:
+                if self._rows is not None:
+                    out = list(self._rows)
+                    self._rows.clear()
+                    return out
                 return cursor.fetchall()
 
             def close(self) -> None:
@@ -538,8 +596,8 @@ class _AsyncNativeBindConnection:
     def acquire(self) -> Any:
         return self
 
-    def cursor(self) -> Any:
-        cursor = self._sync.cursor()
+    def cursor(self, *, lazy_begin: bool = False) -> Any:
+        cursor = self._sync.cursor(lazy_begin=lazy_begin)
 
         class Cursor:
             @property
@@ -550,8 +608,23 @@ class _AsyncNativeBindConnection:
             def rowcount(self) -> int:
                 return int(cursor.rowcount)
 
-            async def execute(self, sql: str, params: Any = None) -> None:
+            @property
+            def lastrowid(self) -> Any:
+                return cursor.lastrowid
+
+            async def execute(self, sql: str, params: Any = None) -> Cursor:
                 cursor.execute(sql, params)
+                return self
+
+            async def executemany(self, sql: str, param_sets: Any) -> Cursor:
+                cursor.executemany(sql, param_sets)
+                return self
+
+            async def fetchone(self) -> Any:
+                return cursor.fetchone()
+
+            async def fetchmany(self, size: int = 1) -> list[Any]:
+                return list(cursor.fetchmany(size))
 
             async def fetchall(self) -> list[Any]:
                 return list(cursor.fetchall())
@@ -1302,6 +1375,136 @@ async def test_postgres_provide_session_and_connection_forward_args_and_route_re
     await primary_async_cfg.close()
 
 
+class _FakeOracleCursor:
+    """Minimal sync Oracle cursor double backed by `_FakeOracleClient`."""
+
+    def __init__(self, client: _FakeOracleClient) -> None:
+        self._client = client
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: Any = None
+        self.out_binds: dict[str, Any] = {}
+        self._rows: list[tuple[Any, ...]] = []
+
+    def execute(self, sql: str, params: Any = None, *, out_binds: Any = None) -> int:
+        _ = out_binds
+        upper = sql.lstrip().upper()
+        if upper.startswith(("SELECT", "WITH")):
+            self._client.executed.append((sql, params, {"select": True}))
+            cols = list(self._client.rows[0].keys()) if self._client.rows else []
+            self.description = tuple((col, None, None, None, None, None, None) for col in cols)
+            self._rows = [tuple(row.get(col) for col in cols) for row in self._client.rows]
+            self.rowcount = -1
+            return 0
+        self._client.executed.append((sql, params, {}))
+        self.description = None
+        self._rows = []
+        self.rowcount = 1
+        return 1
+
+    def executemany(self, sql: str, parameter_sets: Any) -> int:
+        batch = list(parameter_sets)
+        self._client.executed.append((sql, batch, {"many": True}))
+        self.description = None
+        self._rows = []
+        self.rowcount = len(batch)
+        return len(batch)
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = self._rows
+        self._rows = []
+        return rows
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeOracleSessionlessCursor(_FakeOracleCursor):
+    """Fake Oracle cursor accepting `suspend_on_success` for 26ai sessionless tests."""
+
+    def execute(
+        self,
+        sql: str,
+        params: Any = None,
+        *,
+        suspend_on_success: bool = False,
+        out_binds: Any = None,
+    ) -> int:
+        if suspend_on_success:
+            _ = out_binds
+            self._client.executed.append((sql, params, {"suspend_on_success": True}))
+            self.description = None
+            self._rows = []
+            self.rowcount = 1
+            return 1
+        return super().execute(sql, params, out_binds=out_binds)
+
+
+class _FakeAsyncOracleCursor:
+    """Minimal async Oracle cursor double backed by `_FakeAsyncOracleClient`."""
+
+    def __init__(self, client: _FakeAsyncOracleClient) -> None:
+        self._client = client
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: Any = None
+        self.out_binds: dict[str, Any] = {}
+        self._rows: list[tuple[Any, ...]] = []
+
+    async def execute(self, sql: str, params: Any = None, *, out_binds: Any = None) -> int:
+        _ = out_binds
+        upper = sql.lstrip().upper()
+        if upper.startswith(("SELECT", "WITH")):
+            self._client.executed.append((sql, params, {"select": True}))
+            cols = list(self._client.rows[0].keys()) if self._client.rows else []
+            self.description = tuple((col, None, None, None, None, None, None) for col in cols)
+            self._rows = [tuple(row.get(col) for col in cols) for row in self._client.rows]
+            self.rowcount = -1
+            return 0
+        self._client.executed.append((sql, params, {}))
+        self.description = None
+        self._rows = []
+        self.rowcount = 1
+        return 1
+
+    async def executemany(self, sql: str, parameter_sets: Any) -> int:
+        batch = list(parameter_sets)
+        self._client.executed.append((sql, batch, {"many": True}))
+        self.description = None
+        self._rows = []
+        self.rowcount = len(batch)
+        return len(batch)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = self._rows
+        self._rows = []
+        return rows
+
+    async def close(self) -> None:
+        return None
+
+
+class _FakeAsyncOracleSessionlessCursor(_FakeAsyncOracleCursor):
+    """Async fake Oracle cursor accepting `suspend_on_success` for 26ai sessionless tests."""
+
+    async def execute(
+        self,
+        sql: str,
+        params: Any = None,
+        *,
+        suspend_on_success: bool = False,
+        out_binds: Any = None,
+    ) -> int:
+        if suspend_on_success:
+            _ = out_binds
+            self._client.executed.append((sql, params, {"suspend_on_success": True}))
+            self.description = None
+            self._rows = []
+            self.rowcount = 1
+            return 1
+        return await super().execute(sql, params, out_binds=out_binds)
+
+
 class _FakeOracleClient:
     """In-memory fake Oracle connection double for SQLSpec adapter session and 26ai lifecycle tests."""
 
@@ -1341,12 +1544,28 @@ class _FakeOracleClient:
         cols = list(self.rows[0].keys()) if self.rows else []
         return list(self.rows), cols
 
+    @contextlib.contextmanager
+    def checkout_cursor(self) -> Any:
+        cursor = _FakeOracleCursor(self)
+        try:
+            yield cursor
+        finally:
+            cursor.close()
+
     def close(self) -> None:
         self.closed = True
 
 
 class _FakeOracleSessionlessClient(_FakeOracleClient):
     """Fake Oracle connection exposing native 26ai sessionless transaction methods."""
+
+    @contextlib.contextmanager
+    def checkout_cursor(self) -> Any:
+        cursor = _FakeOracleSessionlessCursor(self)
+        try:
+            yield cursor
+        finally:
+            cursor.close()
 
     def execute(self, sql: str, params: Any = None, *, suspend_on_success: bool = False) -> int:
         self.executed.append((sql, params, {"suspend_on_success": suspend_on_success}))
@@ -1418,12 +1637,28 @@ class _FakeAsyncOracleClient:
         cols = list(self.rows[0].keys()) if self.rows else []
         return list(self.rows), cols
 
+    @contextlib.asynccontextmanager
+    async def checkout_cursor(self) -> Any:
+        cursor = _FakeAsyncOracleCursor(self)
+        try:
+            yield cursor
+        finally:
+            await cursor.close()
+
     async def close(self) -> None:
         self.closed = True
 
 
 class _FakeAsyncOracleSessionlessClient(_FakeAsyncOracleClient):
     """Async fake Oracle connection exposing native 26ai sessionless transaction methods."""
+
+    @contextlib.asynccontextmanager
+    async def checkout_cursor(self) -> Any:
+        cursor = _FakeAsyncOracleSessionlessCursor(self)
+        try:
+            yield cursor
+        finally:
+            await cursor.close()
 
     async def execute(self, sql: str, params: Any = None, *, suspend_on_success: bool = False) -> int:
         self.executed.append((sql, params, {"suspend_on_success": suspend_on_success}))
@@ -1788,3 +2023,579 @@ async def test_oracle_26ai_sessionless_transaction_priority_and_unsupported_erro
         await unsupported_async.suspend_sessionless_transaction()
     with pytest.raises(SQLSpecDialectNotSupportedError, match="sessionless"):
         await unsupported_async.execute("UPDATE orders SET status = :s", s="done", suspend_on_success=True)
+
+
+class _CountingOracleSyncCursor:
+    """Proxy around a sync Oracle cursor counting native execute and fetchall calls."""
+
+    def __init__(self, inner: Any, counts: dict[str, int]) -> None:
+        self._inner = inner
+        self._counts = counts
+
+    def execute(self, sql: str, params: Any = (), *, out_binds: Any = None) -> Any:
+        self._counts["execute"] = self._counts.get("execute", 0) + 1
+        if out_binds is not None:
+            return self._inner.execute(sql, params, out_binds=out_binds)
+        return self._inner.execute(sql, params)
+
+    def executemany(self, sql: str, seq_of_params: Any) -> Any:
+        self._counts["executemany"] = self._counts.get("executemany", 0) + 1
+        return self._inner.executemany(sql, seq_of_params)
+
+    def fetchall(self) -> Any:
+        self._counts["fetchall"] = self._counts.get("fetchall", 0) + 1
+        return self._inner.fetchall()
+
+    @property
+    def description(self) -> Any:
+        return self._inner.description
+
+    @property
+    def rowcount(self) -> int:
+        return int(self._inner.rowcount)
+
+    @property
+    def lastrowid(self) -> Any:
+        return self._inner.lastrowid
+
+    @property
+    def out_binds(self) -> Any:
+        return self._inner.out_binds
+
+
+class _CountingOracleAsyncCursor:
+    """Proxy around an async Oracle cursor counting native execute and fetchall calls."""
+
+    def __init__(self, inner: Any, counts: dict[str, int]) -> None:
+        self._inner = inner
+        self._counts = counts
+
+    async def execute(self, sql: str, params: Any = (), *, out_binds: Any = None) -> Any:
+        self._counts["execute"] = self._counts.get("execute", 0) + 1
+        if out_binds is not None:
+            return await self._inner.execute(sql, params, out_binds=out_binds)
+        return await self._inner.execute(sql, params)
+
+    async def executemany(self, sql: str, seq_of_params: Any) -> Any:
+        self._counts["executemany"] = self._counts.get("executemany", 0) + 1
+        return await self._inner.executemany(sql, seq_of_params)
+
+    async def fetchall(self) -> Any:
+        self._counts["fetchall"] = self._counts.get("fetchall", 0) + 1
+        return await self._inner.fetchall()
+
+    @property
+    def description(self) -> Any:
+        return self._inner.description
+
+    @property
+    def rowcount(self) -> int:
+        return int(self._inner.rowcount)
+
+    @property
+    def lastrowid(self) -> Any:
+        return self._inner.lastrowid
+
+    @property
+    def out_binds(self) -> Any:
+        return self._inner.out_binds
+
+
+class _CountingOracleSyncDriverProxy:
+    """Proxy around `SyncOracleDriver` wrapping `checkout_cursor()` with call counting."""
+
+    def __init__(self, inner: SyncOracleDriver) -> None:
+        self._inner = inner
+        self.config = inner.config
+        self.counts: dict[str, int] = {}
+        self.checkout_calls: int = 0
+        self._last_out_binds: Any = None
+
+    @contextlib.contextmanager
+    def checkout_cursor(self, *, lazy_begin: bool = False) -> Iterator[_CountingOracleSyncCursor]:
+        self.checkout_calls += 1
+        with self._inner.checkout_cursor(lazy_begin=lazy_begin) as cur:
+            yield _CountingOracleSyncCursor(cur, self.counts)
+
+    @property
+    def out_binds(self) -> Any:
+        return self._last_out_binds
+
+
+class _CountingOracleAsyncDriverProxy:
+    """Proxy around `AsyncOracleDriver` wrapping `checkout_cursor()` with call counting."""
+
+    def __init__(self, inner: AsyncOracleDriver) -> None:
+        self._inner = inner
+        self.config = inner.config
+        self.counts: dict[str, int] = {}
+        self.checkout_calls: int = 0
+        self._last_out_binds: Any = None
+
+    @contextlib.asynccontextmanager
+    async def checkout_cursor(self, *, lazy_begin: bool = False) -> AsyncIterator[_CountingOracleAsyncCursor]:
+        self.checkout_calls += 1
+        async with self._inner.checkout_cursor(lazy_begin=lazy_begin) as cur:
+            yield _CountingOracleAsyncCursor(cur, self.counts)
+
+    @property
+    def out_binds(self) -> Any:
+        return self._last_out_binds
+
+
+class _OracleMatrixStubClient(_StubSyncOracleClient):
+    """Stub Oracle client servicing SELECT, UPDATE, execute_many, RETURNING INTO, and ORA-00001."""
+
+    def query(
+        self,
+        sql: str,
+        params: Any = None,
+        *,
+        fetch_decimals: bool = False,
+        enable_lowercase_column_names: bool | None = None,
+        out_binds: Any = None,
+    ) -> _oracle_native.OracleQueryResult:
+        _ = (fetch_decimals, enable_lowercase_column_names, out_binds)
+        self.calls.append(("query", {"sql": sql, "params": params}))
+        if "FROM dual" in sql:
+            return _oracle_native.OracleQueryResult(
+                [_oracle_native.OracleColumn("A", "NUMBER")],
+                [(1,)],
+                rowcount=1,
+            )
+        return _oracle_native.OracleQueryResult([], [], rowcount=0)
+
+    def execute(
+        self,
+        sql: str,
+        params: Any = None,
+        *,
+        out_binds: Any = None,
+        fetch_decimals: bool = False,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> _oracle_native.OracleQueryResult:
+        _ = (fetch_decimals, enable_lowercase_column_names)
+        self.calls.append(("execute", {"sql": sql, "params": params, "out_binds": out_binds}))
+        if "DUP_FAIL" in sql:
+            raise NativeIntegrityError("ORA-00001: unique constraint violated")
+        if "RETURNING" in sql.upper():
+            return _oracle_native.OracleQueryResult([], [], rowcount=1, out_binds={"id": 42})
+        if sql.strip().upper().startswith("UPDATE"):
+            return _oracle_native.OracleQueryResult([], [], rowcount=2)
+        return _oracle_native.OracleQueryResult([], [], rowcount=1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("is_async_mode", [False, True], ids=["sync", "async"])
+async def test_oracle_sqlspec_native_cursor_cache_hit_rows_dml_many_returning_and_errors(
+    is_async_mode: bool,
+) -> None:
+    """Verify Oracle SQLSpec adapter uses native cursors for cache-hit select, DML, many, RETURNING, and errors."""
+
+    if not is_async_mode:
+        stub_client = _OracleMatrixStubClient()
+        native_driver = SyncOracleDriver(OracleConfig(), client=stub_client)
+        proxy = _CountingOracleSyncDriverProxy(native_driver)
+        session = SQLSpecOracleSyncDriver(proxy)
+
+        first = session.select("SELECT 1 AS a FROM dual")
+        assert first == [{"a": 1}]
+        proxy.counts.clear()
+
+        second = session.select("SELECT 1 AS a FROM dual")
+        assert second == [{"a": 1}]
+        assert proxy.counts.get("execute") == 1
+        assert proxy.counts.get("fetchall") == 1
+
+        typed_res = session.execute("UPDATE items SET name = :name", name=TypedParameter("updated", str))
+        assert typed_res.rows_affected == 2
+
+        many_res = session.execute_many(
+            "INSERT INTO items (id, name) VALUES (:id, :name)",
+            [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "c"}],
+        )
+        assert many_res.rows_affected == 3
+
+        out_var = _oracle_native.OracleOutBindVar("NUMBER")
+        ret_res = session.execute(
+            "INSERT INTO items (name) VALUES (:name) RETURNING id INTO :id",
+            {"name": "alpha", "id": out_var},
+        )
+        assert ret_res.all() == [{"id": 42}]
+        assert out_var.getvalue() == 42
+        assert proxy.out_binds == {"id": 42}
+
+        with pytest.raises(UniqueViolationError):
+            session.execute("INSERT INTO DUP_FAIL (id) VALUES (:id)", id=1)
+        return
+
+    async_stub = _StubAsyncOracleClient()
+    async_stub._sync = _OracleMatrixStubClient()
+    async_native = AsyncOracleDriver(OracleConfig(), client=async_stub)
+    async_proxy = _CountingOracleAsyncDriverProxy(async_native)
+    async_session = SQLSpecOracleAsyncDriver(async_proxy)
+
+    first = await async_session.select("SELECT 1 AS a FROM dual")
+    assert first == [{"a": 1}]
+    async_proxy.counts.clear()
+
+    second = await async_session.select("SELECT 1 AS a FROM dual")
+    assert second == [{"a": 1}]
+    assert async_proxy.counts.get("execute") == 1
+    assert async_proxy.counts.get("fetchall") == 1
+
+    typed_res = await async_session.execute("UPDATE items SET name = :name", name=TypedParameter("updated", str))
+    assert typed_res.rows_affected == 2
+
+    many_res = await async_session.execute_many(
+        "INSERT INTO items (id, name) VALUES (:id, :name)",
+        [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "c"}],
+    )
+    assert many_res.rows_affected == 3
+
+    aout_var = _oracle_native.OracleOutBindVar("NUMBER")
+    ret_res = await async_session.execute(
+        "INSERT INTO items (name) VALUES (:name) RETURNING id INTO :id",
+        {"name": "alpha", "id": aout_var},
+    )
+    assert ret_res.all() == [{"id": 42}]
+    assert aout_var.getvalue() == 42
+    assert async_proxy.out_binds == {"id": 42}
+
+    with pytest.raises(UniqueViolationError):
+        await async_session.execute("INSERT INTO DUP_FAIL (id) VALUES (:id)", id=1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("is_async_mode", [False, True], ids=["sync", "async"])
+async def test_oracle_sqlspec_pooled_session_checks_out_and_returns_one_client_per_statement(
+    is_async_mode: bool,
+) -> None:
+    """Verify two statements on a pooled Oracle SQLSpec session each check out and return one client."""
+
+    class _CountingSyncPool(_StubSyncOraclePool):
+        def __init__(self) -> None:
+            super().__init__(min_size=1, max_size=4)
+            self.acquire_count = 0
+
+        def acquire(self, **kwargs: Any) -> Any:
+            self.acquire_count += 1
+            return super().acquire(**kwargs)
+
+    class _CountingAsyncPool(_StubAsyncOraclePool):
+        def __init__(self) -> None:
+            super().__init__(min_size=1, max_size=4)
+            self.acquire_count = 0
+
+        async def acquire(self, **kwargs: Any) -> Any:
+            self.acquire_count += 1
+            return await super().acquire(**kwargs)
+
+    if not is_async_mode:
+        pool = _CountingSyncPool()
+        client = _OracleMatrixStubClient()
+        pool._idle = [client]
+        pool.created_clients = [client]
+        native_driver = SyncOracleDriver(OracleConfig(), pool=pool)
+        session = SQLSpecOracleSyncDriver(native_driver)
+
+        assert session.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+        assert pool.borrowed_size == 0
+        assert pool.acquire_count == 1
+
+        assert session.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+        assert pool.borrowed_size == 0
+        assert pool.acquire_count == 2
+        return
+
+    async_pool = _CountingAsyncPool()
+    async_client = _StubAsyncOracleClient()
+    async_client._sync = _OracleMatrixStubClient()
+    async_pool._idle = [async_client]
+    async_pool.created_clients = [async_client]
+    async_native = AsyncOracleDriver(OracleConfig(), pool=async_pool)
+    async_session = SQLSpecOracleAsyncDriver(async_native)
+
+    assert await async_session.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+    assert async_pool.borrowed_size == 0
+    assert async_pool.acquire_count == 1
+
+    assert await async_session.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+    assert async_pool.borrowed_size == 0
+    assert async_pool.acquire_count == 2
+
+
+class _NoCheckoutCursorOracleConnection:
+    """Minimal connection double omitting `checkout_cursor`."""
+
+
+def _build_oracle_cache_hit_fixture(
+    mode: str,
+    *,
+    client_factory: Callable[[], _StubSyncOracleClient] | None = None,
+    statement_config: StatementConfig | None = None,
+) -> tuple[Any, Any, Any]:
+    """Build `(adapter, proxy, stub_client)` for sync or async Oracle cache-hit tests."""
+    if mode == "sync":
+        client = client_factory() if client_factory is not None else _StubSyncOracleClient()
+        native = SyncOracleDriver(OracleConfig(), client=client)
+        proxy: Any = _CountingOracleSyncDriverProxy(native)
+        adapter: Any = SQLSpecOracleSyncDriver(proxy, statement_config=statement_config)
+        return adapter, proxy, client
+    async_client = _StubAsyncOracleClient()
+    if client_factory is not None:
+        async_client._sync = client_factory()
+    async_native = AsyncOracleDriver(OracleConfig(), client=async_client)
+    async_proxy: Any = _CountingOracleAsyncDriverProxy(async_native)
+    async_adapter: Any = SQLSpecOracleAsyncDriver(async_proxy, statement_config=statement_config)
+    return async_adapter, async_proxy, async_client
+
+
+def _wrap_oracle_cache_hit_state(adapter: Any, mode: str) -> dict[str, int]:
+    """Wrap the first two callables in `adapter._cache_hit_state` to count cached invocations."""
+    counts = {"fetch": 0, "dml": 0}
+    orig_fetch, orig_dml, mapper = adapter._cache_hit_state
+    if mode == "sync":
+
+        def counted_fetch(*args: Any, **kwargs: Any) -> Any:
+            counts["fetch"] += 1
+            return orig_fetch(*args, **kwargs)
+
+        def counted_dml(*args: Any, **kwargs: Any) -> Any:
+            counts["dml"] += 1
+            return orig_dml(*args, **kwargs)
+
+        adapter._cache_hit_state = (counted_fetch, counted_dml, mapper)
+        return counts
+
+    async def counted_async_fetch(*args: Any, **kwargs: Any) -> Any:
+        counts["fetch"] += 1
+        return await orig_fetch(*args, **kwargs)
+
+    async def counted_async_dml(*args: Any, **kwargs: Any) -> Any:
+        counts["dml"] += 1
+        return await orig_dml(*args, **kwargs)
+
+    adapter._cache_hit_state = (counted_async_fetch, counted_async_dml, mapper)
+    return counts
+
+
+async def _run_oracle_execute(adapter: Any, mode: str, sql: str, *parameters: Any, **kwargs: Any) -> Any:
+    """Execute `sql` against either a sync or async Oracle SQLSpec adapter."""
+    if mode == "sync":
+        return adapter.execute(sql, *parameters, **kwargs)
+    return await adapter.execute(sql, *parameters, **kwargs)
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_oracle_cache_hit_executor_is_registered(mode: str) -> None:
+    """Verify both Oracle SQLSpec adapters register the base cache-hit executor and 3-item state."""
+    adapter, _, _ = _build_oracle_cache_hit_fixture(mode)
+    expected_executor = (
+        BaseSyncDriver._run_cached_statement if mode == "sync" else BaseAsyncDriver._run_cached_statement
+    )
+    assert adapter._cache_hit_executor is expected_executor
+    assert adapter._cache_hit_state is not None
+    assert len(adapter._cache_hit_state) == 3
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("sql", "expected_key", "other_key"),
+    [
+        ("SELECT 1 AS a FROM dual", "fetch", "dml"),
+        ("UPDATE t SET a = 2", "dml", "fetch"),
+    ],
+    ids=["select", "update"],
+)
+async def test_oracle_cache_hit_makes_one_adapter_call_and_one_checkout(
+    mode: str,
+    sql: str,
+    expected_key: str,
+    other_key: str,
+) -> None:
+    """Verify a cached statement calls one adapter callable and checks out one cursor."""
+    adapter, proxy, _ = _build_oracle_cache_hit_fixture(mode, client_factory=_OracleMatrixStubClient)
+    counts = _wrap_oracle_cache_hit_state(adapter, mode)
+
+    await _run_oracle_execute(adapter, mode, sql)
+    before_checkouts = proxy.checkout_calls
+    counts["fetch"] = 0
+    counts["dml"] = 0
+
+    await _run_oracle_execute(adapter, mode, sql)
+    assert counts[expected_key] == 1
+    assert counts[other_key] == 0
+    assert proxy.checkout_calls == before_checkouts + 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("sql", "result_factory"),
+    [
+        (
+            "SELECT 1 AS a FROM dual",
+            lambda: _oracle_native.OracleQueryResult(
+                [_oracle_native.OracleColumn("A", "NUMBER")],
+                [(1,)],
+                rowcount=1,
+            ),
+        ),
+        (
+            "SELECT a FROM empty_items",
+            lambda: _oracle_native.OracleQueryResult(
+                [_oracle_native.OracleColumn("A", "NUMBER")],
+                [],
+                rowcount=0,
+            ),
+        ),
+        (
+            "UPDATE t SET a = 2",
+            lambda: _oracle_native.OracleQueryResult([], [], rowcount=2),
+        ),
+        (
+            "INSERT INTO t (a) VALUES (1)",
+            lambda: _oracle_native.OracleQueryResult([], [], rowcount=1, lastrowid="AAAR3sAAEAAAACXAAB"),
+        ),
+    ],
+    ids=["select", "empty_select", "update", "insert"],
+)
+async def test_oracle_cache_hit_result_matches_method_path(
+    mode: str,
+    sql: str,
+    result_factory: Callable[[], _oracle_native.OracleQueryResult],
+) -> None:
+    """Verify cached executor results match the method path across select, empty select, update, and insert."""
+    exec_adapter, _, exec_client = _build_oracle_cache_hit_fixture(mode)
+    method_adapter, _, method_client = _build_oracle_cache_hit_fixture(mode)
+    method_adapter._cache_hit_executor = None
+    counts = _wrap_oracle_cache_hit_state(exec_adapter, mode)
+
+    exec_client.queued_results.extend([result_factory(), result_factory()])
+    method_client.queued_results.extend([result_factory(), result_factory()])
+
+    await _run_oracle_execute(exec_adapter, mode, sql)
+    await _run_oracle_execute(method_adapter, mode, sql)
+    counts["fetch"] = 0
+    counts["dml"] = 0
+
+    exec_res = await _run_oracle_execute(exec_adapter, mode, sql)
+    method_res = await _run_oracle_execute(method_adapter, mode, sql)
+
+    assert counts["fetch"] + counts["dml"] == 1
+    assert exec_res.all() == method_res.all()
+    assert exec_res.column_names == method_res.column_names
+    assert exec_res.rows_affected == method_res.rows_affected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_oracle_cache_hit_records_out_binds(mode: str) -> None:
+    """Verify cached runs update `connection._last_out_binds` to cursor `out_binds` and clear it to `None`."""
+    adapter, proxy, client = _build_oracle_cache_hit_fixture(mode)
+    counts = _wrap_oracle_cache_hit_state(adapter, mode)
+    first_sql = "UPDATE out_bind_tbl SET a = 1"
+    second_sql = "UPDATE out_bind_tbl SET a = 2"
+
+    client.queued_results.extend(
+        [
+            _oracle_native.OracleQueryResult([], [], rowcount=1, out_binds={"out": 99}),
+            _oracle_native.OracleQueryResult([], [], rowcount=1, out_binds=None),
+            _oracle_native.OracleQueryResult([], [], rowcount=1, out_binds={"out": 99}),
+            _oracle_native.OracleQueryResult([], [], rowcount=1, out_binds=None),
+        ]
+    )
+
+    await _run_oracle_execute(adapter, mode, first_sql)
+    await _run_oracle_execute(adapter, mode, second_sql)
+    counts["fetch"] = 0
+    counts["dml"] = 0
+
+    await _run_oracle_execute(adapter, mode, first_sql)
+    assert counts["dml"] == 1
+    assert proxy._last_out_binds == {"out": 99}
+
+    await _run_oracle_execute(adapter, mode, second_sql)
+    assert counts["dml"] == 2
+    assert proxy._last_out_binds is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_oracle_cache_hit_not_registered_with_execution_args(mode: str) -> None:
+    """Verify Oracle adapters skip executor registration when `statement_config.execution_args` is non-empty."""
+    config = build_oracle_statement_config().replace(execution_args={"out_binds": {"out": "NUMBER"}})
+    adapter, _, _ = _build_oracle_cache_hit_fixture(
+        mode,
+        client_factory=_OracleMatrixStubClient,
+        statement_config=config,
+    )
+    assert adapter._cache_hit_executor is None
+
+    first = await _run_oracle_execute(adapter, mode, "SELECT 1 AS a FROM dual")
+    second = await _run_oracle_execute(adapter, mode, "SELECT 1 AS a FROM dual")
+    assert first.all() == [{"a": 1}]
+    assert second.all() == [{"a": 1}]
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_oracle_cache_hit_not_registered_without_checkout_cursor(mode: str) -> None:
+    """Verify Oracle adapters register no cache-hit executor when the connection lacks `checkout_cursor`."""
+    conn = _NoCheckoutCursorOracleConnection()
+    adapter: Any = SQLSpecOracleSyncDriver(conn) if mode == "sync" else SQLSpecOracleAsyncDriver(conn)
+    assert adapter._cache_hit_executor is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_oracle_cache_hit_errors_match_method_path(mode: str) -> None:
+    """Verify native errors on a cached statement map identically to the method path and preserve `__cause__`."""
+    exec_adapter, exec_proxy, exec_client = _build_oracle_cache_hit_fixture(mode)
+    method_adapter, _, method_client = _build_oracle_cache_hit_fixture(mode)
+    method_adapter._cache_hit_executor = None
+    counts = _wrap_oracle_cache_hit_state(exec_adapter, mode)
+
+    exec_native_err = NativeIntegrityError("ORA-00001: unique constraint violated")
+    method_native_err = NativeIntegrityError("ORA-00001: unique constraint violated")
+    sql = "INSERT INTO err_tbl (id) VALUES (1)"
+
+    exec_client.queued_results.extend([_oracle_native.OracleQueryResult([], [], rowcount=1), exec_native_err])
+    method_client.queued_results.extend([_oracle_native.OracleQueryResult([], [], rowcount=1), method_native_err])
+
+    await _run_oracle_execute(exec_adapter, mode, sql)
+    await _run_oracle_execute(method_adapter, mode, sql)
+    before_checkouts = exec_proxy.checkout_calls
+    counts["fetch"] = 0
+    counts["dml"] = 0
+
+    with pytest.raises(UniqueViolationError) as exec_exc_info:
+        await _run_oracle_execute(exec_adapter, mode, sql)
+    with pytest.raises(UniqueViolationError) as method_exc_info:
+        await _run_oracle_execute(method_adapter, mode, sql)
+
+    assert type(exec_exc_info.value) is type(method_exc_info.value)
+    assert exec_exc_info.value.__cause__ is exec_native_err
+    assert counts["dml"] == 1
+    assert exec_proxy.checkout_calls == before_checkouts + 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_oracle_suspend_on_success_skips_executor(mode: str) -> None:
+    """Verify `execute(..., suspend_on_success=True)` bypasses the cache-hit executor."""
+    adapter: Any = (
+        SQLSpecOracleSyncDriver(_FakeOracleSessionlessClient())
+        if mode == "sync"
+        else SQLSpecOracleAsyncDriver(_FakeAsyncOracleSessionlessClient())
+    )
+    assert adapter._cache_hit_executor is not None
+    counts = _wrap_oracle_cache_hit_state(adapter, mode)
+    sql = "UPDATE sessionless_orders SET status = 'done'"
+
+    await _run_oracle_execute(adapter, mode, sql, suspend_on_success=True)
+    await _run_oracle_execute(adapter, mode, sql, suspend_on_success=True)
+
+    assert counts["fetch"] == 0
+    assert counts["dml"] == 0

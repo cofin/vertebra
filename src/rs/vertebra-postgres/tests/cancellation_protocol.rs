@@ -92,10 +92,14 @@ fn select_int_response(val: i32, tx: u8, warm: bool) -> Vec<u8> {
         out.extend_from_slice(&frame(b'T', &col));
     }
     out.extend_from_slice(&frame(b'2', b""));
-    out.extend_from_slice(&frame(b'T', &col));
+    if !warm {
+        out.extend_from_slice(&frame(b'T', &col));
+    }
     out.extend_from_slice(&frame(b'D', &row));
     out.extend_from_slice(&frame(b'C', b"SELECT 1\0"));
-    out.extend_from_slice(&frame(b'3', b""));
+    if !warm {
+        out.extend_from_slice(&frame(b'3', b""));
+    }
     out.extend_from_slice(&frame(b'Z', &[tx]));
     out
 }

@@ -2,7 +2,9 @@
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PySequence, PyString};
+use pyo3::types::{
+    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PySequence, PyString, PyTuple,
+};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use tiberius::ToSql;
@@ -124,6 +126,28 @@ impl MssqlParam {
             Self::Xml(x) => x,
         }
     }
+
+    /// Return the T-SQL type declaration string matching `tiberius::ColumnData::type_name()`.
+    pub fn tds_type_name(&self) -> Cow<'static, str> {
+        match self {
+            Self::Null(_) => Cow::Borrowed("nvarchar(4000)"),
+            Self::Bool(_) => Cow::Borrowed("bit"),
+            Self::I64(_) => Cow::Borrowed("bigint"),
+            Self::F64(_) => Cow::Borrowed("float(53)"),
+            Self::String(s) if s.len() <= 4000 => Cow::Borrowed("nvarchar(4000)"),
+            Self::String(s) if s.len() <= 1_073_741_823 => Cow::Borrowed("nvarchar(max)"),
+            Self::String(_) => Cow::Borrowed("ntext(max)"),
+            Self::Bytes(b) if b.len() <= 8000 => Cow::Borrowed("varbinary(8000)"),
+            Self::Bytes(_) => Cow::Borrowed("varbinary(max)"),
+            Self::Decimal(n) => Cow::Owned(format!("numeric({},{})", n.precision(), n.scale())),
+            Self::Uuid(_) => Cow::Borrowed("uniqueidentifier"),
+            Self::Date(_) => Cow::Borrowed("date"),
+            Self::Time(_) => Cow::Borrowed("time"),
+            Self::DateTime(_) => Cow::Borrowed("datetime2"),
+            Self::DateTimeOffset(_) => Cow::Borrowed("datetimeoffset"),
+            Self::Xml(_) => Cow::Borrowed("xml"),
+        }
+    }
 }
 
 /// Extract a single [`MssqlParam`] from an arbitrary Python object.
@@ -162,6 +186,12 @@ pub fn py_any_to_mssql_param(obj: &Bound<'_, PyAny>) -> Result<MssqlParam, Mssql
         .qualname()
         .map(|s| s.to_string())
         .unwrap_or_default();
+    if (type_name == "TypedParameter" || type_name.ends_with(".TypedParameter"))
+        && let Ok(inner) = obj.getattr("value")
+        && !inner.is(obj)
+    {
+        return py_any_to_mssql_param(&inner);
+    }
     let module_name = obj
         .get_type()
         .module()
@@ -318,6 +348,38 @@ fn extract_py_datetime(obj: &Bound<'_, PyAny>) -> Result<MssqlParam, MssqlError>
     Ok(MssqlParam::DateTime(naive))
 }
 
+fn positional_params<'py>(
+    sql: &str,
+    len: usize,
+    items: impl Iterator<Item = Bound<'py, PyAny>>,
+) -> Result<(String, Vec<MssqlParam>), MssqlError> {
+    let mut out = Vec::with_capacity(len);
+    for item in items {
+        out.push(py_any_to_mssql_param(&item)?);
+    }
+    let (rewritten, _) = rewrite_mssql_placeholders(sql);
+    Ok((rewritten, out))
+}
+
+fn named_params(
+    sql: &str,
+    dict: &Bound<'_, PyDict>,
+) -> Result<(String, Vec<MssqlParam>), MssqlError> {
+    let mut named_map = HashMap::with_capacity(dict.len());
+    for (k, v) in dict.iter() {
+        let key_str = k
+            .extract::<String>()
+            .map_err(|_| MssqlError::programming("named SQL parameter keys must be strings"))?;
+        let clean_key = key_str
+            .trim_start_matches('@')
+            .trim_start_matches(':')
+            .to_string();
+        named_map.insert(clean_key, py_any_to_mssql_param(&v)?);
+    }
+    let (rewritten_named, ordered_params) = rewrite_named_mssql_placeholders(sql, &named_map)?;
+    Ok((rewritten_named, ordered_params))
+}
+
 /// Rewrite SQL placeholders (`?`, `$1`, `:name`, `@name`) into TDS `@P1, @P2, ...` and align
 /// Python positional or named parameters accordingly.
 pub fn prepare_sql_and_params(
@@ -333,20 +395,32 @@ pub fn prepare_sql_and_params(
         return Ok((rewritten, Vec::new()));
     }
 
-    if let Ok(dict) = params_obj.cast::<PyDict>() {
-        let mut named_map = HashMap::with_capacity(dict.len());
-        for (k, v) in dict.iter() {
-            let key_str = k
-                .extract::<String>()
-                .map_err(|_| MssqlError::programming("named SQL parameter keys must be strings"))?;
-            let clean_key = key_str
-                .trim_start_matches('@')
-                .trim_start_matches(':')
-                .to_string();
-            named_map.insert(clean_key, py_any_to_mssql_param(&v)?);
+    if let Ok(tuple) = params_obj.cast_exact::<PyTuple>() {
+        if tuple.is_empty() {
+            let (rewritten, _) = rewrite_mssql_placeholders(sql);
+            return Ok((rewritten, Vec::new()));
         }
-        let (rewritten_named, ordered_params) = rewrite_named_mssql_placeholders(sql, &named_map)?;
-        return Ok((rewritten_named, ordered_params));
+        return positional_params(sql, tuple.len(), tuple.iter());
+    }
+
+    if let Ok(list) = params_obj.cast_exact::<PyList>() {
+        if list.is_empty() {
+            let (rewritten, _) = rewrite_mssql_placeholders(sql);
+            return Ok((rewritten, Vec::new()));
+        }
+        return positional_params(sql, list.len(), list.iter());
+    }
+
+    if let Ok(dict) = params_obj.cast_exact::<PyDict>() {
+        if dict.is_empty() {
+            let (rewritten, _) = rewrite_mssql_placeholders(sql);
+            return Ok((rewritten, Vec::new()));
+        }
+        return named_params(sql, dict);
+    }
+
+    if let Ok(dict) = params_obj.cast::<PyDict>() {
+        return named_params(sql, dict);
     }
 
     if let Ok(seq) = params_obj.cast::<PySequence>() {
@@ -520,5 +594,65 @@ mod tests {
             "SELECT * FROM orders WHERE tenant_id = @P1 AND status = @P2 AND parent_tenant = @P1"
         );
         assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn prepare_sql_and_params_exact_containers_and_empty_inputs() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (none_sql, none_params) = prepare_sql_and_params("SELECT 1", None).unwrap();
+            assert_eq!(none_sql, "SELECT 1");
+            assert!(none_params.is_empty());
+
+            let empty_tuple = PyTuple::empty(py);
+            let (et_sql, et_params) =
+                prepare_sql_and_params("SELECT 1", Some(empty_tuple.as_any())).unwrap();
+            assert_eq!(et_sql, none_sql);
+            assert!(et_params.is_empty());
+
+            let empty_list = PyList::empty(py);
+            let (el_sql, el_params) =
+                prepare_sql_and_params("SELECT 1", Some(empty_list.as_any())).unwrap();
+            assert_eq!(el_sql, none_sql);
+            assert!(el_params.is_empty());
+
+            let empty_dict = PyDict::new(py);
+            let (ed_sql, ed_params) =
+                prepare_sql_and_params("SELECT 1", Some(empty_dict.as_any())).unwrap();
+            assert_eq!(ed_sql, none_sql);
+            assert!(ed_params.is_empty());
+
+            let single_tuple = PyTuple::new(py, [1_i64]).unwrap();
+            let (st_sql, st_params) =
+                prepare_sql_and_params("SELECT ?", Some(single_tuple.as_any())).unwrap();
+            assert_eq!(st_sql, "SELECT @P1");
+            assert_eq!(st_params.len(), 1);
+            assert!(matches!(st_params[0], MssqlParam::I64(1)));
+
+            let single_list = PyList::new(py, [1_i64]).unwrap();
+            let (sl_sql, sl_params) =
+                prepare_sql_and_params("SELECT ?", Some(single_list.as_any())).unwrap();
+            assert_eq!(sl_sql, "SELECT @P1");
+            assert_eq!(sl_params.len(), 1);
+            assert!(matches!(sl_params[0], MssqlParam::I64(1)));
+
+            let named_dict = PyDict::new(py);
+            named_dict.set_item("a", 1_i64).unwrap();
+            let (nd_sql, nd_params) =
+                prepare_sql_and_params("SELECT @a", Some(named_dict.as_any())).unwrap();
+            assert_eq!(nd_sql, "SELECT @P1");
+            assert_eq!(nd_params.len(), 1);
+            assert!(matches!(nd_params[0], MssqlParam::I64(1)));
+
+            let collections = py.import("collections").unwrap();
+            let ordered_dict = collections
+                .call_method1("OrderedDict", (vec![("a", 1_i64)],))
+                .unwrap();
+            let (od_sql, od_params) =
+                prepare_sql_and_params("SELECT @a", Some(&ordered_dict)).unwrap();
+            assert_eq!(od_sql, nd_sql);
+            assert_eq!(od_params.len(), 1);
+            assert!(matches!(od_params[0], MssqlParam::I64(1)));
+        });
     }
 }

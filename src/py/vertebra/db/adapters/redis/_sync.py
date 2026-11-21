@@ -362,7 +362,7 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         messages: list[PubSubMessage] = []
         if self._active_listener is not None:
             while True:
-                item = self._active_listener.next_message(timeout_ms=15 if not messages else 5)
+                item = self._active_listener.next_message(timeout_ms=15 if not messages else 0)
                 if item is None:
                     break
                 kind, ch, payload, pat = item

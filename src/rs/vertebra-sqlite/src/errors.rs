@@ -206,6 +206,9 @@ impl SqliteClientError {
                 let message = msg_opt.unwrap_or_else(|| ffi_err.to_string());
                 Self::from_extended_code(code, message)
             }
+            rusqlite::Error::SqlInputError { error, msg, .. } => {
+                Self::from_extended_code(error.extended_code, msg)
+            }
             rusqlite::Error::FromSqlConversionFailure(_, _, inner) => Self::Data {
                 message: format!("SQL conversion failure: {inner}"),
                 code: None,

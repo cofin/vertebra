@@ -23,6 +23,7 @@ from vertebra._vertebra import (
     AsgiScopeIterator,
     Headers,
     HeadersIterator,
+    ReadyAwaitable,
     Request,
     RequestBatch,
     RequestBatchIterator,
@@ -300,9 +301,12 @@ def test_dekker_request_sleep_helpers_roundtrip() -> None:
 
 
 def test_async_bridge_exports_preserved() -> None:
-    """Verify async_bridge.rs exports RustDbTaskAwaitable and TaskPanicError on vertebra._vertebra."""
+    """Verify async_bridge.rs exports ReadyAwaitable, RustDbTaskAwaitable, and TaskPanicError on vertebra._vertebra."""
     assert issubclass(TaskPanicError, RuntimeError)
     assert hasattr(RustDbTaskAwaitable, "__await__")
+    assert hasattr(ReadyAwaitable, "__await__")
+    assert hasattr(ReadyAwaitable, "__iter__")
+    assert hasattr(ReadyAwaitable, "__next__")
 
 
 @pytest.mark.parametrize(
@@ -558,6 +562,7 @@ def test_submit_raw_response_copies_writable_buffer_before_mutation(as_memoryvie
         WsgiEnvironIterator,
         _WsgiStartResponse,
         RsgiTransport,
+        ReadyAwaitable,
     ],
 )
 def test_internal_native_classes_reject_direct_instantiation(native_cls: type[Any]) -> None:

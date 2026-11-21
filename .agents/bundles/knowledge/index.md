@@ -66,7 +66,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [Redis Native Driver Limitations](domains/data/redis-limitations.md)
   - [Valkey Native Driver Limitations](domains/data/valkey-limitations.md)
   - [Database Driver Limitations](domains/data/database-driver-limitations.md)
-  - [GCP BigQuery & Spanner Native Drivers](domains/data/gcp-bigquery-and-spanner-drivers.md)
+  - [Google Cloud BigQuery & Spanner Native Drivers](domains/data/gcp-bigquery-and-spanner-drivers.md)
   - [Native Pipelines, Change Feeds, Tenant Predicates & DataFusion](domains/data/query-pipeline-cdc-and-tenancy.md)
   - [Logging, Trace Context, SQL Trace Propagation & GenAI Metrics](domains/telemetry/logging-tracing-and-genai.md)
   - [Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django](domains/extensions/litestar.md)
@@ -108,3 +108,4 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [ADR-003: PyPI `vertebra-core` Distribution and Wheel-Bundled TypeScript Client](decisions/adr-003-pypi-vertebra-core-distribution-and-wheel-bundled-client.md)
   - [ADR-004: Optional Driver Wheels and Shared-Memory Ownership](decisions/adr-004-optional-driver-wheels-and-shm-ownership.md)
   - [ADR-005: Persistent Object-Store TTL Envelopes](decisions/adr-005-persistent-object-store-ttl-envelopes.md)
+  - [ADR-006: Native Cursor and Connection-Scoped Leases](decisions/adr-006-native-cursor-and-connection-scoped-leases.md)

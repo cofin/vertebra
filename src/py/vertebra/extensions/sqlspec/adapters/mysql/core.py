@@ -7,7 +7,6 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal
-from uuid import UUID
 
 from sqlspec.core import (
     DriverParameterProfile,
@@ -36,7 +35,7 @@ from sqlspec.exceptions import (
     UniqueViolationError,
 )
 from sqlspec.utils.serializers import from_json, to_json
-from sqlspec.utils.type_converters import build_decimal_converter, build_uuid_coercions
+from sqlspec.utils.type_converters import build_decimal_converter
 
 from vertebra.db.adapters.mysql.config import MySQLConfig
 from vertebra.typing import ImproperConfigurationError
@@ -59,10 +58,7 @@ __all__ = (
     "mysql_owner_id_column_parts",
     "mysql_supports_native_vector",
     "mysql_table_options",
-    "normalize_mysql_many_parameters",
-    "normalize_mysql_parameters",
     "parse_mysql_vector",
-    "unwrap_typed_parameters",
 )
 
 MYSQL_TABLE_NOT_FOUND_ERRNO = 1146
@@ -138,12 +134,32 @@ _ERRNO_MAP: dict[int, type[SQLSpecError]] = {
 }
 
 
+def _coerce_mysql_datetime(value: datetime) -> datetime:
+    """Strip timezone metadata from aware `datetime` values for MySQL bind compatibility."""
+    if value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
+
+
+def _unwrap_typed_parameter(value: TypedParameter) -> Any:
+    """Unwrap nested `TypedParameter` wrappers and apply MySQL scalar coercions."""
+    unwrapped: Any = value
+    while isinstance(unwrapped, TypedParameter):
+        unwrapped = unwrapped.value
+    if isinstance(unwrapped, bool):
+        return int(unwrapped)
+    if isinstance(unwrapped, datetime) and unwrapped.tzinfo is not None:
+        return unwrapped.replace(tzinfo=None)
+    return unwrapped
+
+
 def driver_profile() -> DriverParameterProfile:
     """Build the MySQL driver parameter profile using `ParameterStyle.QMARK` (`?`) execution."""
     decimal_converter = build_decimal_converter(mode="string")
     coercions: dict[type, Callable[[Any], Any]] = {
         bool: int,
-        **build_uuid_coercions(native=False),
+        datetime: _coerce_mysql_datetime,
+        TypedParameter: _unwrap_typed_parameter,
         type(None): lambda value: value,
     }
     return DriverParameterProfile(
@@ -188,51 +204,6 @@ def build_statement_config(
 def default_statement_config() -> StatementConfig:
     """Return the default `ParameterStyle.QMARK` MySQL statement configuration."""
     return build_statement_config()
-
-
-def unwrap_typed_parameters(bound: Any) -> Any:
-    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
-    if isinstance(bound, dict):
-        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
-    if isinstance(bound, tuple):
-        return tuple(unwrap_typed_parameters(value) for value in bound)
-    if isinstance(bound, list):
-        return [unwrap_typed_parameters(value) for value in bound]
-    if isinstance(bound, TypedParameter):
-        return unwrap_typed_parameters(bound.value)
-    return bound
-
-
-def _coerce_param(value: Any) -> Any:
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, UUID):
-        return str(value)
-    if isinstance(value, datetime) and value.tzinfo is not None:
-        return value.replace(tzinfo=None)
-    return value
-
-
-def normalize_mysql_parameters(params: Any) -> Any:
-    """Normalize compiled positional MySQL bind parameters into a coerced tuple."""
-    if params is None:
-        return None
-    unwrapped = unwrap_typed_parameters(params)
-    if isinstance(unwrapped, Mapping):
-        return {str(k): _coerce_param(v) for k, v in unwrapped.items()}
-    if isinstance(unwrapped, Sequence) and not isinstance(unwrapped, (str, bytes, bytearray)):
-        return tuple(_coerce_param(item) for item in unwrapped)
-    return (_coerce_param(unwrapped),)
-
-
-def normalize_mysql_many_parameters(params: Any) -> list[Any]:
-    """Normalize batch parameter sets for `execute_many` execution."""
-    unwrapped = unwrap_typed_parameters(params)
-    if unwrapped is None:
-        return []
-    if not isinstance(unwrapped, Sequence) or isinstance(unwrapped, (str, bytes, bytearray)):
-        return [normalize_mysql_parameters(unwrapped)]
-    return [normalize_mysql_parameters(item) for item in unwrapped]
 
 
 def _extract_errno_and_sqlstate(exc: BaseException) -> tuple[int | None, str | None]:

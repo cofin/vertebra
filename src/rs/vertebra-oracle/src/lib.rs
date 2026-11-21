@@ -3,6 +3,7 @@
 pub mod arrow;
 pub mod client;
 pub mod config;
+pub mod cursor;
 pub mod dialer;
 pub mod errors;
 pub mod notify;
@@ -30,6 +31,7 @@ use crate::client::{
     OutBindSpec, SyncOracleClient, WorkerCommand, WorkerReply,
 };
 use crate::config::{NativeOracleConfig, RawOracleOptions};
+use crate::cursor::OracleOutBindVar;
 use crate::errors::OracleError;
 use crate::notify::{AsyncOracleListener, OracleNotification, SyncOracleListener};
 use crate::pool::{AsyncOraclePool, OraclePoolCore, OraclePoolOptions, SyncOraclePool};
@@ -423,5 +425,7 @@ pub fn _oracle(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AsyncOracleClient>()?;
     m.add_class::<SyncOraclePool>()?;
     m.add_class::<AsyncOraclePool>()?;
+    m.add_class::<OracleOutBindVar>()?;
+    cursor::register(m)?;
     Ok(())
 }

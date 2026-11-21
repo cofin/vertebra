@@ -4,6 +4,8 @@
 use std::future::Future;
 use std::io::{self, BufReader, ErrorKind};
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -282,6 +284,40 @@ impl TransportStream {
     /// Return `true` when this stream is encrypted with `tokio-rustls`.
     pub const fn is_tls(&self) -> bool {
         matches!(self, Self::TlsTcp(_))
+    }
+
+    /// Return the raw Unix file descriptor when backed by a plain TCP or Unix socket.
+    #[cfg(unix)]
+    pub fn raw_fd_if_plain(&self) -> Option<RawFd> {
+        match self {
+            Self::PlainTcp(tcp) => Some(tcp.as_raw_fd()),
+            Self::Unix(unix) => Some(unix.as_raw_fd()),
+            Self::TlsTcp(_) => None,
+        }
+    }
+
+    /// Perform a non-blocking write on a plain TCP or Unix socket without entering Tokio.
+    ///
+    /// Returns `None` for TLS streams, which stay on the async Tokio path.
+    pub fn try_write_plain(&self, buf: &[u8]) -> Option<io::Result<usize>> {
+        match self {
+            Self::PlainTcp(tcp) => Some(tcp.try_write(buf)),
+            #[cfg(unix)]
+            Self::Unix(unix) => Some(unix.try_write(buf)),
+            Self::TlsTcp(_) => None,
+        }
+    }
+
+    /// Perform a non-blocking read into `buf` on a plain TCP or Unix socket without entering Tokio.
+    ///
+    /// Returns `None` for TLS streams, which stay on the async Tokio path.
+    pub fn try_read_buf_plain<B: bytes::BufMut>(&self, buf: &mut B) -> Option<io::Result<usize>> {
+        match self {
+            Self::PlainTcp(tcp) => Some(tcp.try_read_buf(buf)),
+            #[cfg(unix)]
+            Self::Unix(unix) => Some(unix.try_read_buf(buf)),
+            Self::TlsTcp(_) => None,
+        }
     }
 
     /// Return the remote TCP `SocketAddr` when backed by TCP or TLS-over-TCP.

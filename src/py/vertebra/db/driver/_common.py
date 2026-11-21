@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import inspect
 import os
 from collections.abc import Sequence
@@ -19,8 +20,6 @@ from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from vertebra._vertebra import StatementCache, StatementPlan
 
 __all__ = (
     "BIGQUERY_DIALECT_TAG",
@@ -110,15 +109,19 @@ class BaseDatabaseConfig(FrozenBaseStruct, frozen=True, gc=False):
 
 
 class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
-    """Shared attributes, SHM lease management, SQL trace annotation, and row hydration for drivers."""
+    """Shared attributes, SHM lease helpers, SQL trace annotation, and row hydration for drivers.
+
+    Broker leases are taken at connection checkout and released when the connection or client closes.
+    """
 
     dialect_tag: ClassVar[int] = 0
 
-    __slots__ = ("_broker", "_closed", "config")
+    __slots__ = ("_broker", "_broker_lease_plan", "_closed", "config")
 
     def __init__(self, config: ConfigT, *, broker: Any = None) -> None:
         self.config: ConfigT = config
         self._broker: Any = broker if broker is not None else getattr(config, "broker", None)
+        self._broker_lease_plan: _BrokerLeasePlan | None = None
         self._closed: bool = False
 
     @property
@@ -144,99 +147,75 @@ class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
         """Hydrate tabular rows into dictionaries or typed `schema_type` instances."""
         return _hydrate_rows_with_schema(rows, columns, schema_type)
 
+    def _lease_plan(self) -> _BrokerLeasePlan:
+        """Return the cached lease call plan for the attached broker, rebuilding it when the broker changes."""
+        broker = self._broker
+        try:
+            plan = self._broker_lease_plan
+        except AttributeError:
+            plan = None
+        if plan is None or plan.broker is not broker:
+            plan = _BrokerLeasePlan(broker)
+            self._broker_lease_plan = plan
+        return plan
+
     def _acquire_broker_lease(self, timeout_ms: int = 5000, bind_key_hash: int = 0) -> Any:
         """Acquire a connection lease from the shared-memory `LeaseBroker` when configured."""
-        if self._broker is None:
+        broker = self._broker
+        if broker is None:
             return None
-        acquire_fn = getattr(self._broker, "acquire", None)
-        if callable(acquire_fn):
-            if inspect.iscoroutinefunction(acquire_fn):
+        plan = self._lease_plan()
+        if plan.has_acquire:
+            if plan.acquire_is_coroutine:
                 msg = "Async broker transport cannot acquire leases synchronously; use SyncSHMBrokerTransport"
                 raise InterfaceError(msg)
-            kwargs = _supported_acquire_kwargs(acquire_fn, timeout_ms=timeout_ms, bind_key_hash=bind_key_hash)
-            with contextlib.suppress(RuntimeError):
-                return acquire_fn(os.getpid(), **kwargs)
-            return None
-        lease_table = getattr(self._broker, "lease_table", None)
+            try:
+                return broker.acquire(os.getpid(), **plan.acquire_kwargs(timeout_ms, bind_key_hash))
+            except RuntimeError:
+                return None
+        lease_table = getattr(broker, "lease_table", None)
         if lease_table is not None:
             with contextlib.suppress(RuntimeError):
                 return lease_table.acquire(os.getpid())
         return None
 
-    def _release_broker_lease(self, lease: Any) -> None:
-        """Release a previously acquired connection lease back to the `LeaseBroker`."""
-        if self._broker is None or lease is None:
-            return
-        lease_release = getattr(lease, "release", None)
-        if callable(lease_release) and not inspect.iscoroutinefunction(lease_release):
-            with contextlib.suppress(RuntimeError):
-                lease_release()
-            return
-        if not (hasattr(lease, "slot_index") and hasattr(lease, "generation")):
-            return
-        release_fn = getattr(self._broker, "release", None)
-        if callable(release_fn) and not inspect.iscoroutinefunction(release_fn):
-            with contextlib.suppress(RuntimeError):
-                release_fn(lease.slot_index, lease.generation)
-            return
-        lease_table = getattr(self._broker, "lease_table", None)
-        if lease_table is not None:
-            with contextlib.suppress(RuntimeError):
-                lease_table.release(lease.slot_index, lease.generation)
+    def _attach_checkout_lease(self, client: Any, timeout_ms: int = 5000) -> bool:
+        """Acquire a checkout lease and attach its releaser to `client.attach_lease`."""
+        lease = self._acquire_broker_lease(timeout_ms)
+        if lease is None:
+            return False
+        client.attach_lease(_lease_releaser(self._broker, self._lease_plan(), lease))
+        return True
 
     def _acquire_pid_lease(self) -> Any:
         """Acquire a PID-bound lease from the shared-memory `LeaseBroker` when configured."""
-        if self._broker is None:
+        broker = self._broker
+        if broker is None:
             return None
-        acquire_fn = getattr(self._broker, "acquire", None)
-        if callable(acquire_fn):
-            if inspect.iscoroutinefunction(acquire_fn):
+        plan = self._lease_plan()
+        if plan.has_acquire:
+            if plan.acquire_is_coroutine:
                 msg = "Async broker transport cannot acquire leases synchronously; use SyncSHMBrokerTransport"
                 raise InterfaceError(msg)
-            kwargs = _supported_acquire_kwargs(acquire_fn, timeout_ms=5000, bind_key_hash=0)
+            kwargs = plan.acquire_kwargs(5000, 0)
             kwargs.pop("bind_key_hash", None)
             with contextlib.suppress(Exception):
-                return acquire_fn(os.getpid(), **kwargs)
+                return broker.acquire(os.getpid(), **kwargs)
         return None
 
     def _release_pid_lease(self, lease: Any) -> None:
         """Release a previously acquired PID-bound lease back to the `LeaseBroker`."""
-        if lease is None or self._broker is None:
+        broker = self._broker
+        if lease is None or broker is None:
             return
-        lease_release = getattr(lease, "release", None)
-        if callable(lease_release) and not inspect.iscoroutinefunction(lease_release):
+        plan = self._lease_plan()
+        if plan.lease_releases_itself(lease):
             with contextlib.suppress(Exception):
-                lease_release()
+                lease.release()
             return
-        release_fn = getattr(self._broker, "release", None)
-        if callable(release_fn) and not inspect.iscoroutinefunction(release_fn):
+        if plan.has_sync_release:
             with contextlib.suppress(Exception):
-                release_fn(lease.slot_index, lease.generation)
-
-    def _lookup_or_cache_statement(
-        self,
-        sql: str,
-        *,
-        param_count: int = 0,
-        compiled_sql: bytes | None = None,
-        param_plan: bytes = b"",
-    ) -> StatementPlan | None:
-        """Lookup or register a UTF-8 SQL statement plan in the broker `StatementCache`."""
-        if self._broker is None:
-            return None
-        sc_attr: StatementCache | Callable[[], StatementCache | None] | None = getattr(
-            self._broker, "statement_cache", None
-        )
-        sc: StatementCache | None = sc_attr() if callable(sc_attr) else sc_attr
-        if sc is None:
-            return None
-        raw_bytes = sql.encode("utf-8")
-        tag = int(self.dialect_tag)
-        cached: StatementPlan | None = sc.lookup(tag, raw_bytes)
-        if cached is not None:
-            return cached
-        sc.insert(tag, raw_bytes, param_count, compiled_sql or raw_bytes, param_plan)
-        return None
+                broker.release(lease.slot_index, lease.generation)
 
     @staticmethod
     def _annotate_sql(sql: str, *, propagate_trace: bool = True) -> str:
@@ -248,29 +227,81 @@ class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
             return f"{sql} /*traceparent='{ctx.format()}'*/"
         return sql
 
-    @staticmethod
-    def _extract_column_names(description: Any) -> tuple[str, ...]:
-        """Normalize a DB-API cursor `description` or string sequence into `tuple[str, ...]`."""
-        if not description:
-            return ()
-        return tuple(col[0] if isinstance(col, tuple) else str(col) for col in description)
+
+class _BrokerLeasePlan:
+    """Signature facts about one broker's lease API, inspected once instead of on every query."""
+
+    __slots__ = (
+        "_self_releasing_lease_types",
+        "accepts_bind_key_hash",
+        "accepts_timeout_ms",
+        "acquire_is_coroutine",
+        "broker",
+        "default_acquire_kwargs",
+        "has_acquire",
+        "has_sync_release",
+    )
+
+    def __init__(self, broker: Any) -> None:
+        self.broker: Any = broker
+        acquire_fn = getattr(broker, "acquire", None)
+        self.has_acquire: bool = callable(acquire_fn)
+        self.acquire_is_coroutine: bool = self.has_acquire and inspect.iscoroutinefunction(acquire_fn)
+        self.accepts_timeout_ms: bool = True
+        self.accepts_bind_key_hash: bool = False
+        if acquire_fn is not None and self.has_acquire:
+            params: Any = None
+            with contextlib.suppress(TypeError, ValueError):
+                params = inspect.signature(acquire_fn).parameters
+            if params is not None:
+                has_var_kw = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values())
+                self.accepts_timeout_ms = has_var_kw or "timeout_ms" in params
+                self.accepts_bind_key_hash = has_var_kw or "bind_key_hash" in params
+        release_fn = getattr(broker, "release", None)
+        self.has_sync_release: bool = callable(release_fn) and not inspect.iscoroutinefunction(release_fn)
+        self._self_releasing_lease_types: dict[type, bool] = {}
+        self.default_acquire_kwargs: dict[str, Any] = self.acquire_kwargs(5000, 0)
+
+    def acquire_kwargs(self, timeout_ms: int, bind_key_hash: int) -> dict[str, Any]:
+        """Return the keyword arguments the broker's `acquire` accepts."""
+        kwargs: dict[str, Any] = {}
+        if self.accepts_timeout_ms:
+            kwargs["timeout_ms"] = timeout_ms
+        if self.accepts_bind_key_hash:
+            kwargs["bind_key_hash"] = bind_key_hash
+        return kwargs
+
+    def lease_releases_itself(self, lease: Any) -> bool:
+        """Return whether `lease` exposes a synchronous `release()` method, cached per lease type."""
+        lease_type = type(lease)
+        known = self._self_releasing_lease_types.get(lease_type)
+        if known is None:
+            release_fn = getattr(lease, "release", None)
+            known = callable(release_fn) and not inspect.iscoroutinefunction(release_fn)
+            self._self_releasing_lease_types[lease_type] = known
+        return known
 
 
-def _supported_acquire_kwargs(
-    acquire_fn: Any,
-    *,
-    timeout_ms: int,
-    bind_key_hash: int,
-) -> dict[str, Any]:
-    """Return keyword arguments supported by ``acquire_fn``."""
-    try:
-        params = inspect.signature(acquire_fn).parameters
-    except (TypeError, ValueError):
-        return {"timeout_ms": timeout_ms}
-    has_var_kw = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values())
-    kwargs: dict[str, Any] = {}
-    if has_var_kw or "timeout_ms" in params:
-        kwargs["timeout_ms"] = timeout_ms
-    if has_var_kw or "bind_key_hash" in params:
-        kwargs["bind_key_hash"] = bind_key_hash
-    return kwargs
+def _release_lease(broker: Any, plan: _BrokerLeasePlan, lease: Any) -> None:
+    """Return a lease to its broker using the release shape the plan recorded."""
+    if broker is None or lease is None:
+        return
+    if plan.lease_releases_itself(lease):
+        with contextlib.suppress(RuntimeError):
+            lease.release()
+        return
+    if not (hasattr(lease, "slot_index") and hasattr(lease, "generation")):
+        return
+    if plan.has_sync_release:
+        with contextlib.suppress(RuntimeError):
+            broker.release(lease.slot_index, lease.generation)
+        return
+    lease_table = getattr(broker, "lease_table", None)
+    if lease_table is not None:
+        with contextlib.suppress(RuntimeError):
+            lease_table.release(lease.slot_index, lease.generation)
+
+
+def _lease_releaser(broker: Any, plan: _BrokerLeasePlan, lease: Any) -> Callable[[], None]:
+    """Return a zero-argument callable that releases the lease and holds no driver reference."""
+    return functools.partial(_release_lease, broker, plan, lease)

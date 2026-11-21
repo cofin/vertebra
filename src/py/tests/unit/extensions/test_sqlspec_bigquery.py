@@ -10,7 +10,7 @@ import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import pyarrow as pa
 import pytest
@@ -417,6 +417,98 @@ class _InMemoryBigQueryEngine:
         return list(self.metrics_rows)
 
 
+class _SimulatedSyncCursor:
+    """PEP 249 cursor adapter over ``_SimulatedSyncCoreDriver``."""
+
+    def __init__(self, driver: _SimulatedSyncCoreDriver) -> None:
+        self._driver = driver
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.query_metadata: dict[str, Any] | None = None
+        self._rows: list[tuple[Any, ...]] = []
+
+    def execute(self, sql: str, parameters: Any = None) -> None:
+        upper = sql.lstrip().upper()
+        if upper.startswith(("SELECT", "WITH")):
+            dict_rows = self._driver.select(sql, parameters)
+            if dict_rows:
+                cols = list(dict_rows[0].keys())
+                self.description = tuple((str(col), None, None, None, None, None, None) for col in cols)
+                self._rows = [tuple(row.get(col) for col in cols) for row in dict_rows]
+                self.rowcount = len(self._rows)
+            else:
+                self.description = ()
+                self._rows = []
+                self.rowcount = 0
+        else:
+            affected = self._driver.execute(sql, parameters)
+            self.description = None
+            self._rows = []
+            self.rowcount = int(affected)
+        self.query_metadata = dict(self._driver.last_query_metadata)
+
+    def executemany(self, sql: str, seq_of_parameters: Sequence[Any]) -> None:
+        affected = self._driver.execute_many(sql, seq_of_parameters)
+        self.description = None
+        self._rows = []
+        self.rowcount = int(affected)
+        self.query_metadata = dict(self._driver.last_query_metadata)
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = list(self._rows)
+        self._rows.clear()
+        return rows
+
+    def close(self) -> None:
+        self._rows.clear()
+
+
+class _SimulatedAsyncCursor:
+    """Async PEP 249 cursor adapter over ``_SimulatedAsyncCoreDriver``."""
+
+    def __init__(self, driver: _SimulatedAsyncCoreDriver) -> None:
+        self._driver = driver
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.query_metadata: dict[str, Any] | None = None
+        self._rows: list[tuple[Any, ...]] = []
+
+    async def execute(self, sql: str, parameters: Any = None) -> None:
+        upper = sql.lstrip().upper()
+        if upper.startswith(("SELECT", "WITH")):
+            dict_rows = await self._driver.select(sql, parameters)
+            if dict_rows:
+                cols = list(dict_rows[0].keys())
+                self.description = tuple((str(col), None, None, None, None, None, None) for col in cols)
+                self._rows = [tuple(row.get(col) for col in cols) for row in dict_rows]
+                self.rowcount = len(self._rows)
+            else:
+                self.description = ()
+                self._rows = []
+                self.rowcount = 0
+        else:
+            affected = await self._driver.execute(sql, parameters)
+            self.description = None
+            self._rows = []
+            self.rowcount = int(affected)
+        self.query_metadata = dict(self._driver.last_query_metadata)
+
+    async def executemany(self, sql: str, seq_of_parameters: Sequence[Any]) -> None:
+        affected = await self._driver.execute_many(sql, seq_of_parameters)
+        self.description = None
+        self._rows = []
+        self.rowcount = int(affected)
+        self.query_metadata = dict(self._driver.last_query_metadata)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = list(self._rows)
+        self._rows.clear()
+        return rows
+
+    async def close(self) -> None:
+        self._rows.clear()
+
+
 class _SimulatedSyncCoreDriver:
     """Sync core driver backed by ``_InMemoryBigQueryEngine``."""
 
@@ -441,6 +533,9 @@ class _SimulatedSyncCoreDriver:
 
     def rollback(self) -> None:
         return None
+
+    def cursor(self) -> _SimulatedSyncCursor:
+        return _SimulatedSyncCursor(self)
 
     def execute(
         self,
@@ -603,6 +698,9 @@ class _SimulatedAsyncCoreDriver:
 
     async def rollback(self) -> None:
         return None
+
+    def cursor(self) -> _SimulatedAsyncCursor:
+        return _SimulatedAsyncCursor(self)
 
     async def execute(
         self,
@@ -1174,6 +1272,34 @@ class _ArrowOptionsBigQueryClient:
         _ = (parent_table, arrow_ipc_bytes, mode)
         raise NotImplementedError
 
+    def cursor(
+        self,
+        *,
+        session_id: str | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: Mapping[str, str] | None = None,
+        param_encoder: Callable[[str, Any], tuple[str, str | None]] | None = None,
+        lazy_begin: bool = False,
+    ) -> NoReturn:
+        """Reject cursor creation; the Arrow read path never opens a cursor."""
+        _ = (
+            session_id,
+            destination_table,
+            write_disposition,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            priority,
+            labels,
+            param_encoder,
+            lazy_begin,
+        )
+        msg = "Arrow options client double does not serve cursors"
+        raise AssertionError(msg)
+
     def close(self) -> None:
         return None
 
@@ -1240,6 +1366,34 @@ class _AsyncArrowOptionsBigQueryClient:
         mode: str = "_default",
     ) -> dict[str, Any]:
         return self.sync.append_arrow(parent_table, arrow_ipc_bytes, mode)
+
+    def cursor(
+        self,
+        *,
+        session_id: str | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: Mapping[str, str] | None = None,
+        param_encoder: Callable[[str, Any], tuple[str, str | None]] | None = None,
+        lazy_begin: bool = False,
+    ) -> NoReturn:
+        """Reject cursor creation; the Arrow read path never opens a cursor."""
+        _ = (
+            session_id,
+            destination_table,
+            write_disposition,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            priority,
+            labels,
+            param_encoder,
+            lazy_begin,
+        )
+        msg = "Arrow options client double does not serve cursors"
+        raise AssertionError(msg)
 
     def close(self) -> None:
         self.sync.close()

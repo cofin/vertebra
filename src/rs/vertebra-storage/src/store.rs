@@ -1944,6 +1944,107 @@ impl ObjectStoreEngine {
             .await
     }
 
+    /// Fast synchronous `put` for default options on `memory://` stores without Tokio runtime entry.
+    pub fn try_put_memory_sync(
+        &self,
+        path: &str,
+        data: Bytes,
+    ) -> Option<Result<StoredObjectMeta, StorageError>> {
+        if self.scheme != "memory" {
+            return None;
+        }
+        let location = match validate_object_path(path) {
+            Ok(loc) => loc,
+            Err(err) => return Some(Err(err)),
+        };
+        let size = data.len() as u64;
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let fut = self.inner.put(&location, PutPayload::from(data));
+        tokio::pin!(fut);
+        match fut.poll(&mut cx) {
+            std::task::Poll::Ready(Ok(result)) => {
+                if let Some(ref registry) = self.local_metadata
+                    && let Ok(guard) = registry.read()
+                    && guard.contains_key(location.as_ref())
+                {
+                    drop(guard);
+                    if let Ok(mut wguard) = registry.write() {
+                        wguard.remove(location.as_ref());
+                    }
+                }
+                Some(Ok(StoredObjectMeta {
+                    path: location.to_string(),
+                    size,
+                    last_modified: chrono::Utc::now().to_rfc3339(),
+                    etag: result.e_tag,
+                    version: result.version,
+                    content_type: None,
+                    attributes: HashMap::new(),
+                    sha256: None,
+                    crc32c: None,
+                    md5: None,
+                }))
+            }
+            std::task::Poll::Ready(Err(err)) => Some(Err(err.into())),
+            std::task::Poll::Pending => None,
+        }
+    }
+
+    /// Fast synchronous ranged `get` for `memory://` stores without Tokio runtime entry.
+    pub fn try_get_range_memory_sync(
+        &self,
+        path: &str,
+        offset: u64,
+        length: u64,
+    ) -> Option<Result<Bytes, StorageError>> {
+        if self.scheme != "memory" || length == 0 {
+            return None;
+        }
+        let end = offset.checked_add(length)?;
+        let location = match validate_object_path(path) {
+            Ok(loc) => loc,
+            Err(err) => return Some(Err(err)),
+        };
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let fut = self.inner.get_range(&location, offset..end);
+        tokio::pin!(fut);
+        match fut.poll(&mut cx) {
+            std::task::Poll::Ready(Ok(bytes)) => Some(Ok(bytes)),
+            std::task::Poll::Ready(Err(err)) => Some(Err(err.into())),
+            std::task::Poll::Pending => None,
+        }
+    }
+
+    /// Fast synchronous `get` for `memory://` stores without Tokio runtime entry.
+    pub fn try_get_memory_sync(&self, path: &str) -> Option<Result<Bytes, StorageError>> {
+        if self.scheme != "memory" {
+            return None;
+        }
+        let location = match validate_object_path(path) {
+            Ok(loc) => loc,
+            Err(err) => return Some(Err(err)),
+        };
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let fut = self.inner.get(&location);
+        tokio::pin!(fut);
+        match fut.poll(&mut cx) {
+            std::task::Poll::Ready(Ok(get_res)) => {
+                let bytes_fut = get_res.bytes();
+                tokio::pin!(bytes_fut);
+                match bytes_fut.poll(&mut cx) {
+                    std::task::Poll::Ready(Ok(bytes)) => Some(Ok(bytes)),
+                    std::task::Poll::Ready(Err(err)) => Some(Err(err.into())),
+                    std::task::Poll::Pending => None,
+                }
+            }
+            std::task::Poll::Ready(Err(err)) => Some(Err(err.into())),
+            std::task::Poll::Pending => None,
+        }
+    }
+
     pub async fn put_opts(
         &self,
         path: &str,
@@ -2078,14 +2179,21 @@ impl ObjectStoreEngine {
         };
 
         if let Some(ref registry) = self.local_metadata {
-            let mut guard = registry.write().unwrap_or_else(|e| e.into_inner());
             if opts.content_type.is_some() || !opts.attributes.is_empty() {
+                let mut guard = registry.write().unwrap_or_else(|e| e.into_inner());
                 guard.insert(
                     location.to_string(),
                     (opts.content_type.clone(), opts.attributes.clone()),
                 );
             } else {
-                guard.remove(location.as_ref());
+                let needs_remove = registry
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(location.as_ref());
+                if needs_remove {
+                    let mut guard = registry.write().unwrap_or_else(|e| e.into_inner());
+                    guard.remove(location.as_ref());
+                }
             }
         }
 

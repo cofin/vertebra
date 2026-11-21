@@ -5,11 +5,11 @@ from __future__ import annotations
 import inspect
 import itertools
 import time
-from collections.abc import Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Self
 
-from vertebra._vertebra import InterfaceError
+from vertebra._vertebra import InterfaceError, NotFoundError
 from vertebra.db.adapters.duckdb.config import DuckDBConfig, DuckDBSecretConfig
 from vertebra.db.adapters.duckdb.core import DUCKDB_DIALECT_TAG, DuckDBCore
 from vertebra.db.adapters.duckdb.pipeline import SyncDuckDBPipeline
@@ -21,17 +21,21 @@ from vertebra.db.arrow import (
 from vertebra.db.driver import SyncDatabaseDriver
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.schema import to_value_type
 from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
-    from vertebra._duckdb import SyncDuckDBClient
+    from vertebra._duckdb import SyncDuckDBClient, SyncDuckDBCursor
 
-__all__ = (
-    "SyncDuckDBDriver",
-    "_SyncDuckDBCursor",
-)
+__all__ = ("SyncDuckDBDriver",)
 
 _TX_SAVEPOINT_COUNTER = itertools.count(1)
+
+
+def _raise_closed(*args: Any, **kwargs: Any) -> NoReturn:
+    """Raise the closed-driver error in place of a native call."""
+    msg = "DuckDB driver is closed"
+    raise InterfaceError(msg)
 
 
 class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
@@ -44,9 +48,19 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         "_client",
         "_dynamic_secrets",
         "_executed_bootstrap_statements",
+        "_fetch_dicts",
+        "_fetch_rows",
+        "_fetch_value",
+        "_run_dml",
         "_secret_generations",
         "_secret_refresh_times",
     )
+
+    _client: SyncDuckDBClient | None
+    _fetch_dicts: Callable[..., Any]
+    _fetch_rows: Callable[..., Any]
+    _fetch_value: Callable[..., Any]
+    _run_dml: Callable[..., Any]
 
     def __init__(
         self,
@@ -69,7 +83,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         self._executed_bootstrap_statements: tuple[str, ...] = tuple(self.config.bootstrap_statements())
 
         if _client is not None:
-            self._client: SyncDuckDBClient | None = _client
+            self._bind_client(_client)
         else:
             native_mod = ensure_module(
                 "vertebra._duckdb",
@@ -78,29 +92,42 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
             )
             init_stmts = [s.to_create_secret_sql() for s in normalized_secrets if s.value_provider is None]
             init_stmts.extend(self.config.init_statements)
-            self._client = native_mod.SyncDuckDBClient(
-                self.config.resolved_path(),
-                read_only=self.config.read_only,
-                max_connections=int(self.config.pool_max_size),
-                max_memory_bytes=max(1, int(self.config.memory_limit_mb)) * 1024 * 1024,
-                threads=max(1, int(self.config.threads)),
-                temp_directory=self.config.temp_directory,
-                parquet_metadata_cache=bool(self.config.parquet_metadata_cache),
-                httpfs_connection_caching=bool(self.config.httpfs_connection_caching),
-                enable_http_metadata_cache=bool(self.config.enable_http_metadata_cache),
-                config=self.config.config or None,
-                extensions=list(self.config.extensions) or None,
-                init_statements=init_stmts or None,
+            self._bind_client(
+                native_mod.SyncDuckDBClient(
+                    self.config.resolved_path(),
+                    read_only=self.config.read_only,
+                    max_connections=int(self.config.pool_max_size),
+                    max_memory_bytes=max(1, int(self.config.memory_limit_mb)) * 1024 * 1024,
+                    threads=max(1, int(self.config.threads)),
+                    temp_directory=self.config.temp_directory,
+                    parquet_metadata_cache=bool(self.config.parquet_metadata_cache),
+                    httpfs_connection_caching=bool(self.config.httpfs_connection_caching),
+                    enable_http_metadata_cache=bool(self.config.enable_http_metadata_cache),
+                    config=self.config.config or None,
+                    extensions=list(self.config.extensions) or None,
+                    init_statements=init_stmts or None,
+                )
             )
         try:
             self._refresh_dynamic_secrets(force=True)
         except BaseException:
             client = self._client
-            self._client = None
+            self._bind_client(None)
             self._closed = True
             if client is not None:
                 client.close()
             raise
+
+    def _bind_client(self, client: SyncDuckDBClient | None) -> None:
+        """Set the client and bind its single-call methods, or the closed-driver error when there is none."""
+        self._client = client
+        if client is None:
+            self._fetch_dicts = self._fetch_rows = self._fetch_value = self._run_dml = _raise_closed
+            return
+        self._fetch_dicts = client.fetch_dicts
+        self._fetch_rows = client.fetch_rows
+        self._fetch_value = client.fetch_value
+        self._run_dml = client.execute_dml
 
     @property
     def executed_bootstrap_statements(self) -> tuple[str, ...]:
@@ -113,9 +140,9 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         client = self._client
         return bool(client.in_transaction) if client is not None else False
 
-    def cursor(self) -> _SyncDuckDBCursor:
-        """Create a synchronous DBAPI-style cursor bound to this driver."""
-        return _SyncDuckDBCursor(self)
+    def cursor(self, *, lazy_begin: bool = False) -> SyncDuckDBCursor:
+        """Create a native synchronous DBAPI-style cursor on the driver's client."""
+        return self._require_client().cursor(lazy_begin=lazy_begin)
 
     def pipeline(self, *, transaction: bool = True) -> SyncDuckDBPipeline:
         """Create a synchronous delayed-commit query pipeline bound to this driver."""
@@ -185,7 +212,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         """Close the underlying `SyncDuckDBClient` worker pool."""
         self._closed = True
         client = self._client
-        self._client = None
+        self._bind_client(None)
         if client is not None:
             client.close()
 
@@ -199,20 +226,29 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> int:
-        """Execute a DDL or DML statement under single-writer coordination."""
+        """Execute a DDL or DML statement and return the affected row count."""
         _ = kwargs
-        self._refresh_dynamic_secrets()
-        client = self._require_client()
-        bound = DuckDBCore.normalize_parameters(parameters)
-        self._lookup_or_cache_statement(sql, param_count=DuckDBCore.param_len(bound))
-        grant = self._acquire_broker_lease()
         try:
-            return int(client.execute(sql, bound))
+            rowcount: int = self._run_dml(sql, parameters)[0]
         except Exception as exc:
-            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            self._on_native_error(exc)
             raise
-        finally:
-            self._release_broker_lease(grant)
+        return rowcount
+
+    def execute_dml(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[int, int | None]:
+        """Execute a DML or DDL statement and return `(rowcount, None)`."""
+        _ = kwargs
+        try:
+            result: tuple[int, int | None] = self._run_dml(sql, parameters)
+        except Exception as exc:
+            self._on_native_error(exc)
+            raise
+        return result
 
     def execute_many(
         self,
@@ -220,43 +256,17 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
         **kwargs: Any,
     ) -> int:
-        """Execute a statement across multiple parameter sets under single-writer coordination."""
+        """Execute a statement across multiple parameter sets and return the affected row count."""
         _ = kwargs
         if not parameter_sets:
             return 0
-        self._refresh_dynamic_secrets()
-        client = self._require_client()
-        normalized_sets = [DuckDBCore.normalize_parameters(item) or () for item in parameter_sets]
-        self._lookup_or_cache_statement(sql, param_count=DuckDBCore.param_len(normalized_sets[0]))
-        grant = self._acquire_broker_lease()
+        cur = self._require_client().cursor()
         try:
-            return int(client.execute_many(sql, normalized_sets))
+            cur.executemany(sql, parameter_sets)
+            return int(cur.rowcount)
         except Exception as exc:
-            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            self._on_native_error(exc)
             raise
-        finally:
-            self._release_broker_lease(grant)
-
-    def execute_tuples(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> list[tuple[Any, ...]]:
-        """Execute a query and return positional row tuples."""
-        _ = kwargs
-        self._refresh_dynamic_secrets()
-        client = self._require_client()
-        bound = DuckDBCore.normalize_parameters(parameters)
-        self._lookup_or_cache_statement(sql, param_count=DuckDBCore.param_len(bound))
-        grant = self._acquire_broker_lease()
-        try:
-            return list(client.execute_tuples(sql, bound))
-        except Exception as exc:
-            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
-            raise
-        finally:
-            self._release_broker_lease(grant)
 
     def execute_with_description(
         self,
@@ -266,19 +276,123 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute SQL and return `(tuple_rows, column_names)` preserving column names on empty result sets."""
         _ = kwargs
-        self._refresh_dynamic_secrets()
-        client = self._require_client()
-        bound = DuckDBCore.normalize_parameters(parameters)
-        self._lookup_or_cache_statement(sql, param_count=DuckDBCore.param_len(bound))
-        grant = self._acquire_broker_lease()
         try:
-            rows, cols = client.execute_with_description(sql, bound)
-            return list(rows), tuple(str(c) for c in cols)
+            result: tuple[list[tuple[Any, ...]], tuple[str, ...]] = self._fetch_rows(sql, parameters)
         except Exception as exc:
-            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            self._on_native_error(exc)
             raise
-        finally:
-            self._release_broker_lease(grant)
+        return result
+
+    def execute_tuples(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[tuple[Any, ...]]:
+        """Execute a query and return unboxed tuple rows."""
+        _ = kwargs
+        try:
+            rows: list[tuple[Any, ...]] = self._fetch_rows(sql, parameters)[0]
+        except Exception as exc:
+            self._on_native_error(exc)
+            raise
+        return rows
+
+    def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> list[Any]:
+        """Execute a `SELECT` query and hydrate rows into dictionaries or `schema_type` instances."""
+        _ = kwargs
+        if schema_type is None or schema_type is dict:
+            try:
+                dict_rows: list[Any] = self._fetch_dicts(sql, parameters)
+            except Exception as exc:
+                self._on_native_error(exc)
+                raise
+            return dict_rows
+        try:
+            rows, cols = self._fetch_rows(sql, parameters)
+        except Exception as exc:
+            self._on_native_error(exc)
+            raise
+        return self.hydrate_rows(rows, cols, schema_type)
+
+    def select_one(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query and return the first row, raising `NotFoundError` when 0 rows match."""
+        _ = kwargs
+        if schema_type is None or schema_type is dict:
+            try:
+                rows = self._fetch_dicts(sql, parameters)
+            except Exception as exc:
+                self._on_native_error(exc)
+                raise
+        else:
+            try:
+                raw_rows, cols = self._fetch_rows(sql, parameters)
+            except Exception as exc:
+                self._on_native_error(exc)
+                raise
+            rows = self.hydrate_rows(raw_rows, cols, schema_type)
+        if not rows:
+            msg = "Query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any | None:
+        """Execute a query and return the first row or `None` when empty."""
+        _ = kwargs
+        if schema_type is None or schema_type is dict:
+            try:
+                rows = self._fetch_dicts(sql, parameters)
+            except Exception as exc:
+                self._on_native_error(exc)
+                raise
+        else:
+            try:
+                raw_rows, cols = self._fetch_rows(sql, parameters)
+            except Exception as exc:
+                self._on_native_error(exc)
+                raise
+            rows = self.hydrate_rows(raw_rows, cols, schema_type)
+        return rows[0] if rows else None
+
+    def select_value(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        value_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query and return the first scalar column, raising `NotFoundError` when 0 rows match."""
+        _ = kwargs
+        try:
+            val = self._fetch_value(sql, parameters)
+        except Exception as exc:
+            self._on_native_error(exc)
+            raise
+        if value_type is not None and val is not None:
+            return to_value_type(val, value_type)
+        return val
 
     def select_with_total(
         self,
@@ -303,24 +417,18 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
     ) -> ArrowCursor:
         """Stream analytical query results into an `ArrowCursor`, spilling to `VTBARROW` SHM at `threshold_rows`."""
         _ = kwargs
-        self._refresh_dynamic_secrets()
         client = self._require_client()
-        bound = DuckDBCore.normalize_parameters(parameters)
-        self._lookup_or_cache_statement(sql, param_count=DuckDBCore.param_len(bound))
-        grant = self._acquire_broker_lease()
         try:
             native_cursor = client.select_to_arrow(
                 sql,
-                bound,
+                parameters,
                 batch_size=max(1, int(batch_size)),
                 threshold_rows=max(0, int(threshold_rows)),
             )
             return native_cursor if isinstance(native_cursor, ArrowCursor) else ArrowCursor(native_cursor)
         except Exception as exc:
-            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            self._on_native_error(exc)
             raise
-        finally:
-            self._release_broker_lease(grant)
 
     def stream_arrow(
         self,
@@ -344,22 +452,16 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         """Stream Arrow record batches from `vertebra._duckdb` shared-memory cursors."""
         _ = kwargs
         chunk = max(1, int(batch_size))
-        self._refresh_dynamic_secrets()
         client = self._require_client()
-        bound = DuckDBCore.normalize_parameters(parameters)
-        self._lookup_or_cache_statement(sql, param_count=DuckDBCore.param_len(bound))
-        grant = self._acquire_broker_lease()
         try:
             native_cursors = client.stream_arrow_batches(
                 sql,
-                bound,
+                parameters,
                 batch_size=chunk,
             )
         except Exception as exc:
-            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            self._on_native_error(exc)
             raise
-        finally:
-            self._release_broker_lease(grant)
 
         idx_cur = 0
         try:
@@ -377,7 +479,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                         for idx in range(0, len(rows), chunk):
                             yield rows[idx : idx + chunk]
         except Exception as exc:
-            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            self._on_native_error(exc)
             raise
         finally:
             for remaining in native_cursors[idx_cur:]:
@@ -405,7 +507,6 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                 validate_identifier(col_str, "column", allow_dots=False)
                 col_list.append(col_str)
 
-        self._refresh_dynamic_secrets()
         client = self._require_client()
         schema = getattr(data, "schema", None)
         if isinstance(data, ArrowCursor) or schema is not None or isinstance(data, (bytes, bytearray, memoryview)):
@@ -413,8 +514,6 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                 for field_name in getattr(schema, "names", ()):
                     validate_identifier(str(field_name), "column", allow_dots=False)
             payload = data.buffer_view() if isinstance(data, ArrowCursor) and data.used_shm else data
-            self._lookup_or_cache_statement(f"APPENDER {table_name}", param_count=len(col_list or ()))
-            grant = self._acquire_broker_lease()
             try:
                 return int(
                     client.load_from_arrow(
@@ -425,10 +524,8 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                     )
                 )
             except Exception as exc:
-                DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+                self._on_native_error(exc)
                 raise
-            finally:
-                self._release_broker_lease(grant)
 
         rows, cols = _table_to_rows_and_cols(data, columns)
         for col in cols:
@@ -436,8 +533,6 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         if not rows or not cols:
             return 0
         dict_rows = [{str(col): DuckDBCore.normalize_param(row[idx]) for idx, col in enumerate(cols)} for row in rows]
-        self._lookup_or_cache_statement(f"APPENDER {table_name}", param_count=len(cols))
-        grant = self._acquire_broker_lease()
         try:
             return int(
                 client.load_from_arrow(
@@ -448,10 +543,8 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                 )
             )
         except Exception as exc:
-            DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
+            self._on_native_error(exc)
             raise
-        finally:
-            self._release_broker_lease(grant)
 
     def _require_client(self) -> SyncDuckDBClient:
         client = self._client
@@ -459,6 +552,17 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
             msg = "DuckDB driver is closed"
             raise InterfaceError(msg)
         return client
+
+    def _on_native_error(self, exc: BaseException) -> None:
+        """Invalidate rejected dynamic secrets and refresh them before the error propagates."""
+        if not self._dynamic_secrets:
+            return
+        if not DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations):
+            return
+        try:
+            self._refresh_dynamic_secrets(force=True)
+        except Exception as refresh_exc:
+            exc.add_note(f"DuckDB secret refresh after credential rejection failed: {refresh_exc}")
 
     def _refresh_dynamic_secrets(self, *, force: bool = False) -> None:
         if not self._dynamic_secrets or self._closed:
@@ -500,80 +604,3 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                 updated_gen = DuckDBCore.probe_provider_generation(provider)
                 if updated_gen is not None:
                     self._secret_generations[key] = updated_gen
-
-
-class _SyncDuckDBCursor:
-    """Synchronous DBAPI-style cursor delegating to `SyncDuckDBDriver`."""
-
-    __slots__ = ("_driver", "_pos", "_rows", "arraysize", "description", "rowcount")
-
-    def __init__(self, driver: SyncDuckDBDriver) -> None:
-        self._driver = driver
-        self._rows: list[tuple[Any, ...]] = []
-        self._pos: int = 0
-        self.arraysize: int = 1
-        self.description: tuple[tuple[str, None, None, None, None, None, None], ...] | None = None
-        self.rowcount: int = -1
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self.close()
-
-    def execute(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Self:
-        """Execute a statement or query and populate cursor state."""
-        if DuckDBCore.is_write_statement(sql):
-            self.rowcount = self._driver.execute(sql, parameters)
-            self._rows = []
-            self._pos = 0
-            self.description = None
-            return self
-        rows, cols = self._driver.execute_with_description(sql, parameters)
-        self._rows = rows
-        self._pos = 0
-        self.rowcount = len(rows)
-        self.description = tuple((col, None, None, None, None, None, None) for col in cols) if cols else None
-        return self
-
-    def executemany(
-        self,
-        sql: str,
-        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
-    ) -> Self:
-        """Execute a statement across multiple parameter sets."""
-        self.rowcount = self._driver.execute_many(sql, parameter_sets)
-        self._rows = []
-        self._pos = 0
-        self.description = None
-        return self
-
-    def fetchone(self) -> tuple[Any, ...] | None:
-        """Return the next row tuple or `None` when exhausted."""
-        if self._pos >= len(self._rows):
-            return None
-        row = self._rows[self._pos]
-        self._pos += 1
-        return row
-
-    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
-        """Return up to `size` remaining row tuples."""
-        limit = self.arraysize if size is None else max(0, int(size))
-        batch = self._rows[self._pos : self._pos + limit]
-        self._pos += len(batch)
-        return batch
-
-    def fetchall(self) -> list[tuple[Any, ...]]:
-        """Return all remaining row tuples."""
-        rest = self._rows[self._pos :]
-        self._pos = len(self._rows)
-        return rest
-
-    def close(self) -> None:
-        """Clear buffered cursor rows."""
-        self._rows = []
-        self._pos = 0

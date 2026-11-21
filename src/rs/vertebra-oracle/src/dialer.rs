@@ -892,6 +892,17 @@ fn start_tns_reset_relay(
     ))
 }
 
+fn relay_target(
+    enable_reset_relay: bool,
+    protocol: OracleProtocol,
+    connect_string: &str,
+) -> Option<ParsedTcpTarget> {
+    if !enable_reset_relay || protocol != OracleProtocol::Tcp {
+        return None;
+    }
+    parse_single_tcp_target(connect_string)
+}
+
 fn dial_oracledb_inner(
     cfg: &NativeOracleConfig,
     enable_reset_relay: bool,
@@ -924,10 +935,11 @@ fn dial_oracledb_inner(
     }
 
     let mut relay_bundle = None;
-    let effective_connect_str = if enable_reset_relay
-        && resolved.protocol == OracleProtocol::Tcp
-        && let Some(parsed) = parse_single_tcp_target(&resolved.connect_string)
-    {
+    let effective_connect_str = if let Some(parsed) = relay_target(
+        enable_reset_relay,
+        resolved.protocol,
+        &resolved.connect_string,
+    ) {
         let (local_str, upstream_sock, guard) =
             start_tns_reset_relay(&resolved.connect_string, &parsed, cfg.connect_timeout)?;
         relay_bundle = Some((upstream_sock, guard));
@@ -989,7 +1001,7 @@ fn dial_oracledb_inner(
 pub fn connect_oracledb_session(
     cfg: &NativeOracleConfig,
 ) -> Result<DialedOracleSession, OracleError> {
-    dial_oracledb_inner(cfg, true)
+    dial_oracledb_inner(cfg, cfg.enable_reset_relay)
 }
 
 /// Establish a direct physical `oracledb::Connection` from a validated [`NativeOracleConfig`].
@@ -1007,8 +1019,8 @@ mod tests {
 
     use super::{
         OracleWalletMaterial, TNS_MARKER_INTERRUPT, TNS_MARKER_RESET, TNS_PACKET_ACCEPT,
-        TNS_PACKET_MARKER, parse_single_tcp_target, relay_tns_connection, resolve_endpoint,
-        rewrite_target_to_local_port,
+        TNS_PACKET_MARKER, parse_single_tcp_target, relay_target, relay_tns_connection,
+        resolve_endpoint, rewrite_target_to_local_port,
     };
     use crate::config::{NativeOracleConfig, OracleProtocol, RawOracleOptions};
     use crate::errors::OracleError;
@@ -1284,5 +1296,37 @@ lM2nO3pQ4rS5tU6v\n\
         let _ = client_end.shutdown(Shutdown::Both);
         let _ = server_end.shutdown(Shutdown::Both);
         relay_thread.join().expect("relay shuts down cleanly");
+    }
+
+    #[test]
+    fn relay_target_returns_some_for_single_tcp_target_when_enabled() {
+        let target = relay_target(true, OracleProtocol::Tcp, "db.internal:1521/FREEPDB1")
+            .expect("single TCP target should enable relay");
+        assert_eq!(target.host, "db.internal");
+        assert_eq!(target.port, 1521);
+    }
+
+    #[test]
+    fn relay_target_returns_none_when_disabled() {
+        assert!(relay_target(false, OracleProtocol::Tcp, "db.internal:1521/FREEPDB1").is_none());
+    }
+
+    #[test]
+    fn relay_target_returns_none_for_tcps_protocol() {
+        assert!(relay_target(true, OracleProtocol::Tcps, "db.internal:1522/FREEPDB1").is_none());
+        assert!(
+            relay_target(
+                true,
+                OracleProtocol::Tcps,
+                "tcps://adb.example.com:1522/mydb_high",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn relay_target_returns_none_for_multi_address_descriptor() {
+        let address_list = "(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=h1)(PORT=1521))(ADDRESS=(PROTOCOL=TCP)(HOST=h2)(PORT=1521)))(CONNECT_DATA=(SERVICE_NAME=s)))";
+        assert!(relay_target(true, OracleProtocol::Tcp, address_list).is_none());
     }
 }

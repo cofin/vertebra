@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
 from sqlspec.core import SQL, ArrowResult, ParameterStyle, StackResult, StatementConfig, StatementStack
 from sqlspec.driver import ExecutionResult
+from sqlspec.driver._common import cache_hit_hooks_unchanged
 from sqlspec.storage import StorageBridgeJob
 
 from vertebra.db.adapters.bigquery import BigQueryCore, ObjectRef, ObjectTableConfig
@@ -16,6 +18,7 @@ from vertebra.extensions.sqlspec._driver import (
     BaseSyncDriver,
 )
 from vertebra.extensions.sqlspec.adapters.bigquery.core import (
+    compile_bigquery_statement,
     default_statement_config,
     encode_typed_bigquery_many,
     encode_typed_bigquery_parameters,
@@ -56,28 +59,14 @@ def _reject_tenant_id(tenant_id: Any) -> None:
         raise NotSupportedError(msg)
 
 
-def _normalize_row_dicts(
-    raw_rows: Any,
-    column_names: Sequence[str] | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Convert driver result rows and optional column names into uniform dictionaries."""
-    rows_list = list(raw_rows) if raw_rows is not None else []
-    names = list(column_names) if column_names else []
-    if not rows_list:
-        return [], names
-    first = rows_list[0]
-    if isinstance(first, Mapping):
-        if not names:
-            names = [str(key) for key in first]
-        return [dict(row) for row in rows_list], names
-    if isinstance(first, (tuple, list)):
-        if not names:
-            names = [f"col_{idx}" for idx in range(len(first))]
-        dict_rows = [{names[idx]: val for idx, val in enumerate(row)} for row in rows_list]
-        return dict_rows, names
-    if not names:
-        names = ["value"]
-    return [{names[0]: row} for row in rows_list], names
+def _record_cursor_metadata(connection: Any, cursor: Any) -> None:
+    """Propagate cursor query metadata to the native BigQuery driver when available."""
+    metadata = getattr(cursor, "query_metadata", None)
+    if metadata is None:
+        return
+    after_query = getattr(connection, "_after_query", None)
+    if callable(after_query):
+        after_query(metadata)
 
 
 def _extract_arrow_ipc_bytes(driver_instance: Any, source: Any) -> tuple[bytes, int]:
@@ -192,9 +181,7 @@ def _prepare_native_export(
         native_uri = "gs://" + native_uri[len("gcs://") :]
     cfg = statement_config or driver.statement_config
     prepared = driver.prepare_statement(statement, parameters, statement_config=cfg, kwargs=kwargs)
-    if not prepared.is_processed:
-        prepared.compile()
-    sql, params = driver._compile_for_native(prepared)
+    sql, params = compile_bigquery_statement(prepared)
     export_sql = _build_native_export_sql(
         sql,
         native_uri,
@@ -207,43 +194,6 @@ def _prepare_native_export(
         "extra": {"native_export": True},
     }
     return export_sql, native_uri, params, telemetry_payload
-
-
-def _execute_sync_select(cursor: Any, sql: str, params: Any) -> tuple[list[dict[str, Any]], list[str]]:
-    """Execute a synchronous BigQuery row-returning query preserving zero-row column metadata."""
-    if callable(getattr(cursor, "execute_with_description", None)):
-        raw_rows, col_names = cursor.execute_with_description(sql, params)
-        return _normalize_row_dicts(raw_rows, col_names)
-    if callable(getattr(cursor, "select", None)):
-        raw_rows = cursor.select(sql, params)
-        col_names = getattr(cursor, "last_column_names", None)
-        return _normalize_row_dicts(raw_rows, col_names)
-    if callable(getattr(cursor, "query", None)):
-        job = cursor.query(sql, params)
-        raw_rows = job.result() if hasattr(job, "result") else list(job)
-        return _normalize_row_dicts(raw_rows, None)
-    cursor.execute(sql, params)
-    description = getattr(cursor, "description", None)
-    col_names = [str(col[0]) for col in description] if description else None
-    raw_rows = cursor.fetchall() if callable(getattr(cursor, "fetchall", None)) else []
-    return _normalize_row_dicts(raw_rows, col_names)
-
-
-async def _execute_async_select(cursor: Any, sql: str, params: Any) -> tuple[list[dict[str, Any]], list[str]]:
-    """Execute an asynchronous BigQuery row-returning query preserving zero-row column metadata."""
-    if callable(getattr(cursor, "execute_with_description", None)):
-        raw_rows, col_names = await cursor.execute_with_description(sql, params)
-        return _normalize_row_dicts(raw_rows, col_names)
-    if callable(getattr(cursor, "select", None)):
-        raw_rows = await cursor.select(sql, params)
-        col_names = getattr(cursor, "last_column_names", None)
-        return _normalize_row_dicts(raw_rows, col_names)
-    await cursor.execute(sql, params)
-    description = getattr(cursor, "description", None)
-    col_names = [str(col[0]) for col in description] if description else None
-    fetchall = getattr(cursor, "fetchall", None)
-    raw_rows = await cast("Any", fetchall)() if callable(fetchall) else []
-    return _normalize_row_dicts(raw_rows, col_names)
 
 
 class BigQuerySyncDriver(BaseSyncDriver):
@@ -288,6 +238,37 @@ class BigQuerySyncDriver(BaseSyncDriver):
             self._data_dictionary = BigQuerySyncDataDictionary()
         return self._data_dictionary
 
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the metadata-recording callables the cache-hit executor calls, or `None` to register no executor."""
+        if not cache_hit_hooks_unchanged(type(self), BigQuerySyncDriver):
+            return None
+        if not callable(getattr(self.native_driver, "cursor", None)):
+            return None
+        return self._cached_fetch_rows, self._cached_run_dml
+
+    def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run a cached row-returning statement on one cursor, record its metadata, and return `(rows, names)`."""
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(sql, params)
+            _record_cursor_metadata(self.connection, cursor)
+            description = cursor.description
+            if description is None:
+                return [], ()
+            return cursor.fetchall(), tuple(str(column[0]) for column in description)
+        finally:
+            cursor.close()
+
+    def _cached_run_dml(self, sql: str, params: Any = ()) -> tuple[int, Any]:
+        """Run a cached statement without rows on one cursor, record its metadata, and return `(rowcount, None)`."""
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(sql, params)
+            _record_cursor_metadata(self.connection, cursor)
+            return max(cursor.rowcount, 0), None
+        finally:
+            cursor.close()
+
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_bigquery_exception(exc)
 
@@ -304,75 +285,67 @@ class BigQuerySyncDriver(BaseSyncDriver):
             _reject_tenant_id(kwargs.get("tenant_id"))
         return super().prepare_statement(statement, parameters, statement_config=statement_config, kwargs=kwargs)
 
-    def _compile_for_native(self, statement: SQL) -> tuple[str, Any]:
-        sql, params = super()._compile_for_native(statement)
-        return sql, encode_typed_bigquery_parameters(params)
+    @contextmanager
+    def with_cursor(self, connection: Any) -> Iterator[Any]:
+        """Yield a native BigQuery cursor, closing it on exit."""
+        cursor = connection.cursor()
+        try:
+            yield cursor
+        finally:
+            cursor.close()
 
     def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a compiled BigQuery statement preserving zero-row column metadata."""
-        sql, params = self._compile_for_native(statement)
-        if statement.returns_rows():
-            dict_rows, column_names = _execute_sync_select(cursor, sql, params)
+        """Execute a compiled BigQuery statement through the native cursor."""
+        sql, params = compile_bigquery_statement(statement)
+        self._cache_statement(statement)
+        cursor.execute(sql, params)
+        _record_cursor_metadata(self.connection, cursor)
+        description = cursor.description
+        if description is not None:
+            rows = cursor.fetchall()
             return self.create_execution_result(
                 cursor,
-                selected_data=dict_rows,
-                column_names=column_names,
-                data_row_count=len(dict_rows),
+                selected_data=rows,
+                column_names=[str(col[0]) for col in description],
+                data_row_count=len(rows),
                 is_select_result=True,
+                row_format="tuple",
             )
-        affected = cursor.execute(sql, params)
-        rowcount = int(affected) if isinstance(affected, int) else 0
-        return self.create_execution_result(cursor, rowcount_override=rowcount)
+        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a parameterized batch against BigQuery."""
-        effective_config = getattr(statement, "statement_config", None) or self.statement_config
-        sql, prepared = self._compiled_sql(statement, effective_config)
+        """Execute a parameterized batch against BigQuery through the native cursor."""
+        sql, prepared = statement.compile()
         param_sets = encode_typed_bigquery_many(prepared)
         if not param_sets:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        execute_many_fn = getattr(cursor, "execute_many", None)
-        if callable(execute_many_fn):
-            affected = execute_many_fn(sql, param_sets)
-            return self.create_execution_result(
-                cursor,
-                rowcount_override=int(affected) if isinstance(affected, int) else len(param_sets),
-                is_many_result=True,
-            )
-        total_affected = 0
-        for param_set in param_sets:
-            res = cursor.execute(sql, param_set)
-            total_affected += int(res) if isinstance(res, int) else 1
-        return self.create_execution_result(cursor, rowcount_override=total_affected, is_many_result=True)
+        cursor.executemany(sql, param_sets)
+        _record_cursor_metadata(self.connection, cursor)
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=max(cursor.rowcount, 0),
+            is_many_result=True,
+        )
 
     def dispatch_execute_script(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute BigQuery scripts without splitting compound ``BEGIN ... END`` procedural blocks."""
         raw_sql = statement.raw_sql
         params = encode_typed_bigquery_parameters(statement.parameters)
-        execute_script_fn = getattr(cursor, "execute_script", None)
+        if isinstance(params, (dict, list, tuple)) and len(params) == 0:
+            params = None
         if is_compound_googlesql_script(raw_sql):
-            if callable(execute_script_fn):
-                execute_script_fn(raw_sql, params)
-            else:
-                cursor.execute(raw_sql, params)
+            cursor.execute(raw_sql, params)
+            _record_cursor_metadata(self.connection, cursor)
             return self.create_execution_result(
                 cursor,
                 statement_count=1,
                 successful_statements=1,
                 is_script_result=True,
             )
-        if callable(execute_script_fn):
-            script_results = execute_script_fn(raw_sql, params)
-            count = len(script_results) if isinstance(script_results, Sequence) else 1
-            return self.create_execution_result(
-                cursor,
-                statement_count=max(count, 1),
-                successful_statements=max(count, 1),
-                is_script_result=True,
-            )
         statements = self.split_script_statements(raw_sql, statement.statement_config)
         for chunk in statements:
             cursor.execute(chunk, None)
+            _record_cursor_metadata(self.connection, cursor)
         return self.create_execution_result(
             cursor,
             statement_count=len(statements),
@@ -408,9 +381,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
                 statement_config=statement_config or self.statement_config,
                 kwargs=stmt_kwargs,
             )
-            if not prepared.is_processed:
-                prepared.compile()
-            sql, params = self._compile_for_native(prepared)
+            sql, params = compile_bigquery_statement(prepared)
             exc_handler = self.handle_database_exceptions()
             with exc_handler:
                 arrow_cursor = native_arrow_fn(sql, params, **native_kwargs)
@@ -551,7 +522,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
             if isinstance(statement, SQL)
             else SQL(statement, parameters, statement_config=self.statement_config)
         )
-        sql, params = self._compile_for_native(sql_obj)
+        sql, params = compile_bigquery_statement(sql_obj)
         exc_handler = self.handle_database_exceptions()
         with exc_handler:
             return self.connection.dry_run(sql, params)
@@ -656,6 +627,37 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
             self._data_dictionary = BigQueryAsyncDataDictionary()
         return self._data_dictionary
 
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the metadata-recording callables the cache-hit executor calls, or `None` to register no executor."""
+        if not cache_hit_hooks_unchanged(type(self), BigQueryAsyncDriver):
+            return None
+        if not callable(getattr(self.native_driver, "cursor", None)):
+            return None
+        return self._cached_fetch_rows, self._cached_run_dml
+
+    async def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run a cached row-returning statement on one cursor, record its metadata, and return `(rows, names)`."""
+        cursor = self.connection.cursor()
+        try:
+            await cursor.execute(sql, params)
+            _record_cursor_metadata(self.connection, cursor)
+            description = cursor.description
+            if description is None:
+                return [], ()
+            return await cursor.fetchall(), tuple(str(column[0]) for column in description)
+        finally:
+            await cursor.close()
+
+    async def _cached_run_dml(self, sql: str, params: Any = ()) -> tuple[int, Any]:
+        """Run a cached statement without rows on one cursor, record its metadata, and return `(rowcount, None)`."""
+        cursor = self.connection.cursor()
+        try:
+            await cursor.execute(sql, params)
+            _record_cursor_metadata(self.connection, cursor)
+            return max(cursor.rowcount, 0), None
+        finally:
+            await cursor.close()
+
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_bigquery_exception(exc)
 
@@ -672,75 +674,67 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
             _reject_tenant_id(kwargs.get("tenant_id"))
         return super().prepare_statement(statement, parameters, statement_config=statement_config, kwargs=kwargs)
 
-    def _compile_for_native(self, statement: SQL) -> tuple[str, Any]:
-        sql, params = super()._compile_for_native(statement)
-        return sql, encode_typed_bigquery_parameters(params)
+    @asynccontextmanager
+    async def with_cursor(self, connection: Any) -> AsyncIterator[Any]:
+        """Yield an async native BigQuery cursor, closing it on exit."""
+        cursor = connection.cursor()
+        try:
+            yield cursor
+        finally:
+            await cursor.close()
 
     async def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a compiled BigQuery statement asynchronously preserving zero-row column metadata."""
-        sql, params = self._compile_for_native(statement)
-        if statement.returns_rows():
-            dict_rows, column_names = await _execute_async_select(cursor, sql, params)
+        """Execute a compiled BigQuery statement asynchronously through the native cursor."""
+        sql, params = compile_bigquery_statement(statement)
+        self._cache_statement(statement)
+        await cursor.execute(sql, params)
+        _record_cursor_metadata(self.connection, cursor)
+        description = cursor.description
+        if description is not None:
+            rows = await cursor.fetchall()
             return self.create_execution_result(
                 cursor,
-                selected_data=dict_rows,
-                column_names=column_names,
-                data_row_count=len(dict_rows),
+                selected_data=rows,
+                column_names=[str(col[0]) for col in description],
+                data_row_count=len(rows),
                 is_select_result=True,
+                row_format="tuple",
             )
-        affected = await cursor.execute(sql, params)
-        rowcount = int(affected) if isinstance(affected, int) else 0
-        return self.create_execution_result(cursor, rowcount_override=rowcount)
+        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a parameterized batch asynchronously against BigQuery."""
-        effective_config = getattr(statement, "statement_config", None) or self.statement_config
-        sql, prepared = self._compiled_sql(statement, effective_config)
+        """Execute a parameterized batch asynchronously against BigQuery through the native cursor."""
+        sql, prepared = statement.compile()
         param_sets = encode_typed_bigquery_many(prepared)
         if not param_sets:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        execute_many_fn = getattr(cursor, "execute_many", None)
-        if callable(execute_many_fn):
-            affected = await cast("Any", execute_many_fn)(sql, param_sets)
-            return self.create_execution_result(
-                cursor,
-                rowcount_override=int(affected) if isinstance(affected, int) else len(param_sets),
-                is_many_result=True,
-            )
-        total_affected = 0
-        for param_set in param_sets:
-            res = await cursor.execute(sql, param_set)
-            total_affected += int(res) if isinstance(res, int) else 1
-        return self.create_execution_result(cursor, rowcount_override=total_affected, is_many_result=True)
+        await cursor.executemany(sql, param_sets)
+        _record_cursor_metadata(self.connection, cursor)
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=max(cursor.rowcount, 0),
+            is_many_result=True,
+        )
 
     async def dispatch_execute_script(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute BigQuery procedural scripts asynchronously without breaking ``BEGIN ... END`` blocks."""
         raw_sql = statement.raw_sql
         params = encode_typed_bigquery_parameters(statement.parameters)
-        execute_script_fn = getattr(cursor, "execute_script", None)
+        if isinstance(params, (dict, list, tuple)) and len(params) == 0:
+            params = None
         if is_compound_googlesql_script(raw_sql):
-            if callable(execute_script_fn):
-                await cast("Any", execute_script_fn)(raw_sql, params)
-            else:
-                await cursor.execute(raw_sql, params)
+            await cursor.execute(raw_sql, params)
+            _record_cursor_metadata(self.connection, cursor)
             return self.create_execution_result(
                 cursor,
                 statement_count=1,
                 successful_statements=1,
                 is_script_result=True,
             )
-        if callable(execute_script_fn):
-            script_results = await cast("Any", execute_script_fn)(raw_sql, params)
-            count = len(script_results) if isinstance(script_results, Sequence) else 1
-            return self.create_execution_result(
-                cursor,
-                statement_count=max(count, 1),
-                successful_statements=max(count, 1),
-                is_script_result=True,
-            )
         statements = self.split_script_statements(raw_sql, statement.statement_config)
         for chunk in statements:
             await cursor.execute(chunk, None)
+            _record_cursor_metadata(self.connection, cursor)
         return self.create_execution_result(
             cursor,
             statement_count=len(statements),
@@ -776,9 +770,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
                 statement_config=statement_config or self.statement_config,
                 kwargs=stmt_kwargs,
             )
-            if not prepared.is_processed:
-                prepared.compile()
-            sql, params = self._compile_for_native(prepared)
+            sql, params = compile_bigquery_statement(prepared)
             exc_handler = self.handle_database_exceptions()
             async with exc_handler:
                 arrow_cursor = await cast("Any", native_arrow_fn)(sql, params, **native_kwargs)
@@ -932,7 +924,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
             if isinstance(statement, SQL)
             else SQL(statement, parameters, statement_config=self.statement_config)
         )
-        sql, params = self._compile_for_native(sql_obj)
+        sql, params = compile_bigquery_statement(sql_obj)
         exc_handler = self.handle_database_exceptions()
         async with exc_handler:
             return await self.connection.dry_run(sql, params)

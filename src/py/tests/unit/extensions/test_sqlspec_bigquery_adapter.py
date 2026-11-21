@@ -3,13 +3,13 @@
 import asyncio
 import subprocess
 import sys
-from datetime import timedelta
+from datetime import date, timedelta
 from importlib import import_module
 from typing import Any
 
 import pyarrow as pa
 import pytest
-from sqlspec.core import ParameterStyle, StatementConfig, TypedParameter
+from sqlspec.core import SQL, ParameterStyle, StatementConfig, TypedParameter
 from sqlspec.exceptions import (
     ConnectionTimeoutError,
     DatabaseConnectionError,
@@ -25,6 +25,7 @@ from sqlspec.exceptions import (
 from sqlspec.exceptions import ImproperConfigurationError as SQLSpecImproperConfigurationError
 from sqlspec.utils.adapters import resolve_adapter_name, resolve_extension_store_class
 
+from vertebra._bigquery import SyncBigQueryCursor
 from vertebra._vertebra import (
     BigQueryError,
     BigQueryRowError,
@@ -33,6 +34,8 @@ from vertebra._vertebra import (
 )
 from vertebra.db.adapters.bigquery import BigQueryDryRunResult, ObjectRef, ObjectTableConfig
 from vertebra.db.arrow import ArrowCursor
+from vertebra.db.dbapi import connect
+from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver
 from vertebra.extensions.sqlspec.adapters.bigquery import (
     BigQueryAsyncADKArtifactStore,
     BigQueryAsyncConfig,
@@ -59,6 +62,7 @@ from vertebra.extensions.sqlspec.adapters.bigquery import (
 )
 from vertebra.extensions.sqlspec.adapters.bigquery.core import (
     bigquery_partition_clauses,
+    compile_bigquery_statement,
     encode_typed_bigquery_parameters,
     is_compound_googlesql_script,
     object_ref_to_artifact_reference,
@@ -66,6 +70,98 @@ from vertebra.extensions.sqlspec.adapters.bigquery.core import (
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import ArtifactReference
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
+
+
+class _RecordingBigQuerySyncCursor:
+    """PEP 249 cursor adapter recording calls onto `_RecordingBigQuerySyncNative`."""
+
+    def __init__(self, driver: "_RecordingBigQuerySyncNative") -> None:
+        self._driver = driver
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.query_metadata: dict[str, Any] | None = None
+        self._rows: list[tuple[Any, ...]] = []
+
+    def execute(self, sql: str, parameters: Any = None) -> None:
+        self._driver.calls.append(("execute", (sql, parameters), {}))
+        upper = sql.lstrip().upper()
+        if upper.startswith(("SELECT", "WITH")):
+            cols = list(self._driver.description_cols)
+            raw_rows = self._driver.description_rows
+            if not cols and raw_rows and isinstance(raw_rows[0], dict):
+                cols = list(raw_rows[0].keys())
+            self.description = tuple((str(col), None, None, None, None, None, None) for col in cols)
+            self._rows = [
+                tuple(row.get(col) for col in cols) if isinstance(row, dict) else tuple(row) for row in raw_rows
+            ]
+            self.rowcount = len(self._rows)
+        else:
+            self.description = None
+            self._rows = []
+            self.rowcount = 1
+        self.query_metadata = dict(self._driver.last_query_metadata)
+
+    def executemany(self, sql: str, seq_of_parameters: Any) -> None:
+        batch = list(seq_of_parameters or [])
+        self._driver.calls.append(("executemany", (sql, batch), {}))
+        self.description = None
+        self._rows = []
+        self.rowcount = len(batch)
+        self.query_metadata = dict(self._driver.last_query_metadata)
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = list(self._rows)
+        self._rows.clear()
+        return rows
+
+    def close(self) -> None:
+        self._rows.clear()
+
+
+class _RecordingBigQueryAsyncCursor:
+    """Async PEP 249 cursor adapter recording calls onto `_RecordingBigQueryAsyncNative`."""
+
+    def __init__(self, driver: "_RecordingBigQueryAsyncNative") -> None:
+        self._driver = driver
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.query_metadata: dict[str, Any] | None = None
+        self._rows: list[tuple[Any, ...]] = []
+
+    async def execute(self, sql: str, parameters: Any = None) -> None:
+        self._driver.calls.append(("execute", (sql, parameters), {}))
+        upper = sql.lstrip().upper()
+        if upper.startswith(("SELECT", "WITH")):
+            cols = list(self._driver.description_cols)
+            raw_rows = self._driver.description_rows
+            if not cols and raw_rows and isinstance(raw_rows[0], dict):
+                cols = list(raw_rows[0].keys())
+            self.description = tuple((str(col), None, None, None, None, None, None) for col in cols)
+            self._rows = [
+                tuple(row.get(col) for col in cols) if isinstance(row, dict) else tuple(row) for row in raw_rows
+            ]
+            self.rowcount = len(self._rows)
+        else:
+            self.description = None
+            self._rows = []
+            self.rowcount = 1
+        self.query_metadata = dict(getattr(self._driver, "last_query_metadata", {}))
+
+    async def executemany(self, sql: str, seq_of_parameters: Any) -> None:
+        batch = list(seq_of_parameters or [])
+        self._driver.calls.append(("executemany", (sql, batch), {}))
+        self.description = None
+        self._rows = []
+        self.rowcount = len(batch)
+        self.query_metadata = dict(getattr(self._driver, "last_query_metadata", {}))
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = list(self._rows)
+        self._rows.clear()
+        return rows
+
+    async def close(self) -> None:
+        self._rows.clear()
 
 
 class _RecordingBigQuerySyncNative:
@@ -96,6 +192,12 @@ class _RecordingBigQuerySyncNative:
 
     def close(self) -> None:
         self.closed = True
+
+    def cursor(self) -> _RecordingBigQuerySyncCursor:
+        return _RecordingBigQuerySyncCursor(self)
+
+    def _after_query(self, metadata: dict[str, Any]) -> None:
+        self.last_query_metadata = dict(metadata)
 
     def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> int:
         self.calls.append(("execute", (sql, parameters), dict(kwargs)))
@@ -173,6 +275,12 @@ class _RecordingBigQueryAsyncNative:
 
     async def close(self) -> None:
         self.closed = True
+
+    def cursor(self) -> _RecordingBigQueryAsyncCursor:
+        return _RecordingBigQueryAsyncCursor(self)
+
+    def _after_query(self, metadata: dict[str, Any]) -> None:
+        self.last_query_metadata = dict(metadata)
 
     async def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> int:
         self.calls.append(("execute", (sql, parameters), dict(kwargs)))
@@ -372,7 +480,7 @@ def test_bigquery_sync_driver_zero_row_arrow_object_table_and_dry_run() -> None:
         script_res = driver.execute_script(compound_sql)
         assert script_res.total_statements == 1
         assert script_res.successful_statements == 1
-        assert native.calls[-1][0] == "execute_script"
+        assert native.calls[-1][0] == "execute"
         assert native.calls[-1][1][0] == compound_sql
 
         arrow_res = driver.select_to_arrow(
@@ -428,7 +536,7 @@ async def test_bigquery_async_driver_dispatch_and_arrow() -> None:
     async with cfg.provide_session() as driver:
         assert isinstance(driver, BigQueryAsyncDriver)
         res = await driver.execute("SELECT id FROM items WHERE id = @id", {"id": 2})
-        assert res.data == [{"id": 2}]
+        assert res.get_data() == [{"id": 2}]
 
         arrow_res = await driver.select_to_arrow("SELECT id FROM items", max_streams=1)
         assert isinstance(arrow_res.data, pa.Table)
@@ -803,3 +911,586 @@ def test_bigquery_module_invariants_slots_and_no_top_level_pyarrow() -> None:
         BigQueryAsyncDriver,
     ):
         assert "__slots__" in cls.__dict__
+
+
+class _CountingBigQueryCursor:
+    """Sync counting PEP 249 cursor verifying single-execute, fetchall, close, and metadata behavior."""
+
+    def __init__(
+        self,
+        *,
+        rows: list[tuple[Any, ...]] | None = None,
+        description: tuple[tuple[Any, ...], ...] | None = None,
+        rowcount: int = 0,
+        query_metadata: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self._initial_rows = list(rows or [])
+        self._rows: list[tuple[Any, ...]] = []
+        self._initial_description = description
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self._initial_rowcount = rowcount
+        self.rowcount: int = -1
+        self._initial_metadata = dict(query_metadata) if query_metadata is not None else None
+        self.query_metadata: dict[str, Any] | None = None
+        self._error = error
+        self.execute_calls: list[tuple[str, Any]] = []
+        self.executemany_calls: list[tuple[str, list[Any]]] = []
+        self.fetchall_calls: int = 0
+        self.close_calls: int = 0
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.execute_calls.append((sql, params))
+        if self._error is not None:
+            raise self._error
+        self.description = self._initial_description
+        self._rows = list(self._initial_rows)
+        self.rowcount = len(self._rows) if self.description is not None else self._initial_rowcount
+        self.query_metadata = dict(self._initial_metadata) if self._initial_metadata is not None else None
+
+    def executemany(self, sql: str, seq_of_params: Any) -> None:
+        batch = list(seq_of_params)
+        self.executemany_calls.append((sql, batch))
+        if self._error is not None:
+            raise self._error
+        self.description = None
+        self._rows = []
+        self.rowcount = len(batch)
+        self.query_metadata = dict(self._initial_metadata) if self._initial_metadata is not None else None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        self.fetchall_calls += 1
+        rows = list(self._rows)
+        self._rows.clear()
+        return rows
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _AsyncCountingBigQueryCursor:
+    """Async counting PEP 249 cursor mirroring `_CountingBigQueryCursor`."""
+
+    def __init__(
+        self,
+        *,
+        rows: list[tuple[Any, ...]] | None = None,
+        description: tuple[tuple[Any, ...], ...] | None = None,
+        rowcount: int = 0,
+        query_metadata: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self._inner = _CountingBigQueryCursor(
+            rows=rows,
+            description=description,
+            rowcount=rowcount,
+            query_metadata=query_metadata,
+            error=error,
+        )
+
+    @property
+    def description(self) -> tuple[tuple[Any, ...], ...] | None:
+        return self._inner.description
+
+    @property
+    def rowcount(self) -> int:
+        return self._inner.rowcount
+
+    @property
+    def query_metadata(self) -> dict[str, Any] | None:
+        return self._inner.query_metadata
+
+    @property
+    def execute_calls(self) -> list[tuple[str, Any]]:
+        return self._inner.execute_calls
+
+    @property
+    def executemany_calls(self) -> list[tuple[str, list[Any]]]:
+        return self._inner.executemany_calls
+
+    @property
+    def fetchall_calls(self) -> int:
+        return self._inner.fetchall_calls
+
+    @property
+    def close_calls(self) -> int:
+        return self._inner.close_calls
+
+    async def execute(self, sql: str, params: Any = None) -> None:
+        self._inner.execute(sql, params)
+
+    async def executemany(self, sql: str, seq_of_params: Any) -> None:
+        self._inner.executemany(sql, seq_of_params)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._inner.fetchall()
+
+    async def close(self) -> None:
+        self._inner.close()
+
+
+class _CountingBigQueryConnection:
+    """Connection double yielding counting cursors and recording `_after_query` metadata updates."""
+
+    def __init__(
+        self,
+        *,
+        asynchronous: bool = False,
+        rows: list[tuple[Any, ...]] | None = None,
+        description: tuple[tuple[Any, ...], ...] | None = None,
+        rowcount: int = 0,
+        query_metadata: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self._asynchronous = asynchronous
+        self._rows = rows
+        self._description = description
+        self._rowcount = rowcount
+        self._query_metadata = query_metadata
+        self._error = error
+        self.cursors: list[_CountingBigQueryCursor | _AsyncCountingBigQueryCursor] = []
+        self.last_query_metadata: dict[str, Any] = {}
+
+    def cursor(self) -> _CountingBigQueryCursor | _AsyncCountingBigQueryCursor:
+        cur: _CountingBigQueryCursor | _AsyncCountingBigQueryCursor
+        if self._asynchronous:
+            cur = _AsyncCountingBigQueryCursor(
+                rows=self._rows,
+                description=self._description,
+                rowcount=self._rowcount,
+                query_metadata=self._query_metadata,
+                error=self._error,
+            )
+        else:
+            cur = _CountingBigQueryCursor(
+                rows=self._rows,
+                description=self._description,
+                rowcount=self._rowcount,
+                query_metadata=self._query_metadata,
+                error=self._error,
+            )
+        self.cursors.append(cur)
+        return cur
+
+    def _after_query(self, metadata: dict[str, Any]) -> None:
+        self.last_query_metadata = dict(metadata)
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_bigquery_native_cursor_cache_hit_rows_and_cost_metadata(mode: str) -> None:
+    """Repeated select performs one execute and one fetchall on cache hit and updates last_query_metadata."""
+    metadata = {
+        "job_id": "job-bq-77",
+        "session_id": "sess-bq-99",
+        "total_bytes_processed": 4096,
+        "total_bytes_billed": 10485760,
+        "cache_hit": True,
+    }
+    conn = _CountingBigQueryConnection(
+        asynchronous=(mode == "async"),
+        rows=[(1,)],
+        description=(("a", None, None, None, None, None, None),),
+        query_metadata=metadata,
+    )
+    if mode == "sync":
+        driver = BigQuerySyncDriver(conn)
+        first = driver.select("SELECT 1 AS a")
+        second = driver.select("SELECT 1 AS a")
+    else:
+
+        async def _run() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            driver = BigQueryAsyncDriver(conn)
+            r1 = await driver.select("SELECT 1 AS a")
+            r2 = await driver.select("SELECT 1 AS a")
+            return r1, r2
+
+        first, second = asyncio.run(_run())
+
+    assert first == [{"a": 1}]
+    assert second == [{"a": 1}]
+    assert len(conn.cursors) == 2
+    second_cursor = conn.cursors[1]
+    assert len(second_cursor.execute_calls) == 1
+    assert second_cursor.fetchall_calls == 1
+    assert second_cursor.close_calls == 1
+    assert conn.last_query_metadata == metadata
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_bigquery_native_cursor_dml_execute_many_and_script(mode: str) -> None:
+    """Verify UPDATE rowcount, execute_many batching, and two-statement execute_script on native cursor."""
+    dml_conn = _CountingBigQueryConnection(asynchronous=(mode == "async"), rowcount=5)
+    many_conn = _CountingBigQueryConnection(asynchronous=(mode == "async"))
+    script_conn = _CountingBigQueryConnection(asynchronous=(mode == "async"))
+
+    if mode == "sync":
+        dml_res = BigQuerySyncDriver(dml_conn).execute(
+            "UPDATE items SET active = @a WHERE id = @id", {"a": True, "id": 1}
+        )
+        many_res = BigQuerySyncDriver(many_conn).execute_many(
+            "INSERT INTO items (id) VALUES (@id)",
+            [{"id": 1}, {"id": 2}, {"id": 3}],
+        )
+        script_res = BigQuerySyncDriver(script_conn).execute_script("SELECT 1; SELECT 2;")
+    else:
+
+        async def _run() -> tuple[Any, Any, Any]:
+            r1 = await BigQueryAsyncDriver(dml_conn).execute(
+                "UPDATE items SET active = @a WHERE id = @id", {"a": True, "id": 1}
+            )
+            r2 = await BigQueryAsyncDriver(many_conn).execute_many(
+                "INSERT INTO items (id) VALUES (@id)",
+                [{"id": 1}, {"id": 2}, {"id": 3}],
+            )
+            r3 = await BigQueryAsyncDriver(script_conn).execute_script("SELECT 1; SELECT 2;")
+            return r1, r2, r3
+
+        dml_res, many_res, script_res = asyncio.run(_run())
+
+    assert dml_res.rows_affected == 5
+    assert many_res.rows_affected == 3
+    assert len(many_conn.cursors[0].executemany_calls) == 1
+    assert script_res.total_statements == 2
+    assert script_res.successful_statements == 2
+    assert len(script_conn.cursors[0].execute_calls) == 2
+
+
+def test_bigquery_compile_statement_typed_date_parameter() -> None:
+    """compile_bigquery_statement compiles once and encodes a date TypedParameter with its BigQuery type."""
+    target_date = date(2026, 11, 20)
+    stmt = SQL(
+        "SELECT @d AS d",
+        {"d": TypedParameter(target_date, date, semantic_name="DATE")},
+        statement_config=default_statement_config(),
+    )
+    compiled_sql, compiled_params = compile_bigquery_statement(stmt)
+    assert "SELECT" in compiled_sql
+    assert compiled_params == {"d": {"type": "DATE", "value": target_date}}
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_bigquery_native_cursor_invalid_query_maps_to_sql_parsing_error(mode: str) -> None:
+    """Syntax error BigQueryError raised by the native cursor maps to SQLParsingError."""
+    err = BigQueryError("HTTP 400: Syntax error: Unexpected identifier SELEC")
+    conn = _CountingBigQueryConnection(asynchronous=(mode == "async"), error=err)
+    if mode == "sync":
+        with pytest.raises(SQLParsingError):
+            BigQuerySyncDriver(conn).execute("SELEC 1")
+    else:
+
+        async def _run() -> None:
+            await BigQueryAsyncDriver(conn).execute("SELEC 1")
+
+        with pytest.raises(SQLParsingError):
+            asyncio.run(_run())
+
+
+def test_bigquery_dbapi_cursor_is_native() -> None:
+    """BigQuery DB-API connect().cursor() returns SyncBigQueryCursor."""
+    conn = connect("bigquery://proj/ds?rest_endpoint=http://127.0.0.1:9050")
+    cursor = conn.cursor()
+    try:
+        assert isinstance(cursor, SyncBigQueryCursor)
+    finally:
+        cursor.close()
+        if conn._driver is not None:
+            conn._driver.close()
+
+
+def _instrument_bigquery_cache_hit_state(adapter: Any, *, asynchronous: bool) -> dict[str, int]:
+    """Wrap adapter._cache_hit_state callables with invocation counters."""
+    counts = {"fetch": 0, "dml": 0}
+    orig_fetch, orig_dml, orig_mapper = adapter._cache_hit_state
+    if asynchronous:
+
+        async def _wrapped_async_fetch(*args: Any, **kwargs: Any) -> Any:
+            counts["fetch"] += 1
+            return await orig_fetch(*args, **kwargs)
+
+        async def _wrapped_async_dml(*args: Any, **kwargs: Any) -> Any:
+            counts["dml"] += 1
+            return await orig_dml(*args, **kwargs)
+
+        adapter._cache_hit_state = (_wrapped_async_fetch, _wrapped_async_dml, orig_mapper)
+    else:
+
+        def _wrapped_sync_fetch(*args: Any, **kwargs: Any) -> Any:
+            counts["fetch"] += 1
+            return orig_fetch(*args, **kwargs)
+
+        def _wrapped_sync_dml(*args: Any, **kwargs: Any) -> Any:
+            counts["dml"] += 1
+            return orig_dml(*args, **kwargs)
+
+        adapter._cache_hit_state = (_wrapped_sync_fetch, _wrapped_sync_dml, orig_mapper)
+    return counts
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_bigquery_cache_hit_executor_is_registered(mode: str) -> None:
+    """BigQuery sync and async adapters register the base cache-hit executor with a 3-tuple state."""
+    conn = _CountingBigQueryConnection(asynchronous=(mode == "async"))
+    if mode == "sync":
+        adapter: Any = BigQuerySyncDriver(conn)
+        assert adapter._cache_hit_executor is BaseSyncDriver._run_cached_statement
+    else:
+        adapter = BigQueryAsyncDriver(conn)
+        assert adapter._cache_hit_executor is BaseAsyncDriver._run_cached_statement
+    assert isinstance(adapter._cache_hit_state, tuple)
+    assert len(adapter._cache_hit_state) == 3
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("sql", "kind", "rows", "description", "rowcount"),
+    [
+        pytest.param(
+            "SELECT 1 AS a",
+            "fetch",
+            [(1,)],
+            (("a", None, None, None, None, None, None),),
+            0,
+            id="select",
+        ),
+        pytest.param(
+            "UPDATE items SET active = TRUE WHERE id = 1",
+            "dml",
+            None,
+            None,
+            5,
+            id="update",
+        ),
+    ],
+)
+def test_bigquery_cache_hit_makes_one_adapter_call_and_one_cursor(
+    mode: str,
+    sql: str,
+    kind: str,
+    rows: list[tuple[Any, ...]] | None,
+    description: tuple[tuple[Any, ...], ...] | None,
+    rowcount: int,
+) -> None:
+    """A cached BigQuery statement invokes one adapter callable and opens and closes one cursor."""
+    conn = _CountingBigQueryConnection(
+        asynchronous=(mode == "async"),
+        rows=rows,
+        description=description,
+        rowcount=rowcount,
+    )
+    if mode == "sync":
+        adapter: Any = BigQuerySyncDriver(conn)
+        counts = _instrument_bigquery_cache_hit_state(adapter, asynchronous=False)
+        adapter.execute(sql)
+        conn.cursors.clear()
+        counts["fetch"] = 0
+        counts["dml"] = 0
+        adapter.execute(sql)
+    else:
+        adapter = BigQueryAsyncDriver(conn)
+        counts = _instrument_bigquery_cache_hit_state(adapter, asynchronous=True)
+
+        async def _run() -> None:
+            await adapter.execute(sql)
+            conn.cursors.clear()
+            counts["fetch"] = 0
+            counts["dml"] = 0
+            await adapter.execute(sql)
+
+        asyncio.run(_run())
+
+    expected_other = "dml" if kind == "fetch" else "fetch"
+    assert counts[kind] == 1
+    assert counts[expected_other] == 0
+    assert len(conn.cursors) == 1
+    assert len(conn.cursors[0].execute_calls) == 1
+    assert conn.cursors[0].close_calls == 1
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("sql", "rows", "description", "rowcount"),
+    [
+        pytest.param(
+            "SELECT 1 AS a",
+            [(1,)],
+            (("a", None, None, None, None, None, None),),
+            0,
+            id="select",
+        ),
+        pytest.param(
+            "SELECT 1 AS a WHERE FALSE",
+            [],
+            (("a", None, None, None, None, None, None),),
+            0,
+            id="empty_select",
+        ),
+        pytest.param(
+            "UPDATE items SET active = TRUE WHERE id = 1",
+            None,
+            None,
+            5,
+            id="update",
+        ),
+    ],
+)
+def test_bigquery_cache_hit_result_matches_method_path(
+    mode: str,
+    sql: str,
+    rows: list[tuple[Any, ...]] | None,
+    description: tuple[tuple[Any, ...], ...] | None,
+    rowcount: int,
+) -> None:
+    """Cached BigQuery executor results match the method path across selects, empty selects, and DML."""
+    fast_conn = _CountingBigQueryConnection(
+        asynchronous=(mode == "async"),
+        rows=rows,
+        description=description,
+        rowcount=rowcount,
+    )
+    method_conn = _CountingBigQueryConnection(
+        asynchronous=(mode == "async"),
+        rows=rows,
+        description=description,
+        rowcount=rowcount,
+    )
+    if mode == "sync":
+        fast_adapter: Any = BigQuerySyncDriver(fast_conn)
+        method_adapter: Any = BigQuerySyncDriver(method_conn)
+        method_adapter._cache_hit_executor = None
+        fast_adapter.execute(sql)
+        method_adapter.execute(sql)
+        fast_res = fast_adapter.execute(sql)
+        method_res = method_adapter.execute(sql)
+    else:
+        fast_adapter = BigQueryAsyncDriver(fast_conn)
+        method_adapter = BigQueryAsyncDriver(method_conn)
+        method_adapter._cache_hit_executor = None
+
+        async def _run() -> tuple[Any, Any]:
+            await fast_adapter.execute(sql)
+            await method_adapter.execute(sql)
+            return await fast_adapter.execute(sql), await method_adapter.execute(sql)
+
+        fast_res, method_res = asyncio.run(_run())
+
+    assert fast_res.all() == method_res.all()
+    assert fast_res.column_names == method_res.column_names
+    assert fast_res.rows_affected == method_res.rows_affected
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_bigquery_cache_hit_records_query_metadata(mode: str) -> None:
+    """Cached BigQuery execution forwards cursor query_metadata to connection._after_query."""
+    metadata = {
+        "job_id": "job-bq-cached",
+        "session_id": "sess-bq-cached",
+        "total_bytes_processed": 100,
+        "total_bytes_billed": 10,
+        "cache_hit": False,
+    }
+    conn = _CountingBigQueryConnection(
+        asynchronous=(mode == "async"),
+        rows=[(1,)],
+        description=(("a", None, None, None, None, None, None),),
+        query_metadata=metadata,
+    )
+    if mode == "sync":
+        adapter: Any = BigQuerySyncDriver(conn)
+        adapter.execute("SELECT 1 AS a")
+        conn.last_query_metadata.clear()
+        adapter.execute("SELECT 1 AS a")
+    else:
+        adapter = BigQueryAsyncDriver(conn)
+
+        async def _run() -> None:
+            await adapter.execute("SELECT 1 AS a")
+            conn.last_query_metadata.clear()
+            await adapter.execute("SELECT 1 AS a")
+
+        asyncio.run(_run())
+
+    assert conn.last_query_metadata == metadata
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_bigquery_cache_hit_error_records_no_metadata_and_matches_method_path(mode: str) -> None:
+    """Failed cached BigQuery runs map errors identically, record no metadata, and close the cursor."""
+    native_error = BigQueryError("HTTP 400: Syntax error: Unexpected identifier SELEC")
+    metadata = {
+        "job_id": "job-bq-ok",
+        "total_bytes_billed": 10,
+        "cache_hit": False,
+    }
+    fast_conn = _CountingBigQueryConnection(
+        asynchronous=(mode == "async"),
+        rows=[(1,)],
+        description=(("a", None, None, None, None, None, None),),
+        query_metadata=metadata,
+    )
+    method_conn = _CountingBigQueryConnection(
+        asynchronous=(mode == "async"),
+        rows=[(1,)],
+        description=(("a", None, None, None, None, None, None),),
+        query_metadata=metadata,
+    )
+    sql = "SELECT 1 AS a"
+
+    if mode == "sync":
+        fast_adapter: Any = BigQuerySyncDriver(fast_conn)
+        method_adapter: Any = BigQuerySyncDriver(method_conn)
+        method_adapter._cache_hit_executor = None
+        fast_adapter.execute(sql)
+        method_adapter.execute(sql)
+        fast_conn.last_query_metadata.clear()
+        method_conn.last_query_metadata.clear()
+        fast_conn._error = native_error
+        method_conn._error = native_error
+        with pytest.raises(SQLParsingError) as fast_exc:
+            fast_adapter.execute(sql)
+        with pytest.raises(SQLParsingError) as method_exc:
+            method_adapter.execute(sql)
+    else:
+        fast_adapter = BigQueryAsyncDriver(fast_conn)
+        method_adapter = BigQueryAsyncDriver(method_conn)
+        method_adapter._cache_hit_executor = None
+
+        async def _run() -> tuple[BaseException, BaseException]:
+            await fast_adapter.execute(sql)
+            await method_adapter.execute(sql)
+            fast_conn.last_query_metadata.clear()
+            method_conn.last_query_metadata.clear()
+            fast_conn._error = native_error
+            method_conn._error = native_error
+            with pytest.raises(SQLParsingError) as f_exc:
+                await fast_adapter.execute(sql)
+            with pytest.raises(SQLParsingError) as m_exc:
+                await method_adapter.execute(sql)
+            return f_exc.value, m_exc.value
+
+        fast_val, method_val = asyncio.run(_run())
+        assert type(fast_val) is type(method_val)
+        assert fast_val.__cause__ is native_error
+        assert fast_conn.last_query_metadata == {}
+        assert fast_conn.cursors[-1].close_calls == 1
+        return
+
+    assert type(fast_exc.value) is type(method_exc.value)
+    assert fast_exc.value.__cause__ is native_error
+    assert fast_conn.last_query_metadata == {}
+    assert fast_conn.cursors[-1].close_calls == 1
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_bigquery_cache_hit_not_registered_without_cursor(mode: str) -> None:
+    """BigQuery adapters leave _cache_hit_executor unset when the connection provides no cursor."""
+
+    class _NoCursorBigQueryConnection:
+        pass
+
+    adapter: Any = (
+        BigQuerySyncDriver(_NoCursorBigQueryConnection())
+        if mode == "sync"
+        else BigQueryAsyncDriver(_NoCursorBigQueryConnection())
+    )
+    assert adapter._cache_hit_executor is None
+    assert adapter._cache_hit_state is None

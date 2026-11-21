@@ -85,12 +85,40 @@ class _LoopbackOAuthServer:
         self._thread.join(timeout=2.0)
 
 
+class _SyncFaultInjectingDuckDBCursor:
+    """Delegating synchronous DuckDB cursor wrapper raising a synthetic HTTP 401/403 when armed."""
+
+    def __init__(self, owner: _SyncFaultInjectingDuckDBClient, inner: Any) -> None:
+        self._owner = owner
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def execute(self, sql: str, params: Any = None) -> Any:
+        """Raise a simulated HTTP status rejection when armed, else delegate to the native cursor."""
+        if self._owner.fail_with_status is not None:
+            status = self._owner.fail_with_status
+            self._owner.fail_with_status = None
+            msg = f"HTTP Error: Unable to connect to URL (HTTP {status})"
+            raise RuntimeError(msg)
+        self._inner.execute(sql, params)
+        return self
+
+
 class _SyncFaultInjectingDuckDBClient:
     """Delegating synchronous DuckDB client wrapper that can raise a synthetic HTTP 401/403 error."""
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
         self.fail_with_status: int | None = None
+
+    def _maybe_raise_fault(self) -> None:
+        if self.fail_with_status is not None:
+            status = self.fail_with_status
+            self.fail_with_status = None
+            msg = f"HTTP Error: Unable to connect to URL (HTTP {status})"
+            raise RuntimeError(msg)
 
     @property
     def in_transaction(self) -> bool:
@@ -101,23 +129,57 @@ class _SyncFaultInjectingDuckDBClient:
         """Delegate DDL/DML execution to the native DuckDB client."""
         return int(self._inner.execute(sql, params))
 
-    def execute_with_description(
-        self,
-        sql: str,
-        params: Any = None,
-    ) -> tuple[list[Any], tuple[str, ...]]:
+    def fetch_rows(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Raise a simulated HTTP status rejection when armed, else delegate to the native client."""
-        if self.fail_with_status is not None:
-            status = self.fail_with_status
-            self.fail_with_status = None
-            msg = f"HTTP Error: Unable to connect to URL (HTTP {status})"
-            raise RuntimeError(msg)
-        rows, cols = self._inner.execute_with_description(sql, params)
-        return list(rows), tuple(str(c) for c in cols)
+        self._maybe_raise_fault()
+        result: tuple[list[tuple[Any, ...]], tuple[str, ...]] = self._inner.fetch_rows(sql, params)
+        return result
+
+    def fetch_dicts(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+        """Raise a simulated HTTP status rejection when armed, else delegate to the native client."""
+        self._maybe_raise_fault()
+        result: list[dict[str, Any]] = self._inner.fetch_dicts(sql, params)
+        return result
+
+    def fetch_value(self, sql: str, params: Any = None) -> Any:
+        """Raise a simulated HTTP status rejection when armed, else delegate to the native client."""
+        self._maybe_raise_fault()
+        return self._inner.fetch_value(sql, params)
+
+    def execute_dml(self, sql: str, params: Any = None) -> tuple[int, int | None]:
+        """Raise a simulated HTTP status rejection when armed, else delegate to the native client."""
+        self._maybe_raise_fault()
+        result: tuple[int, int | None] = self._inner.execute_dml(sql, params)
+        return result
+
+    def cursor(self, *, lazy_begin: bool = False) -> _SyncFaultInjectingDuckDBCursor:
+        """Return a fault-injecting cursor backed by the native synchronous cursor."""
+        return _SyncFaultInjectingDuckDBCursor(self, self._inner.cursor(lazy_begin=lazy_begin))
 
     def close(self) -> None:
         """Close the underlying native DuckDB client."""
         self._inner.close()
+
+
+class _AsyncFaultInjectingDuckDBCursor:
+    """Delegating asynchronous DuckDB cursor wrapper raising a synthetic HTTP 401/403 when armed."""
+
+    def __init__(self, owner: _AsyncFaultInjectingDuckDBClient, inner: Any) -> None:
+        self._owner = owner
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def execute(self, sql: str, params: Any = None) -> Any:
+        """Raise a simulated HTTP status rejection when armed, else delegate to the native cursor."""
+        if self._owner.fail_with_status is not None:
+            status = self._owner.fail_with_status
+            self._owner.fail_with_status = None
+            msg = f"HTTP Error: Unable to connect to URL (HTTP {status})"
+            raise RuntimeError(msg)
+        await self._inner.execute(sql, params)
+        return self
 
 
 class _AsyncFaultInjectingDuckDBClient:
@@ -126,6 +188,13 @@ class _AsyncFaultInjectingDuckDBClient:
     def __init__(self, inner: Any) -> None:
         self._inner = inner
         self.fail_with_status: int | None = None
+
+    def _maybe_raise_fault(self) -> None:
+        if self.fail_with_status is not None:
+            status = self.fail_with_status
+            self.fail_with_status = None
+            msg = f"HTTP Error: Unable to connect to URL (HTTP {status})"
+            raise RuntimeError(msg)
 
     @property
     def in_transaction(self) -> bool:
@@ -136,19 +205,32 @@ class _AsyncFaultInjectingDuckDBClient:
         """Delegate DDL/DML execution to the native async DuckDB client."""
         return int(await self._inner.execute(sql, params))
 
-    async def execute_with_description(
-        self,
-        sql: str,
-        params: Any = None,
-    ) -> tuple[list[Any], tuple[str, ...]]:
-        """Raise a simulated HTTP status rejection when armed, else delegate to the native client."""
-        if self.fail_with_status is not None:
-            status = self.fail_with_status
-            self.fail_with_status = None
-            msg = f"HTTP Error: Unable to connect to URL (HTTP {status})"
-            raise RuntimeError(msg)
-        rows, cols = await self._inner.execute_with_description(sql, params)
-        return list(rows), tuple(str(c) for c in cols)
+    async def fetch_rows(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Raise a simulated HTTP status rejection when armed, else delegate to the native async client."""
+        self._maybe_raise_fault()
+        result: tuple[list[tuple[Any, ...]], tuple[str, ...]] = await self._inner.fetch_rows(sql, params)
+        return result
+
+    async def fetch_dicts(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+        """Raise a simulated HTTP status rejection when armed, else delegate to the native async client."""
+        self._maybe_raise_fault()
+        result: list[dict[str, Any]] = await self._inner.fetch_dicts(sql, params)
+        return result
+
+    async def fetch_value(self, sql: str, params: Any = None) -> Any:
+        """Raise a simulated HTTP status rejection when armed, else delegate to the native async client."""
+        self._maybe_raise_fault()
+        return await self._inner.fetch_value(sql, params)
+
+    async def execute_dml(self, sql: str, params: Any = None) -> tuple[int, int | None]:
+        """Raise a simulated HTTP status rejection when armed, else delegate to the native async client."""
+        self._maybe_raise_fault()
+        result: tuple[int, int | None] = await self._inner.execute_dml(sql, params)
+        return result
+
+    def cursor(self, *, lazy_begin: bool = False) -> _AsyncFaultInjectingDuckDBCursor:
+        """Return a fault-injecting cursor backed by the native asynchronous cursor."""
+        return _AsyncFaultInjectingDuckDBCursor(self, self._inner.cursor(lazy_begin=lazy_begin))
 
     async def close(self) -> None:
         """Close the underlying native async DuckDB client."""
@@ -364,7 +446,9 @@ async def test_duckdb_loopback_gcs_bearer_secret_rotation_on_auth_rejection(
             proxy.fail_with_status = status_code
             with pytest.raises(RuntimeError, match=f"HTTP {status_code}"):
                 driver.select("SELECT 1 AS ok")
-            assert provider.needs_refresh() is True
+            assert provider.generation == 2
+            assert oauth_server.token_calls == 2
+            assert provider.needs_refresh() is False
 
             assert driver.select("SELECT 1 AS ok") == [{"ok": 1}]
             assert provider.generation == 2
@@ -400,7 +484,9 @@ async def test_duckdb_loopback_gcs_bearer_secret_rotation_on_auth_rejection(
             async_proxy.fail_with_status = status_code
             with pytest.raises(RuntimeError, match=f"HTTP {status_code}"):
                 await async_driver.select("SELECT 1 AS ok")
-            assert async_provider.needs_refresh() is True
+            assert async_provider.generation == 2
+            assert oauth_server.token_calls == 2
+            assert async_provider.needs_refresh() is False
 
             assert await async_driver.select("SELECT 1 AS ok") == [{"ok": 1}]
             assert async_provider.generation == 2
@@ -461,4 +547,6 @@ def test_duckdb_live_httpfs_gcs_bearer_rotation(
         provider.invalidate(1)
         assert provider.needs_refresh() is True
         assert driver.select_value("SELECT 1", value_type=int) == 1
+        assert provider.generation == 1
+        driver.refresh_secrets(force=False)
         assert provider.generation == 2

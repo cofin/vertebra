@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Self, cast
 
-from vertebra._vertebra import classify_sql_statement
+from vertebra._vertebra import NotFoundError
 from vertebra.db.adapters.sqlite.config import SQLiteConfig
 from vertebra.db.adapters.sqlite.core import VALID_SQLITE_SYNCHRONOUS
 from vertebra.db.adapters.sqlite.pipeline import SyncSQLitePipeline
@@ -21,19 +21,20 @@ from vertebra.db.driver import (
     SyncDatabaseDriver,
 )
 from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.schema import to_value_type
 from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 if TYPE_CHECKING:
-    from vertebra._sqlite import SyncSQLiteClient
+    from vertebra._sqlite import SyncSQLiteClient, SyncSQLiteCursor
 
 __all__ = ("SyncSQLiteDriver",)
 
 
-def _sqlite_param_count(parameters: Any) -> int:
-    """Return parameter count for sequence or mapping bind payloads."""
-    if isinstance(parameters, (Sequence, Mapping)) and not isinstance(parameters, (str, bytes)):
-        return len(parameters)
-    return 0
+def _raise_closed(*args: Any, **kwargs: Any) -> NoReturn:
+    """Raise the closed-driver error in place of a native call."""
+    _ = (args, kwargs)
+    msg = "SQLite driver is closed"
+    raise InterfaceError(msg)
 
 
 class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
@@ -42,7 +43,19 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
     dialect: ClassVar[str] = "sqlite"
     dialect_tag: ClassVar[int] = SQLITE_DIALECT_TAG
 
-    __slots__ = ("_client", "_lastrowid")
+    __slots__ = ("_client", "_fetch_dicts", "_fetch_rows", "_fetch_value", "_run_dml", "cursor")
+
+    _client: SyncSQLiteClient | None
+    _fetch_dicts: Callable[..., list[dict[str, Any]]]
+    _fetch_rows: Callable[..., tuple[list[tuple[Any, ...]], tuple[str, ...]]]
+    _fetch_value: Callable[..., Any]
+    _run_dml: Callable[..., tuple[int, int | None]]
+
+    if TYPE_CHECKING:
+
+        def cursor(self, *, lazy_begin: bool = False) -> SyncSQLiteCursor:
+            """Return a native synchronous SQLite cursor bound to this driver."""
+            ...
 
     def __init__(
         self,
@@ -57,11 +70,20 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
             msg = f"Invalid synchronous mode: {resolved.synchronous!r}"
             raise ValueError(msg)
         super().__init__(resolved, broker=broker)
-        self._lastrowid: int | None = None
-        if _client is not None:
-            self._client: SyncSQLiteClient | None = _client
-        else:
-            self._client = self._create_client()
+        self._bind_client(_client if _client is not None else self._create_client())
+
+    def _bind_client(self, client: SyncSQLiteClient | None) -> None:
+        """Set the client and bind its native methods, or the closed-driver error when there is none."""
+        self._client = client
+        if client is None:
+            self._fetch_dicts = self._fetch_rows = self._fetch_value = self._run_dml = _raise_closed
+            object.__setattr__(self, "cursor", _raise_closed)
+            return
+        self._fetch_dicts = client.fetch_dicts
+        self._fetch_rows = client.fetch_rows
+        self._fetch_value = client.fetch_value
+        self._run_dml = client.execute_dml
+        object.__setattr__(self, "cursor", client.cursor)
 
     def _create_client(self) -> SyncSQLiteClient:
         """Create a new native SyncSQLiteClient handle."""
@@ -111,14 +133,14 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
     @property
     def lastrowid(self) -> int | None:
         """Return the last captured SQLite INSERT rowid on this driver."""
-        return self._lastrowid
+        client = self._client
+        return client.last_statement_rowid if client is not None else None
 
     def connect(self) -> Self:
         """Establish or reopen the native SQLite client connection."""
         if self._client is None or self._closed:
-            self._client = self._create_client()
+            self._bind_client(self._create_client())
             self._closed = False
-            self._lastrowid = None
         return self
 
     def begin(self) -> None:
@@ -143,11 +165,107 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
     def close(self) -> None:
         """Close the driver and release client worker connections."""
         self._closed = True
-        self._lastrowid = None
-        if self._client is not None:
-            client = self._client
-            self._client = None
+        client = self._client
+        self._bind_client(None)
+        if client is not None:
             client.close()
+
+    def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> list[Any]:
+        """Execute a `SELECT` query and hydrate rows into dictionaries or `schema_type` instances."""
+        _ = kwargs
+        if schema_type is None or schema_type is dict:
+            return self._fetch_dicts(sql, parameters)
+        rows, cols = self._fetch_rows(sql, parameters)
+        return self.hydrate_rows(rows, cols, schema_type)
+
+    def select_one(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query and return the first row, raising `NotFoundError` when 0 rows match."""
+        _ = kwargs
+        if schema_type is None or schema_type is dict:
+            rows = self._fetch_dicts(sql, parameters)
+        else:
+            raw, cols = self._fetch_rows(sql, parameters)
+            rows = self.hydrate_rows(raw, cols, schema_type)
+        if not rows:
+            msg = "Query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any | None:
+        """Execute a query and return the first row or `None` when empty."""
+        _ = kwargs
+        if schema_type is None or schema_type is dict:
+            rows = self._fetch_dicts(sql, parameters)
+        else:
+            raw, cols = self._fetch_rows(sql, parameters)
+            rows = self.hydrate_rows(raw, cols, schema_type)
+        return rows[0] if rows else None
+
+    def select_value(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        value_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query and return the first scalar column, raising `NotFoundError` when 0 rows match."""
+        _ = kwargs
+        val = self._fetch_value(sql, parameters)
+        if value_type is not None and val is not None:
+            return to_value_type(val, value_type)
+        return val
+
+    def execute_with_description(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Execute a query and return `(tuple_rows, column_names)`."""
+        _ = kwargs
+        return self._fetch_rows(sql, parameters)
+
+    def execute_tuples(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[tuple[Any, ...]]:
+        """Execute a query and return unboxed tuple rows."""
+        _ = kwargs
+        return self._fetch_rows(sql, parameters)[0]
+
+    def execute_dml(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[int, int | None]:
+        """Execute a DML or DDL statement and atomically return `(rowcount, lastrowid)`."""
+        _ = kwargs
+        return self._run_dml(sql, parameters)
 
     def execute(
         self,
@@ -156,31 +274,8 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         **kwargs: Any,
     ) -> int:
         """Execute a DML or DDL statement and return the affected row count."""
-        rowcount, _ = self.execute_dml(sql, parameters, **kwargs)
-        return rowcount
-
-    def execute_dml(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> tuple[int, int | None]:
-        """Execute a DML or DDL statement and atomically return (rowcount, lastrowid)."""
         _ = kwargs
-        _, is_insert, _ = classify_sql_statement(sql)
-        self._lookup_or_cache_statement(sql, param_count=_sqlite_param_count(parameters))
-        lease = self._acquire_broker_lease()
-        try:
-            rowcount = self._require_client().execute(sql, parameters)
-            rowid = None
-            if is_insert and rowcount > 0:
-                raw_id = self._require_client().last_insert_rowid
-                if raw_id > 0:
-                    rowid = raw_id
-            self._lastrowid = rowid
-            return rowcount, rowid
-        finally:
-            self._release_broker_lease(lease)
+        return self._run_dml(sql, parameters)[0]
 
     def execute_many(
         self,
@@ -192,56 +287,9 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         _ = kwargs
         if not parameter_sets:
             return 0
-        self._lookup_or_cache_statement(sql, param_count=_sqlite_param_count(parameter_sets[0]))
-        lease = self._acquire_broker_lease()
-        try:
-            return self._require_client().execute_many(sql, parameter_sets)
-        finally:
-            self._release_broker_lease(lease)
-
-    def execute_tuples(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> list[tuple[Any, ...]]:
-        """Execute a query and return unboxed tuple rows."""
-        rows, _ = self.execute_with_description(sql, parameters, **kwargs)
-        return rows
-
-    def execute_with_description(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-        """Execute a query and return (tuple_rows, column_names)."""
-        _ = kwargs
-        _, is_insert, _ = classify_sql_statement(sql)
-        self._lookup_or_cache_statement(sql, param_count=_sqlite_param_count(parameters))
-        lease = self._acquire_broker_lease()
-        try:
-            cols, rows = self._require_client().fetch_all(sql, parameters)
-            if is_insert:
-                raw_id = self._require_client().last_insert_rowid
-                self._lastrowid = int(raw_id) if raw_id > 0 else None
-            else:
-                self._lastrowid = None
-            return list(rows), tuple(str(c) for c in cols)
-        finally:
-            self._release_broker_lease(lease)
-
-    def select(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-        **kwargs: Any,
-    ) -> list[Any]:
-        """Execute a SELECT query and hydrate rows into dictionaries or schema_type instances."""
-        rows, cols = self.execute_with_description(sql, parameters, **kwargs)
-        return self.hydrate_rows(rows, cols, schema_type)
+        cur = self._require_client().cursor()
+        cur.executemany(sql, parameter_sets)
+        return cur.rowcount
 
     def select_to_arrow(
         self,
@@ -253,13 +301,8 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
     ) -> ArrowCursor:
         """Execute a query and return an ArrowCursor via zero-copy ShmRegion Arrow IPC."""
         _ = (threshold_rows, kwargs)
-        self._lookup_or_cache_statement(sql, param_count=_sqlite_param_count(parameters))
-        lease = self._acquire_broker_lease()
-        try:
-            native = self._require_client().select_to_arrow(sql, parameters)
-            return native if isinstance(native, ArrowCursor) else ArrowCursor(native)
-        finally:
-            self._release_broker_lease(lease)
+        native = self._require_client().select_to_arrow(sql, parameters)
+        return native if isinstance(native, ArrowCursor) else ArrowCursor(native)
 
     def stream_arrow_batches(
         self,

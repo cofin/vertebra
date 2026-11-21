@@ -704,6 +704,78 @@ async def test_channel_bus_change_feed_and_async_source() -> None:
     await bus.on_shutdown()
 
 
+class _SpannerChangeStreamCursor:
+    """Async cursor double that records one change-stream read on its owning client double."""
+
+    description: tuple[tuple[Any, ...], ...] | None
+    rowcount: int
+    lastrowid: Any | None
+    arraysize: int
+
+    def __init__(
+        self,
+        calls: list[tuple[str, str | None]],
+        param_encoder: Callable[[Any], str | None] | None,
+    ) -> None:
+        self._calls = calls
+        self._param_encoder = param_encoder
+        self.description = None
+        self.rowcount = -1
+        self.lastrowid = None
+        self.arraysize = 1
+        self._rows: list[tuple[Any, ...]] = []
+
+    async def execute(self, sql: str, params: Any = ()) -> _SpannerChangeStreamCursor:
+        """Record the change-stream query and buffer one synthetic change-record row."""
+        encoded = self._param_encoder(params) if self._param_encoder is not None else None
+        self._calls.append((sql, encoded))
+        self.description = (("data_change_record", None, None, None, None, None, None),)
+        self._rows = [
+            (
+                [
+                    {
+                        "table_name": "orders",
+                        "mod_type": "INSERT",
+                        "mods": [{"keys": {"id": 1}}],
+                    }
+                ],
+            )
+        ]
+        self.rowcount = 1
+        return self
+
+    async def executemany(self, sql: str, seq_of_params: Any) -> _SpannerChangeStreamCursor:
+        """Clear buffered rows and record the parameter batch size."""
+        _ = sql
+        self._rows = []
+        self.description = None
+        self.rowcount = len(seq_of_params)
+        return self
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        """Pop and return the next buffered row, or `None` when exhausted."""
+        if not self._rows:
+            return None
+        return self._rows.pop(0)
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Pop and return up to `size` buffered rows."""
+        limit = self.arraysize if size is None else size
+        batch = self._rows[:limit]
+        del self._rows[:limit]
+        return batch
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return and clear all remaining buffered rows."""
+        rows = list(self._rows)
+        self._rows.clear()
+        return rows
+
+    async def close(self) -> None:
+        """Release any remaining buffered rows."""
+        self._rows.clear()
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("channel", [None, "orders", "override"])
 @pytest.mark.parametrize("shared_feed", [False, True], ids=["independent-feed", "shared-feed"])
@@ -719,24 +791,19 @@ async def test_channel_bus_spanner_source_delivers_once_per_output_channel(
         def close(self) -> None:
             pass
 
-        async def query(
-            self, sql: str, params_json: str | None, staleness_mode: str, staleness_ms: int
-        ) -> dict[str, Any]:
-            self.calls.append((sql, params_json))
-            return {
-                "columns": ["data_change_record"],
-                "rows": [
-                    [
-                        [
-                            {
-                                "table_name": "orders",
-                                "mod_type": "INSERT",
-                                "mods": [{"keys": {"id": 1}}],
-                            }
-                        ]
-                    ]
-                ],
-            }
+        def cursor(
+            self,
+            *,
+            staleness_mode: str = "strong",
+            staleness_value: int = 0,
+            request_tag: str | None = None,
+            transaction_tag: str | None = None,
+            param_encoder: Callable[[Any], str | None] | None = None,
+            lazy_begin: bool = False,
+        ) -> _SpannerChangeStreamCursor:
+            """Create an async change-stream cursor bound to this client double."""
+            _ = (staleness_mode, staleness_value, request_tag, transaction_tag, lazy_begin)
+            return _SpannerChangeStreamCursor(self.calls, param_encoder)
 
     client = Client()
     driver = AsyncSpannerDriver(SpannerConfig(), client=cast(Any, client))

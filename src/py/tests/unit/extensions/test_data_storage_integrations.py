@@ -1218,7 +1218,12 @@ def test_duckdb_secret_config_executes_against_duckdb() -> None:
             value={"bearer_token": "tok'en"},
         ).to_create_secret_sql()
         client.execute(ddl)
-        secret = client.fetch_optional("SELECT name, type FROM duckdb_secrets() WHERE name = 'http_lake'")
+        cur = client.cursor()
+        cur.execute("SELECT name, type FROM duckdb_secrets() WHERE name = 'http_lake'")
+        row = cur.fetchone()
+        assert row is not None
+        assert cur.description is not None
+        secret = {col[0]: val for col, val in zip(cur.description, row, strict=True)}
         assert secret == {"name": "http_lake", "type": "http"}
     finally:
         client.close()

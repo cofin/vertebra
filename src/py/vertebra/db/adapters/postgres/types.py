@@ -123,15 +123,17 @@ class PostgresQueryResult(msgspec.Struct, frozen=True, gc=False):
             msg = "PostgresQueryResult.rows must be a tuple of row tuples"
             raise TypeError(msg)
         expected_width = len(self.columns)
+        scalar_types = _SCALAR_RESULT_TYPES
         for row in self.rows:
-            if not isinstance(row, tuple):
+            if type(row) is not tuple:
                 msg = "Each PostgresQueryResult row must be a tuple"
                 raise TypeError(msg)
             if len(row) != expected_width:
                 msg = f"Row width {len(row)} does not match column count {expected_width}"
                 raise ValueError(msg)
             for cell in row:
-                _reject_nested_parameter(cell)
+                if type(cell) not in scalar_types:
+                    _reject_nested_parameter(cell)
         _validate_int(self.affected_rows, "affected_rows", 0, _U64_MAX)
         if not isinstance(self.command_tag, str):
             msg = "PostgresQueryResult.command_tag must be a str"
@@ -684,8 +686,13 @@ def _validate_int(value: object, field_name: str, min_value: int, max_value: int
         raise ValueError(msg)
 
 
+_SCALAR_RESULT_TYPES: Final[frozenset[type]] = frozenset((int, str, float, bool, bytes, type(None)))
+
+
 def _reject_nested_parameter(value: object) -> None:
     """Ensure PgParameter never appears nested inside a SQL value or container."""
+    if type(value) in _SCALAR_RESULT_TYPES:
+        return
     stack: list[object] = [value]
     seen: set[int] = set()
     while stack:

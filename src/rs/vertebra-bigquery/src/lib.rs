@@ -3,6 +3,7 @@
 pub mod arrow_ipc;
 pub mod client;
 pub mod codec;
+pub mod cursor;
 pub mod errors;
 
 use std::collections::HashMap;
@@ -23,9 +24,13 @@ use crate::codec::{
     BigQueryAppendResult, BigQueryArrowCompression, BigQueryCellValue, BigQueryDryRunResult,
     BigQueryFieldSchema, BigQueryQueryOptions, BigQueryQueryResult, parse_query_parameters_json,
 };
+use crate::cursor::{
+    CursorQueryOptions, PyAsyncBigQueryCursor, PySyncBigQueryCursor, cursor_not_supported_err,
+    extract_labels,
+};
 use crate::errors::bigquery_error_to_py;
 
-const BIGQUERY_COMPLETION_DRAINER_ATTR: &str = "_vertebra_bigquery_completion_drainer";
+pub(crate) const BIGQUERY_COMPLETION_DRAINER_ATTR: &str = "_vertebra_bigquery_completion_drainer";
 
 /// Whether this build targets free-threaded Python (3.14t+).
 #[cfg(Py_GIL_DISABLED)]
@@ -33,7 +38,7 @@ pub const FREE_THREADED: bool = true;
 #[cfg(not(Py_GIL_DISABLED))]
 pub const FREE_THREADED: bool = false;
 
-fn cell_to_py(py: Python<'_>, cell: &BigQueryCellValue) -> PyResult<Py<PyAny>> {
+pub(crate) fn cell_to_py(py: Python<'_>, cell: &BigQueryCellValue) -> PyResult<Py<PyAny>> {
     match cell {
         BigQueryCellValue::Null => Ok(py.None()),
         BigQueryCellValue::Bool(b) => Ok((*b).into_pyobject(py)?.to_owned().into_any().unbind()),
@@ -300,6 +305,54 @@ impl PySyncBigQueryClient {
     }
 
     #[pyo3(signature = (
+        *,
+        session_id=None,
+        destination_table=None,
+        write_disposition=None,
+        maximum_bytes_billed=None,
+        job_timeout_ms=None,
+        priority=None,
+        labels=None,
+        param_encoder=None,
+        lazy_begin=false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn cursor(
+        &self,
+        py: Python<'_>,
+        session_id: Option<String>,
+        destination_table: Option<String>,
+        write_disposition: Option<String>,
+        maximum_bytes_billed: Option<i64>,
+        job_timeout_ms: Option<u64>,
+        priority: Option<String>,
+        labels: Option<&Bound<'_, PyAny>>,
+        param_encoder: Option<Py<PyAny>>,
+        lazy_begin: bool,
+    ) -> PyResult<PySyncBigQueryCursor> {
+        if lazy_begin {
+            return Err(cursor_not_supported_err(
+                py,
+                "BigQuery client cursors require autocommit and do not support lazy_begin",
+            ));
+        }
+        let options = CursorQueryOptions {
+            destination_table,
+            write_disposition,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            priority,
+            labels: extract_labels(labels)?,
+        };
+        Ok(PySyncBigQueryCursor::new(
+            Arc::clone(&self.inner),
+            session_id,
+            options,
+            param_encoder,
+        ))
+    }
+
+    #[pyo3(signature = (
         sql,
         params_json=None,
         session_id=None,
@@ -550,6 +603,54 @@ impl PyAsyncBigQueryClient {
     }
 
     #[pyo3(signature = (
+        *,
+        session_id=None,
+        destination_table=None,
+        write_disposition=None,
+        maximum_bytes_billed=None,
+        job_timeout_ms=None,
+        priority=None,
+        labels=None,
+        param_encoder=None,
+        lazy_begin=false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn cursor(
+        &self,
+        py: Python<'_>,
+        session_id: Option<String>,
+        destination_table: Option<String>,
+        write_disposition: Option<String>,
+        maximum_bytes_billed: Option<i64>,
+        job_timeout_ms: Option<u64>,
+        priority: Option<String>,
+        labels: Option<&Bound<'_, PyAny>>,
+        param_encoder: Option<Py<PyAny>>,
+        lazy_begin: bool,
+    ) -> PyResult<PyAsyncBigQueryCursor> {
+        if lazy_begin {
+            return Err(cursor_not_supported_err(
+                py,
+                "BigQuery client cursors require autocommit and do not support lazy_begin",
+            ));
+        }
+        let options = CursorQueryOptions {
+            destination_table,
+            write_disposition,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            priority,
+            labels: extract_labels(labels)?,
+        };
+        Ok(PyAsyncBigQueryCursor::new(
+            Arc::clone(&self.inner),
+            session_id,
+            options,
+            param_encoder,
+        ))
+    }
+
+    #[pyo3(signature = (
         sql,
         params_json=None,
         session_id=None,
@@ -710,5 +811,6 @@ pub fn _bigquery(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("GIL_USED", false)?;
     m.add_class::<PySyncBigQueryClient>()?;
     m.add_class::<PyAsyncBigQueryClient>()?;
+    cursor::register(m)?;
     Ok(())
 }

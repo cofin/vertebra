@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+import os
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
+from operator import attrgetter
 from typing import TYPE_CHECKING, Any, ClassVar, Self
+
+from anyio import CancelScope
 
 from vertebra.db.adapters.oracle.config import OracleConfig, OracleSessionAttrs
 from vertebra.db.adapters.oracle.core import ORACLE_DIALECT_TAG, OracleCore
@@ -22,10 +26,13 @@ from vertebra.db.arrow import (
     _table_to_rows_and_cols,
 )
 from vertebra.db.driver import AsyncDatabaseDriver, InterfaceError, NotificationEvent
+from vertebra.db.driver._common import _lease_releaser
 from vertebra.db.rls import TenantScopeConfig
+from vertebra.utils.schema import to_value_type
 from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
+    from vertebra._oracle import AsyncOracleCursor
     from vertebra.db.cdc import ChangeFeed
 
 __all__ = (
@@ -38,6 +45,10 @@ _ASYNC_PINNED_TX: ContextVar[dict[int, tuple[int, int | None, Any, bool]] | None
     "_ASYNC_PINNED_TX",
     default=None,
 )
+_FETCH_ROWS = attrgetter("fetch_rows")
+_FETCH_DICTS = attrgetter("fetch_dicts")
+_FETCH_VALUE = attrgetter("fetch_value")
+_EXECUTE_DML = attrgetter("execute_dml")
 
 
 class AsyncOraclePool:
@@ -244,6 +255,41 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         self._last_pipeline_outcomes: tuple[Any, ...] = ()
         self._last_out_binds: Any = None
         self._tx_events: list[str] = []
+        features = self.config.driver_features
+        self._cursor_opts: dict[str, Any] = {
+            "enable_uuid_binary": features.enable_uuid_binary,
+            "fetch_decimals": features.fetch_decimals,
+            "vector_return_format": features.vector_return_format,
+            "enable_lowercase_column_names": features.enable_lowercase_column_names,
+        }
+        self._lease_at_checkout: bool = self._broker is not None
+        self._native_pool: Any = pool.native_pool if isinstance(pool, AsyncOraclePool) else pool
+        self._pool_target: Any = None if self._lease_at_checkout else self._native_pool
+
+    def _cursor_options(self) -> dict[str, Any]:
+        return self._cursor_opts
+
+    def cursor(self, *, lazy_begin: bool = False) -> AsyncOracleCursor:
+        """Return a native `AsyncOracleCursor` on the pinned transaction client or single client."""
+        active = self._get_pinned_lease()
+        if active is None:
+            if self._pool is not None:
+                raise InterfaceError(
+                    "cursor() needs an open transaction on a pooled Oracle driver; use checkout_cursor()"
+                )
+            active = self._client
+        cur: AsyncOracleCursor = active.cursor(**self._cursor_options(), lazy_begin=lazy_begin)
+        return cur
+
+    @asynccontextmanager
+    async def checkout_cursor(self, *, lazy_begin: bool = False) -> AsyncIterator[AsyncOracleCursor]:
+        """Check out a client, yield a native `AsyncOracleCursor`, and close the cursor on exit."""
+        async with self._checkout_client() as active_client:
+            cur: AsyncOracleCursor = active_client.cursor(**self._cursor_options(), lazy_begin=lazy_begin)
+            try:
+                yield cur
+            finally:
+                await cur.close()
 
     @property
     def out_binds(self) -> Any:
@@ -329,6 +375,8 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         """Establish or validate the underlying asynchronous Oracle session."""
         if self._pool is None:
             await self._client.connect()
+            if self._lease_at_checkout:
+                await self._attach_checkout_lease_async(self._client)
         self._closed = False
         return self
 
@@ -454,6 +502,9 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
             if from_pool and self._pool is not None:
                 with suppress(Exception):
                     await self._release_pool_client(active_client, discard=False)
+        if self._pool is None and self._lease_at_checkout:
+            with suppress(Exception):
+                self._client.release_lease()
         await self._client.close()
 
     async def enter_tenant_scope(
@@ -508,8 +559,69 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
                     await self._release_pool_client(active_client, discard=True)
                 return
         self._closed = True
+        if self._pool is None and self._lease_at_checkout:
+            with suppress(Exception):
+                self._client.release_lease()
         with suppress(Exception):
             await self._client.close()
+
+    def _single_call(
+        self,
+        pick: Callable[[Any], Callable[..., Awaitable[Any]]],
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None,
+        out_binds: Any,
+    ) -> Awaitable[Any]:
+        """Return the awaitable of one native single-call method for one statement."""
+        if self._pending_session_attrs is None:
+            target = self._get_pinned_lease()
+            if target is None:
+                target = self._client if self._pool is None else self._pool_target
+            if target is not None:
+                return pick(target)(sql, parameters or (), out_binds=out_binds, **self._cursor_opts)
+        return self._single_call_checked(pick, sql, parameters, out_binds)
+
+    async def _single_call_checked(
+        self,
+        pick: Callable[[Any], Callable[..., Awaitable[Any]]],
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None,
+        out_binds: Any,
+    ) -> Any:
+        """Run one statement on a client after applying session attributes or checking it out of the pool."""
+        active = self._get_pinned_lease()
+        if active is None and self._pool is None:
+            active = self._client
+        if active is not None:
+            self._apply_pending_session_attrs(active)
+            try:
+                return await pick(active)(sql, parameters or (), out_binds=out_binds, **self._cursor_opts)
+            finally:
+                self._capture_piggyback(active)
+        lease = await self._acquire_pool_client()
+        discard = False
+        try:
+            return await pick(lease)(sql, parameters or (), out_binds=out_binds, **self._cursor_opts)
+        except BaseException as exc:
+            discard = bool(getattr(lease, "closed", False)) or OracleCore.is_fatal_transport_error(exc)
+            raise
+        finally:
+            await self._release_pool_client(lease, discard=discard)
+
+    async def execute_dml(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[int, Any]:
+        """Execute a statement and return its row count and last row id."""
+        rowcount, lastrowid, out_values, touches = await self._single_call(
+            _EXECUTE_DML, sql, parameters, kwargs.get("out_binds")
+        )
+        self._last_out_binds = out_values
+        if touches:
+            OracleCore.track_session_context_sql(self._session_context, sql, parameters)
+        return rowcount, lastrowid
 
     async def execute(
         self,
@@ -518,31 +630,8 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         **kwargs: Any,
     ) -> int:
         """Execute a DML, DDL, or PL/SQL statement asynchronously and return affected row count."""
-        in_params, out_binds, out_vars = OracleCore.split_out_bind_parameters(parameters, kwargs.get("out_binds"))
-        coerced = OracleCore.coerce_parameters(in_params, features=self.config.driver_features)
-        param_count = len(coerced) if coerced is not None else 0
-        self._lookup_or_cache_statement(sql, param_count=param_count, param_plan=b"\x00\x01")
-        grant = self._acquire_broker_lease()
-        try:
-            async with self._checkout_client() as active_client:
-                OracleCore.track_session_context_sql(self._session_context, sql, in_params)
-                result = await active_client.execute(
-                    sql,
-                    coerced,
-                    out_binds=out_binds,
-                    fetch_decimals=self.config.driver_features.fetch_decimals,
-                    enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
-                )
-                self._last_out_binds = OracleCore.populate_out_bind_vars(
-                    out_vars,
-                    result,
-                    features=self.config.driver_features,
-                )
-                if isinstance(result, int):
-                    return max(result, 0)
-                return max(int(result.rowcount), 0)
-        finally:
-            self._release_broker_lease(grant)
+        rowcount, _ = await self.execute_dml(sql, parameters, **kwargs)
+        return rowcount
 
     async def execute_many(
         self,
@@ -554,17 +643,9 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         _ = kwargs
         if not parameter_sets:
             return 0
-        coerced_seq = [
-            OracleCore.coerce_parameters(p, features=self.config.driver_features) or () for p in parameter_sets
-        ]
-        first_len = len(coerced_seq[0]) if coerced_seq else 0
-        self._lookup_or_cache_statement(sql, param_count=first_len, param_plan=b"\x00\x01")
-        grant = self._acquire_broker_lease()
-        try:
-            async with self._checkout_client() as active_client:
-                return int(await active_client.execute_many(sql, coerced_seq))
-        finally:
-            self._release_broker_lease(grant)
+        async with self.checkout_cursor() as cur:
+            await cur.executemany(sql, parameter_sets)
+            return max(cur.rowcount, 0)
 
     async def execute_tuples(
         self,
@@ -573,8 +654,10 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         **kwargs: Any,
     ) -> list[tuple[Any, ...]]:
         """Execute a query or `DML ... RETURNING ... INTO` statement and return positional tuples."""
-        rows, _ = await self.execute_with_description(sql, parameters, **kwargs)
-        return rows
+        self._last_out_binds = None
+        rows, _ = await self._single_call(_FETCH_ROWS, sql, parameters, kwargs.get("out_binds"))
+        result: list[tuple[Any, ...]] = rows
+        return result
 
     async def execute_with_description(
         self,
@@ -583,44 +666,11 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         **kwargs: Any,
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute SQL asynchronously and return `(rows, column_names)`."""
-        in_params, out_binds, out_vars = OracleCore.split_out_bind_parameters(parameters, kwargs.get("out_binds"))
-        coerced = OracleCore.coerce_parameters(in_params, features=self.config.driver_features)
-        param_count = len(coerced) if coerced is not None else 0
-        self._lookup_or_cache_statement(sql, param_count=param_count, param_plan=b"\x00\x01")
-        grant = self._acquire_broker_lease()
-        try:
-            async with self._checkout_client() as active_client:
-                OracleCore.track_session_context_sql(self._session_context, sql, in_params)
-                lowercase = self.config.driver_features.enable_lowercase_column_names
-                fetch_decimals = self.config.driver_features.fetch_decimals
-                if OracleCore.is_dml_or_plsql(sql):
-                    result = await active_client.execute(
-                        sql,
-                        coerced,
-                        out_binds=out_binds,
-                        fetch_decimals=fetch_decimals,
-                        enable_lowercase_column_names=lowercase,
-                    )
-                else:
-                    result = await active_client.query(
-                        sql,
-                        coerced,
-                        out_binds=out_binds,
-                        fetch_decimals=fetch_decimals,
-                        enable_lowercase_column_names=lowercase,
-                    )
-                self._last_out_binds = OracleCore.populate_out_bind_vars(
-                    out_vars,
-                    result,
-                    features=self.config.driver_features,
-                )
-                return OracleCore.coerce_result_rows_and_cols(
-                    result,
-                    features=self.config.driver_features,
-                    out_hints=out_binds,
-                )
-        finally:
-            self._release_broker_lease(grant)
+        self._last_out_binds = None
+        result: tuple[list[tuple[Any, ...]], tuple[str, ...]] = await self._single_call(
+            _FETCH_ROWS, sql, parameters, kwargs.get("out_binds")
+        )
+        return result
 
     async def select(
         self,
@@ -631,10 +681,28 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         **kwargs: Any,
     ) -> list[Any]:
         """Execute a `SELECT` or `DML ... RETURNING` query asynchronously and hydrate rows."""
-        rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
-        if not rows:
-            return []
-        return _hydrate_rows_with_schema(rows, cols, schema_type)
+        self._last_out_binds = None
+        out_binds = kwargs.get("out_binds")
+        if schema_type is None:
+            dicts: list[Any] = await self._single_call(_FETCH_DICTS, sql, parameters, out_binds)
+            return dicts
+        rows, names = await self._single_call(_FETCH_ROWS, sql, parameters, out_binds)
+        return _hydrate_rows_with_schema(rows, names, schema_type) if rows else []
+
+    async def select_value(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        value_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query and return the first scalar column, raising `NotFoundError` when 0 rows match."""
+        self._last_out_binds = None
+        value = await self._single_call(_FETCH_VALUE, sql, parameters, kwargs.get("out_binds"))
+        if value_type is not None and value is not None:
+            return to_value_type(value, value_type)
+        return value
 
     async def exec_returning_async(
         self,
@@ -662,23 +730,17 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
             force_shm is not None or threshold_rows == ARROW_SHM_THRESHOLD_ROWS
         ):
             coerced = OracleCore.coerce_parameters(parameters, features=self.config.driver_features)
-            param_count = len(coerced) if coerced is not None else 0
-            self._lookup_or_cache_statement(sql, param_count=param_count, param_plan=b"\x00\x01")
-            grant = self._acquire_broker_lease()
-            try:
-                async with self._checkout_client() as active_client:
-                    OracleCore.track_session_context_sql(self._session_context, sql, parameters)
-                    effective_batch = int(batch_size) if batch_size is not None and batch_size > 0 else 8192
-                    cursor: ArrowCursor = await active_client.query_arrow(
-                        sql,
-                        coerced,
-                        batch_size=effective_batch,
-                        force_shm=force_shm,
-                        enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
-                    )
-                    return cursor
-            finally:
-                self._release_broker_lease(grant)
+            async with self._checkout_client() as active_client:
+                OracleCore.track_session_context_sql(self._session_context, sql, parameters)
+                effective_batch = int(batch_size) if batch_size is not None and batch_size > 0 else 8192
+                cursor: ArrowCursor = await active_client.query_arrow(
+                    sql,
+                    coerced,
+                    batch_size=effective_batch,
+                    force_shm=force_shm,
+                    enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
+                )
+                return cursor
         rows, raw_cols = await self.execute_with_description(sql, parameters, **kwargs)
         cols = [col.lower() if self.config.driver_features.enable_lowercase_column_names else col for col in raw_cols]
         return ArrowCursor.from_rows(rows, cols, threshold_rows=threshold_rows)
@@ -807,6 +869,31 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         _ASYNC_PINNED_TX.set(updated or None)
         return entry
 
+    async def _acquire_broker_lease_async(self, timeout_ms: int = 5000, bind_key_hash: int = 0) -> Any:
+        broker = self._broker
+        if broker is None:
+            return None
+        plan = self._lease_plan()
+        if plan.has_acquire:
+            try:
+                if plan.acquire_is_coroutine:
+                    return await broker.acquire(os.getpid(), **plan.acquire_kwargs(timeout_ms, bind_key_hash))
+                return broker.acquire(os.getpid(), **plan.acquire_kwargs(timeout_ms, bind_key_hash))
+            except RuntimeError:
+                return None
+        lease_table = getattr(broker, "lease_table", None)
+        if lease_table is not None:
+            with suppress(RuntimeError):
+                return lease_table.acquire(os.getpid())
+        return None
+
+    async def _attach_checkout_lease_async(self, client: Any, timeout_ms: int = 5000) -> bool:
+        lease = await self._acquire_broker_lease_async(timeout_ms)
+        if lease is None:
+            return False
+        client.attach_lease(_lease_releaser(self._broker, self._lease_plan(), lease))
+        return True
+
     async def _acquire_pool_client(self) -> Any:
         if self._pool is None:
             raise InterfaceError("Oracle connection pool is not configured")
@@ -814,16 +901,29 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         self._pending_session_attrs = None
         acquire_kwargs = OracleCore.build_session_attr_acquire_kwargs(attrs)
         if hasattr(self._pool, "acquire_from_pool"):
-            return await self._pool.acquire_from_pool(**acquire_kwargs)
-        return await self._pool.acquire(**acquire_kwargs)
+            client = await self._pool.acquire_from_pool(**acquire_kwargs)
+        else:
+            client = await self._pool.acquire(**acquire_kwargs)
+        if self._lease_at_checkout:
+            try:
+                await self._attach_checkout_lease_async(client)
+            except BaseException:
+                await self._release_pool_client(client, discard=False)
+                raise
+        return client
 
     async def _release_pool_client(self, lease: Any, *, discard: bool = False) -> None:
         if self._pool is None:
             return
-        if hasattr(self._pool, "release_to_pool"):
-            await self._pool.release_to_pool(lease, discard=discard)
-        else:
-            await self._pool.release(lease, discard=discard)
+        with CancelScope(shield=True):
+            self._capture_piggyback(lease)
+            if self._lease_at_checkout:
+                with suppress(Exception):
+                    lease.release_lease()
+            if hasattr(self._pool, "release_to_pool"):
+                await self._pool.release_to_pool(lease, discard=discard)
+            else:
+                await self._pool.release(lease, discard=discard)
 
     @asynccontextmanager
     async def _checkout_client(self) -> AsyncIterator[Any]:

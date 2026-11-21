@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, ClassVar, cast
 
 import pytest
-from sqlspec.core import ParameterStyle, ParameterStyleConfig, StatementConfig, TypedParameter
+from sqlspec.core import ParameterStyle, ParameterStyleConfig, StatementConfig
 from sqlspec.data_dictionary import get_dialect_config
 from sqlspec.data_dictionary.dialects.mysql.dictionary import (
     MySQLAsyncDataDictionary as UpstreamMySQLAsyncDataDictionary,
@@ -24,6 +24,7 @@ from sqlspec.driver import (
     SyncDataDictionaryBase,
     SyncDriverAdapterBase,
 )
+from sqlspec.driver._common import cache_hit_hooks_unchanged
 from sqlspec.exceptions import (
     CheckViolationError,
     ConnectionTimeoutError,
@@ -42,6 +43,7 @@ from sqlspec.exceptions import (
     UniqueViolationError,
 )
 from sqlspec.extensions.events import AsyncEventBackendProtocol, SyncEventBackendProtocol
+from sqlspec.observability import ObservabilityConfig, ObservabilityRuntime
 
 from vertebra._vertebra import (
     BigQueryError,
@@ -50,6 +52,7 @@ from vertebra._vertebra import (
     DatabaseError,
     GoogleCloudAuthError,
     GoogleCloudError,
+    InterfaceError,
     NotFoundError,
     NotSupportedError,
     PoolExhaustedError,
@@ -61,9 +64,13 @@ from vertebra._vertebra import (
 )
 from vertebra._vertebra import DataError as NativeDataError
 from vertebra._vertebra import IntegrityError as NativeIntegrityError
+from vertebra._vertebra import InterfaceError as NativeInterfaceError
 from vertebra._vertebra import OperationalError as NativeOperationalError
+from vertebra.db import dbapi
+from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
 from vertebra.db.adapters.sqlite.config import SQLiteConfig
-from vertebra.db.driver import AsyncDatabaseDriver, SyncDatabaseDriver
+from vertebra.db.driver import AsyncDatabaseDriver, SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDriver
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.sqlspec._driver import (
     AsyncAdapterConfig,
@@ -72,9 +79,113 @@ from vertebra.extensions.sqlspec._driver import (
     LazyStoreAttr,
     SyncAdapterConfig,
 )
+from vertebra.extensions.sqlspec.adapters.bigquery.driver import BigQueryAsyncDriver, BigQuerySyncDriver
+from vertebra.extensions.sqlspec.adapters.duckdb.driver import DuckDBAsyncDriver, DuckDBSyncDriver
+from vertebra.extensions.sqlspec.adapters.mssql.driver import MSSQLAsyncDriver, MSSQLSyncDriver
+from vertebra.extensions.sqlspec.adapters.mysql.driver import MySQLAsyncDriver, MySQLSyncDriver
 from vertebra.extensions.sqlspec.adapters.oracle import OracleAsyncConfig, OracleSyncConfig
+from vertebra.extensions.sqlspec.adapters.oracle.driver import OracleAsyncDriver, OracleSyncDriver
 from vertebra.extensions.sqlspec.adapters.postgres import PostgresAsyncConfig, PostgresSyncConfig
+from vertebra.extensions.sqlspec.adapters.postgres.driver import PostgresAsyncDriver, PostgresSyncDriver
+from vertebra.extensions.sqlspec.adapters.spanner.driver import SpannerAsyncDriver, SpannerSyncDriver
+from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteAsyncDriver, SQLiteSyncDriver
 from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
+
+
+class _RecordingSyncCursor:
+    """Minimal sync DB-API cursor double backed by `_RecordingSyncNativeDriver`."""
+
+    def __init__(self, driver: "_RecordingSyncNativeDriver") -> None:
+        self._driver = driver
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: int | None = None
+        self.closed: bool = False
+        self._rows: list[tuple[Any, ...]] = []
+
+    def execute(self, sql: str, parameters: Any = None) -> None:
+        self._driver.calls.append(("execute", sql, parameters))
+        upper = sql.lstrip().upper()
+        if upper.startswith(("SELECT", "WITH", "PRAGMA", "VALUES")) or "RETURNING" in upper:
+            cols = self._driver._columns or (list(self._driver._rows[0].keys()) if self._driver._rows else ["column_0"])
+            self.description = tuple((col, None, None, None, None, None, None) for col in cols)
+            self._rows = [tuple(row.get(col) for col in cols) for row in self._driver._rows]
+            self.rowcount = -1
+        else:
+            self.description = None
+            self._rows = []
+            self.rowcount = 1
+
+    def executemany(self, sql: str, parameter_sets: Sequence[Any]) -> None:
+        batch = list(parameter_sets)
+        self._driver.calls.append(("executemany", sql, batch))
+        self.description = None
+        self._rows = []
+        self.rowcount = len(batch)
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = self._rows
+        self._rows = []
+        return rows
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows.pop(0) if self._rows else None
+
+    def fetchmany(self, size: int = 1) -> list[tuple[Any, ...]]:
+        chunk = self._rows[:size]
+        self._rows = self._rows[size:]
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _RecordingAsyncCursor:
+    """Minimal async DB-API cursor double backed by `_RecordingAsyncNativeDriver`."""
+
+    def __init__(self, driver: "_RecordingAsyncNativeDriver") -> None:
+        self._driver = driver
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: int | None = None
+        self.closed: bool = False
+        self._rows: list[tuple[Any, ...]] = []
+
+    async def execute(self, sql: str, parameters: Any = None) -> None:
+        self._driver.calls.append(("execute", sql, parameters))
+        upper = sql.lstrip().upper()
+        if upper.startswith(("SELECT", "WITH", "PRAGMA", "VALUES")) or "RETURNING" in upper:
+            cols = self._driver._columns or (list(self._driver._rows[0].keys()) if self._driver._rows else ["column_0"])
+            self.description = tuple((col, None, None, None, None, None, None) for col in cols)
+            self._rows = [tuple(row.get(col) for col in cols) for row in self._driver._rows]
+            self.rowcount = -1
+        else:
+            self.description = None
+            self._rows = []
+            self.rowcount = 1
+
+    async def executemany(self, sql: str, parameter_sets: Sequence[Any]) -> None:
+        batch = list(parameter_sets)
+        self._driver.calls.append(("executemany", sql, batch))
+        self.description = None
+        self._rows = []
+        self.rowcount = len(batch)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = self._rows
+        self._rows = []
+        return rows
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows.pop(0) if self._rows else None
+
+    async def fetchmany(self, size: int = 1) -> list[tuple[Any, ...]]:
+        chunk = self._rows[:size]
+        self._rows = self._rows[size:]
+        return chunk
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class _RecordingSyncNativeDriver(SyncDatabaseDriver[Any]):
@@ -137,6 +248,98 @@ class _RecordingSyncNativeDriver(SyncDatabaseDriver[Any]):
     def rollback(self) -> None:
         self._in_tx = False
 
+    def cursor(self, *, lazy_begin: bool = False) -> _RecordingSyncCursor:
+        _ = lazy_begin
+        return _RecordingSyncCursor(self)
+
+
+class _SingleCallSyncCursor(_RecordingSyncCursor):
+    """Sync cursor double propagating configured errors, rowcount, and lastrowid."""
+
+    _driver: "_SingleCallSyncNative"
+
+    def __init__(self, driver: "_SingleCallSyncNative") -> None:
+        super().__init__(driver)
+
+    def execute(self, sql: str, parameters: Any = None) -> None:
+        if self._driver.fail_with is not None:
+            raise self._driver.fail_with
+        super().execute(sql, parameters)
+        self.lastrowid = self._driver.lastrowid
+        if self.description is None:
+            self.rowcount = self._driver.rowcount
+
+
+class _SingleCallSyncClient:
+    """Sync client double recording single-call fetch_rows and execute_dml invocations."""
+
+    def __init__(self, driver: "_SingleCallSyncNative") -> None:
+        self._driver = driver
+
+    def fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        self._driver.calls.append(("fetch_rows", sql, params))
+        if self._driver.fail_with is not None:
+            raise self._driver.fail_with
+        cols = self._driver._columns or (list(self._driver._rows[0].keys()) if self._driver._rows else [])
+        tuple_rows = [tuple(r.get(c) for c in cols) for r in self._driver._rows]
+        return tuple_rows, tuple(cols)
+
+    def execute_dml(self, sql: str, params: Any = ()) -> tuple[int, int | None]:
+        self._driver.calls.append(("client_execute_dml", sql, params))
+        if self._driver.fail_with is not None:
+            raise self._driver.fail_with
+        return self._driver.rowcount, self._driver.lastrowid
+
+
+class _SingleCallSyncNative(_RecordingSyncNativeDriver):
+    """Sync native driver double supporting single-call methods and optional bound client methods."""
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        columns: list[str] | None = None,
+        *,
+        rowcount: int = 1,
+        lastrowid: int | None = 7,
+        with_client: bool = False,
+        fail_with: BaseException | None = None,
+    ) -> None:
+        super().__init__(rows=rows, columns=columns)
+        self.rowcount = rowcount
+        self.lastrowid = lastrowid
+        self.fail_with = fail_with
+        if with_client:
+            self._client = _SingleCallSyncClient(self)
+            self._fetch_rows = self._client.fetch_rows
+            self._run_dml = self._client.execute_dml
+
+    def execute_with_description(
+        self,
+        sql: str,
+        parameters: Any = None,
+        **kwargs: Any,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        if self.fail_with is not None:
+            raise self.fail_with
+        return super().execute_with_description(sql, parameters, **kwargs)
+
+    def execute_dml(
+        self,
+        sql: str,
+        parameters: Any = None,
+        **kwargs: Any,
+    ) -> tuple[int, int | None]:
+        _ = kwargs
+        self.calls.append(("execute_dml", sql, parameters))
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.rowcount, self.lastrowid
+
+    def cursor(self, *, lazy_begin: bool = False) -> _SingleCallSyncCursor:
+        _ = lazy_begin
+        self.calls.append(("cursor", "", None))
+        return _SingleCallSyncCursor(self)
+
 
 class _RecordingAsyncNativeDriver(AsyncDatabaseDriver[Any]):
     """Minimal native async driver double recording calls for BaseAsyncDriver verification."""
@@ -198,6 +401,104 @@ class _RecordingAsyncNativeDriver(AsyncDatabaseDriver[Any]):
     async def rollback(self) -> None:
         self._in_tx = False
 
+    def cursor(self, *, lazy_begin: bool = False) -> _RecordingAsyncCursor:
+        _ = lazy_begin
+        return _RecordingAsyncCursor(self)
+
+
+class _SingleCallAsyncCursor(_RecordingAsyncCursor):
+    """Async cursor double propagating configured errors, rowcount, and lastrowid."""
+
+    _driver: "_SingleCallAsyncNative"
+
+    def __init__(self, driver: "_SingleCallAsyncNative") -> None:
+        super().__init__(driver)
+
+    async def execute(self, sql: str, parameters: Any = None) -> None:
+        self._driver.awaited += 1
+        if self._driver.fail_with is not None:
+            raise self._driver.fail_with
+        await super().execute(sql, parameters)
+        self.lastrowid = self._driver.lastrowid
+        if self.description is None:
+            self.rowcount = self._driver.rowcount
+
+
+class _SingleCallAsyncClient:
+    """Async client double recording single-call fetch_rows and execute_dml invocations."""
+
+    def __init__(self, driver: "_SingleCallAsyncNative") -> None:
+        self._driver = driver
+
+    async def fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        self._driver.awaited += 1
+        self._driver.calls.append(("fetch_rows", sql, params))
+        if self._driver.fail_with is not None:
+            raise self._driver.fail_with
+        cols = self._driver._columns or (list(self._driver._rows[0].keys()) if self._driver._rows else [])
+        tuple_rows = [tuple(r.get(c) for c in cols) for r in self._driver._rows]
+        return tuple_rows, tuple(cols)
+
+    async def execute_dml(self, sql: str, params: Any = ()) -> tuple[int, int | None]:
+        self._driver.awaited += 1
+        self._driver.calls.append(("client_execute_dml", sql, params))
+        if self._driver.fail_with is not None:
+            raise self._driver.fail_with
+        return self._driver.rowcount, self._driver.lastrowid
+
+
+class _SingleCallAsyncNative(_RecordingAsyncNativeDriver):
+    """Async native driver double supporting single-call methods and optional bound client methods."""
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        columns: list[str] | None = None,
+        *,
+        rowcount: int = 1,
+        lastrowid: int | None = 7,
+        with_client: bool = False,
+        fail_with: BaseException | None = None,
+    ) -> None:
+        super().__init__(rows=rows, columns=columns)
+        self.rowcount = rowcount
+        self.lastrowid = lastrowid
+        self.fail_with = fail_with
+        self.awaited: int = 0
+        if with_client:
+            self._client = _SingleCallAsyncClient(self)
+            self._fetch_rows = self._client.fetch_rows
+            self._run_dml = self._client.execute_dml
+
+    async def execute_with_description(
+        self,
+        sql: str,
+        parameters: Any = None,
+        **kwargs: Any,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        self.awaited += 1
+        if self.fail_with is not None:
+            raise self.fail_with
+        return await super().execute_with_description(sql, parameters, **kwargs)
+
+    async def execute_dml(
+        self,
+        sql: str,
+        parameters: Any = None,
+        **kwargs: Any,
+    ) -> tuple[int, int | None]:
+        _ = kwargs
+        self.awaited += 1
+        self.calls.append(("execute_dml", sql, parameters))
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.rowcount, self.lastrowid
+
+    def cursor(self, *, lazy_begin: bool = False) -> _SingleCallAsyncCursor:
+        _ = lazy_begin
+        self.calls.append(("cursor", "", None))
+        return _SingleCallAsyncCursor(self)
+
 
 class _SampleSyncAdapter(BaseSyncDriver):
     """Concrete BaseSyncDriver subclass for sqlite qmark execution."""
@@ -220,12 +521,14 @@ class _SampleAsyncAdapter(BaseAsyncDriver):
 
 
 def test_base_drivers_inherit_template_dispatch_and_with_cursor_cache_contract() -> None:
-    """BaseSyncDriver and BaseAsyncDriver inherit upstream execute/select and yield connection in with_cursor."""
+    """BaseSyncDriver inherits upstream execute/select and yields a closed-on-exit native cursor in with_cursor."""
     sync_native = _RecordingSyncNativeDriver(rows=[], columns=["id", "name"])
     sync_adapter = _SampleSyncAdapter(sync_native)
     assert isinstance(sync_adapter, SyncDriverAdapterBase)
     with sync_adapter.with_cursor(sync_native) as cursor:
-        assert cursor is sync_native
+        assert isinstance(cursor, _RecordingSyncCursor)
+        assert cursor.closed is False
+    assert cursor.closed is True
 
     empty_res = sync_adapter.execute("SELECT id, name FROM users WHERE id = ?", 99)
     assert empty_res.all() == []
@@ -235,12 +538,14 @@ def test_base_drivers_inherit_template_dispatch_and_with_cursor_cache_contract()
 
 @pytest.mark.anyio
 async def test_base_async_driver_preserves_zero_row_columns_and_cursor_contract() -> None:
-    """BaseAsyncDriver preserves zero-row ordered column names via query_with_columns."""
+    """BaseAsyncDriver preserves zero-row ordered column names via native cursor description."""
     async_native = _RecordingAsyncNativeDriver(rows=[], columns=["alpha", "beta"])
     async_adapter = _SampleAsyncAdapter(async_native)
     assert isinstance(async_adapter, AsyncDriverAdapterBase)
     async with async_adapter.with_cursor(async_native) as cursor:
-        assert cursor is async_native
+        assert isinstance(cursor, _RecordingAsyncCursor)
+        assert cursor.closed is False
+    assert cursor.closed is True
 
     empty_res = await async_adapter.execute("SELECT alpha, beta FROM items WHERE 1 = 0")
     assert empty_res.all() == []
@@ -248,14 +553,8 @@ async def test_base_async_driver_preserves_zero_row_columns_and_cursor_contract(
     assert empty_res.num_rows == 0
 
 
-def test_unwrap_typed_parameters_and_non_mutating_statement_config_merge() -> None:
-    """TypedParameter wrappers unwrap cleanly and _merge_statement_config never mutates its base."""
-    assert BaseSyncDriver._unwrap_typed_parameters([TypedParameter(42, int), {"k": TypedParameter("v", str)}]) == [
-        42,
-        {"k": "v"},
-    ]
-    assert BaseSyncDriver._unwrap_typed_parameters({"a": TypedParameter(None, Any)}) == {"a": None}
-
+def test_non_mutating_statement_config_merge() -> None:
+    """_merge_statement_config never mutates its base StatementConfig."""
     base = StatementConfig(
         dialect="sqlite",
         parameter_config=ParameterStyleConfig(
@@ -267,6 +566,24 @@ def test_unwrap_typed_parameters_and_non_mutating_statement_config_merge() -> No
     assert base.dialect == "sqlite"
     assert updated.dialect == "mysql"
     assert updated.enable_caching is False
+
+
+@pytest.mark.parametrize(
+    "hook_name",
+    [
+        "_unwrap_typed_parameters",
+        "_normalize_bound_params",
+        "_normalize_statement_params",
+        "_prepare_native_parameters",
+        "_compile_for_native",
+        "_fetch_rows_with_columns",
+    ],
+)
+@pytest.mark.parametrize("driver_cls", [BaseSyncDriver, BaseAsyncDriver])
+def test_base_drivers_omit_removed_legacy_hooks(driver_cls: type[Any], hook_name: str) -> None:
+    """BaseSyncDriver and BaseAsyncDriver expose no legacy parameter, compile, or row-probe hooks."""
+    with pytest.raises(AttributeError):
+        getattr(driver_cls, hook_name)
 
 
 @pytest.mark.parametrize(
@@ -607,49 +924,6 @@ def test_sqlspec_package_ast_headers_and_zero_comments(module_path: Path) -> Non
     assert comments == [], f"{module_path} contains inline # comments: {comments}"
 
 
-def test_sqlite_driver_imports_unwrap_typed_parameters_from_sqlite_core() -> None:
-    """SQLite driver module imports unwrap_typed_parameters from sqlite.core rather than _driver."""
-    driver_path = _SQLSPEC_ADAPTERS_ROOT / "sqlite" / "driver.py"
-    tree = ast.parse(driver_path.read_text(encoding="utf-8"), filename=str(driver_path))
-
-    imported_sources: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                imported_sources[alias.name] = node.module
-
-    assert imported_sources.get("unwrap_typed_parameters") == "vertebra.extensions.sqlspec.adapters.sqlite.core"
-
-
-@pytest.mark.parametrize("adapter_name", ["postgres", "oracle", "sqlite", "mysql", "mssql", "duckdb"])
-def test_isolated_adapter_unwrap_typed_parameters(adapter_name: str) -> None:
-    """Each isolated adapter core unwraps TypedParameter recursively without aliasing input containers."""
-    core_mod = importlib.import_module(f"vertebra.extensions.sqlspec.adapters.{adapter_name}.core")
-    local_unwrap = core_mod.unwrap_typed_parameters
-    assert local_unwrap is not BaseSyncDriver._unwrap_typed_parameters
-
-    inner_list = [TypedParameter(None, Any), True, 3.5]
-    payload = {
-        "scalar": TypedParameter(7, int),
-        "nested": TypedParameter(TypedParameter("ok", str), str),
-        "tuple": (TypedParameter(1, int), "plain"),
-        "list": inner_list,
-    }
-    unwrapped = local_unwrap(payload)
-    assert unwrapped == {
-        "scalar": 7,
-        "nested": "ok",
-        "tuple": (1, "plain"),
-        "list": [None, True, 3.5],
-    }
-    assert unwrapped is not payload
-    assert unwrapped["list"] is not inner_list
-    assert isinstance(unwrapped["tuple"], tuple)
-    assert isinstance(unwrapped["list"], list)
-    assert local_unwrap("raw") == "raw"
-    assert local_unwrap(None) is None
-
-
 @pytest.mark.parametrize(
     ("adapter_name", "dialect", "parameter_style"),
     [
@@ -766,6 +1040,10 @@ def test_base_driver_module_surface_slots_and_lazy_store_attr() -> None:
 
     for slotted_cls in (BaseSyncDriver, BaseAsyncDriver, SyncAdapterConfig, AsyncAdapterConfig, LazyStoreAttr):
         assert "__slots__" in slotted_cls.__dict__
+    assert "_exception_handler" in BaseSyncDriver.__slots__
+    assert "_native_cursor" not in BaseSyncDriver.__slots__
+    assert "_exception_handler" in BaseAsyncDriver.__slots__
+    assert "_native_cursor" not in BaseAsyncDriver.__slots__
 
     sync_cfg = _CustomBuildSyncConfig("sqlite:///slots_check.db", share_pool=False)
     assert not hasattr(sync_cfg, "_driver_instance")
@@ -970,8 +1248,10 @@ async def test_replicas_route_read_sessions_and_connections_sync_and_async() -> 
     routing_sync.execute("INSERT INTO items VALUES (1)")
     assert replica_sync.connection_instance is not None
     assert sync_cfg.connection_instance is not None
-    assert replica_sync.connection_instance.calls[-1][0] == "execute_with_description"
+    assert replica_sync.connection_instance.calls[-1][0] == "execute"
+    assert "SELECT 1" in replica_sync.connection_instance.calls[-1][1]
     assert sync_cfg.connection_instance.calls[-1][0] == "execute"
+    assert "INSERT INTO items" in sync_cfg.connection_instance.calls[-1][1]
     sync_cfg.close_pool()
 
     async_cfg = _CustomBuildAsyncConfig(
@@ -994,8 +1274,10 @@ async def test_replicas_route_read_sessions_and_connections_sync_and_async() -> 
     await routing_async.execute("INSERT INTO items VALUES (1)")
     assert replica_async.connection_instance is not None
     assert async_cfg.connection_instance is not None
-    assert replica_async.connection_instance.calls[-1][0] == "execute_with_description"
+    assert replica_async.connection_instance.calls[-1][0] == "execute"
+    assert "SELECT 1" in replica_async.connection_instance.calls[-1][1]
     assert async_cfg.connection_instance.calls[-1][0] == "execute"
+    assert "INSERT INTO items" in async_cfg.connection_instance.calls[-1][1]
     await async_cfg.close_pool()
 
 
@@ -1789,3 +2071,1273 @@ async def test_changefeed_table_queue_publish_many_preserves_order(tmp_path: Pat
         assert am2 is not None and am2.event_id == async_ids[1] and am2.payload == {"i": 20}
     finally:
         await async_backend.shutdown()
+
+
+class _CountingSyncCursor:
+    """Proxy around a native sync cursor counting DB-API method and property accesses."""
+
+    def __init__(self, inner: Any, counter: dict[str, int]) -> None:
+        self._inner = inner
+        self._counter = counter
+
+    def execute(self, sql: str, params: Any = None) -> Any:
+        self._counter["execute"] = self._counter.get("execute", 0) + 1
+        if params is None:
+            return self._inner.execute(sql)
+        return self._inner.execute(sql, params)
+
+    def executemany(self, sql: str, params_seq: Any) -> Any:
+        self._counter["executemany"] = self._counter.get("executemany", 0) + 1
+        return self._inner.executemany(sql, params_seq)
+
+    def fetchall(self) -> Any:
+        self._counter["fetchall"] = self._counter.get("fetchall", 0) + 1
+        return self._inner.fetchall()
+
+    def fetchone(self) -> Any:
+        self._counter["fetchone"] = self._counter.get("fetchone", 0) + 1
+        return self._inner.fetchone()
+
+    def fetchmany(self, size: int | None = None) -> Any:
+        self._counter["fetchmany"] = self._counter.get("fetchmany", 0) + 1
+        if size is None:
+            return self._inner.fetchmany()
+        return self._inner.fetchmany(size)
+
+    def close(self) -> None:
+        self._counter["close"] = self._counter.get("close", 0) + 1
+        self._inner.close()
+
+    @property
+    def description(self) -> Any:
+        self._counter["description"] = self._counter.get("description", 0) + 1
+        return self._inner.description
+
+    @property
+    def rowcount(self) -> int:
+        self._counter["rowcount"] = self._counter.get("rowcount", 0) + 1
+        return int(self._inner.rowcount)
+
+    @property
+    def lastrowid(self) -> Any:
+        self._counter["lastrowid"] = self._counter.get("lastrowid", 0) + 1
+        return self._inner.lastrowid
+
+
+class _CountingSyncDriver:
+    """Proxy around a real native sync driver counting cursor openings and forwarded attributes."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.config = inner.config
+        self.cursor_calls = 0
+        self.cursor_counts: dict[str, int] = {}
+        self.forwarded_names: list[str] = []
+
+    def cursor(self) -> _CountingSyncCursor:
+        self.cursor_calls += 1
+        return _CountingSyncCursor(self._inner.cursor(), self.cursor_counts)
+
+    def __getattr__(self, name: str) -> Any:
+        self.forwarded_names.append(name)
+        return getattr(self._inner, name)
+
+
+def test_native_sync_cache_hit_opens_no_cursor() -> None:
+    """A cached sync SQLSpec query calls the bound client directly without opening a cursor."""
+    native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    counting = _CountingSyncDriver(native)
+    adapter = SQLiteSyncDriver(counting)
+    try:
+        assert counting.forwarded_names.count("_fetch_rows") == 1
+        assert counting.forwarded_names.count("_run_dml") == 1
+
+        first = adapter.execute("SELECT ? AS a", 10)
+        assert first.all() == [{"a": 10}]
+
+        cursor_calls_before = counting.cursor_calls
+        execute_calls_before = counting.cursor_counts.get("execute", 0)
+        counting.forwarded_names.clear()
+
+        second = adapter.execute("SELECT ? AS a", 25)
+        assert second.all() == [{"a": 25}]
+        assert counting.cursor_calls == cursor_calls_before
+        assert counting.cursor_counts.get("execute", 0) == execute_calls_before
+        assert counting.forwarded_names == []
+    finally:
+        native.close()
+
+
+@pytest.mark.parametrize("engine", ["sqlite", "duckdb"])
+def test_native_sync_with_cursor_yields_closed_on_exit_native_cursor(engine: str) -> None:
+    """with_cursor yields a native cursor distinct from connection and closes it on block exit."""
+
+    assert dbapi.InterfaceError is NativeInterfaceError
+    native: Any
+    adapter: BaseSyncDriver
+    if engine == "sqlite":
+        native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+        adapter = SQLiteSyncDriver(native)
+    else:
+        native = SyncDuckDBDriver(DuckDBConfig(path=":memory:"))
+        adapter = DuckDBSyncDriver(native)
+    try:
+        with adapter.with_cursor(adapter.connection) as cursor:
+            assert cursor is not adapter.connection
+        with pytest.raises(dbapi.InterfaceError):
+            cursor.fetchall()
+    finally:
+        native.close()
+
+
+def test_native_sync_dispatch_reads_description_rowcount_and_lastrowid() -> None:
+    """Native sync dispatch populates rows_affected, RETURNING data, and zero-row column_names from cursor state."""
+
+    native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    adapter = SQLiteSyncDriver(native)
+    try:
+        adapter.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)")
+        ins = adapter.execute("INSERT INTO items (name) VALUES (?)", "alpha")
+        assert ins.rows_affected == 1
+
+        ret = adapter.execute("INSERT INTO items (name) VALUES (?) RETURNING id", "beta")
+        assert ret.all() == [{"id": 2}]
+
+        empty = adapter.execute("SELECT id, name FROM items WHERE id = ?", 999)
+        assert empty.all() == []
+        assert empty.column_names == ["id", "name"]
+    finally:
+        native.close()
+
+
+@pytest.mark.parametrize("engine", ["sqlite", "duckdb"])
+def test_native_sync_execute_many_reports_engine_rowcount(engine: str) -> None:
+    """Native sync execute_many reports affected row counts for non-empty batches and skips native calls on empty."""
+
+    native: Any
+    adapter: BaseSyncDriver
+    if engine == "sqlite":
+        native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+        counting = _CountingSyncDriver(native)
+        adapter = SQLiteSyncDriver(counting)
+    else:
+        native = SyncDuckDBDriver(DuckDBConfig(path=":memory:"))
+        counting = _CountingSyncDriver(native)
+        adapter = DuckDBSyncDriver(counting)
+    try:
+        adapter.execute("CREATE TABLE batch_items (id INTEGER, name TEXT)")
+        res = adapter.execute_many(
+            "INSERT INTO batch_items (id, name) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c")],
+        )
+        assert res.rows_affected == 3
+
+        many_calls_before = counting.cursor_counts.get("executemany", 0)
+        empty_res = adapter.execute_many("INSERT INTO batch_items (id, name) VALUES (?, ?)", [])
+        assert empty_res.rows_affected == 0
+        assert counting.cursor_counts.get("executemany", 0) == many_calls_before
+    finally:
+        native.close()
+
+
+def test_native_sync_cursor_errors_map_to_sqlspec_exceptions() -> None:
+    """Native cursor errors map to sqlspec.exceptions preserving the native exception as __cause__."""
+
+    native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    adapter = SQLiteSyncDriver(native)
+    try:
+        adapter.execute("CREATE TABLE uniq_items (id INTEGER PRIMARY KEY)")
+        adapter.execute("INSERT INTO uniq_items (id) VALUES (?)", 1)
+
+        with pytest.raises(UniqueViolationError) as dup_info:
+            adapter.execute("INSERT INTO uniq_items (id) VALUES (?)", 1)
+        assert type(dup_info.value.__cause__) is NativeIntegrityError
+
+        with pytest.raises(SQLParsingError):
+            adapter.execute("SELECT * FROM missing_table_xyz")
+    finally:
+        native.close()
+
+
+def test_native_sync_driver_reuses_one_exception_handler() -> None:
+    """Every BaseSyncDriver reuses one exception handler clearing pending errors across calls."""
+
+    native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    adapter = SQLiteSyncDriver(native)
+    try:
+        assert adapter.handle_database_exceptions() is adapter.handle_database_exceptions()
+        with pytest.raises(SQLParsingError):
+            adapter.execute("SELECT * FROM nonexistent_table_abc")
+        ok = adapter.execute("SELECT 1 AS v")
+        assert ok.all() == [{"v": 1}]
+    finally:
+        native.close()
+
+    sample = _SampleSyncAdapter(_RecordingSyncNativeDriver())
+    assert sample.handle_database_exceptions() is sample.handle_database_exceptions()
+
+
+@pytest.mark.parametrize(
+    ("exc_factory", "expected_type"),
+    [
+        (lambda dbapi: dbapi.IntegrityError("UNIQUE constraint failed"), UniqueViolationError),
+        (lambda dbapi: dbapi.DataError("invalid value"), DataError),
+        (lambda dbapi: dbapi.NotSupportedError("unsupported feature"), DialectNotSupportedError),
+        (lambda dbapi: dbapi.OperationalError("database is locked"), OperationalError),
+        (lambda dbapi: dbapi.ProgrammingError("syntax error"), SQLParsingError),
+        (lambda dbapi: dbapi.InterfaceError("closed"), OperationalError),
+        (lambda _dbapi: QueryCancelledError("stopped"), OperationCancelledError),
+    ],
+)
+def test_map_native_database_exception_matches_cursor_error_classes(
+    exc_factory: Any,
+    expected_type: type[Exception],
+) -> None:
+    """_map_native_database_exception maps DB-API native cursor errors and QueryCancelledError to SQLSpec types."""
+
+    mapped = BaseSyncDriver._map_native_database_exception(exc_factory(dbapi))
+    assert isinstance(mapped, expected_type)
+
+
+class _CountingAsyncCursor:
+    """Proxy around a native async cursor counting DB-API method and property accesses."""
+
+    def __init__(self, inner: Any, counter: dict[str, int]) -> None:
+        self._inner = inner
+        self._counter = counter
+
+    async def execute(self, sql: str, params: Any = None) -> Any:
+        self._counter["execute"] = self._counter.get("execute", 0) + 1
+        if params is None:
+            return await self._inner.execute(sql)
+        return await self._inner.execute(sql, params)
+
+    async def executemany(self, sql: str, params_seq: Any) -> Any:
+        self._counter["executemany"] = self._counter.get("executemany", 0) + 1
+        return await self._inner.executemany(sql, params_seq)
+
+    async def fetchall(self) -> Any:
+        self._counter["fetchall"] = self._counter.get("fetchall", 0) + 1
+        return await self._inner.fetchall()
+
+    async def fetchone(self) -> Any:
+        self._counter["fetchone"] = self._counter.get("fetchone", 0) + 1
+        return await self._inner.fetchone()
+
+    async def fetchmany(self, size: int | None = None) -> Any:
+        self._counter["fetchmany"] = self._counter.get("fetchmany", 0) + 1
+        if size is None:
+            return await self._inner.fetchmany()
+        return await self._inner.fetchmany(size)
+
+    async def close(self) -> None:
+        self._counter["close"] = self._counter.get("close", 0) + 1
+        await self._inner.close()
+
+    @property
+    def description(self) -> Any:
+        self._counter["description"] = self._counter.get("description", 0) + 1
+        return self._inner.description
+
+    @property
+    def rowcount(self) -> int:
+        self._counter["rowcount"] = self._counter.get("rowcount", 0) + 1
+        return int(self._inner.rowcount)
+
+    @property
+    def lastrowid(self) -> Any:
+        self._counter["lastrowid"] = self._counter.get("lastrowid", 0) + 1
+        return self._inner.lastrowid
+
+
+class _CountingAsyncDriver:
+    """Proxy around a real native async driver counting cursor openings and forwarded attributes."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.config = inner.config
+        self.cursor_calls = 0
+        self.cursor_counts: dict[str, int] = {}
+        self.forwarded_names: list[str] = []
+
+    def cursor(self) -> _CountingAsyncCursor:
+        self.cursor_calls += 1
+        return _CountingAsyncCursor(self._inner.cursor(), self.cursor_counts)
+
+    def __getattr__(self, name: str) -> Any:
+        self.forwarded_names.append(name)
+        return getattr(self._inner, name)
+
+
+@pytest.mark.anyio
+async def test_native_async_cache_hit_opens_no_cursor() -> None:
+    """A cached async SQLSpec query calls the bound client directly without opening a cursor."""
+    native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    counting = _CountingAsyncDriver(native)
+    adapter = SQLiteAsyncDriver(counting)
+    try:
+        assert counting.forwarded_names.count("_fetch_rows") == 1
+        assert counting.forwarded_names.count("_run_dml") == 1
+
+        first = await adapter.execute("SELECT ? AS a", 10)
+        assert first.all() == [{"a": 10}]
+
+        cursor_calls_before = counting.cursor_calls
+        execute_calls_before = counting.cursor_counts.get("execute", 0)
+        counting.forwarded_names.clear()
+
+        second = await adapter.execute("SELECT ? AS a", 25)
+        assert second.all() == [{"a": 25}]
+        assert counting.cursor_calls == cursor_calls_before
+        assert counting.cursor_counts.get("execute", 0) == execute_calls_before
+        assert counting.forwarded_names == []
+    finally:
+        await native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", ["sqlite", "duckdb"])
+async def test_native_async_with_cursor_yields_closed_on_exit_native_cursor(engine: str) -> None:
+    """with_cursor yields a native async cursor distinct from connection and closes it on block exit."""
+
+    assert dbapi.InterfaceError is NativeInterfaceError
+    native: Any
+    adapter: BaseAsyncDriver
+    if engine == "sqlite":
+        native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+        adapter = SQLiteAsyncDriver(native)
+    else:
+        native = AsyncDuckDBDriver(DuckDBConfig(path=":memory:"))
+        adapter = DuckDBAsyncDriver(native)
+    try:
+        async with adapter.with_cursor(adapter.connection) as cursor:
+            assert cursor is not adapter.connection
+        with pytest.raises(dbapi.InterfaceError):
+            await cursor.fetchall()
+    finally:
+        await native.close()
+
+
+@pytest.mark.anyio
+async def test_native_async_dispatch_reads_description_rowcount_and_lastrowid() -> None:
+    """Native async dispatch populates rows_affected, RETURNING data, and zero-row column_names from cursor state."""
+
+    native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    adapter = SQLiteAsyncDriver(native)
+    try:
+        await adapter.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)")
+        ins = await adapter.execute("INSERT INTO items (name) VALUES (?)", "alpha")
+        assert ins.rows_affected == 1
+
+        ret = await adapter.execute("INSERT INTO items (name) VALUES (?) RETURNING id", "beta")
+        assert ret.all() == [{"id": 2}]
+
+        empty = await adapter.execute("SELECT id, name FROM items WHERE id = ?", 999)
+        assert empty.all() == []
+        assert empty.column_names == ["id", "name"]
+    finally:
+        await native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", ["sqlite", "duckdb"])
+async def test_native_async_execute_many_reports_engine_rowcount(engine: str) -> None:
+    """Native async execute_many reports affected row counts for non-empty batches and skips native calls on empty."""
+
+    native: Any
+    adapter: BaseAsyncDriver
+    if engine == "sqlite":
+        native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+        counting = _CountingAsyncDriver(native)
+        adapter = SQLiteAsyncDriver(counting)
+    else:
+        native = AsyncDuckDBDriver(DuckDBConfig(path=":memory:"))
+        counting = _CountingAsyncDriver(native)
+        adapter = DuckDBAsyncDriver(counting)
+    try:
+        await adapter.execute("CREATE TABLE batch_items (id INTEGER, name TEXT)")
+        res = await adapter.execute_many(
+            "INSERT INTO batch_items (id, name) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c")],
+        )
+        assert res.rows_affected == 3
+
+        many_calls_before = counting.cursor_counts.get("executemany", 0)
+        empty_res = await adapter.execute_many("INSERT INTO batch_items (id, name) VALUES (?, ?)", [])
+        assert empty_res.rows_affected == 0
+        assert counting.cursor_counts.get("executemany", 0) == many_calls_before
+    finally:
+        await native.close()
+
+
+@pytest.mark.anyio
+async def test_native_async_cursor_errors_map_to_sqlspec_exceptions() -> None:
+    """Native async cursor errors map to sqlspec.exceptions preserving the native exception as __cause__."""
+
+    native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    adapter = SQLiteAsyncDriver(native)
+    try:
+        await adapter.execute("CREATE TABLE uniq_items (id INTEGER PRIMARY KEY)")
+        await adapter.execute("INSERT INTO uniq_items (id) VALUES (?)", 1)
+
+        with pytest.raises(UniqueViolationError) as dup_info:
+            await adapter.execute("INSERT INTO uniq_items (id) VALUES (?)", 1)
+        assert type(dup_info.value.__cause__) is NativeIntegrityError
+
+        with pytest.raises(SQLParsingError):
+            await adapter.execute("SELECT * FROM missing_table_xyz")
+    finally:
+        await native.close()
+
+
+@pytest.mark.anyio
+async def test_native_async_driver_reuses_one_exception_handler() -> None:
+    """Every BaseAsyncDriver reuses one exception handler clearing pending errors across calls."""
+
+    native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    adapter = SQLiteAsyncDriver(native)
+    try:
+        assert adapter.handle_database_exceptions() is adapter.handle_database_exceptions()
+        with pytest.raises(SQLParsingError):
+            await adapter.execute("SELECT * FROM nonexistent_table_abc")
+        ok = await adapter.execute("SELECT 1 AS v")
+        assert ok.all() == [{"v": 1}]
+    finally:
+        await native.close()
+
+    sample = _SampleAsyncAdapter(_RecordingAsyncNativeDriver())
+    assert sample.handle_database_exceptions() is sample.handle_database_exceptions()
+
+
+def test_sqlite_select_stream_yields_expected_chunks() -> None:
+    """select_stream on SQLite with chunk_size=2 over five rows yields chunks of two, two, and one."""
+
+    native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    adapter = SQLiteSyncDriver(native)
+    try:
+        adapter.execute("CREATE TABLE stream_items (id INTEGER PRIMARY KEY, name TEXT)")
+        adapter.execute_many(
+            "INSERT INTO stream_items (id, name) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")],
+        )
+        batches = list(adapter.stream_arrow_batches("SELECT id, name FROM stream_items ORDER BY id", batch_size=2))
+        assert [batch.num_rows for batch in batches] == [2, 2, 1]
+
+        with adapter.select_stream("SELECT id, name FROM stream_items ORDER BY id", chunk_size=2) as stream:
+            rows = list(stream)
+        assert [row["id"] for row in rows] == [1, 2, 3, 4, 5]
+    finally:
+        native.close()
+
+
+_CACHE_HIT_SYNC_ADAPTERS = [
+    pytest.param(SQLiteSyncDriver, True, True, True, "fetch_rows", "client_execute_dml", id="sqlite"),
+    pytest.param(DuckDBSyncDriver, True, True, True, "fetch_rows", "client_execute_dml", id="duckdb"),
+    pytest.param(PostgresSyncDriver, True, True, False, "execute_with_description", "execute_dml", id="postgres"),
+    pytest.param(MySQLSyncDriver, True, True, False, "execute_with_description", "execute_dml", id="mysql"),
+    pytest.param(MSSQLSyncDriver, True, True, False, "execute_with_description", "execute_dml", id="mssql"),
+    pytest.param(OracleSyncDriver, False, False, False, "", "", id="oracle"),
+    pytest.param(SpannerSyncDriver, False, True, False, "", "", id="spanner"),
+    pytest.param(BigQuerySyncDriver, False, True, False, "", "", id="bigquery"),
+]
+
+_REGISTERED_CACHE_HIT_SYNC_ADAPTERS = [
+    pytest.param(SQLiteSyncDriver, True, "fetch_rows", "client_execute_dml", id="sqlite"),
+    pytest.param(DuckDBSyncDriver, True, "fetch_rows", "client_execute_dml", id="duckdb"),
+    pytest.param(PostgresSyncDriver, False, "execute_with_description", "execute_dml", id="postgres"),
+    pytest.param(MySQLSyncDriver, False, "execute_with_description", "execute_dml", id="mysql"),
+    pytest.param(MSSQLSyncDriver, False, "execute_with_description", "execute_dml", id="mssql"),
+]
+
+
+@pytest.mark.parametrize(
+    ("adapter_cls", "base_hooks_unchanged", "registered", "with_client", "fetch_call", "dml_call"),
+    _CACHE_HIT_SYNC_ADAPTERS,
+)
+def test_sync_cache_hit_executor_registration_follows_hook_overrides(
+    adapter_cls: type[BaseSyncDriver],
+    base_hooks_unchanged: bool,
+    registered: bool,
+    with_client: bool,
+    fetch_call: str,
+    dml_call: str,
+) -> None:
+    """Sync cache-hit executor registers when base hooks match or the adapter defines its own callables."""
+    _ = (fetch_call, dml_call)
+    assert cache_hit_hooks_unchanged(adapter_cls, BaseSyncDriver) is base_hooks_unchanged
+    adapter = adapter_cls(_SingleCallSyncNative(with_client=with_client))
+    if registered:
+        assert adapter._cache_hit_executor is BaseSyncDriver._run_cached_statement
+        assert isinstance(adapter._cache_hit_state, tuple)
+        assert len(adapter._cache_hit_state) == 3
+    else:
+        assert adapter._cache_hit_executor is None
+        assert adapter._cache_hit_state is None
+
+
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client", "fetch_call", "dml_call"),
+    _REGISTERED_CACHE_HIT_SYNC_ADAPTERS,
+)
+@pytest.mark.parametrize(
+    ("sql", "kind"),
+    [
+        pytest.param("SELECT 1 AS a", "fetch", id="select"),
+        pytest.param("UPDATE t SET a = 2", "dml", id="update"),
+    ],
+)
+def test_sync_cache_hit_makes_one_driver_call(
+    adapter_cls: type[BaseSyncDriver],
+    with_client: bool,
+    fetch_call: str,
+    dml_call: str,
+    sql: str,
+    kind: str,
+) -> None:
+    """A cached statement makes exactly one single-call driver invocation with no cursor opened."""
+    native = _SingleCallSyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    adapter = adapter_cls(native)
+    assert adapter._stmt_cache_enabled
+
+    adapter.execute(sql)
+    native.calls.clear()
+    adapter.execute(sql)
+
+    expected_call = fetch_call if kind == "fetch" else dml_call
+    cached = adapter._stmt_cache.get(sql)
+    assert cached is not None
+    assert len(native.calls) == 1
+    assert native.calls[0][0] == expected_call
+    assert native.calls[0][1] == cached.compiled_sql
+    assert all(entry[0] != "cursor" for entry in native.calls)
+
+
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client", "fetch_call", "dml_call"),
+    _REGISTERED_CACHE_HIT_SYNC_ADAPTERS,
+)
+def test_sync_cache_miss_runs_through_cursor(
+    adapter_cls: type[BaseSyncDriver],
+    with_client: bool,
+    fetch_call: str,
+    dml_call: str,
+) -> None:
+    """The first execution of a statement misses the cache and runs through a native cursor."""
+    _ = (fetch_call, dml_call)
+    native = _SingleCallSyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    adapter = adapter_cls(native)
+    assert adapter._stmt_cache_enabled
+
+    result = adapter.execute("SELECT 1 AS a")
+
+    call_names = [entry[0] for entry in native.calls]
+    assert "cursor" in call_names
+    assert "execute" in call_names
+    assert result.all() == [{"a": 1}]
+
+
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client", "fetch_call", "dml_call"),
+    _REGISTERED_CACHE_HIT_SYNC_ADAPTERS,
+)
+@pytest.mark.parametrize(
+    ("case_name", "sql", "rows", "columns", "rowcount", "lastrowid"),
+    [
+        pytest.param("select", "SELECT 1 AS a", [{"a": 1}], ["a"], 1, 7, id="select"),
+        pytest.param("empty_select", "SELECT 1 AS a", [], ["a"], 0, None, id="empty-select"),
+        pytest.param("insert", "INSERT INTO t (a) VALUES (1)", [], [], 1, 7, id="insert"),
+        pytest.param("update", "UPDATE t SET a = 2", [], [], 3, 7, id="update"),
+        pytest.param("update_no_match", "UPDATE t SET a = 2", [], [], 0, 7, id="update-no-match"),
+    ],
+)
+def test_sync_cache_hit_result_matches_method_path(
+    adapter_cls: type[BaseSyncDriver],
+    with_client: bool,
+    fetch_call: str,
+    dml_call: str,
+    case_name: str,
+    sql: str,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+    rowcount: int,
+    lastrowid: int | None,
+) -> None:
+    """Cached execution results match the method path across SELECT and DML shapes."""
+    _ = (fetch_call, dml_call)
+    exec_native = _SingleCallSyncNative(
+        rows=rows,
+        columns=columns,
+        rowcount=rowcount,
+        lastrowid=lastrowid,
+        with_client=with_client,
+    )
+    method_native = _SingleCallSyncNative(
+        rows=rows,
+        columns=columns,
+        rowcount=rowcount,
+        lastrowid=lastrowid,
+        with_client=with_client,
+    )
+    exec_adapter = adapter_cls(exec_native)
+    method_adapter = adapter_cls(method_native)
+    assert exec_adapter._stmt_cache_enabled
+    assert method_adapter._stmt_cache_enabled
+    method_adapter._cache_hit_executor = None
+
+    exec_adapter.execute(sql)
+    method_adapter.execute(sql)
+    exec_result = exec_adapter.execute(sql)
+    method_result = method_adapter.execute(sql)
+
+    assert exec_result.all() == method_result.all()
+    assert exec_result.column_names == method_result.column_names
+    assert exec_result.rows_affected == method_result.rows_affected
+
+    if case_name == "select":
+        assert exec_result.all() == [{"a": 1}]
+    elif case_name == "empty_select":
+        assert exec_result.all() == []
+        assert exec_result.column_names == ["a"]
+    elif case_name == "insert":
+        assert exec_result.rows_affected == 1
+        assert exec_result.last_inserted_id == 7
+    elif case_name == "update":
+        assert exec_result.rows_affected == 3
+        assert exec_result.last_inserted_id is None
+    elif case_name == "update_no_match":
+        assert exec_result.rows_affected == 0
+        assert exec_result.last_inserted_id is None
+
+
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client", "fetch_call"),
+    [
+        pytest.param(SQLiteSyncDriver, True, "fetch_rows", id="sqlite"),
+        pytest.param(DuckDBSyncDriver, True, "fetch_rows", id="duckdb"),
+        pytest.param(PostgresSyncDriver, False, "execute_with_description", id="postgres"),
+    ],
+)
+def test_sync_cache_hit_returning_clause_builds_row_result(
+    adapter_cls: type[BaseSyncDriver],
+    with_client: bool,
+    fetch_call: str,
+) -> None:
+    """INSERT ... RETURNING routes through the fetch callable and matches the method path."""
+    sql = "INSERT INTO t (a) VALUES (1) RETURNING a"
+    exec_native = _SingleCallSyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    method_native = _SingleCallSyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    exec_adapter = adapter_cls(exec_native)
+    method_adapter = adapter_cls(method_native)
+    assert exec_adapter._stmt_cache_enabled
+    method_adapter._cache_hit_executor = None
+
+    exec_adapter.execute(sql)
+    method_adapter.execute(sql)
+    exec_native.calls.clear()
+
+    exec_result = exec_adapter.execute(sql)
+    method_result = method_adapter.execute(sql)
+
+    assert len(exec_native.calls) == 1
+    assert exec_native.calls[0][0] == fetch_call
+    assert exec_result.all() == [{"a": 1}]
+    assert exec_result.all() == method_result.all()
+    assert exec_result.column_names == method_result.column_names
+    assert exec_result.rows_affected == method_result.rows_affected
+
+
+_SYNC_CACHE_HIT_MAPPED_ERRORS = [
+    pytest.param(
+        lambda: NativeIntegrityError("UNIQUE constraint failed: t.id"),
+        UniqueViolationError,
+        id="integrity",
+    ),
+    pytest.param(
+        lambda: ProgrammingError("syntax error"),
+        SQLParsingError,
+        id="programming",
+    ),
+    pytest.param(
+        lambda: NativeOperationalError("database is locked"),
+        OperationalError,
+        id="operational",
+    ),
+    pytest.param(
+        lambda: InterfaceError("closed"),
+        OperationalError,
+        id="interface",
+    ),
+    pytest.param(
+        lambda: QueryCancelledError("stopped"),
+        OperationCancelledError,
+        id="cancelled",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client", "fetch_call", "dml_call"),
+    _REGISTERED_CACHE_HIT_SYNC_ADAPTERS,
+)
+@pytest.mark.parametrize(
+    ("exc_factory", "mapped"),
+    [
+        pytest.param(lambda: NativeIntegrityError("UNIQUE constraint failed: t.id"), True, id="integrity"),
+        pytest.param(lambda: ProgrammingError("syntax error"), True, id="programming"),
+        pytest.param(lambda: NativeOperationalError("database is locked"), True, id="operational"),
+        pytest.param(lambda: InterfaceError("closed"), True, id="interface"),
+        pytest.param(lambda: QueryCancelledError("stopped"), True, id="cancelled"),
+        pytest.param(lambda: ValueError("boom"), False, id="unmapped"),
+    ],
+)
+def test_sync_cache_hit_errors_match_method_path(
+    adapter_cls: type[BaseSyncDriver],
+    with_client: bool,
+    fetch_call: str,
+    dml_call: str,
+    exc_factory: Any,
+    mapped: bool,
+) -> None:
+    """Errors raised on the cache-hit executor match the method path class and preserve __cause__."""
+    _ = (fetch_call, dml_call)
+    exec_native = _SingleCallSyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    method_native = _SingleCallSyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    exec_adapter = adapter_cls(exec_native)
+    method_adapter = adapter_cls(method_native)
+    assert exec_adapter._stmt_cache_enabled
+    method_adapter._cache_hit_executor = None
+
+    exec_adapter.execute("SELECT 1 AS a")
+    method_adapter.execute("SELECT 1 AS a")
+
+    exec_error = exc_factory()
+    method_error = exc_factory()
+    exec_native.fail_with = exec_error
+    method_native.fail_with = method_error
+
+    with pytest.raises(Exception) as exec_info:
+        exec_adapter.execute("SELECT 1 AS a")
+    with pytest.raises(Exception) as method_info:
+        method_adapter.execute("SELECT 1 AS a")
+
+    assert type(exec_info.value) is type(method_info.value)
+    if mapped:
+        assert exec_info.value.__cause__ is exec_error
+    else:
+        assert exec_info.value is exec_error
+
+
+@pytest.mark.parametrize(("exc_factory", "expected_cls"), _SYNC_CACHE_HIT_MAPPED_ERRORS)
+def test_sync_cache_hit_error_classes_on_base_adapter(
+    exc_factory: Any,
+    expected_cls: type[Exception],
+) -> None:
+    """BaseSyncDriver cache-hit executor maps native errors to expected SQLSpec exception classes."""
+    native = _SingleCallSyncNative(rows=[{"a": 1}], columns=["a"])
+    adapter = _SampleSyncAdapter(native)
+    assert adapter._stmt_cache_enabled
+
+    adapter.execute("SELECT 1 AS a")
+    native_error = exc_factory()
+    native.fail_with = native_error
+
+    with pytest.raises(expected_cls) as exc_info:
+        adapter.execute("SELECT 1 AS a")
+    assert exc_info.value.__cause__ is native_error
+
+
+def test_sync_cache_hit_with_active_observability_uses_observed_path() -> None:
+    """Active statement observers route cached statements through the observed cursor path."""
+    events: list[Any] = []
+    native = _SingleCallSyncNative(rows=[{"a": 1}], columns=["a"])
+    adapter = _SampleSyncAdapter(
+        native,
+        observability=ObservabilityRuntime(ObservabilityConfig(statement_observers=(events.append,))),
+    )
+    assert adapter._stmt_cache_enabled
+
+    adapter.execute("SELECT 1 AS a")
+    native.calls.clear()
+    adapter.execute("SELECT 1 AS a")
+
+    call_names = [entry[0] for entry in native.calls]
+    assert "cursor" in call_names
+    assert "execute_with_description" not in call_names
+    assert len(events) == 2
+
+
+@pytest.mark.parametrize("engine", ["sqlite", "duckdb"])
+def test_sync_cache_hit_on_real_embedded_engines(engine: str) -> None:
+    """Real SQLite and DuckDB sync drivers execute cached DML, SELECT, duplicate-key, and closed-client paths."""
+    native: Any
+    exec_adapter: BaseSyncDriver
+    method_adapter: BaseSyncDriver
+    if engine == "sqlite":
+        native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+        exec_adapter = SQLiteSyncDriver(native)
+        method_adapter = SQLiteSyncDriver(native)
+    else:
+        native = SyncDuckDBDriver(DuckDBConfig(path=":memory:"))
+        exec_adapter = DuckDBSyncDriver(native)
+        method_adapter = DuckDBSyncDriver(native)
+    method_adapter._cache_hit_executor = None
+
+    try:
+        assert exec_adapter._stmt_cache_enabled
+        exec_adapter.execute("CREATE TABLE cache_hit_items (id INTEGER PRIMARY KEY, name TEXT)")
+
+        first_insert = exec_adapter.execute("INSERT INTO cache_hit_items (id, name) VALUES (?, ?)", (1, "alpha"))
+        assert first_insert.rows_affected == 1
+
+        second_insert = exec_adapter.execute("INSERT INTO cache_hit_items (id, name) VALUES (?, ?)", (2, "beta"))
+        assert second_insert.rows_affected == 1
+        if engine == "sqlite":
+            assert second_insert.last_inserted_id == 2
+
+        first_select = exec_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
+        second_select = exec_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
+        expected_rows = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+        assert first_select.all() == expected_rows
+        assert second_select.all() == expected_rows
+
+        with pytest.raises(UniqueViolationError) as dup_info:
+            exec_adapter.execute("INSERT INTO cache_hit_items (id, name) VALUES (?, ?)", (1, "dup"))
+        assert type(dup_info.value.__cause__) is NativeIntegrityError
+
+        method_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
+    finally:
+        native.close()
+
+    with pytest.raises(Exception) as exec_closed:
+        exec_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
+    with pytest.raises(Exception) as method_closed:
+        method_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
+
+    assert type(exec_closed.value.__cause__) is InterfaceError
+    assert type(exec_closed.value) is type(method_closed.value)
+
+
+def test_sync_base_execute_dml_runs_one_cursor_statement() -> None:
+    """SyncDatabaseDriver.execute_dml executes once on a cursor, normalizes empty params, and closes the cursor."""
+    native = _RecordingSyncNativeDriver()
+    result = native.execute_dml("UPDATE t SET a = 2")
+    assert result == (1, None)
+    assert native.calls == [("execute", "UPDATE t SET a = 2", ())]
+
+    class _CapturingCursorNative(_RecordingSyncNativeDriver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_cursor: _RecordingSyncCursor | None = None
+
+        def cursor(self, *, lazy_begin: bool = False) -> _RecordingSyncCursor:
+            self.last_cursor = super().cursor(lazy_begin=lazy_begin)
+            return self.last_cursor
+
+    capturing = _CapturingCursorNative()
+    assert capturing.execute_dml("UPDATE t SET a = 2") == (1, None)
+    assert capturing.last_cursor is not None
+    assert capturing.last_cursor.closed is True
+
+
+_CACHE_HIT_ASYNC_ADAPTERS = [
+    pytest.param(SQLiteAsyncDriver, True, True, True, "fetch_rows", "client_execute_dml", id="sqlite"),
+    pytest.param(DuckDBAsyncDriver, True, True, True, "fetch_rows", "client_execute_dml", id="duckdb"),
+    pytest.param(PostgresAsyncDriver, True, True, False, "execute_with_description", "execute_dml", id="postgres"),
+    pytest.param(MySQLAsyncDriver, True, True, False, "execute_with_description", "execute_dml", id="mysql"),
+    pytest.param(MSSQLAsyncDriver, True, True, False, "execute_with_description", "execute_dml", id="mssql"),
+    pytest.param(OracleAsyncDriver, False, False, False, "", "", id="oracle"),
+    pytest.param(SpannerAsyncDriver, False, True, False, "", "", id="spanner"),
+    pytest.param(BigQueryAsyncDriver, False, True, False, "", "", id="bigquery"),
+]
+
+_REGISTERED_CACHE_HIT_ASYNC_ADAPTERS = [
+    pytest.param(SQLiteAsyncDriver, True, "fetch_rows", "client_execute_dml", id="sqlite"),
+    pytest.param(DuckDBAsyncDriver, True, "fetch_rows", "client_execute_dml", id="duckdb"),
+    pytest.param(PostgresAsyncDriver, False, "execute_with_description", "execute_dml", id="postgres"),
+    pytest.param(MySQLAsyncDriver, False, "execute_with_description", "execute_dml", id="mysql"),
+    pytest.param(MSSQLAsyncDriver, False, "execute_with_description", "execute_dml", id="mssql"),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("adapter_cls", "base_hooks_unchanged", "registered", "with_client", "fetch_call", "dml_call"),
+    _CACHE_HIT_ASYNC_ADAPTERS,
+)
+async def test_async_cache_hit_executor_registration_follows_hook_overrides(
+    adapter_cls: type[BaseAsyncDriver],
+    base_hooks_unchanged: bool,
+    registered: bool,
+    with_client: bool,
+    fetch_call: str,
+    dml_call: str,
+) -> None:
+    """Async cache-hit executor registers when base hooks match or the adapter defines its own callables."""
+    _ = (fetch_call, dml_call)
+    assert cache_hit_hooks_unchanged(adapter_cls, BaseAsyncDriver) is base_hooks_unchanged
+    adapter = adapter_cls(_SingleCallAsyncNative(with_client=with_client))
+    if registered:
+        assert adapter._cache_hit_executor is BaseAsyncDriver._run_cached_statement
+        assert isinstance(adapter._cache_hit_state, tuple)
+        assert len(adapter._cache_hit_state) == 3
+    else:
+        assert adapter._cache_hit_executor is None
+        assert adapter._cache_hit_state is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client", "fetch_call", "dml_call"),
+    _REGISTERED_CACHE_HIT_ASYNC_ADAPTERS,
+)
+@pytest.mark.parametrize(
+    ("sql", "kind"),
+    [
+        pytest.param("SELECT 1 AS a", "fetch", id="select"),
+        pytest.param("UPDATE t SET a = 2", "dml", id="update"),
+    ],
+)
+async def test_async_cache_hit_awaits_one_driver_awaitable(
+    adapter_cls: type[BaseAsyncDriver],
+    with_client: bool,
+    fetch_call: str,
+    dml_call: str,
+    sql: str,
+    kind: str,
+) -> None:
+    """A cached async statement awaits exactly one single-call driver awaitable with no cursor opened."""
+    native = _SingleCallAsyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    adapter = adapter_cls(native)
+    assert adapter._stmt_cache_enabled
+
+    await adapter.execute(sql)
+    native.calls.clear()
+    native.awaited = 0
+    await adapter.execute(sql)
+
+    expected_call = fetch_call if kind == "fetch" else dml_call
+    cached = adapter._stmt_cache.get(sql)
+    assert cached is not None
+    assert len(native.calls) == 1
+    assert native.calls[0][0] == expected_call
+    assert native.calls[0][1] == cached.compiled_sql
+    assert native.awaited == 1
+    assert all(entry[0] != "cursor" for entry in native.calls)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client", "fetch_call", "dml_call"),
+    _REGISTERED_CACHE_HIT_ASYNC_ADAPTERS,
+)
+async def test_async_cache_miss_runs_through_cursor(
+    adapter_cls: type[BaseAsyncDriver],
+    with_client: bool,
+    fetch_call: str,
+    dml_call: str,
+) -> None:
+    """The first async execution of a statement misses the cache and runs through a native cursor."""
+    _ = (fetch_call, dml_call)
+    native = _SingleCallAsyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    adapter = adapter_cls(native)
+    assert adapter._stmt_cache_enabled
+
+    result = await adapter.execute("SELECT 1 AS a")
+
+    call_names = [entry[0] for entry in native.calls]
+    assert "cursor" in call_names
+    assert "execute" in call_names
+    assert result.all() == [{"a": 1}]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client", "fetch_call", "dml_call"),
+    _REGISTERED_CACHE_HIT_ASYNC_ADAPTERS,
+)
+@pytest.mark.parametrize(
+    ("case_name", "sql", "rows", "columns", "rowcount", "lastrowid"),
+    [
+        pytest.param("select", "SELECT 1 AS a", [{"a": 1}], ["a"], 1, 7, id="select"),
+        pytest.param("empty_select", "SELECT 1 AS a", [], ["a"], 0, None, id="empty-select"),
+        pytest.param("insert", "INSERT INTO t (a) VALUES (1)", [], [], 1, 7, id="insert"),
+        pytest.param("update", "UPDATE t SET a = 2", [], [], 3, 7, id="update"),
+        pytest.param("update_no_match", "UPDATE t SET a = 2", [], [], 0, 7, id="update-no-match"),
+    ],
+)
+async def test_async_cache_hit_result_matches_method_path(
+    adapter_cls: type[BaseAsyncDriver],
+    with_client: bool,
+    fetch_call: str,
+    dml_call: str,
+    case_name: str,
+    sql: str,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+    rowcount: int,
+    lastrowid: int | None,
+) -> None:
+    """Async cached execution results match the method path across SELECT and DML shapes."""
+    _ = (fetch_call, dml_call)
+    exec_native = _SingleCallAsyncNative(
+        rows=rows,
+        columns=columns,
+        rowcount=rowcount,
+        lastrowid=lastrowid,
+        with_client=with_client,
+    )
+    method_native = _SingleCallAsyncNative(
+        rows=rows,
+        columns=columns,
+        rowcount=rowcount,
+        lastrowid=lastrowid,
+        with_client=with_client,
+    )
+    exec_adapter = adapter_cls(exec_native)
+    method_adapter = adapter_cls(method_native)
+    assert exec_adapter._stmt_cache_enabled
+    assert method_adapter._stmt_cache_enabled
+    method_adapter._cache_hit_executor = None
+
+    await exec_adapter.execute(sql)
+    await method_adapter.execute(sql)
+    exec_result = await exec_adapter.execute(sql)
+    method_result = await method_adapter.execute(sql)
+
+    assert exec_result.all() == method_result.all()
+    assert exec_result.column_names == method_result.column_names
+    assert exec_result.rows_affected == method_result.rows_affected
+
+    if case_name == "select":
+        assert exec_result.all() == [{"a": 1}]
+    elif case_name == "empty_select":
+        assert exec_result.all() == []
+        assert exec_result.column_names == ["a"]
+    elif case_name == "insert":
+        assert exec_result.rows_affected == 1
+        assert exec_result.last_inserted_id == 7
+    elif case_name == "update":
+        assert exec_result.rows_affected == 3
+        assert exec_result.last_inserted_id is None
+    elif case_name == "update_no_match":
+        assert exec_result.rows_affected == 0
+        assert exec_result.last_inserted_id is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client", "fetch_call"),
+    [
+        pytest.param(SQLiteAsyncDriver, True, "fetch_rows", id="sqlite"),
+        pytest.param(DuckDBAsyncDriver, True, "fetch_rows", id="duckdb"),
+        pytest.param(PostgresAsyncDriver, False, "execute_with_description", id="postgres"),
+    ],
+)
+async def test_async_cache_hit_returning_clause_builds_row_result(
+    adapter_cls: type[BaseAsyncDriver],
+    with_client: bool,
+    fetch_call: str,
+) -> None:
+    """Async INSERT ... RETURNING routes through the fetch callable and matches the method path."""
+    sql = "INSERT INTO t (a) VALUES (1) RETURNING a"
+    exec_native = _SingleCallAsyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    method_native = _SingleCallAsyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    exec_adapter = adapter_cls(exec_native)
+    method_adapter = adapter_cls(method_native)
+    assert exec_adapter._stmt_cache_enabled
+    method_adapter._cache_hit_executor = None
+
+    await exec_adapter.execute(sql)
+    await method_adapter.execute(sql)
+    exec_native.calls.clear()
+    exec_native.awaited = 0
+
+    exec_result = await exec_adapter.execute(sql)
+    method_result = await method_adapter.execute(sql)
+
+    assert len(exec_native.calls) == 1
+    assert exec_native.calls[0][0] == fetch_call
+    assert exec_native.awaited == 1
+    assert exec_result.all() == [{"a": 1}]
+    assert exec_result.all() == method_result.all()
+    assert exec_result.column_names == method_result.column_names
+    assert exec_result.rows_affected == method_result.rows_affected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client", "fetch_call", "dml_call"),
+    _REGISTERED_CACHE_HIT_ASYNC_ADAPTERS,
+)
+@pytest.mark.parametrize(
+    ("exc_factory", "mapped"),
+    [
+        pytest.param(lambda: NativeIntegrityError("UNIQUE constraint failed: t.id"), True, id="integrity"),
+        pytest.param(lambda: ProgrammingError("syntax error"), True, id="programming"),
+        pytest.param(lambda: NativeOperationalError("database is locked"), True, id="operational"),
+        pytest.param(lambda: InterfaceError("closed"), True, id="interface"),
+        pytest.param(lambda: QueryCancelledError("stopped"), True, id="cancelled"),
+        pytest.param(lambda: ValueError("boom"), False, id="unmapped"),
+    ],
+)
+async def test_async_cache_hit_errors_match_method_path(
+    adapter_cls: type[BaseAsyncDriver],
+    with_client: bool,
+    fetch_call: str,
+    dml_call: str,
+    exc_factory: Any,
+    mapped: bool,
+) -> None:
+    """Async errors raised on the cache-hit executor match the method path class and preserve __cause__."""
+    _ = (fetch_call, dml_call)
+    exec_native = _SingleCallAsyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    method_native = _SingleCallAsyncNative(rows=[{"a": 1}], columns=["a"], with_client=with_client)
+    exec_adapter = adapter_cls(exec_native)
+    method_adapter = adapter_cls(method_native)
+    assert exec_adapter._stmt_cache_enabled
+    method_adapter._cache_hit_executor = None
+
+    await exec_adapter.execute("SELECT 1 AS a")
+    await method_adapter.execute("SELECT 1 AS a")
+
+    exec_error = exc_factory()
+    method_error = exc_factory()
+    exec_native.fail_with = exec_error
+    method_native.fail_with = method_error
+
+    with pytest.raises(Exception) as exec_info:
+        await exec_adapter.execute("SELECT 1 AS a")
+    with pytest.raises(Exception) as method_info:
+        await method_adapter.execute("SELECT 1 AS a")
+
+    assert type(exec_info.value) is type(method_info.value)
+    if mapped:
+        assert exec_info.value.__cause__ is exec_error
+    else:
+        assert exec_info.value is exec_error
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("exc_factory", "expected_cls"), _SYNC_CACHE_HIT_MAPPED_ERRORS)
+async def test_async_cache_hit_error_classes_on_base_adapter(
+    exc_factory: Any,
+    expected_cls: type[Exception],
+) -> None:
+    """BaseAsyncDriver cache-hit executor maps native errors to expected SQLSpec exception classes."""
+    native = _SingleCallAsyncNative(rows=[{"a": 1}], columns=["a"])
+    adapter = _SampleAsyncAdapter(native)
+    assert adapter._stmt_cache_enabled
+
+    await adapter.execute("SELECT 1 AS a")
+    native_error = exc_factory()
+    native.fail_with = native_error
+
+    with pytest.raises(expected_cls) as exc_info:
+        await adapter.execute("SELECT 1 AS a")
+    assert exc_info.value.__cause__ is native_error
+
+
+@pytest.mark.anyio
+async def test_async_cache_hit_with_active_observability_uses_observed_path() -> None:
+    """Active statement observers route async cached statements through the observed cursor path."""
+    events: list[Any] = []
+    native = _SingleCallAsyncNative(rows=[{"a": 1}], columns=["a"])
+    adapter = _SampleAsyncAdapter(
+        native,
+        observability=ObservabilityRuntime(ObservabilityConfig(statement_observers=(events.append,))),
+    )
+    assert adapter._stmt_cache_enabled
+
+    await adapter.execute("SELECT 1 AS a")
+    native.calls.clear()
+    await adapter.execute("SELECT 1 AS a")
+
+    call_names = [entry[0] for entry in native.calls]
+    assert "cursor" in call_names
+    assert "execute_with_description" not in call_names
+    assert len(events) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", ["sqlite", "duckdb"])
+async def test_async_cache_hit_on_real_embedded_engines(engine: str) -> None:
+    """Real SQLite and DuckDB async drivers execute cached DML, SELECT, duplicate-key, and closed-client paths."""
+    native: Any
+    exec_adapter: BaseAsyncDriver
+    method_adapter: BaseAsyncDriver
+    if engine == "sqlite":
+        native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+        exec_adapter = SQLiteAsyncDriver(native)
+        method_adapter = SQLiteAsyncDriver(native)
+    else:
+        native = AsyncDuckDBDriver(DuckDBConfig(path=":memory:"))
+        exec_adapter = DuckDBAsyncDriver(native)
+        method_adapter = DuckDBAsyncDriver(native)
+    method_adapter._cache_hit_executor = None
+
+    try:
+        assert exec_adapter._stmt_cache_enabled
+        await exec_adapter.execute("CREATE TABLE cache_hit_items (id INTEGER PRIMARY KEY, name TEXT)")
+
+        first_insert = await exec_adapter.execute("INSERT INTO cache_hit_items (id, name) VALUES (?, ?)", (1, "alpha"))
+        assert first_insert.rows_affected == 1
+
+        second_insert = await exec_adapter.execute("INSERT INTO cache_hit_items (id, name) VALUES (?, ?)", (2, "beta"))
+        assert second_insert.rows_affected == 1
+        if engine == "sqlite":
+            assert second_insert.last_inserted_id == 2
+
+        first_select = await exec_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
+        second_select = await exec_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
+        expected_rows = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+        assert first_select.all() == expected_rows
+        assert second_select.all() == expected_rows
+
+        with pytest.raises(UniqueViolationError) as dup_info:
+            await exec_adapter.execute("INSERT INTO cache_hit_items (id, name) VALUES (?, ?)", (1, "dup"))
+        assert type(dup_info.value.__cause__) is NativeIntegrityError
+
+        await method_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
+    finally:
+        await native.close()
+
+    with pytest.raises(Exception) as exec_closed:
+        await exec_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
+    with pytest.raises(Exception) as method_closed:
+        await method_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
+
+    assert type(exec_closed.value.__cause__) is InterfaceError
+    assert type(exec_closed.value) is type(method_closed.value)
+
+
+@pytest.mark.anyio
+async def test_async_base_execute_dml_awaits_one_cursor_statement() -> None:
+    """AsyncDatabaseDriver.execute_dml executes once on a cursor, normalizes empty params, and closes the cursor."""
+    native = _RecordingAsyncNativeDriver()
+    result = await native.execute_dml("UPDATE t SET a = 2")
+    assert result == (1, None)
+    assert native.calls == [("execute", "UPDATE t SET a = 2", ())]
+
+    class _CapturingCursorNative(_RecordingAsyncNativeDriver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_cursor: _RecordingAsyncCursor | None = None
+
+        def cursor(self, *, lazy_begin: bool = False) -> _RecordingAsyncCursor:
+            self.last_cursor = super().cursor(lazy_begin=lazy_begin)
+            return self.last_cursor
+
+    capturing = _CapturingCursorNative()
+    assert await capturing.execute_dml("UPDATE t SET a = 2") == (1, None)
+    assert capturing.last_cursor is not None
+    assert capturing.last_cursor.closed is True
+
+
+@pytest.mark.anyio
+async def test_thread_offload_execute_dml_delegates_to_sync_driver() -> None:
+    """ThreadOffloadAsyncDatabaseDriver.execute_dml runs the paired sync driver's execute_dml on a worker thread."""
+    sync_native = _RecordingSyncNativeDriver()
+    driver = ThreadOffloadAsyncDatabaseDriver(SQLiteConfig(path=":memory:"), sync_native)
+    result = await driver.execute_dml("UPDATE t SET a = 2")
+    assert result == (1, None)
+    assert sync_native.calls == [("execute", "UPDATE t SET a = 2", ())]

@@ -60,6 +60,22 @@ pub struct PreparedDescription {
     pub result_columns: Vec<Column>,
 }
 
+impl PreparedDescription {
+    /// Return cloned `result_columns` with each column's `format` set to the matching entry in `formats`.
+    pub fn portal_columns(&self, formats: &[Format]) -> Vec<Column> {
+        debug_assert_eq!(self.result_columns.len(), formats.len());
+        self.result_columns
+            .iter()
+            .zip(formats.iter().copied())
+            .map(|(col, format)| {
+                let mut cloned = col.clone();
+                cloned.format = format;
+                cloned
+            })
+            .collect()
+    }
+}
+
 /// Encode a PostgreSQL Protocol 3.0 `Bind` (`'B'`) frontend message into `out`.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_bind(
@@ -207,6 +223,30 @@ impl ExtendedQueryCollector {
             statement_param_oids: Vec::new(),
             statement_columns: Vec::new(),
             portal_columns: Vec::new(),
+            rows: Vec::new(),
+            command_tag: None,
+            affected_rows: 0,
+            first_error: None,
+        }
+    }
+
+    /// Construct a new [`ExtendedQueryCollector`] with pre-known portal columns and no pending `Describe`.
+    pub fn with_known_columns(
+        expected_param_count: usize,
+        requested_result_formats: Vec<Format>,
+        columns: Vec<Column>,
+    ) -> Self {
+        Self {
+            expected_param_count,
+            requested_result_formats,
+            expect_portal_describe: false,
+            saw_parse_complete: false,
+            saw_bind_complete: false,
+            statement_describe_done: true,
+            portal_describe_done: true,
+            statement_param_oids: Vec::new(),
+            statement_columns: Vec::new(),
+            portal_columns: columns,
             rows: Vec::new(),
             command_tag: None,
             affected_rows: 0,

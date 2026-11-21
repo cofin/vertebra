@@ -125,14 +125,15 @@ impl PostgresError {
     }
 }
 
-struct PostgresPyExceptionTypes {
+pub(crate) struct PostgresPyExceptionTypes {
     database: Py<PyType>,
-    interface: Py<PyType>,
+    pub(crate) interface: Py<PyType>,
     data: Py<PyType>,
+    pub(crate) not_found: Py<PyType>,
     operational: Py<PyType>,
     pool_exhausted: Py<PyType>,
     integrity: Py<PyType>,
-    programming: Py<PyType>,
+    pub(crate) programming: Py<PyType>,
     not_supported: Py<PyType>,
     connection_failure: Py<PyType>,
     query_cancelled: Py<PyType>,
@@ -162,6 +163,8 @@ fn build_stand_in_py_exceptions(py: Python<'_>) -> PyResult<PostgresPyExceptionT
     let db_bound = database.bind(py);
     let interface = new_stand_in_class(py, "InterfaceError", &PyTuple::new(py, [db_bound])?)?;
     let data = new_stand_in_class(py, "DataError", &PyTuple::new(py, [db_bound])?)?;
+    let data_bound = data.bind(py);
+    let not_found = new_stand_in_class(py, "NotFoundError", &PyTuple::new(py, [data_bound])?)?;
     let operational = new_stand_in_class(py, "OperationalError", &PyTuple::new(py, [db_bound])?)?;
     let op_bound = operational.bind(py);
     let pool_exhausted =
@@ -182,6 +185,7 @@ fn build_stand_in_py_exceptions(py: Python<'_>) -> PyResult<PostgresPyExceptionT
         database,
         interface,
         data,
+        not_found,
         operational,
         pool_exhausted,
         integrity,
@@ -203,6 +207,7 @@ fn load_py_exceptions_from_core(py: Python<'_>) -> PyResult<PostgresPyExceptionT
         database: get_ty("DatabaseError")?,
         interface: get_ty("InterfaceError")?,
         data: get_ty("DataError")?,
+        not_found: get_ty("NotFoundError")?,
         operational: get_ty("OperationalError")?,
         pool_exhausted: get_ty("PoolExhaustedError")?,
         integrity: get_ty("IntegrityError")?,
@@ -215,14 +220,14 @@ fn load_py_exceptions_from_core(py: Python<'_>) -> PyResult<PostgresPyExceptionT
     })
 }
 
-fn resolve_py_exceptions(py: Python<'_>) -> PyResult<&'static PostgresPyExceptionTypes> {
+pub(crate) fn resolve_py_exceptions(py: Python<'_>) -> PyResult<&'static PostgresPyExceptionTypes> {
     POSTGRES_PY_EXCEPTIONS.get_or_try_init(py, || match load_py_exceptions_from_core(py) {
         Ok(types) => Ok(types),
         Err(_) => build_stand_in_py_exceptions(py),
     })
 }
 
-fn instantiate_exc(
+pub(crate) fn instantiate_exc(
     py: Python<'_>,
     ty: &Py<PyType>,
     message: &str,

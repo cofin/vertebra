@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import decimal
+import gc
 import hashlib
 import importlib
 import socket
@@ -29,11 +30,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import vertebra.db.adapters.mysql.driver as mysql_driver_mod
 from vertebra._mysql import (
     AsyncMySQLClient,
+    AsyncMySQLCursor,
     MySQLWireTestServer,
     SyncMySQLClient,
+    SyncMySQLCursor,
+    compile_binds,
     map_mysql_error,
 )
-from vertebra._vertebra import LeaseBroker
 from vertebra.db import (
     ArrowCursor,
     AsyncPipelineCapable,
@@ -41,6 +44,7 @@ from vertebra.db import (
     DatabaseError,
     DataError,
     IntegrityError,
+    InterfaceError,
     NotFoundError,
     OperationalError,
     ProgrammingError,
@@ -57,7 +61,6 @@ from vertebra.db.adapters.mysql import (
     SyncMySQLDriver,
     SyncMySQLPipeline,
     build_mysql_connect_kwargs,
-    compile_mysql_statement,
     map_mysql_exception,
 )
 from vertebra.db.adapters.mysql.config import build_mysql_client_kwargs
@@ -65,7 +68,6 @@ from vertebra.db.dbapi import AsyncDBAPIConnection, SyncDBAPIConnection
 from vertebra.db.dialer import aws_rds_root_ca_pem
 from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, CloudSQLConfig, SyncCloudSQLDialer
 from vertebra.db.driver import AZURE_MYSQL_SCOPE, AwsRdsIamTokenProvider, AzureEntraTokenProvider
-from vertebra.db.driver._common import MYSQL_DIALECT_TAG
 from vertebra.extensions.sqlalchemy import (
     AsyncMySQLDialect,
     SyncMySQLDialect,
@@ -188,16 +190,18 @@ def test_native_mysql_client_validation_and_redaction(mysql_server: MySQLWireTes
         ),
     ],
 )
-def test_compile_mysql_statement_preserves_literals_comments_and_backticks(
+def test_compile_for_driver_preserves_literals_comments_and_backticks(
     sql: str,
     params: Any,
     expected_sql: str,
     expected_params: tuple[Any, ...],
 ) -> None:
-    """Verify compile_mysql_statement rewrites placeholders outside string literals, comments, and backticks."""
-    compiled_sql, bound = compile_mysql_statement(sql, params, target_style="qmark")
+    """Verify MySQLCore.compile_for_driver rewrites placeholders outside literals, comments, and backticks."""
+    compiled_sql, bound = MySQLCore.compile_for_driver(sql, params)
     assert compiled_sql == expected_sql
     assert bound == expected_params
+    assert MySQLCore.compile_for_driver("SELECT 1", None) == ("SELECT 1", ())
+    assert MySQLCore.compile_for_driver("SELECT 1", ()) == ("SELECT 1", ())
 
 
 @pytest.mark.parametrize(
@@ -490,7 +494,7 @@ async def test_async_mysql_cancelled_error_not_swallowed() -> None:
     """Verify AsyncMySQLDriver propagates asyncio.CancelledError without wrapping into OperationalError."""
     client = MagicMock()
     client.is_closed = False
-    client.fetch_all = AsyncMock(side_effect=asyncio.CancelledError())
+    client.cursor.return_value.execute = AsyncMock(side_effect=asyncio.CancelledError())
     driver = AsyncMySQLDriver(MySQLConfig(dsn="mysql://localhost:3306/app"), client=client)
     with pytest.raises(asyncio.CancelledError):
         await driver.select("SELECT 1")
@@ -578,71 +582,6 @@ def test_mysql_driver_and_pipeline_resolution_identity(
     mod = importlib.import_module(target_module)
     exp_mod = importlib.import_module(expected_module)
     assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)
-
-
-def test_sync_mysql_driver_uses_common_mixin_broker_and_bytes_statement_cache(
-    mysql_server: MySQLWireTestServer,
-) -> None:
-    """SyncMySQLDriver forwards broker, caches bytes StatementPlan entries, and releases leases on error."""
-    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
-    cfg = MySQLConfig.from_url(mysql_server.dsn, broker=broker)
-    driver = SyncMySQLDriver(cfg)
-    assert driver.broker is broker
-    try:
-        driver.execute("CREATE TABLE broker_items (id INT PRIMARY KEY, label VARCHAR(64) NOT NULL)")
-        insert_sql = "INSERT INTO broker_items (id, label) VALUES (%s, %s)"
-        assert driver.execute(insert_sql, (1, "alpha")) == 1
-        assert driver.execute(insert_sql, (2, "beta")) == 1
-
-        sc = broker.statement_cache()
-        assert sc is not None
-        assert sc.stats().hits >= 1
-        plan = sc.lookup(MYSQL_DIALECT_TAG, insert_sql.encode("utf-8"))
-        assert plan is not None
-        assert plan.param_count == 2
-        assert plan.compiled_sql == insert_sql.encode("utf-8")
-
-        with pytest.raises(NotFoundError):
-            driver.select_one("SELECT id FROM broker_items WHERE id = %s", (999,))
-        broker_stats = broker.stats()
-        assert broker_stats.active_leases == 0
-        assert broker_stats.total_acquired == 4
-        assert broker_stats.total_released == 4
-    finally:
-        driver.close()
-
-
-@pytest.mark.anyio
-async def test_async_mysql_driver_uses_common_mixin_broker_and_bytes_statement_cache(
-    mysql_server: MySQLWireTestServer,
-) -> None:
-    """AsyncMySQLDriver forwards broker, caches bytes StatementPlan entries, and releases leases on error."""
-    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
-    cfg = MySQLConfig.from_url(mysql_server.dsn)
-    driver = AsyncMySQLDriver(cfg, broker=broker)
-    assert driver.broker is broker
-    try:
-        await driver.execute("CREATE TABLE broker_items (id INT PRIMARY KEY, label VARCHAR(64) NOT NULL)")
-        insert_sql = "INSERT INTO broker_items (id, label) VALUES (%s, %s)"
-        assert await driver.execute(insert_sql, (1, "alpha")) == 1
-        assert await driver.execute(insert_sql, (2, "beta")) == 1
-
-        sc = broker.statement_cache()
-        assert sc is not None
-        assert sc.stats().hits >= 1
-        plan = sc.lookup(MYSQL_DIALECT_TAG, insert_sql.encode("utf-8"))
-        assert plan is not None
-        assert plan.param_count == 2
-        assert plan.compiled_sql == insert_sql.encode("utf-8")
-
-        with pytest.raises(NotFoundError):
-            await driver.select_one("SELECT id FROM broker_items WHERE id = %s", (999,))
-        broker_stats = broker.stats()
-        assert broker_stats.active_leases == 0
-        assert broker_stats.total_acquired == 4
-        assert broker_stats.total_released == 4
-    finally:
-        await driver.close()
 
 
 @pytest.mark.parametrize(
@@ -1991,7 +1930,11 @@ async def test_mysql_drivers_azure_entra_default_scope_wire_auth_and_refresh(
                         break
                     if not cmd_payload or cmd_payload[0] == 0x01:
                         break
-                    conn.sendall(_mysql_packet(cmd_seq + 1, _mysql_ok_packet()))
+                    if cmd_payload[0] == 0x16:
+                        prep_ok = b"\x00" + struct.pack("<IHHBH", 1, 0, 0, 0, 0)
+                        conn.sendall(_mysql_packet(cmd_seq + 1, prep_ok))
+                    else:
+                        conn.sendall(_mysql_packet(cmd_seq + 1, _mysql_ok_packet()))
 
         def _server() -> None:
             idx = 0
@@ -2110,12 +2053,132 @@ def _raise_with_cause(outer: Exception, cause: Exception) -> Exception:
     return outer
 
 
+class _FakeMySQLProtocolCursor:
+    """Minimal PEP 249 sync cursor backed by _FakeMySQLSyncProtocolDriver."""
+
+    description: tuple[tuple[Any, ...], ...] | None
+    rowcount: int
+    lastrowid: int | None
+    arraysize: int
+
+    def __init__(self, driver: _FakeMySQLSyncProtocolDriver) -> None:
+        self._driver = driver
+        self._rows: list[tuple[Any, ...]] = []
+        self._pos = 0
+        self.description = None
+        self.rowcount = -1
+        self.lastrowid = None
+        self.arraysize = 1
+
+    def execute(self, sql: str, parameters: Any = ()) -> _FakeMySQLProtocolCursor:
+        """Execute a statement through the backing driver and buffer returned rows."""
+        self._rows, self.description = self._driver.execute_with_description(sql, parameters)
+        self._pos = 0
+        self.rowcount = len(self._rows)
+        return self
+
+    def executemany(self, sql: str, seq_of_parameters: Any) -> _FakeMySQLProtocolCursor:
+        """Execute a statement once per parameter set and record the batch size."""
+        count = 0
+        for params in seq_of_parameters:
+            self.execute(sql, params)
+            count += 1
+        self._rows = []
+        self._pos = 0
+        self.description = None
+        self.rowcount = count
+        return self
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next buffered row, or `None` when exhausted."""
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to `size` buffered rows."""
+        n = self.arraysize if size is None else size
+        batch = self._rows[self._pos : self._pos + n]
+        self._pos += len(batch)
+        return batch
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return all remaining buffered rows."""
+        rest = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return rest
+
+    def close(self) -> None:
+        """Release any buffered rows."""
+        self._rows = []
+
+
+class _FakeMySQLAsyncProtocolCursor:
+    """Minimal PEP 249 async cursor delegating to _FakeMySQLProtocolCursor."""
+
+    def __init__(self, sync_cursor: _FakeMySQLProtocolCursor) -> None:
+        self._sync = sync_cursor
+
+    @property
+    def description(self) -> tuple[tuple[Any, ...], ...] | None:
+        """Return PEP 249 column metadata tuples from the backing cursor."""
+        return self._sync.description
+
+    @property
+    def rowcount(self) -> int:
+        """Return the affected or buffered row count from the backing cursor."""
+        return self._sync.rowcount
+
+    @property
+    def lastrowid(self) -> int | None:
+        """Return the last inserted row identifier from the backing cursor."""
+        return self._sync.lastrowid
+
+    @property
+    def arraysize(self) -> int:
+        """Return the default batch size from the backing cursor."""
+        return self._sync.arraysize
+
+    async def execute(self, sql: str, parameters: Any = ()) -> _FakeMySQLAsyncProtocolCursor:
+        """Execute a statement asynchronously via the backing sync cursor."""
+        self._sync.execute(sql, parameters)
+        return self
+
+    async def executemany(self, sql: str, seq_of_parameters: Any) -> _FakeMySQLAsyncProtocolCursor:
+        """Execute a statement across parameter sets asynchronously via the backing cursor."""
+        self._sync.executemany(sql, seq_of_parameters)
+        return self
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next buffered row asynchronously."""
+        return self._sync.fetchone()
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to `size` buffered rows asynchronously."""
+        return self._sync.fetchmany(size)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return all remaining buffered rows asynchronously."""
+        return self._sync.fetchall()
+
+    async def close(self) -> None:
+        """Release any buffered rows asynchronously."""
+        self._sync.close()
+
+
 class _FakeMySQLSyncProtocolDriver:
     """Protocol-fake sync MySQL driver supporting initialize(), do_ping(), and isolation levels."""
 
     def __init__(self) -> None:
         self.isolation_level = "REPEATABLE-READ"
         self.statements: list[str] = []
+
+    def cursor(self, *, lazy_begin: bool = False) -> _FakeMySQLProtocolCursor:
+        """Create a sync cursor backed by this driver double."""
+        _ = lazy_begin
+        return _FakeMySQLProtocolCursor(self)
 
     def begin(self, isolation_level: str | None = None) -> None:
         _ = isolation_level
@@ -2162,6 +2225,11 @@ class _FakeMySQLAsyncProtocolDriver:
 
     def __init__(self, sync_driver: _FakeMySQLSyncProtocolDriver) -> None:
         self._sync = sync_driver
+
+    def cursor(self, *, lazy_begin: bool = False) -> _FakeMySQLAsyncProtocolCursor:
+        """Create an async cursor backed by this driver double."""
+        _ = lazy_begin
+        return _FakeMySQLAsyncProtocolCursor(_FakeMySQLProtocolCursor(self._sync))
 
     async def begin(self, isolation_level: str | None = None) -> None:
         self._sync.begin(isolation_level)
@@ -2240,3 +2308,880 @@ async def test_mysql_sync_and_async_engine_initialize_and_isolation() -> None:
             assert (await aconn.execute(text("SELECT 1"))).scalar() == 1
     finally:
         await async_engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("sql", "params", "expected_sql", "expected_params"),
+    [
+        ("SELECT :a", {"a": 1}, "SELECT ?", (1,)),
+        ("SELECT %(a)s, :b", {"a": 1, "b": "x"}, "SELECT ?, ?", (1, "x")),
+        ("SELECT ? + ?", (1, 2), "SELECT ? + ?", (1, 2)),
+        ("SELECT 1", None, "SELECT 1", ()),
+        (
+            "SELECT :u",
+            {"u": uuid.UUID("12345678-1234-5678-1234-567812345678")},
+            "SELECT ?",
+            ("12345678-1234-5678-1234-567812345678",),
+        ),
+        ("SELECT :b", {"b": bytearray(b"hi")}, "SELECT ?", (b"hi",)),
+    ],
+)
+def test_sync_cursor_compile_binds(
+    sql: str,
+    params: Any,
+    expected_sql: str,
+    expected_params: tuple[Any, ...],
+) -> None:
+    """Verify compile_binds rewrites named placeholders and coerces bind values."""
+    out_sql, out_params = compile_binds(sql, params)
+    assert out_sql == expected_sql
+    assert out_params == expected_params
+
+
+def test_sync_cursor_matrix_and_fetch_controls(mysql_server: MySQLWireTestServer) -> None:
+    """Verify SyncMySQLCursor select, DML, positional/named binds, executemany, errors, and fetch APIs."""
+    client = SyncMySQLClient(mysql_server.dsn)
+    try:
+        cur = client.cursor()
+        assert isinstance(cur, SyncMySQLCursor)
+        initial_desc = cur.description
+        assert initial_desc is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+        assert cur.arraysize == 1
+
+        assert cur.fetchone() is None
+
+        assert cur.execute("SELECT 2 AS a, 'x' AS b") is cur
+        assert cur.fetchall() == [(2, "x")]
+        desc = cur.description
+        assert desc is not None
+        assert [col[0] for col in desc] == ["a", "b"]
+        assert all(len(col) == 7 and col[2:] == (None, None, None, None, None) for col in desc)
+
+        cur.execute("CREATE TEMPORARY TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
+        assert cur.description is None
+        assert cur.fetchall() == []
+
+        cur.execute("INSERT INTO t (v) VALUES (?)", (10,))
+        assert cur.rowcount == 1
+        assert cur.lastrowid is not None and cur.lastrowid >= 1
+
+        cur.execute("INSERT INTO t (v) VALUES (?)", (20,))
+        assert cur.rowcount == 1
+
+        cur.execute("UPDATE t SET v = ? WHERE v >= ?", (99, 10))
+        assert cur.rowcount == 2
+        assert cur.lastrowid is None
+
+        cur.execute("SELECT v FROM t WHERE v = -1")
+        assert cur.description is not None
+        assert cur.fetchall() == []
+
+        cur.execute("SELECT ? AS a, ? AS b", (1, 2))
+        assert cur.fetchall() == [(1, 2)]
+
+        cur.execute("SELECT :a AS a, :b AS b", {"a": 1, "b": 2})
+        assert cur.fetchall() == [(1, 2)]
+
+        cur.executemany("INSERT INTO t (v) VALUES (?)", [(101,), (102,), (103,)])
+        assert cur.rowcount == 3
+        assert cur.description is None
+
+        before_exec = mysql_server.execute_count
+        cur.executemany("INSERT INTO t (v) VALUES (?)", [])
+        assert cur.rowcount == 0
+        assert cur.description is None
+        assert mysql_server.execute_count == before_exec
+
+        cur.execute("SELECT v FROM t ORDER BY id")
+        cur.arraysize = 2
+        assert cur.arraysize == 2
+        assert cur.fetchmany(0) == []
+        first_batch = cur.fetchmany()
+        assert len(first_batch) == 2
+        assert cur.fetchone() is not None
+        remaining = cur.fetchall()
+        assert len(first_batch) + 1 + len(remaining) == 5
+        assert cur.fetchone() is None
+        assert cur.fetchall() == []
+
+        with pytest.raises(ProgrammingError):
+            cur.arraysize = 0
+        with pytest.raises(ProgrammingError):
+            cur.fetchmany(-1)
+
+        cur.execute("CREATE TEMPORARY TABLE pk_t (id INT PRIMARY KEY, v INT)")
+        cur.execute("INSERT INTO pk_t (id, v) VALUES (?, ?)", (1, 10))
+        cur.execute("SELECT 1 AS ok")
+        assert cur.description is not None
+        with pytest.raises(IntegrityError):
+            cur.execute("INSERT INTO pk_t (id, v) VALUES (?, ?)", (1, 20))
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+
+        cur.execute("SELECT 1 AS ok")
+        with pytest.raises(ProgrammingError):
+            cur.execute("SELEC 1")
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+
+        with pytest.raises(InterfaceError):
+            cur.execute("SELECT ?", "not-a-sequence")
+
+        cur.close()
+        cur.close()
+        with pytest.raises(InterfaceError):
+            cur.execute("SELECT 1")
+        with pytest.raises(InterfaceError):
+            cur.fetchone()
+        with pytest.raises(InterfaceError):
+            cur.fetchmany()
+        with pytest.raises(InterfaceError):
+            cur.fetchall()
+
+        with client.cursor() as ctx_cur:
+            ctx_cur.execute("SELECT 1 AS v")
+            assert ctx_cur.fetchone() == (1,)
+        with pytest.raises(InterfaceError):
+            ctx_cur.execute("SELECT 1")
+    finally:
+        client.close()
+
+
+def test_sync_cursor_lazy_begin_and_lease_lifecycle(mysql_server: MySQLWireTestServer) -> None:
+    """Verify SyncMySQLClient lazy_begin cursor transactions and lease attachment/release."""
+    client = SyncMySQLClient(mysql_server.dsn)
+    try:
+        default_cur = client.cursor()
+        default_cur.execute("CREATE TEMPORARY TABLE lb_t (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
+        assert client.in_transaction is False
+        default_cur.execute("INSERT INTO lb_t (v) VALUES (?)", (1,))
+        assert client.in_transaction is False
+        default_cur.close()
+
+        tx_cur = client.cursor(lazy_begin=True)
+        tx_cur.execute("INSERT INTO lb_t (v) VALUES (?)", (2,))
+        assert client.in_transaction is True
+        client.rollback()
+        assert client.in_transaction is False
+
+        check_cur = client.cursor()
+        check_cur.execute("SELECT v FROM lb_t ORDER BY id")
+        assert check_cur.fetchall() == [(1,)]
+        check_cur.close()
+
+        tx_cur.execute("INSERT INTO lb_t (v) VALUES (?)", (3,))
+        assert client.in_transaction is True
+        client.commit()
+        assert client.in_transaction is False
+
+        tx_cur.execute("INSERT INTO lb_t (v) VALUES (?)", (4,))
+        assert client.in_transaction is True
+        client.commit()
+        assert client.in_transaction is False
+
+        tx_cur.execute("SELECT v FROM lb_t ORDER BY id")
+        assert tx_cur.fetchall() == [(1,), (3,), (4,)]
+        client.rollback()
+
+        calls: list[str] = []
+        client.attach_lease(lambda: calls.append("first"))
+        client.release_lease()
+        client.release_lease()
+        assert calls == ["first"]
+
+        client.attach_lease(lambda: calls.append("second"))
+        client.attach_lease(lambda: calls.append("third"))
+        assert calls == ["first", "second"]
+
+        client.close()
+        assert calls == ["first", "second", "third"]
+
+        with pytest.raises(ConnectionFailure):
+            tx_cur.execute("SELECT 1")
+        assert tx_cur.description is None
+        assert tx_cur.rowcount == -1
+        assert tx_cur.lastrowid is None
+    finally:
+        client.close()
+
+    drop_calls: list[int] = []
+    ephemeral = SyncMySQLClient(mysql_server.dsn)
+    ephemeral.attach_lease(lambda: drop_calls.append(1))
+    del ephemeral
+    gc.collect()
+    assert drop_calls == [1]
+
+
+@pytest.mark.anyio
+async def test_async_cursor_matrix_and_fetch_controls(mysql_server: MySQLWireTestServer) -> None:
+    """Verify AsyncMySQLCursor select, DML, positional/named binds, executemany, errors, and fetch APIs."""
+    client = AsyncMySQLClient(mysql_server.dsn)
+    try:
+        cur = client.cursor()
+        assert isinstance(cur, AsyncMySQLCursor)
+        initial_desc = cur.description
+        assert initial_desc is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+        assert cur.arraysize == 1
+
+        assert await cur.fetchone() is None
+
+        assert await cur.execute("SELECT 2 AS a, 'x' AS b") is cur
+        assert await cur.fetchall() == [(2, "x")]
+        desc = cur.description
+        assert desc is not None
+        assert [col[0] for col in desc] == ["a", "b"]
+        assert all(len(col) == 7 and col[2:] == (None, None, None, None, None) for col in desc)
+
+        await cur.execute("CREATE TEMPORARY TABLE at_t (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
+        assert cur.description is None
+        assert await cur.fetchall() == []
+
+        await cur.execute("INSERT INTO at_t (v) VALUES (?)", (10,))
+        assert cur.rowcount == 1
+        assert cur.lastrowid is not None and cur.lastrowid >= 1
+
+        await cur.execute("INSERT INTO at_t (v) VALUES (?)", (20,))
+        assert cur.rowcount == 1
+
+        await cur.execute("UPDATE at_t SET v = ? WHERE v >= ?", (99, 10))
+        assert cur.rowcount == 2
+        assert cur.lastrowid is None
+
+        await cur.execute("SELECT v FROM at_t WHERE v = -1")
+        assert cur.description is not None
+        assert await cur.fetchall() == []
+
+        await cur.execute("SELECT ? AS a, ? AS b", (1, 2))
+        assert await cur.fetchall() == [(1, 2)]
+
+        await cur.execute("SELECT :a AS a, :b AS b", {"a": 1, "b": 2})
+        assert await cur.fetchall() == [(1, 2)]
+
+        await cur.executemany("INSERT INTO at_t (v) VALUES (?)", [(101,), (102,), (103,)])
+        assert cur.rowcount == 3
+        assert cur.description is None
+
+        before_exec = mysql_server.execute_count
+        await cur.executemany("INSERT INTO at_t (v) VALUES (?)", [])
+        assert cur.rowcount == 0
+        assert cur.description is None
+        assert mysql_server.execute_count == before_exec
+
+        await cur.execute("SELECT v FROM at_t ORDER BY id")
+        cur.arraysize = 2
+        assert cur.arraysize == 2
+        assert await cur.fetchmany(0) == []
+        first_batch = await cur.fetchmany()
+        assert len(first_batch) == 2
+        assert await cur.fetchone() is not None
+        remaining = await cur.fetchall()
+        assert len(first_batch) + 1 + len(remaining) == 5
+        assert await cur.fetchone() is None
+        assert await cur.fetchall() == []
+
+        with pytest.raises(ProgrammingError):
+            cur.arraysize = 0
+        with pytest.raises(ProgrammingError):
+            await cur.fetchmany(-1)
+
+        await cur.execute("CREATE TEMPORARY TABLE apk_t (id INT PRIMARY KEY, v INT)")
+        await cur.execute("INSERT INTO apk_t (id, v) VALUES (?, ?)", (1, 10))
+        await cur.execute("SELECT 1 AS ok")
+        with pytest.raises(IntegrityError):
+            await cur.execute("INSERT INTO apk_t (id, v) VALUES (?, ?)", (1, 20))
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+
+        await cur.execute("SELECT 1 AS ok")
+        with pytest.raises(ProgrammingError):
+            await cur.execute("SELEC 1")
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+
+        with pytest.raises(InterfaceError):
+            await cur.execute("SELECT ?", "not-a-sequence")
+
+        pending = cur.execute("SELECT 1 AS a")
+        with pytest.raises(InterfaceError, match="cursor is already executing"):
+            cur.execute("SELECT 2 AS b")
+        await pending
+        assert await cur.fetchall() == [(1,)]
+
+        await cur.close()
+        await cur.close()
+        with pytest.raises(InterfaceError):
+            await cur.execute("SELECT 1")
+        with pytest.raises(InterfaceError):
+            await cur.fetchone()
+        with pytest.raises(InterfaceError):
+            await cur.fetchmany()
+        with pytest.raises(InterfaceError):
+            await cur.fetchall()
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_fetch_returns_completed_awaitable(mysql_server: MySQLWireTestServer) -> None:
+    """Verify AsyncMySQLCursor.fetchall returns an immediately completed awaitable."""
+    client = AsyncMySQLClient(mysql_server.dsn)
+    try:
+        cur = client.cursor()
+        await cur.execute("SELECT 2 AS a, 'x' AS b")
+        step = cur.fetchall().__await__()
+        with pytest.raises(StopIteration) as exc_info:
+            next(step)
+        assert exc_info.value.value == [(2, "x")]
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("method", ["fetchone", "fetchmany", "close"])
+def test_async_cursor_ready_methods_complete_without_loop(
+    mysql_server: MySQLWireTestServer,
+    method: str,
+) -> None:
+    """Verify AsyncMySQLCursor fetchone, fetchmany, and close complete synchronously without a running loop."""
+    client = AsyncMySQLClient(mysql_server.dsn)
+    cur = client.cursor()
+
+    async def _execute() -> None:
+        await cur.execute("SELECT 2 AS a, 'x' AS b")
+
+    async def _close_client() -> None:
+        await client.close()
+
+    try:
+        asyncio.run(_execute())
+        step = getattr(cur, method)().__await__()
+        with pytest.raises(StopIteration) as exc_info:
+            next(step)
+        expected = {
+            "fetchone": (2, "x"),
+            "fetchmany": [(2, "x")],
+            "close": None,
+        }[method]
+        assert exc_info.value.value == expected
+    finally:
+        asyncio.run(_close_client())
+
+
+@pytest.mark.anyio
+async def test_async_cursor_state_errors_raise_at_call(mysql_server: MySQLWireTestServer) -> None:
+    """Verify AsyncMySQLCursor state errors raise immediately at the call site without awaiting."""
+    client = AsyncMySQLClient(mysql_server.dsn)
+    try:
+        cur = client.cursor()
+        assert await cur.fetchall() == []
+
+        await cur.execute("SELECT 1 AS a")
+        with pytest.raises(ProgrammingError):
+            cur.fetchmany(-1)
+
+        await cur.close()
+        with pytest.raises(InterfaceError):
+            cur.fetchone()
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("params", [(), [], {}])
+async def test_async_cursor_empty_container_matches_no_parameters(
+    mysql_server: MySQLWireTestServer,
+    params: tuple[()] | list[Any] | dict[str, Any],
+) -> None:
+    """Verify empty exact parameter containers bind identically to omitted parameters."""
+    client = AsyncMySQLClient(mysql_server.dsn)
+    try:
+        cur = client.cursor()
+        await cur.execute("SELECT 1 AS a", params)
+        assert await cur.fetchall() == [(1,)]
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_lazy_begin_and_lease_lifecycle(mysql_server: MySQLWireTestServer) -> None:
+    """Verify AsyncMySQLClient lazy_begin cursor transactions and lease attachment/release."""
+    client = AsyncMySQLClient(mysql_server.dsn)
+    try:
+        default_cur = client.cursor()
+        await default_cur.execute("CREATE TEMPORARY TABLE alb_t (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
+        assert client.in_transaction is False
+        await default_cur.execute("INSERT INTO alb_t (v) VALUES (?)", (1,))
+        assert client.in_transaction is False
+        await default_cur.close()
+
+        tx_cur = client.cursor(lazy_begin=True)
+        await tx_cur.execute("INSERT INTO alb_t (v) VALUES (?)", (2,))
+        assert client.in_transaction is True
+        await client.rollback()
+        assert client.in_transaction is False
+
+        check_cur = client.cursor()
+        await check_cur.execute("SELECT v FROM alb_t ORDER BY id")
+        assert await check_cur.fetchall() == [(1,)]
+        await check_cur.close()
+
+        await tx_cur.execute("INSERT INTO alb_t (v) VALUES (?)", (3,))
+        assert client.in_transaction is True
+        await client.commit()
+        assert client.in_transaction is False
+
+        await tx_cur.execute("INSERT INTO alb_t (v) VALUES (?)", (4,))
+        assert client.in_transaction is True
+        await client.commit()
+        assert client.in_transaction is False
+
+        await tx_cur.execute("SELECT v FROM alb_t ORDER BY id")
+        assert await tx_cur.fetchall() == [(1,), (3,), (4,)]
+        await client.rollback()
+
+        calls: list[str] = []
+        client.attach_lease(lambda: calls.append("first"))
+        client.release_lease()
+        client.release_lease()
+        assert calls == ["first"]
+
+        client.attach_lease(lambda: calls.append("second"))
+        client.attach_lease(lambda: calls.append("third"))
+        assert calls == ["first", "second"]
+
+        await client.close()
+        assert calls == ["first", "second", "third"]
+
+        with pytest.raises(ConnectionFailure):
+            await tx_cur.execute("SELECT 1")
+        assert tx_cur.description is None
+        assert tx_cur.rowcount == -1
+        assert tx_cur.lastrowid is None
+    finally:
+        await client.close()
+
+    drop_calls: list[int] = []
+    ephemeral = AsyncMySQLClient(mysql_server.dsn)
+    ephemeral.attach_lease(lambda: drop_calls.append(1))
+    del ephemeral
+    gc.collect()
+    assert drop_calls == [1]
+
+
+class _MySQLSchemaRow(msgspec.Struct, frozen=True):
+    a: int
+    b: str = ""
+
+
+class _RecordingLease:
+    def __init__(self, broker: _RecordingBroker | _AsyncRecordingBroker) -> None:
+        self._broker = broker
+
+    def release(self) -> None:
+        self._broker.release_calls += 1
+        self._broker.events.append("release")
+
+
+class _RecordingBroker:
+    def __init__(self, *, refuse: bool = False) -> None:
+        self.refuse = refuse
+        self.acquire_calls = 0
+        self.release_calls = 0
+        self.events: list[str] = []
+
+    def acquire(self, pid: int, *, timeout_ms: int = 5000) -> _RecordingLease:
+        _ = (pid, timeout_ms)
+        self.acquire_calls += 1
+        self.events.append("acquire")
+        if self.refuse:
+            msg = "broker lease refused"
+            raise RuntimeError(msg)
+        return _RecordingLease(self)
+
+
+class _AsyncRecordingBroker:
+    def __init__(self, *, refuse: bool = False) -> None:
+        self.refuse = refuse
+        self.acquire_calls = 0
+        self.release_calls = 0
+        self.events: list[str] = []
+
+    async def acquire(self, pid: int, *, timeout_ms: int = 5000) -> _RecordingLease:
+        _ = (pid, timeout_ms)
+        await asyncio.sleep(0)
+        self.acquire_calls += 1
+        self.events.append("acquire")
+        if self.refuse:
+            msg = "broker lease refused"
+            raise RuntimeError(msg)
+        return _RecordingLease(self)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_mysql_driver_native_cursor_query_matrix(
+    mysql_server: MySQLWireTestServer,
+    mode: str,
+) -> None:
+    """Verify SyncMySQLDriver and AsyncMySQLDriver execute all query methods through the native cursor."""
+    cfg = MySQLConfig.from_url(mysql_server.dsn)
+    if mode == "sync":
+        driver = SyncMySQLDriver(cfg)
+        try:
+            cur = driver.cursor()
+            assert isinstance(cur, SyncMySQLCursor)
+            cur.close()
+
+            lazy_cur = driver.cursor(lazy_begin=True)
+            assert isinstance(lazy_cur, SyncMySQLCursor)
+            lazy_cur.close()
+
+            assert driver.select("SELECT 1 AS a") == [{"a": 1}]
+            assert driver.select("SELECT 1 AS a", schema_type=_MySQLSchemaRow) == [_MySQLSchemaRow(a=1, b="")]
+            assert driver.select("SELECT :a AS a", {"a": 5}) == [{"a": 5}]
+
+            driver.execute("CREATE TABLE t13_items (id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(64) NOT NULL)")
+            assert driver.execute("INSERT INTO t13_items (label) VALUES (?)", ("first",)) == 1
+            first_id = driver.lastrowid
+            assert first_id is not None and first_id >= 1
+
+            assert driver.execute("INSERT INTO t13_items (label) VALUES (?)", ("second",)) == 1
+            second_id = driver.lastrowid
+            assert second_id is not None and second_id > first_id
+
+            assert driver.execute("UPDATE t13_items SET label = ?", ("updated",)) == 2
+            assert driver.execute_with_description("SELECT id AS a, label AS b FROM t13_items ORDER BY id") == (
+                [(first_id, "updated"), (second_id, "updated")],
+                ("a", "b"),
+            )
+            assert driver.execute_tuples("SELECT id AS a, label AS b FROM t13_items ORDER BY id") == [
+                (first_id, "updated"),
+                (second_id, "updated"),
+            ]
+            assert driver.select(
+                "SELECT id AS a, label AS b FROM t13_items ORDER BY id",
+                schema_type=_MySQLSchemaRow,
+            ) == [
+                _MySQLSchemaRow(a=first_id, b="updated"),
+                _MySQLSchemaRow(a=second_id, b="updated"),
+            ]
+            assert driver.execute_with_description(
+                "SELECT id AS a, label AS b FROM t13_items WHERE id = ?", (999,)
+            ) == (
+                [],
+                ("a", "b"),
+            )
+            assert (
+                driver.execute_many(
+                    "INSERT INTO t13_items (label) VALUES (?)",
+                    [("m1",), ("m2",), ("m3",)],
+                )
+                == 3
+            )
+
+            assert driver.select_one("SELECT id AS a, label AS b FROM t13_items ORDER BY id LIMIT 1") == {
+                "a": first_id,
+                "b": "updated",
+            }
+            assert driver.select_one(
+                "SELECT id AS a, label AS b FROM t13_items ORDER BY id LIMIT 1",
+                schema_type=_MySQLSchemaRow,
+            ) == _MySQLSchemaRow(a=first_id, b="updated")
+            assert driver.select_one_or_none("SELECT id FROM t13_items WHERE id = ?", (999,)) is None
+            assert len(driver.select_many("SELECT id, label FROM t13_items ORDER BY id", size=2)) == 2
+            assert driver.select_value("SELECT COUNT(*) FROM t13_items", value_type=int) == 5
+            assert driver.select_value_or_none("SELECT id FROM t13_items WHERE id = ?", (999,)) is None
+
+            limited_rows, total = driver.select_with_total("SELECT id, label FROM t13_items ORDER BY id LIMIT 2")
+            assert len(limited_rows) == 2
+            assert total == 5
+
+            with pytest.raises(IntegrityError):
+                driver.execute("INSERT INTO t13_items (id, label) VALUES (?, ?)", (first_id, "dup"))
+        finally:
+            driver.close()
+    else:
+        async_driver = AsyncMySQLDriver(cfg)
+        try:
+            async_cur = async_driver.cursor()
+            assert isinstance(async_cur, AsyncMySQLCursor)
+            await async_cur.close()
+
+            async_lazy_cur = async_driver.cursor(lazy_begin=True)
+            assert isinstance(async_lazy_cur, AsyncMySQLCursor)
+            await async_lazy_cur.close()
+
+            assert await async_driver.select("SELECT 1 AS a") == [{"a": 1}]
+            assert await async_driver.select("SELECT 1 AS a", schema_type=_MySQLSchemaRow) == [
+                _MySQLSchemaRow(a=1, b="")
+            ]
+            assert await async_driver.select("SELECT :a AS a", {"a": 5}) == [{"a": 5}]
+
+            await async_driver.execute(
+                "CREATE TABLE t13_items (id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(64) NOT NULL)"
+            )
+            assert await async_driver.execute("INSERT INTO t13_items (label) VALUES (?)", ("first",)) == 1
+            first_id = async_driver.lastrowid
+            assert first_id is not None and first_id >= 1
+
+            assert await async_driver.execute("INSERT INTO t13_items (label) VALUES (?)", ("second",)) == 1
+            second_id = async_driver.lastrowid
+            assert second_id is not None and second_id > first_id
+
+            assert await async_driver.execute("UPDATE t13_items SET label = ?", ("updated",)) == 2
+            assert await async_driver.execute_with_description(
+                "SELECT id AS a, label AS b FROM t13_items ORDER BY id"
+            ) == ([(first_id, "updated"), (second_id, "updated")], ("a", "b"))
+            assert await async_driver.execute_tuples("SELECT id AS a, label AS b FROM t13_items ORDER BY id") == [
+                (first_id, "updated"),
+                (second_id, "updated"),
+            ]
+            assert await async_driver.select(
+                "SELECT id AS a, label AS b FROM t13_items ORDER BY id",
+                schema_type=_MySQLSchemaRow,
+            ) == [
+                _MySQLSchemaRow(a=first_id, b="updated"),
+                _MySQLSchemaRow(a=second_id, b="updated"),
+            ]
+            assert await async_driver.execute_with_description(
+                "SELECT id AS a, label AS b FROM t13_items WHERE id = ?",
+                (999,),
+            ) == ([], ("a", "b"))
+            assert (
+                await async_driver.execute_many(
+                    "INSERT INTO t13_items (label) VALUES (?)",
+                    [("m1",), ("m2",), ("m3",)],
+                )
+                == 3
+            )
+
+            assert await async_driver.select_one("SELECT id AS a, label AS b FROM t13_items ORDER BY id LIMIT 1") == {
+                "a": first_id,
+                "b": "updated",
+            }
+            assert await async_driver.select_one(
+                "SELECT id AS a, label AS b FROM t13_items ORDER BY id LIMIT 1",
+                schema_type=_MySQLSchemaRow,
+            ) == _MySQLSchemaRow(a=first_id, b="updated")
+            assert await async_driver.select_one_or_none("SELECT id FROM t13_items WHERE id = ?", (999,)) is None
+            assert len(await async_driver.select_many("SELECT id, label FROM t13_items ORDER BY id", size=2)) == 2
+            assert await async_driver.select_value("SELECT COUNT(*) FROM t13_items", value_type=int) == 5
+            assert await async_driver.select_value_or_none("SELECT id FROM t13_items WHERE id = ?", (999,)) is None
+
+            limited_rows, total = await async_driver.select_with_total(
+                "SELECT id, label FROM t13_items ORDER BY id LIMIT 2"
+            )
+            assert len(limited_rows) == 2
+            assert total == 5
+
+            with pytest.raises(IntegrityError):
+                await async_driver.execute("INSERT INTO t13_items (id, label) VALUES (?, ?)", (first_id, "dup"))
+        finally:
+            await async_driver.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_mysql_driver_broker_lease_lifecycle(
+    mysql_server: MySQLWireTestServer,
+    mode: str,
+) -> None:
+    """Verify broker leases are acquired once per client, released on close or drop, and skipped when refused or absent."""
+    cfg = MySQLConfig.from_url(mysql_server.dsn)
+    unused_broker = _RecordingBroker()
+
+    if mode == "sync":
+        no_broker_drv = SyncMySQLDriver(cfg, broker=None)
+        try:
+            for i in range(10):
+                assert no_broker_drv.select("SELECT :a AS a", {"a": i}) == [{"a": i}]
+        finally:
+            no_broker_drv.close()
+        assert unused_broker.acquire_calls == 0
+        assert unused_broker.release_calls == 0
+
+        broker = _RecordingBroker()
+        drv = SyncMySQLDriver(cfg, broker=broker)
+        try:
+            for i in range(10):
+                assert drv.select("SELECT :a AS a", {"a": i}) == [{"a": i}]
+            assert broker.acquire_calls == 1
+            assert broker.release_calls == 0
+        finally:
+            drv.close()
+        assert broker.acquire_calls == 1
+        assert broker.release_calls == 1
+
+        refused_broker = _RecordingBroker(refuse=True)
+        refused_drv = SyncMySQLDriver(cfg, broker=refused_broker)
+        try:
+            refused_drv.connect()
+            assert refused_drv.select("SELECT 1 AS a") == [{"a": 1}]
+            assert refused_broker.acquire_calls == 1
+            assert refused_broker.release_calls == 0
+        finally:
+            refused_drv.close()
+        assert refused_broker.release_calls == 0
+
+        drop_broker = _RecordingBroker()
+        ephemeral = SyncMySQLDriver(cfg, broker=drop_broker)
+        ephemeral.connect()
+        assert ephemeral.select("SELECT 1 AS a") == [{"a": 1}]
+        assert drop_broker.acquire_calls == 1
+        assert drop_broker.release_calls == 0
+        del ephemeral
+        gc.collect()
+        assert drop_broker.release_calls == 1
+    else:
+        no_broker_async = AsyncMySQLDriver(cfg, broker=None)
+        try:
+            for i in range(10):
+                assert await no_broker_async.select("SELECT :a AS a", {"a": i}) == [{"a": i}]
+        finally:
+            await no_broker_async.close()
+        assert unused_broker.acquire_calls == 0
+        assert unused_broker.release_calls == 0
+
+        async_broker = _AsyncRecordingBroker()
+        async_drv = AsyncMySQLDriver(cfg, broker=async_broker)
+        try:
+            for i in range(10):
+                assert await async_drv.select("SELECT :a AS a", {"a": i}) == [{"a": i}]
+            assert async_broker.acquire_calls == 1
+            assert async_broker.release_calls == 0
+        finally:
+            await async_drv.close()
+        assert async_broker.acquire_calls == 1
+        assert async_broker.release_calls == 1
+
+        refused_async_broker = _AsyncRecordingBroker(refuse=True)
+        refused_async_drv = AsyncMySQLDriver(cfg, broker=refused_async_broker)
+        try:
+            await refused_async_drv.connect()
+            assert await refused_async_drv.select("SELECT 1 AS a") == [{"a": 1}]
+            assert refused_async_broker.acquire_calls == 1
+            assert refused_async_broker.release_calls == 0
+        finally:
+            await refused_async_drv.close()
+        assert refused_async_broker.release_calls == 0
+
+        drop_async_broker = _AsyncRecordingBroker()
+        ephemeral_async = AsyncMySQLDriver(cfg, broker=drop_async_broker)
+        await ephemeral_async.connect()
+        assert await ephemeral_async.select("SELECT 1 AS a") == [{"a": 1}]
+        assert drop_async_broker.acquire_calls == 1
+        assert drop_async_broker.release_calls == 0
+        del ephemeral_async
+        gc.collect()
+        assert drop_async_broker.release_calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_mysql_driver_lease_across_auth_refresh(mode: str) -> None:
+    """Verify broker lease is released and re-acquired around an authentication refresh retry."""
+    issued: list[str] = []
+
+    def _sync_mint(*, now_ts: float) -> str:
+        token = f"test-token-placeholder-{len(issued) + 1}-{int(now_ts)}"
+        issued.append(token)
+        return token
+
+    async def _async_mint(*, now_ts: float) -> str:
+        await asyncio.sleep(0)
+        return _sync_mint(now_ts=now_ts)
+
+    provider = AwsRdsIamTokenProvider(
+        endpoint_host="127.0.0.1",
+        port=3306,
+        region="us-east-1",
+        username="iam_user",
+        refresh_margin_seconds=60.0,
+        token_ttl_seconds=900,
+        clock=lambda: 1000.0,
+        signer=_async_mint if mode == "async" else _sync_mint,
+    )
+
+    nonce = b"12345678901234567890"
+    stop_event = threading.Event()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(16)
+        srv.settimeout(0.2)
+        port = srv.getsockname()[1]
+
+        def _handle_conn(conn: socket.socket, conn_idx: int) -> None:
+            with conn:
+                conn.sendall(_mysql_packet(0, _mysql_handshake_v10(conn_idx + 1, nonce)))
+                try:
+                    seq, _payload = _read_mysql_packet(conn)
+                except EOFError:
+                    return
+                if conn_idx == 0:
+                    conn.sendall(_mysql_packet(seq + 1, _mysql_err_packet(1045, "28000", "Access denied for user")))
+                    return
+                conn.sendall(_mysql_packet(seq + 1, _mysql_ok_packet()))
+                while True:
+                    try:
+                        cmd_seq, cmd_payload = _read_mysql_packet(conn)
+                    except EOFError:
+                        break
+                    if not cmd_payload or cmd_payload[0] == 0x01:
+                        break
+                    if cmd_payload[0] == 0x16:
+                        prep_ok = b"\x00" + struct.pack("<IHHBH", 1, 0, 0, 0, 0)
+                        conn.sendall(_mysql_packet(cmd_seq + 1, prep_ok))
+                    else:
+                        conn.sendall(_mysql_packet(cmd_seq + 1, _mysql_ok_packet()))
+
+        def _server() -> None:
+            idx = 0
+            while not stop_event.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                t = threading.Thread(target=_handle_conn, args=(conn, idx), daemon=True)
+                t.start()
+                idx += 1
+
+        srv_thread = threading.Thread(target=_server, daemon=True)
+        srv_thread.start()
+
+        cfg = MySQLConfig(
+            dsn=f"mysql://iam_user@127.0.0.1:{port}/appdb?ssl_mode=disable",
+            token_provider=provider,
+        )
+        try:
+            if mode == "sync":
+                broker = _RecordingBroker()
+                drv = SyncMySQLDriver(cfg, broker=broker)
+                try:
+                    assert drv.execute("DO 1") == 0
+                    assert broker.events == ["acquire", "release", "acquire"]
+                finally:
+                    drv.close()
+                assert broker.events == ["acquire", "release", "acquire", "release"]
+            else:
+                async_broker = _AsyncRecordingBroker()
+                async_drv = AsyncMySQLDriver(cfg, broker=async_broker)
+                try:
+                    assert await async_drv.execute("DO 1") == 0
+                    assert async_broker.events == ["acquire", "release", "acquire"]
+                finally:
+                    await async_drv.close()
+                assert async_broker.events == ["acquire", "release", "acquire", "release"]
+        finally:
+            stop_event.set()
+            srv_thread.join(timeout=2.0)

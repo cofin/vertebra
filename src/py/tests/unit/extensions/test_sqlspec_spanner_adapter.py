@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import json
 import subprocess
 import sys
 from contextlib import asynccontextmanager, contextmanager
@@ -12,7 +13,7 @@ from typing import Any, cast
 
 import pyarrow as pa
 import pytest
-from sqlspec.core import ArrowResult, StackResult, StatementStack, TypedParameter
+from sqlspec.core import SQL, ArrowResult, StackResult, StatementStack, TypedParameter
 from sqlspec.data_dictionary._types import MetadataCapabilityProfile
 from sqlspec.exceptions import (
     DatabaseConnectionError,
@@ -33,6 +34,7 @@ from sqlspec.exceptions import (
 )
 from sqlspec.utils.adapters import resolve_adapter_name, resolve_extension_store_class
 
+from vertebra._spanner import SyncSpannerCursor
 from vertebra._vertebra import SpannerAbortedError, SpannerError
 from vertebra.db.adapters.spanner import (
     Mutation,
@@ -41,7 +43,9 @@ from vertebra.db.adapters.spanner import (
     StalenessBound,
 )
 from vertebra.db.arrow import ArrowCursor
+from vertebra.db.dbapi import connect
 from vertebra.db.driver import NotSupportedError
+from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver
 from vertebra.extensions.sqlspec.adapters.spanner import (
     SpangresAsyncConfig,
     SpangresSyncConfig,
@@ -70,6 +74,10 @@ from vertebra.extensions.sqlspec.adapters.spanner import (
     SpannerSyncSessionContext,
     encode_spanner_parameters,
     map_spanner_exception,
+)
+from vertebra.extensions.sqlspec.adapters.spanner.core import (
+    compile_spanner_statement,
+    default_statement_config,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import ArtifactReference
@@ -119,6 +127,124 @@ class _RecordingSyncSnapshot:
         self.closed = True
 
 
+class _RecordingSyncCursor:
+    """PEP 249 cursor double backed by ``_RecordingSpannerSyncNative``."""
+
+    def __init__(self, parent: "_RecordingSpannerSyncNative", **kwargs: Any) -> None:
+        self._parent = parent
+        self._kwargs = dict(kwargs)
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: Any = None
+        self.arraysize: int = 1
+        self._rows: list[tuple[Any, ...]] = []
+        self.closed = False
+
+    def execute(self, sql: str, params: Any = None) -> "_RecordingSyncCursor":
+        self._parent.calls.append(("execute", (sql, params), dict(self._kwargs)))
+        stripped = sql.lstrip().upper()
+        is_returning = "THEN RETURN" in stripped or "RETURNING" in stripped
+        if stripped.startswith(("SELECT", "WITH", "GRAPH")) or is_returning:
+            if self._parent.description_cols:
+                self.description = tuple(
+                    (col, None, None, None, None, None, None) for col in self._parent.description_cols
+                )
+                self._rows = [
+                    tuple(row)
+                    if isinstance(row, (tuple, list))
+                    else tuple(row[col] for col in self._parent.description_cols)
+                    for row in self._parent.description_rows
+                ]
+            elif self._parent.select_rows:
+                cols = list(self._parent.select_rows[0].keys())
+                self.description = tuple((col, None, None, None, None, None, None) for col in cols)
+                self._rows = [tuple(row[col] for col in cols) for row in self._parent.select_rows]
+            else:
+                self.description = ()
+                self._rows = []
+            self.rowcount = len(self._rows)
+            return self
+        self.description = None
+        self._rows = []
+        self.rowcount = 1
+        return self
+
+    def executemany(self, sql: str, seq_of_params: Any) -> "_RecordingSyncCursor":
+        batch = list(seq_of_params)
+        self._parent.calls.append(("executemany", (sql, batch), dict(self._kwargs)))
+        self.description = None
+        self._rows = []
+        self.rowcount = len(batch)
+        return self
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = list(self._rows)
+        self._rows = []
+        return rows
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _RecordingAsyncCursor:
+    """Async PEP 249 cursor double backed by ``_RecordingSpannerAsyncNative``."""
+
+    def __init__(self, parent: "_RecordingSpannerAsyncNative", **kwargs: Any) -> None:
+        self._parent = parent
+        self._kwargs = dict(kwargs)
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: Any = None
+        self.arraysize: int = 1
+        self._rows: list[tuple[Any, ...]] = []
+        self.closed = False
+
+    async def execute(self, sql: str, params: Any = None) -> "_RecordingAsyncCursor":
+        self._parent.calls.append(("execute", (sql, params), dict(self._kwargs)))
+        stripped = sql.lstrip().upper()
+        is_returning = "THEN RETURN" in stripped or "RETURNING" in stripped
+        if stripped.startswith(("SELECT", "WITH", "GRAPH")) or is_returning:
+            if self._parent.description_cols:
+                self.description = tuple(
+                    (col, None, None, None, None, None, None) for col in self._parent.description_cols
+                )
+                self._rows = [
+                    tuple(row)
+                    if isinstance(row, (tuple, list))
+                    else tuple(row[col] for col in self._parent.description_cols)
+                    for row in self._parent.description_rows
+                ]
+            elif self._parent.select_rows:
+                cols = list(self._parent.select_rows[0].keys())
+                self.description = tuple((col, None, None, None, None, None, None) for col in cols)
+                self._rows = [tuple(row[col] for col in cols) for row in self._parent.select_rows]
+            else:
+                self.description = ()
+                self._rows = []
+            self.rowcount = len(self._rows)
+            return self
+        self.description = None
+        self._rows = []
+        self.rowcount = 1
+        return self
+
+    async def executemany(self, sql: str, seq_of_params: Any) -> "_RecordingAsyncCursor":
+        batch = list(seq_of_params)
+        self._parent.calls.append(("executemany", (sql, batch), dict(self._kwargs)))
+        self.description = None
+        self._rows = []
+        self.rowcount = len(batch)
+        return self
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = list(self._rows)
+        self._rows = []
+        return rows
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class _RecordingSpannerSyncNative:
     """Offline synchronous double simulating ``SyncSpannerDriver`` calls."""
 
@@ -142,6 +268,9 @@ class _RecordingSpannerSyncNative:
 
     def close(self) -> None:
         self.closed = True
+
+    def cursor(self, **kwargs: Any) -> _RecordingSyncCursor:
+        return _RecordingSyncCursor(self, **kwargs)
 
     @contextmanager
     def snapshot(self, staleness: StalenessBound | None = None, *, multi_use: bool = True) -> Any:
@@ -260,6 +389,9 @@ class _RecordingSpannerAsyncNative:
 
     async def close(self) -> None:
         self.closed = True
+
+    def cursor(self, **kwargs: Any) -> _RecordingAsyncCursor:
+        return _RecordingAsyncCursor(self, **kwargs)
 
     @asynccontextmanager
     async def snapshot(self, staleness: StalenessBound | None = None, *, multi_use: bool = True) -> Any:
@@ -1130,3 +1262,580 @@ def test_spanner_adapter_classes_use_slots() -> None:
     ]
     for obj in instances:
         assert not hasattr(obj, "__dict__"), f"{type(obj).__name__} unexpectedly exposes __dict__"
+
+
+class _CountingSyncCursor:
+    """Wrapped sync cursor counting native execute, executemany, fetchall, and close calls."""
+
+    def __init__(
+        self,
+        *,
+        rows: list[tuple[Any, ...]] | None = None,
+        description: tuple[tuple[Any, ...], ...] | None = None,
+        rowcount: int = 0,
+        error: BaseException | None = None,
+    ) -> None:
+        self._rows = list(rows or [])
+        self._description = description
+        self._rowcount = rowcount
+        self._error = error
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.execute_calls: list[tuple[str, Any]] = []
+        self.executemany_calls: list[tuple[str, list[Any]]] = []
+        self.fetchall_calls: int = 0
+        self.close_calls: int = 0
+
+    def execute(self, sql: str, params: Any = None) -> "_CountingSyncCursor":
+        self.execute_calls.append((sql, params))
+        if self._error is not None:
+            raise self._error
+        self.description = self._description
+        self.rowcount = len(self._rows) if self._description is not None else self._rowcount
+        return self
+
+    def executemany(self, sql: str, seq_of_params: Any) -> "_CountingSyncCursor":
+        batch = list(seq_of_params)
+        self.executemany_calls.append((sql, batch))
+        self.description = None
+        self.rowcount = len(batch)
+        return self
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        self.fetchall_calls += 1
+        return list(self._rows)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _CountingAsyncCursor:
+    """Wrapped async cursor counting native execute, executemany, fetchall, and close calls."""
+
+    def __init__(self, inner: _CountingSyncCursor) -> None:
+        self._inner = inner
+
+    @property
+    def description(self) -> tuple[tuple[Any, ...], ...] | None:
+        return self._inner.description
+
+    @property
+    def rowcount(self) -> int:
+        return self._inner.rowcount
+
+    async def execute(self, sql: str, params: Any = None) -> "_CountingAsyncCursor":
+        self._inner.execute(sql, params)
+        return self
+
+    async def executemany(self, sql: str, seq_of_params: Any) -> "_CountingAsyncCursor":
+        self._inner.executemany(sql, seq_of_params)
+        return self
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._inner.fetchall()
+
+    async def close(self) -> None:
+        self._inner.close()
+
+
+class _CountingSpannerConnection:
+    """Minimal Spanner connection double issuing counting sync or async cursors."""
+
+    def __init__(
+        self,
+        *,
+        asynchronous: bool = False,
+        rows: list[tuple[Any, ...]] | None = None,
+        description: tuple[tuple[Any, ...], ...] | None = None,
+        rowcount: int = 0,
+        error: BaseException | None = None,
+    ) -> None:
+        self.config = SpannerConfig(project_id="p", instance_id="i", database_id="d")
+        self.dialect = "googlesql"
+        self.spanner_dialect = "googlesql"
+        self._asynchronous = asynchronous
+        self._rows = rows
+        self._description = description
+        self._rowcount = rowcount
+        self._error = error
+        self.cursor_kwargs: list[dict[str, Any]] = []
+        self.cursors: list[_CountingSyncCursor] = []
+
+    def cursor(self, **kwargs: Any) -> Any:
+        self.cursor_kwargs.append(dict(kwargs))
+        sync_cursor = _CountingSyncCursor(
+            rows=self._rows,
+            description=self._description,
+            rowcount=self._rowcount,
+            error=self._error,
+        )
+        self.cursors.append(sync_cursor)
+        return _CountingAsyncCursor(sync_cursor) if self._asynchronous else sync_cursor
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_spanner_native_cursor_cache_hit_and_rows(mode: str) -> None:
+    """Second identical select performs exactly one native execute and one fetchall."""
+    conn = _CountingSpannerConnection(
+        asynchronous=(mode == "async"),
+        rows=[(1,)],
+        description=(("a", None, None, None, None, None, None),),
+    )
+    if mode == "sync":
+        driver = SpannerSyncDriver(conn)
+        first = driver.select("SELECT 1 AS a")
+        second = driver.select("SELECT 1 AS a")
+    else:
+        async_driver = SpannerAsyncDriver(conn)
+
+        async def _run() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            return await async_driver.select("SELECT 1 AS a"), await async_driver.select("SELECT 1 AS a")
+
+        first, second = asyncio.run(_run())
+
+    assert first == [{"a": 1}]
+    assert second == [{"a": 1}]
+    assert len(conn.cursors) == 2
+    second_cursor = conn.cursors[1]
+    assert len(second_cursor.execute_calls) == 1
+    assert second_cursor.fetchall_calls == 1
+    assert second_cursor.close_calls == 1
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_spanner_native_cursor_dml_returning_and_execute_many(mode: str) -> None:
+    """Verify UPDATE rowcount, INSERT ... THEN RETURN rows, and execute_many batching."""
+    dml_conn = _CountingSpannerConnection(asynchronous=(mode == "async"), rowcount=4)
+    ret_conn = _CountingSpannerConnection(
+        asynchronous=(mode == "async"),
+        rows=[(42,)],
+        description=(("id", None, None, None, None, None, None),),
+    )
+    many_conn = _CountingSpannerConnection(asynchronous=(mode == "async"))
+
+    if mode == "sync":
+        dml_res = SpannerSyncDriver(dml_conn).execute(
+            "UPDATE users SET active = @a WHERE id = @id", {"a": True, "id": 1}
+        )
+        ret_rows = SpannerSyncDriver(ret_conn).select("INSERT INTO users (id) VALUES (@id) THEN RETURN id", {"id": 42})
+        many_res = SpannerSyncDriver(many_conn).execute_many(
+            "INSERT INTO users (id) VALUES (@id)",
+            [{"id": 1}, {"id": 2}, {"id": 3}],
+        )
+    else:
+
+        async def _run() -> tuple[Any, list[dict[str, Any]], Any]:
+            r1 = await SpannerAsyncDriver(dml_conn).execute(
+                "UPDATE users SET active = @a WHERE id = @id", {"a": True, "id": 1}
+            )
+            r2 = await SpannerAsyncDriver(ret_conn).select(
+                "INSERT INTO users (id) VALUES (@id) THEN RETURN id", {"id": 42}
+            )
+            r3 = await SpannerAsyncDriver(many_conn).execute_many(
+                "INSERT INTO users (id) VALUES (@id)",
+                [{"id": 1}, {"id": 2}, {"id": 3}],
+            )
+            return r1, r2, r3
+
+        dml_res, ret_rows, many_res = asyncio.run(_run())
+
+    assert dml_res.rows_affected == 4
+    assert ret_rows == [{"id": 42}]
+    assert many_res.rows_affected == 3
+    assert len(many_conn.cursors[0].executemany_calls) == 1
+    batch_sql, batch_params = many_conn.cursors[0].executemany_calls[0]
+    assert "INSERT INTO users" in batch_sql
+    assert [json.loads(item) for item in batch_params] == [{"id": 1}, {"id": 2}, {"id": 3}]
+
+
+@pytest.mark.parametrize("dialect", ["spanner", "spangres"])
+def test_spanner_compile_statement_typed_parameter_and_cursor_tags(dialect: str) -> None:
+    """compile_spanner_statement encodes TypedParameter timestamps and with_cursor forwards staleness and tags."""
+    ts = datetime(2026, 11, 20, 12, 30, tzinfo=UTC)
+    stmt_cfg = default_statement_config(dialect)
+    sql_text = "SELECT $1 AS ts" if dialect == "spangres" else "SELECT @ts AS ts"
+    params_arg: Any = (
+        [TypedParameter(ts, semantic_name="TIMESTAMP")]
+        if dialect == "spangres"
+        else {"ts": TypedParameter(ts, semantic_name="TIMESTAMP")}
+    )
+    stmt = SQL(sql_text, params_arg, statement_config=stmt_cfg)
+
+    compiled_sql, params_json = compile_spanner_statement(stmt, dialect=dialect)
+    assert "SELECT" in compiled_sql
+    assert params_json is not None
+    decoded = json.loads(params_json)
+    expected_key = "p1" if dialect == "spangres" else "ts"
+    assert decoded[expected_key] == {"type": "TIMESTAMP", "value": "2026-11-20T12:30:00Z"}
+
+    staleness = StalenessBound.exact_staleness(250)
+    conn = _CountingSpannerConnection(
+        rows=[(1,)],
+        description=(("a", None, None, None, None, None, None),),
+    )
+    driver = SpannerSyncDriver(
+        conn,
+        driver_features={"request_tag": "req-tag-1", "transaction_tag": "tx-tag-1"},
+        staleness=staleness,
+    )
+    assert driver.select("SELECT 1 AS a") == [{"a": 1}]
+    assert conn.cursor_kwargs == [{"staleness": staleness, "request_tag": "req-tag-1", "transaction_tag": "tx-tag-1"}]
+    assert conn.cursors[0].close_calls == 1
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_spanner_native_cursor_already_exists_maps_to_unique_violation(mode: str) -> None:
+    """Duplicate key SpannerError(code=6) raised by the cursor maps to UniqueViolationError."""
+    err = _make_spanner_error("Row already exists", code=6)
+    conn = _CountingSpannerConnection(asynchronous=(mode == "async"), error=err)
+    if mode == "sync":
+        with pytest.raises(UniqueViolationError):
+            SpannerSyncDriver(conn).execute("INSERT INTO users (id) VALUES (1)")
+    else:
+
+        async def _run() -> None:
+            await SpannerAsyncDriver(conn).execute("INSERT INTO users (id) VALUES (1)")
+
+        with pytest.raises(UniqueViolationError):
+            asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "spanner_url",
+    [
+        "spanner://proj/inst/db?endpoint=http://127.0.0.1:9010",
+        "spangres://proj/inst/db?endpoint=http://127.0.0.1:9010",
+    ],
+)
+def test_spanner_dbapi_cursor_is_native(spanner_url: str) -> None:
+    """Spanner DB-API connect().cursor() returns SyncSpannerCursor."""
+    conn = connect(spanner_url)
+    cursor = conn.cursor()
+    try:
+        assert isinstance(cursor, SyncSpannerCursor)
+    finally:
+        cursor.close()
+        if conn._driver is not None:
+            conn._driver.close()
+
+
+def _instrument_spanner_cache_hit_state(adapter: Any, *, asynchronous: bool) -> dict[str, int]:
+    """Wrap adapter._cache_hit_state callables with invocation counters."""
+    counts = {"fetch": 0, "dml": 0}
+    orig_fetch, orig_dml, orig_mapper = adapter._cache_hit_state
+    if asynchronous:
+
+        async def _wrapped_async_fetch(*args: Any, **kwargs: Any) -> Any:
+            counts["fetch"] += 1
+            return await orig_fetch(*args, **kwargs)
+
+        async def _wrapped_async_dml(*args: Any, **kwargs: Any) -> Any:
+            counts["dml"] += 1
+            return await orig_dml(*args, **kwargs)
+
+        adapter._cache_hit_state = (_wrapped_async_fetch, _wrapped_async_dml, orig_mapper)
+    else:
+
+        def _wrapped_sync_fetch(*args: Any, **kwargs: Any) -> Any:
+            counts["fetch"] += 1
+            return orig_fetch(*args, **kwargs)
+
+        def _wrapped_sync_dml(*args: Any, **kwargs: Any) -> Any:
+            counts["dml"] += 1
+            return orig_dml(*args, **kwargs)
+
+        adapter._cache_hit_state = (_wrapped_sync_fetch, _wrapped_sync_dml, orig_mapper)
+    return counts
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_spanner_cache_hit_executor_is_registered(mode: str) -> None:
+    """Spanner sync and async adapters register the base cache-hit executor with a 3-tuple state."""
+    conn = _CountingSpannerConnection(asynchronous=(mode == "async"))
+    if mode == "sync":
+        adapter: Any = SpannerSyncDriver(conn)
+        assert adapter._cache_hit_executor is BaseSyncDriver._run_cached_statement
+    else:
+        adapter = SpannerAsyncDriver(conn)
+        assert adapter._cache_hit_executor is BaseAsyncDriver._run_cached_statement
+    assert isinstance(adapter._cache_hit_state, tuple)
+    assert len(adapter._cache_hit_state) == 3
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("sql", "kind", "rows", "description", "rowcount"),
+    [
+        pytest.param(
+            "SELECT 1 AS a",
+            "fetch",
+            [(1,)],
+            (("a", None, None, None, None, None, None),),
+            0,
+            id="select",
+        ),
+        pytest.param(
+            "UPDATE users SET active = TRUE WHERE id = 1",
+            "dml",
+            None,
+            None,
+            3,
+            id="update",
+        ),
+    ],
+)
+def test_spanner_cache_hit_makes_one_adapter_call_and_one_cursor(
+    mode: str,
+    sql: str,
+    kind: str,
+    rows: list[tuple[Any, ...]] | None,
+    description: tuple[tuple[Any, ...], ...] | None,
+    rowcount: int,
+) -> None:
+    """A cached Spanner statement invokes one adapter callable and opens and closes one cursor."""
+    conn = _CountingSpannerConnection(
+        asynchronous=(mode == "async"),
+        rows=rows,
+        description=description,
+        rowcount=rowcount,
+    )
+    if mode == "sync":
+        adapter: Any = SpannerSyncDriver(conn)
+        counts = _instrument_spanner_cache_hit_state(adapter, asynchronous=False)
+        adapter.execute(sql)
+        conn.cursor_kwargs.clear()
+        conn.cursors.clear()
+        counts["fetch"] = 0
+        counts["dml"] = 0
+        adapter.execute(sql)
+    else:
+        adapter = SpannerAsyncDriver(conn)
+        counts = _instrument_spanner_cache_hit_state(adapter, asynchronous=True)
+
+        async def _run() -> None:
+            await adapter.execute(sql)
+            conn.cursor_kwargs.clear()
+            conn.cursors.clear()
+            counts["fetch"] = 0
+            counts["dml"] = 0
+            await adapter.execute(sql)
+
+        asyncio.run(_run())
+
+    expected_other = "dml" if kind == "fetch" else "fetch"
+    assert counts[kind] == 1
+    assert counts[expected_other] == 0
+    assert len(conn.cursor_kwargs) == 1
+    assert len(conn.cursors) == 1
+    assert len(conn.cursors[0].execute_calls) == 1
+    assert conn.cursors[0].close_calls == 1
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("sql", "rows", "description", "rowcount"),
+    [
+        pytest.param(
+            "SELECT 1 AS a",
+            [(1,)],
+            (("a", None, None, None, None, None, None),),
+            0,
+            id="select",
+        ),
+        pytest.param(
+            "SELECT 1 AS a WHERE FALSE",
+            [],
+            (("a", None, None, None, None, None, None),),
+            0,
+            id="empty_select",
+        ),
+        pytest.param(
+            "UPDATE users SET active = TRUE WHERE id = 1",
+            None,
+            None,
+            4,
+            id="update",
+        ),
+        pytest.param(
+            "INSERT INTO users (id) VALUES (42) THEN RETURN id",
+            [(42,)],
+            (("id", None, None, None, None, None, None),),
+            0,
+            id="dml_returning",
+        ),
+    ],
+)
+def test_spanner_cache_hit_result_matches_method_path(
+    mode: str,
+    sql: str,
+    rows: list[tuple[Any, ...]] | None,
+    description: tuple[tuple[Any, ...], ...] | None,
+    rowcount: int,
+) -> None:
+    """Cached Spanner executor results match the method path across selects, empty selects, and DML."""
+    fast_conn = _CountingSpannerConnection(
+        asynchronous=(mode == "async"),
+        rows=rows,
+        description=description,
+        rowcount=rowcount,
+    )
+    method_conn = _CountingSpannerConnection(
+        asynchronous=(mode == "async"),
+        rows=rows,
+        description=description,
+        rowcount=rowcount,
+    )
+    if mode == "sync":
+        fast_adapter: Any = SpannerSyncDriver(fast_conn)
+        method_adapter: Any = SpannerSyncDriver(method_conn)
+        method_adapter._cache_hit_executor = None
+        fast_adapter.execute(sql)
+        method_adapter.execute(sql)
+        fast_res = fast_adapter.execute(sql)
+        method_res = method_adapter.execute(sql)
+    else:
+        fast_adapter = SpannerAsyncDriver(fast_conn)
+        method_adapter = SpannerAsyncDriver(method_conn)
+        method_adapter._cache_hit_executor = None
+
+        async def _run() -> tuple[Any, Any]:
+            await fast_adapter.execute(sql)
+            await method_adapter.execute(sql)
+            return await fast_adapter.execute(sql), await method_adapter.execute(sql)
+
+        fast_res, method_res = asyncio.run(_run())
+
+    assert fast_res.all() == method_res.all()
+    assert fast_res.column_names == method_res.column_names
+    assert fast_res.rows_affected == method_res.rows_affected
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_spanner_cache_hit_keeps_session_staleness_and_tags(mode: str) -> None:
+    """Cached Spanner runs read session staleness and driver_features request_tag dynamically."""
+    staleness = StalenessBound.exact_staleness(2500)
+    conn = _CountingSpannerConnection(
+        asynchronous=(mode == "async"),
+        rows=[(1,)],
+        description=(("a", None, None, None, None, None, None),),
+    )
+    if mode == "sync":
+        adapter: Any = SpannerSyncDriver(conn, staleness=staleness, driver_features={"request_tag": "first"})
+        adapter.execute("SELECT 1 AS a")
+        adapter.execute("SELECT 1 AS a")
+        first_kwargs = dict(conn.cursor_kwargs[-1])
+        adapter.driver_features["request_tag"] = "second"
+        adapter.execute("SELECT 1 AS a")
+        second_kwargs = dict(conn.cursor_kwargs[-1])
+    else:
+        adapter = SpannerAsyncDriver(conn, staleness=staleness, driver_features={"request_tag": "first"})
+
+        async def _run() -> tuple[dict[str, Any], dict[str, Any]]:
+            await adapter.execute("SELECT 1 AS a")
+            await adapter.execute("SELECT 1 AS a")
+            first_kw = dict(conn.cursor_kwargs[-1])
+            adapter.driver_features["request_tag"] = "second"
+            await adapter.execute("SELECT 1 AS a")
+            second_kw = dict(conn.cursor_kwargs[-1])
+            return first_kw, second_kw
+
+        first_kwargs, second_kwargs = asyncio.run(_run())
+
+    assert first_kwargs["staleness"] == staleness
+    assert first_kwargs["request_tag"] == "first"
+    assert second_kwargs["staleness"] == staleness
+    assert second_kwargs["request_tag"] == "second"
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_spanner_cache_hit_read_only_session_refuses_write(mode: str) -> None:
+    """A read-only Spanner session refuses cached writes before creating a cursor and still runs reads."""
+    conn = _CountingSpannerConnection(
+        asynchronous=(mode == "async"),
+        rows=[(1,)],
+        description=(("a", None, None, None, None, None, None),),
+    )
+    if mode == "sync":
+        adapter: Any = SpannerSyncDriver(conn, read_only=True)
+        with pytest.raises(ImproperConfigurationError, match="read-only Spanner snapshot"):
+            adapter._cache_hit_state[1]("UPDATE t SET a = 1", ())
+        assert conn.cursor_kwargs == []
+        fetched_rows, fetched_names = adapter._cache_hit_state[0]("SELECT 1", ())
+    else:
+        adapter = SpannerAsyncDriver(conn, read_only=True)
+
+        async def _run() -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            with pytest.raises(ImproperConfigurationError, match="read-only Spanner snapshot"):
+                await adapter._cache_hit_state[1]("UPDATE t SET a = 1", ())
+            assert conn.cursor_kwargs == []
+            return cast(
+                "tuple[list[tuple[Any, ...]], tuple[str, ...]]",
+                await adapter._cache_hit_state[0]("SELECT 1", ()),
+            )
+
+        fetched_rows, fetched_names = asyncio.run(_run())
+
+    assert fetched_rows == [(1,)]
+    assert fetched_names == ("a",)
+
+
+def test_spanner_cache_hit_not_registered_without_cursor() -> None:
+    """Async Spanner adapter leaves _cache_hit_executor unset when connection exposes only _sync."""
+
+    class _SyncOnlySpannerConnection:
+        def __init__(self) -> None:
+            self.config = SpannerConfig(project_id="p", instance_id="i", database_id="d")
+            self.dialect = "googlesql"
+            self.spanner_dialect = "googlesql"
+            self._sync = _CountingSpannerConnection()
+
+    adapter = SpannerAsyncDriver(_SyncOnlySpannerConnection())
+    assert adapter._cache_hit_executor is None
+    assert adapter._cache_hit_state is None
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_spanner_cache_hit_errors_match_method_path(mode: str) -> None:
+    """Native errors raised on a cached Spanner run map to the same SQLSpec exception class with __cause__."""
+    native_error = _make_spanner_error("already exists", code=6)
+    fast_conn = _CountingSpannerConnection(asynchronous=(mode == "async"), rowcount=1)
+    method_conn = _CountingSpannerConnection(asynchronous=(mode == "async"), rowcount=1)
+    sql = "INSERT INTO users (id) VALUES (1)"
+
+    if mode == "sync":
+        fast_adapter: Any = SpannerSyncDriver(fast_conn)
+        method_adapter: Any = SpannerSyncDriver(method_conn)
+        method_adapter._cache_hit_executor = None
+        fast_adapter.execute(sql)
+        method_adapter.execute(sql)
+        fast_conn._error = native_error
+        method_conn._error = native_error
+        with pytest.raises(UniqueViolationError) as fast_exc:
+            fast_adapter.execute(sql)
+        with pytest.raises(UniqueViolationError) as method_exc:
+            method_adapter.execute(sql)
+    else:
+        fast_adapter = SpannerAsyncDriver(fast_conn)
+        method_adapter = SpannerAsyncDriver(method_conn)
+        method_adapter._cache_hit_executor = None
+
+        async def _run() -> tuple[BaseException, BaseException]:
+            await fast_adapter.execute(sql)
+            await method_adapter.execute(sql)
+            fast_conn._error = native_error
+            method_conn._error = native_error
+            with pytest.raises(UniqueViolationError) as f_exc:
+                await fast_adapter.execute(sql)
+            with pytest.raises(UniqueViolationError) as m_exc:
+                await method_adapter.execute(sql)
+            return f_exc.value, m_exc.value
+
+        fast_val, method_val = asyncio.run(_run())
+        assert type(fast_val) is type(method_val)
+        assert fast_val.__cause__ is native_error
+        assert fast_conn.cursors[-1].close_calls == 1
+        return
+
+    assert type(fast_exc.value) is type(method_exc.value)
+    assert fast_exc.value.__cause__ is native_error
+    assert fast_conn.cursors[-1].close_calls == 1

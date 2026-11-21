@@ -8,16 +8,18 @@ import io
 import socket
 import zipfile
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from typing import Any, Final
 
 import msgspec
 
 import vertebra._oracle as _oracle
+from vertebra.db.adapters.oracle.config import OracleDriverFeatures
 from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.db.arrow import ArrowCursor
 from vertebra.db.driver import (
     InterfaceError,
+    NotFoundError,
     OperationalError,
     PoolExhaustedError,
 )
@@ -116,6 +118,281 @@ class _StubAsyncListener:
         self.close_calls += 1
 
 
+def _stub_is_write_sql(sql: str) -> bool:
+    trimmed = sql.lstrip()
+    while trimmed.startswith("/*"):
+        end = trimmed.find("*/")
+        if end == -1:
+            break
+        trimmed = trimmed[end + 2 :].lstrip()
+    upper = trimmed.upper()
+    return not (upper.startswith("SELECT") or upper.startswith("WITH"))
+
+
+def _stub_is_var_placeholder(value: Any) -> bool:
+    return callable(getattr(value, "setvalue", None)) and hasattr(value, "type_code")
+
+
+def _stub_var_type_hint(var: Any) -> str:
+    type_code = getattr(var, "type_code", None)
+    raw_name = getattr(type_code, "_name", None)
+    if raw_name is None:
+        raw_name = type_code.__name__ if isinstance(type_code, type) else str(type_code or "")
+    upper = str(raw_name).upper()
+    if upper == "BLOB":
+        return "BLOB"
+    if upper in {"CLOB", "NCLOB"}:
+        return "CLOB"
+    if upper in {"BINARY", "BFILE", "BYTES", "RAW"}:
+        return "RAW"
+    if upper in {"NUMBER", "INT", "FLOAT", "DECIMAL"}:
+        return "NUMBER"
+    if upper in {"DATETIME", "DATE", "TIMESTAMP"}:
+        return "TIMESTAMP"
+    if upper in {"BOOL", "BOOLEAN"}:
+        return "BOOLEAN"
+    return "VARCHAR2"
+
+
+def _stub_partition_bind_vars(
+    parameters: Sequence[Any] | Mapping[str, Any] | None,
+    out_binds: Any = None,
+) -> tuple[
+    Sequence[Any] | Mapping[str, Any] | None,
+    Any,
+    dict[str, tuple[Any, str]] | list[tuple[Any, str]],
+]:
+    if parameters is None:
+        return None, out_binds, {}
+    if isinstance(parameters, Mapping):
+        if not any(_stub_is_var_placeholder(v) for v in parameters.values()):
+            return parameters, out_binds, {}
+        in_params: dict[str, Any] = {}
+        out_vars: dict[str, tuple[Any, str]] = {}
+        derived_out: dict[str, str] = dict(out_binds) if isinstance(out_binds, Mapping) else {}
+        for k, v in parameters.items():
+            clean_k = str(k).lstrip(":")
+            if _stub_is_var_placeholder(v):
+                hint = str(derived_out.get(clean_k) or _stub_var_type_hint(v))
+                derived_out[clean_k] = hint
+                out_vars[clean_k] = (v, hint)
+            else:
+                in_params[str(k)] = v
+        return in_params, derived_out, out_vars
+    if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray)):
+        if not any(_stub_is_var_placeholder(v) for v in parameters):
+            return parameters, out_binds, []
+        in_seq: list[Any] = []
+        out_seq: list[tuple[Any, str]] = []
+        derived_seq: list[str] = (
+            [str(item) for item in out_binds]
+            if isinstance(out_binds, Sequence) and not isinstance(out_binds, (str, bytes, bytearray))
+            else []
+        )
+        for v in parameters:
+            if _stub_is_var_placeholder(v):
+                hint = _stub_var_type_hint(v)
+                derived_seq.append(hint)
+                out_seq.append((v, hint))
+            else:
+                in_seq.append(v)
+        return in_seq, derived_seq, out_seq
+    return parameters, out_binds, {}
+
+
+def _stub_fill_bind_vars(
+    out_vars: dict[str, tuple[Any, str]] | list[tuple[Any, str]],
+    result: Any,
+    *,
+    features: OracleDriverFeatures,
+) -> Any:
+    raw_out = getattr(result, "out_binds", None)
+    if raw_out is None:
+        return None
+    if isinstance(raw_out, Mapping):
+        lower_map = {str(k).lstrip(":").lower(): v for k, v in raw_out.items()}
+        coerced_map: dict[str, Any] = {}
+        if isinstance(out_vars, dict) and out_vars:
+            for clean_k, (var, hint) in out_vars.items():
+                raw_val = raw_out.get(clean_k, lower_map.get(clean_k.lower()))
+                coerced_val = OracleCore.coerce_row_cell(raw_val, hint, features=features)
+                var.setvalue(0, coerced_val)
+                coerced_map[clean_k] = coerced_val
+            for k, v in raw_out.items():
+                norm_k = str(k).lstrip(":")
+                if norm_k not in coerced_map:
+                    coerced_map[norm_k] = OracleCore.coerce_row_cell(v, None, features=features)
+            return coerced_map
+        return {str(k).lstrip(":"): OracleCore.coerce_row_cell(v, None, features=features) for k, v in raw_out.items()}
+    if isinstance(raw_out, Sequence) and not isinstance(raw_out, (str, bytes, bytearray)):
+        var_list = out_vars if isinstance(out_vars, list) else list(out_vars.values())
+        coerced_list: list[Any] = []
+        for idx, raw_val in enumerate(raw_out):
+            seq_hint: str | None = var_list[idx][1] if idx < len(var_list) else None
+            coerced_val = OracleCore.coerce_row_cell(raw_val, seq_hint, features=features)
+            if idx < len(var_list):
+                var_list[idx][0].setvalue(0, coerced_val)
+            coerced_list.append(coerced_val)
+        return tuple(coerced_list)
+    return raw_out
+
+
+class _StubSyncOracleCursor:
+    """Protocol double matching `_oracle.SyncOracleCursor` for offline driver tests."""
+
+    def __init__(
+        self,
+        client: _StubSyncOracleClient,
+        *,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+        lazy_begin: bool = False,
+    ) -> None:
+        self._client = client
+        self.arraysize: int = 256
+        self.description: tuple[tuple[str, str, None, None, None, None, None], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: str | None = None
+        self.touches_session_context: bool = False
+        self.out_binds: dict[str, Any] | tuple[Any, ...] | None = None
+        self.closed: bool = False
+        self.lazy_begin: bool = lazy_begin
+        self.options: dict[str, Any] = {
+            "enable_uuid_binary": enable_uuid_binary,
+            "fetch_decimals": fetch_decimals,
+            "vector_return_format": vector_return_format,
+            "enable_lowercase_column_names": enable_lowercase_column_names,
+        }
+        self._features = OracleDriverFeatures(
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        self._rows: list[tuple[Any, ...]] = []
+        self._pos: int = 0
+
+    def var(
+        self,
+        type_code: Any,
+        size: int = 0,
+        arraysize: int = 1,
+        outconverter: Callable[[Any], Any] | None = None,
+    ) -> _oracle.OracleOutBindVar:
+        """Create an `OracleOutBindVar` placeholder."""
+        return _oracle.OracleOutBindVar(type_code, size=size, arraysize=arraysize, outconverter=outconverter)
+
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+    ) -> _StubSyncOracleCursor:
+        """Execute SQL against the owning stub client and populate cursor state."""
+        if self.closed:
+            raise InterfaceError("Oracle cursor is closed")
+        raw_params = None if params == () else params
+        in_params, resolved_out_binds, out_vars = _stub_partition_bind_vars(raw_params, out_binds)
+        coerced = OracleCore.coerce_parameters(in_params, features=self._features)
+        if _stub_is_write_sql(sql):
+            result = self._client.execute(
+                sql,
+                coerced,
+                out_binds=resolved_out_binds,
+                fetch_decimals=self._features.fetch_decimals,
+                enable_lowercase_column_names=self._features.enable_lowercase_column_names,
+            )
+        else:
+            result = self._client.query(
+                sql,
+                coerced,
+                out_binds=resolved_out_binds,
+                fetch_decimals=self._features.fetch_decimals,
+                enable_lowercase_column_names=self._features.enable_lowercase_column_names,
+            )
+        self.out_binds = _stub_fill_bind_vars(out_vars, result, features=self._features)
+        rows, cols = OracleCore.coerce_result_rows_and_cols(
+            result,
+            features=self._features,
+            out_hints=resolved_out_binds,
+        )
+        if cols:
+            self.description = tuple((name, "UNKNOWN", None, None, None, None, None) for name in cols)
+        else:
+            self.description = None
+        self._rows = list(rows)
+        self._pos = 0
+        self.rowcount = int(result.rowcount)
+        self.lastrowid = result.lastrowid
+        upper = sql.upper()
+        self.touches_session_context = (
+            "DBMS_SESSION" in upper or "SET_IDENTIFIER" in upper or "CLEAR_IDENTIFIER" in upper
+        )
+        return self
+
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> _StubSyncOracleCursor:
+        """Execute a DML batch against the owning stub client."""
+        if self.closed:
+            raise InterfaceError("Oracle cursor is closed")
+        coerced_seq = [OracleCore.coerce_parameters(p, features=self._features) or () for p in seq_of_params]
+        count = self._client.execute_many(sql, coerced_seq)
+        self.description = None
+        self._rows = []
+        self._pos = 0
+        self.rowcount = int(count)
+        self.lastrowid = None
+        self.out_binds = None
+        self.touches_session_context = False
+        return self
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next buffered row or `None`."""
+        if self.closed:
+            raise InterfaceError("Oracle cursor is closed")
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to `size` buffered rows."""
+        if self.closed:
+            raise InterfaceError("Oracle cursor is closed")
+        count = self.arraysize if size is None else max(0, int(size))
+        chunk = self._rows[self._pos : self._pos + count]
+        self._pos += len(chunk)
+        return chunk
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return all remaining buffered rows."""
+        if self.closed:
+            raise InterfaceError("Oracle cursor is closed")
+        chunk = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return chunk
+
+    def close(self) -> None:
+        """Close the cursor idempotently."""
+        self.closed = True
+        self._rows = []
+
+    def __enter__(self) -> _StubSyncOracleCursor:
+        """Enter the cursor context manager."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Close the cursor on context exit."""
+        self.close()
+
+
 class _StubSyncOracleClient:
     """Protocol double matching `_oracle.SyncOracleClient` at the Python adapter boundary."""
 
@@ -132,7 +409,7 @@ class _StubSyncOracleClient:
         self.purity: str = purity
         self.connection_tag: str | None = connection_tag
         self.tag_matched: bool = False
-        self.calls: list[tuple[str, Any]] = []
+        self.calls: list[tuple[Any, ...]] = []
         self.queued_results: deque[_oracle.OracleQueryResult | BaseException] = deque()
         self.queued_many_counts: deque[int] = deque()
         self.queued_arrow: deque[tuple[Sequence[tuple[Any, ...]], Sequence[str]]] = deque()
@@ -147,6 +424,214 @@ class _StubSyncOracleClient:
         }
         self._last_piggyback_frame: bytes | None = None
         self._msg_seq: int = 0
+        self._lease_releaser: Callable[[], None] | None = None
+        self.attach_lease_calls: int = 0
+        self.release_lease_calls: int = 0
+        self.cursor_calls: list[dict[str, Any]] = []
+
+    def attach_lease(self, release: Callable[[], None]) -> None:
+        """Attach a checkout lease releaser to this stub client."""
+        self.attach_lease_calls += 1
+        self._lease_releaser = release
+
+    def release_lease(self) -> None:
+        """Release any attached checkout lease idempotently."""
+        self.release_lease_calls += 1
+        releaser = self._lease_releaser
+        self._lease_releaser = None
+        if releaser is not None:
+            releaser()
+
+    def cursor(
+        self,
+        *,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+        lazy_begin: bool = False,
+    ) -> _StubSyncOracleCursor:
+        """Create a `_StubSyncOracleCursor` bound to this stub client."""
+        self._ensure_open()
+        opts: dict[str, Any] = {
+            "enable_uuid_binary": enable_uuid_binary,
+            "fetch_decimals": fetch_decimals,
+            "vector_return_format": vector_return_format,
+            "enable_lowercase_column_names": enable_lowercase_column_names,
+            "lazy_begin": lazy_begin,
+        }
+        self.cursor_calls.append(opts)
+        return _StubSyncOracleCursor(self, **opts)
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run `sql` directly via a cursor helper without recording a `cursor()` call."""
+        self._ensure_open()
+        self.calls.append(
+            (
+                "fetch_rows",
+                {
+                    "sql": sql,
+                    "params": params,
+                    "out_binds": out_binds,
+                    "fetch_decimals": fetch_decimals,
+                    "enable_lowercase_column_names": enable_lowercase_column_names,
+                },
+            )
+        )
+        cur = _StubSyncOracleCursor(
+            self,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        try:
+            cur.execute(sql, params, out_binds=out_binds)
+            if cur.description is None:
+                return ([], ())
+            names = tuple(col[0] for col in cur.description)
+            return (cur.fetchall(), names)
+        finally:
+            cur.close()
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Run `sql` directly via a cursor helper and return row dictionaries."""
+        self._ensure_open()
+        self.calls.append(
+            (
+                "fetch_dicts",
+                {
+                    "sql": sql,
+                    "params": params,
+                    "out_binds": out_binds,
+                    "fetch_decimals": fetch_decimals,
+                    "enable_lowercase_column_names": enable_lowercase_column_names,
+                },
+            )
+        )
+        cur = _StubSyncOracleCursor(
+            self,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        try:
+            cur.execute(sql, params, out_binds=out_binds)
+            if cur.description is None:
+                return []
+            names = tuple(col[0] for col in cur.description)
+            return [dict(zip(names, row, strict=False)) for row in cur.fetchall()]
+        finally:
+            cur.close()
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Run `sql` directly via a cursor helper and return the first scalar cell."""
+        self._ensure_open()
+        self.calls.append(
+            (
+                "fetch_value",
+                {
+                    "sql": sql,
+                    "params": params,
+                    "out_binds": out_binds,
+                    "fetch_decimals": fetch_decimals,
+                    "enable_lowercase_column_names": enable_lowercase_column_names,
+                },
+            )
+        )
+        cur = _StubSyncOracleCursor(
+            self,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        try:
+            cur.execute(sql, params, out_binds=out_binds)
+            row = cur.fetchone()
+            if row is None:
+                raise NotFoundError("Query returned no rows")
+            if not row:
+                return None
+            return row[0]
+        finally:
+            cur.close()
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool]:
+        """Run DML/PLSQL `sql` directly via a cursor helper and return the four-item tuple."""
+        self._ensure_open()
+        self.calls.append(
+            (
+                "execute_dml",
+                {
+                    "sql": sql,
+                    "params": params,
+                    "out_binds": out_binds,
+                    "fetch_decimals": fetch_decimals,
+                    "enable_lowercase_column_names": enable_lowercase_column_names,
+                },
+            )
+        )
+        cur = _StubSyncOracleCursor(
+            self,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        try:
+            cur.execute(sql, params, out_binds=out_binds)
+            return (max(cur.rowcount, 0), cur.lastrowid, cur.out_binds, cur.touches_session_context)
+        finally:
+            cur.close()
+
+    def __del__(self) -> None:
+        releaser = getattr(self, "_lease_releaser", None)
+        if releaser is not None:
+            self._lease_releaser = None
+            with contextlib.suppress(Exception):
+                releaser()
 
     @property
     def pending_session_attrs(self) -> dict[str, str | None] | None:
@@ -208,6 +693,7 @@ class _StubSyncOracleClient:
 
     def close(self) -> None:
         """Close the client session idempotently."""
+        self.release_lease()
         self.closed = True
         self.in_transaction = False
         self.calls.append(("close", None))
@@ -430,6 +916,116 @@ class _StubSyncOracleClient:
         )
 
 
+class _StubAsyncOracleCursor:
+    """Protocol double matching `_oracle.AsyncOracleCursor` for offline async driver tests."""
+
+    def __init__(
+        self,
+        sync_cursor: _StubSyncOracleCursor,
+    ) -> None:
+        self._sync = sync_cursor
+
+    @property
+    def arraysize(self) -> int:
+        """Return the cursor fetch array size."""
+        return self._sync.arraysize
+
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        self._sync.arraysize = value
+
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, None], ...] | None:
+        """Return PEP 249 column metadata tuples."""
+        return self._sync.description
+
+    @property
+    def rowcount(self) -> int:
+        """Return affected row count."""
+        return self._sync.rowcount
+
+    @property
+    def lastrowid(self) -> str | None:
+        """Return last inserted ROWID when available."""
+        return self._sync.lastrowid
+
+    @property
+    def touches_session_context(self) -> bool:
+        """Return whether the executed SQL modified session context."""
+        return self._sync.touches_session_context
+
+    @property
+    def out_binds(self) -> dict[str, Any] | tuple[Any, ...] | None:
+        """Return coerced OUT bind values."""
+        return self._sync.out_binds
+
+    @property
+    def closed(self) -> bool:
+        """Return whether the cursor has been closed."""
+        return self._sync.closed
+
+    @property
+    def lazy_begin(self) -> bool:
+        """Return whether the cursor was created with lazy_begin=True."""
+        return self._sync.lazy_begin
+
+    @property
+    def options(self) -> dict[str, Any]:
+        """Return the cursor feature options."""
+        return self._sync.options
+
+    def var(
+        self,
+        type_code: Any,
+        size: int = 0,
+        arraysize: int = 1,
+        outconverter: Callable[[Any], Any] | None = None,
+    ) -> _oracle.OracleOutBindVar:
+        """Create an `OracleOutBindVar` placeholder."""
+        return self._sync.var(type_code, size=size, arraysize=arraysize, outconverter=outconverter)
+
+    async def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+    ) -> _StubAsyncOracleCursor:
+        """Execute SQL asynchronously against the owning stub client."""
+        await asyncio.sleep(0)
+        self._sync.execute(sql, params, out_binds=out_binds)
+        return self
+
+    async def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> _StubAsyncOracleCursor:
+        """Execute a DML batch asynchronously against the owning stub client."""
+        await asyncio.sleep(0)
+        self._sync.executemany(sql, seq_of_params)
+        return self
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next buffered row or `None`."""
+        await asyncio.sleep(0)
+        return self._sync.fetchone()
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to `size` buffered rows."""
+        await asyncio.sleep(0)
+        return self._sync.fetchmany(size)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return all remaining buffered rows."""
+        await asyncio.sleep(0)
+        return self._sync.fetchall()
+
+    async def close(self) -> None:
+        """Close the cursor idempotently."""
+        self._sync.close()
+
+
 class _StubAsyncOracleClient:
     """Protocol double matching `_oracle.AsyncOracleClient` via composition around `_StubSyncOracleClient`."""
 
@@ -492,7 +1088,7 @@ class _StubAsyncOracleClient:
         self._sync.tag_matched = value
 
     @property
-    def calls(self) -> list[tuple[str, Any]]:
+    def calls(self) -> list[tuple[Any, ...]]:
         """Return recorded client operations."""
         return self._sync.calls
 
@@ -530,6 +1126,140 @@ class _StubAsyncOracleClient:
     def last_piggyback_frame(self) -> bytes | None:
         """Return the last encoded TTC piggyback frame."""
         return self._sync.last_piggyback_frame
+
+    @property
+    def attach_lease_calls(self) -> int:
+        """Return the number of `attach_lease()` calls on this stub client."""
+        return self._sync.attach_lease_calls
+
+    @property
+    def release_lease_calls(self) -> int:
+        """Return the number of `release_lease()` calls on this stub client."""
+        return self._sync.release_lease_calls
+
+    @property
+    def cursor_calls(self) -> list[dict[str, Any]]:
+        """Return recorded `cursor()` option dicts."""
+        return self._sync.cursor_calls
+
+    def attach_lease(self, release: Callable[[], None]) -> None:
+        """Attach a checkout lease releaser to this stub client."""
+        self._sync.attach_lease(release)
+
+    def release_lease(self) -> None:
+        """Release any attached checkout lease idempotently."""
+        self._sync.release_lease()
+
+    def cursor(
+        self,
+        *,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+        lazy_begin: bool = False,
+    ) -> _StubAsyncOracleCursor:
+        """Create a `_StubAsyncOracleCursor` bound to this stub client."""
+        sync_cur = self._sync.cursor(
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+            lazy_begin=lazy_begin,
+        )
+        return _StubAsyncOracleCursor(sync_cur)
+
+    async def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Awaitable `fetch_rows()` forwarding to the underlying sync stub client."""
+        await asyncio.sleep(0)
+        return self._sync.fetch_rows(
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+
+    async def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Awaitable `fetch_dicts()` forwarding to the underlying sync stub client."""
+        await asyncio.sleep(0)
+        return self._sync.fetch_dicts(
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+
+    async def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Awaitable `fetch_value()` forwarding to the underlying sync stub client."""
+        await asyncio.sleep(0)
+        return self._sync.fetch_value(
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+
+    async def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool]:
+        """Awaitable `execute_dml()` forwarding to the underlying sync stub client."""
+        await asyncio.sleep(0)
+        return self._sync.execute_dml(
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
 
     def set_session_attrs(
         self,
@@ -718,6 +1448,8 @@ class _StubSyncOraclePool:
         self._idle: list[_StubSyncOracleClient] = []
         self._borrowed: list[_StubSyncOracleClient] = []
         self.created_clients: list[_StubSyncOracleClient] = []
+        self.single_call_results: deque[_oracle.OracleQueryResult | BaseException] = deque()
+        self.single_calls: list[tuple[str, str, Any]] = []
 
     @property
     def size(self) -> int:
@@ -847,6 +1579,135 @@ class _StubSyncOraclePool:
         while self._idle:
             self._idle.pop().close()
 
+    def _run_single_call(
+        self,
+        method_name: str,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None,
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: str,
+        enable_lowercase_column_names: bool,
+    ) -> Any:
+        self.single_calls.append((method_name, sql, params))
+        client = self.acquire()
+        if self.single_call_results:
+            client.queued_results.append(self.single_call_results.popleft())
+        discard = False
+        try:
+            method = getattr(client, method_name)
+            return method(
+                sql,
+                params,
+                out_binds=out_binds,
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+            )
+        except BaseException as exc:
+            discard = OracleCore.is_fatal_transport_error(exc)
+            raise
+        finally:
+            self.release(client, discard=discard)
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Check out a stub client, run `fetch_rows`, and release it."""
+        result: tuple[list[tuple[Any, ...]], tuple[str, ...]] = self._run_single_call(
+            "fetch_rows",
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        return result
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Check out a stub client, run `fetch_dicts`, and release it."""
+        result: list[dict[str, Any]] = self._run_single_call(
+            "fetch_dicts",
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        return result
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Check out a stub client, run `fetch_value`, and release it."""
+        return self._run_single_call(
+            "fetch_value",
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool]:
+        """Check out a stub client, run `execute_dml`, and release it."""
+        result: tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool] = self._run_single_call(
+            "execute_dml",
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        return result
+
     @staticmethod
     def _raise_exhausted() -> None:
         err = PoolExhaustedError("Oracle connection pool exhausted")
@@ -874,6 +1735,8 @@ class _StubAsyncOraclePool:
         self._idle: list[_StubAsyncOracleClient] = []
         self._borrowed: list[_StubAsyncOracleClient] = []
         self.created_clients: list[_StubAsyncOracleClient] = []
+        self.single_call_results: deque[_oracle.OracleQueryResult | BaseException] = deque()
+        self.single_calls: list[tuple[str, str, Any]] = []
 
     @property
     def size(self) -> int:
@@ -1004,6 +1867,135 @@ class _StubAsyncOraclePool:
         while self._idle:
             await self._idle.pop().close()
 
+    async def _run_single_call(
+        self,
+        method_name: str,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None,
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: str,
+        enable_lowercase_column_names: bool,
+    ) -> Any:
+        self.single_calls.append((method_name, sql, params))
+        client = await self.acquire()
+        if self.single_call_results:
+            client.queued_results.append(self.single_call_results.popleft())
+        discard = False
+        try:
+            method = getattr(client, method_name)
+            return await method(
+                sql,
+                params,
+                out_binds=out_binds,
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+            )
+        except BaseException as exc:
+            discard = OracleCore.is_fatal_transport_error(exc)
+            raise
+        finally:
+            await self.release(client, discard=discard)
+
+    async def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Check out an async stub client, await `fetch_rows`, and release it."""
+        result: tuple[list[tuple[Any, ...]], tuple[str, ...]] = await self._run_single_call(
+            "fetch_rows",
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        return result
+
+    async def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Check out an async stub client, await `fetch_dicts`, and release it."""
+        result: list[dict[str, Any]] = await self._run_single_call(
+            "fetch_dicts",
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        return result
+
+    async def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Check out an async stub client, await `fetch_value`, and release it."""
+        return await self._run_single_call(
+            "fetch_value",
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+
+    async def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool]:
+        """Check out an async stub client, await `execute_dml`, and release it."""
+        result: tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool] = await self._run_single_call(
+            "execute_dml",
+            sql,
+            params,
+            out_binds=out_binds,
+            enable_uuid_binary=enable_uuid_binary,
+            fetch_decimals=fetch_decimals,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        return result
+
 
 class _SyncDriverDouble:
     """Minimal synchronous driver double for `TenantConnectionScope` reset/evict verification."""
@@ -1081,7 +2073,7 @@ class _FakeSyncOracleDriver:
         return False
 
     @contextlib.contextmanager
-    def transaction(self) -> Any:
+    def transaction(self) -> Iterator[_FakeSyncOracleDriver]:
         yield self
 
 
@@ -1109,7 +2101,7 @@ class _FakeAsyncOracleDriver:
         return False
 
     @contextlib.asynccontextmanager
-    async def transaction(self) -> Any:
+    async def transaction(self) -> AsyncIterator[_FakeAsyncOracleDriver]:
         yield self
 
 

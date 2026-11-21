@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import threading
 import time
@@ -23,7 +25,13 @@ from vertebra.db.adapters.oracle.driver import (
 from vertebra.db.adapters.oracle.embeddings import OracleEmbeddingPushdown
 from vertebra.db.adapters.oracle.notify import AsyncOracleNotificationSource, OracleNotifyConfig
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS
-from vertebra.db.driver import NotFoundError, QueryCancelledError
+from vertebra.db.driver import (
+    DatabaseError,
+    IntegrityError,
+    InterfaceError,
+    NotFoundError,
+    QueryCancelledError,
+)
 from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope
 from vertebra.utils.module_loader import ensure_module
 
@@ -509,3 +517,422 @@ async def test_oracle_26ai_aq_wait_timeout_seconds_idle_liveness_and_delivery(
         finally:
             await source.close()
             await driver.execute(cleanup_plsql)
+
+
+def test_sync_single_call_client_matches_cursor(oracle_config: OracleConfig) -> None:
+    """Verify `SyncOracleClient.fetch_rows`, `fetch_dicts`, and `fetch_value` match `SyncOracleCursor`."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    client = mod.SyncOracleClient(**oracle_config.to_client_kwargs())
+    try:
+        client.connect()
+        sql = "SELECT 1 AS a, 'hello' AS b FROM dual"
+        rows, names = client.fetch_rows(sql)
+        cur = client.cursor()
+        try:
+            cur.execute(sql)
+            cur_rows = cur.fetchall()
+            assert cur.description is not None
+            cur_names = tuple(col[0] for col in cur.description)
+        finally:
+            cur.close()
+        assert rows == cur_rows
+        assert names == cur_names
+        assert client.fetch_dicts(sql) == [{"a": 1, "b": "hello"}]
+        assert client.fetch_value(sql) == 1
+    finally:
+        client.close()
+
+
+def test_sync_single_call_pool_sequential_reuse(oracle_config: OracleConfig) -> None:
+    """Verify 50 sequential `SyncOraclePool.fetch_value` calls reuse a size-1 pool with zero leaked borrows."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    _, pool_kwargs = OracleConfig.resolve_pool_kwargs(oracle_config, {"min_size": 1, "max_size": 1})
+    pool = mod.SyncOraclePool(**pool_kwargs)
+    try:
+        results = [pool.fetch_value("SELECT 1 FROM dual") for _ in range(50)]
+        assert results == [1] * 50
+        assert pool.borrowed_size == 0
+    finally:
+        pool.close()
+
+
+def test_sync_single_call_pool_recovers_after_statement_error(oracle_config: OracleConfig) -> None:
+    """Verify a non-fatal statement error (`ORA-00942`) releases the pooled connection cleanly."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    _, pool_kwargs = OracleConfig.resolve_pool_kwargs(oracle_config, {"min_size": 1, "max_size": 1})
+    pool = mod.SyncOraclePool(**pool_kwargs)
+    try:
+        with pytest.raises(DatabaseError) as exc_info:
+            pool.fetch_rows("SELECT 1 FROM vtb_nonexistent_sync_single_call_tbl")
+        assert getattr(exc_info.value, "vendor_code", None) == 942
+        assert pool.fetch_value("SELECT 1 FROM dual") == 1
+        assert pool.borrowed_size == 0
+    finally:
+        pool.close()
+
+
+def test_sync_single_call_execute_dml_unique_violation_raises_integrity_error(
+    oracle_config: OracleConfig,
+) -> None:
+    """Verify `SyncOracleClient.execute_dml` maps a unique constraint violation to `IntegrityError`."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    client = mod.SyncOracleClient(**oracle_config.to_client_kwargs())
+    table = "vtb_ora_sync_sc_uniq"
+    try:
+        client.connect()
+        client.execute_dml(f"DROP TABLE IF EXISTS {table} PURGE")
+        client.execute_dml(f"CREATE TABLE {table} (id NUMBER(10) PRIMARY KEY)")
+        try:
+            rowcount, _, out_binds, touches_ctx = client.execute_dml(
+                f"INSERT INTO {table} (id) VALUES (:1)",
+                (1,),
+            )
+            assert rowcount == 1
+            assert out_binds is None
+            assert touches_ctx is False
+            with pytest.raises(IntegrityError):
+                client.execute_dml(f"INSERT INTO {table} (id) VALUES (:1)", (1,))
+        finally:
+            client.execute_dml(f"DROP TABLE IF EXISTS {table} PURGE")
+    finally:
+        client.close()
+
+
+def test_pool_release_reset_autocommit_dml_visible(oracle_config: OracleConfig) -> None:
+    """Verify pooled autocommit DML commits cleanly and stays visible from a second connection."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    _, pool_kwargs = OracleConfig.resolve_pool_kwargs(oracle_config, {"min_size": 1, "max_size": 1})
+    pool = mod.SyncOraclePool(**pool_kwargs)
+    observer = mod.SyncOracleClient(**oracle_config.to_client_kwargs())
+    table = "vtb_ora_pool_reset_dml"
+    try:
+        observer.connect()
+        observer.execute_dml(f"DROP TABLE IF EXISTS {table} PURGE")
+        observer.execute_dml(f"CREATE TABLE {table} (id NUMBER(10) PRIMARY KEY, label VARCHAR2(64))")
+        try:
+            rowcount, _, _, _ = pool.execute_dml(
+                f"INSERT INTO {table} (id, label) VALUES (:1, :2)",
+                (1, "committed"),
+            )
+            assert rowcount == 1
+            assert pool.borrowed_size == 0
+            assert observer.fetch_value(f"SELECT COUNT(*) FROM {table} WHERE id = :1", (1,)) == 1
+        finally:
+            observer.execute_dml(f"DROP TABLE IF EXISTS {table} PURGE")
+    finally:
+        observer.close()
+        pool.close()
+
+
+def test_pool_release_reset_abandoned_transaction_rolled_back(oracle_config: OracleConfig) -> None:
+    """Verify releasing a pooled connection with an uncommitted transaction rolls back the insert."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    _, pool_kwargs = OracleConfig.resolve_pool_kwargs(oracle_config, {"min_size": 1, "max_size": 1})
+    pool = mod.SyncOraclePool(**pool_kwargs)
+    observer = mod.SyncOracleClient(**oracle_config.to_client_kwargs())
+    table = "vtb_ora_pool_reset_abandon"
+    try:
+        observer.connect()
+        observer.execute_dml(f"DROP TABLE IF EXISTS {table} PURGE")
+        observer.execute_dml(f"CREATE TABLE {table} (id NUMBER(10) PRIMARY KEY, label VARCHAR2(64))")
+        try:
+            client = pool.acquire()
+            try:
+                client.begin()
+                client.execute_dml(
+                    f"INSERT INTO {table} (id, label) VALUES (:1, :2)",
+                    (1, "uncommitted"),
+                )
+            finally:
+                pool.release(client)
+            assert pool.borrowed_size == 0
+            assert observer.fetch_value(f"SELECT COUNT(*) FROM {table} WHERE id = :1", (1,)) == 0
+        finally:
+            observer.execute_dml(f"DROP TABLE IF EXISTS {table} PURGE")
+    finally:
+        observer.close()
+        pool.close()
+
+
+def test_pool_release_reset_select_for_update_releases_row_lock(oracle_config: OracleConfig) -> None:
+    """Verify pooled `SELECT ... FOR UPDATE` rolls back on release so another session updates without blocking."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    _, pool_kwargs = OracleConfig.resolve_pool_kwargs(oracle_config, {"min_size": 1, "max_size": 1})
+    pool = mod.SyncOraclePool(**pool_kwargs)
+    observer_kwargs = {**oracle_config.to_client_kwargs(), "call_timeout_ms": 5000}
+    observer = mod.SyncOracleClient(**observer_kwargs)
+    table = "vtb_ora_pool_reset_lock"
+    try:
+        observer.connect()
+        observer.execute_dml(f"DROP TABLE IF EXISTS {table} PURGE")
+        observer.execute_dml(f"CREATE TABLE {table} (id NUMBER(10) PRIMARY KEY, label VARCHAR2(64))")
+        observer.execute_dml(f"INSERT INTO {table} (id, label) VALUES (:1, :2)", (1, "initial"))
+        try:
+            rows, _ = pool.fetch_rows(f"SELECT id, label FROM {table} WHERE id = :1 FOR UPDATE", (1,))
+            assert rows == [(1, "initial")]
+            assert pool.borrowed_size == 0
+
+            rowcount, _, _, _ = observer.execute_dml(
+                f"UPDATE {table} SET label = :1 WHERE id = :2",
+                ("updated", 1),
+            )
+            assert rowcount == 1
+            assert observer.fetch_value(f"SELECT label FROM {table} WHERE id = :1", (1,)) == "updated"
+        finally:
+            observer.execute_dml(f"DROP TABLE IF EXISTS {table} PURGE")
+    finally:
+        observer.close()
+        pool.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_fetch_ready_does_not_iterate_event_loop(
+    oracle_config: OracleConfig,
+) -> None:
+    """Verify `AsyncOracleCursor` fetch and close awaitables resolve synchronously without turning the event loop."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    client = mod.AsyncOracleClient(**oracle_config.to_client_kwargs())
+    try:
+        await client.connect()
+        cur = client.cursor()
+        try:
+            await cur.execute("SELECT 1 AS a FROM dual UNION ALL SELECT 2 AS a FROM dual")
+            loop = asyncio.get_running_loop()
+            ran: list[int] = []
+            loop.call_soon(ran.append, 1)
+            rows = await cur.fetchall()
+            assert rows == [(1,), (2,)]
+            assert ran == []
+        finally:
+            loop = asyncio.get_running_loop()
+            close_ran: list[int] = []
+            loop.call_soon(close_ran.append, 1)
+            await cur.close()
+            assert close_ran == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
+async def test_async_single_call_client_matches_cursor_and_shapes(
+    oracle_config: OracleConfig,
+) -> None:
+    """Verify `AsyncOracleClient` single-call methods match cursor output, handle out-binds, and validate at call time."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    client = mod.AsyncOracleClient(**oracle_config.to_client_kwargs())
+    try:
+        await client.connect()
+        sql = "SELECT 1 AS a, 'hello' AS b FROM dual"
+        rows, names = await client.fetch_rows(sql)
+        cur = client.cursor()
+        try:
+            await cur.execute(sql)
+            cur_rows = await cur.fetchall()
+            assert cur.description is not None
+            cur_names = tuple(col[0] for col in cur.description)
+        finally:
+            await cur.close()
+        assert rows == cur_rows
+        assert names == cur_names
+        assert await client.fetch_dicts(sql) == [{"a": 1, "b": "hello"}]
+        assert await client.fetch_value(sql) == 1
+
+        with pytest.raises(NotFoundError):
+            await client.fetch_value("SELECT 1 FROM dual WHERE 1 = 0")
+
+        with pytest.raises(InterfaceError):
+            client.fetch_rows("SELECT 1 FROM dual", "abc")
+
+        var = mod.OracleOutBindVar("NUMBER")
+        rowcount, _, out_binds, touches_ctx = await client.execute_dml(
+            "BEGIN :out := 99; END;",
+            {"out": var},
+        )
+        assert rowcount == 0
+        assert out_binds == {"out": 99}
+        assert var.getvalue() == 99
+        assert touches_ctx is False
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
+async def test_async_single_call_pool_one_awaitable_shapes_and_error_recovery(
+    oracle_config: OracleConfig,
+) -> None:
+    """Verify `AsyncOraclePool` single-call methods return one non-coroutine awaitable and recover after errors."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    _, pool_kwargs = OracleConfig.resolve_pool_kwargs(oracle_config, {"min_size": 1, "max_size": 1})
+    pool = mod.AsyncOraclePool(**pool_kwargs)
+    try:
+        aw = pool.fetch_value("SELECT 1 FROM dual")
+        assert not inspect.iscoroutine(aw)
+        assert await aw == 1
+        assert pool.borrowed_size == 0
+
+        sql = "SELECT 1 AS a, 'hello' AS b FROM dual"
+        rows, names = await pool.fetch_rows(sql)
+        assert rows == [(1, "hello")]
+        assert names == ("a", "b")
+        assert await pool.fetch_dicts(sql) == [{"a": 1, "b": "hello"}]
+        assert pool.borrowed_size == 0
+
+        with pytest.raises(DatabaseError) as exc_info:
+            await pool.fetch_rows("SELECT 1 FROM vtb_nonexistent_async_single_call_tbl")
+        assert getattr(exc_info.value, "vendor_code", None) == 942
+        assert await pool.fetch_value("SELECT 1 FROM dual") == 1
+        assert pool.borrowed_size == 0
+    finally:
+        await pool.close()
+
+
+@pytest.mark.anyio
+async def test_async_single_call_pool_cancel_returns_connection(
+    oracle_config: OracleConfig,
+) -> None:
+    """Verify cancelling a slow `AsyncOraclePool.fetch_value` releases the borrowed slot so a later call succeeds."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    _, pool_kwargs = OracleConfig.resolve_pool_kwargs(oracle_config, {"min_size": 1, "max_size": 1})
+    pool = mod.AsyncOraclePool(**pool_kwargs)
+    try:
+        assert await pool.fetch_value("SELECT 1 FROM dual") == 1
+
+        async def _slow_call() -> Any:
+            return await pool.fetch_value("BEGIN DBMS_SESSION.SLEEP(10); END;")
+
+        task = asyncio.create_task(_slow_call())
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        deadline = time.monotonic() + 4.0
+        while pool.borrowed_size != 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert pool.borrowed_size == 0
+        assert await pool.fetch_value("SELECT 1 FROM dual") == 1
+        assert pool.borrowed_size == 0
+    finally:
+        await pool.close()
+
+
+@pytest.mark.anyio
+async def test_async_single_call_pool_dml_and_abandoned_transaction(
+    oracle_config: OracleConfig,
+) -> None:
+    """Verify async pooled autocommit DML commits while an abandoned async transaction rolls back on release."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    _, pool_kwargs = OracleConfig.resolve_pool_kwargs(oracle_config, {"min_size": 1, "max_size": 1})
+    pool = mod.AsyncOraclePool(**pool_kwargs)
+    observer = mod.AsyncOracleClient(**oracle_config.to_client_kwargs())
+    table = "vtb_ora_async_pool_sc_dml"
+    try:
+        await observer.connect()
+        await observer.execute_dml(f"DROP TABLE IF EXISTS {table} PURGE")
+        await observer.execute_dml(f"CREATE TABLE {table} (id NUMBER(10) PRIMARY KEY, label VARCHAR2(64))")
+        try:
+            rowcount, _, _, _ = await pool.execute_dml(
+                f"INSERT INTO {table} (id, label) VALUES (:1, :2)",
+                (1, "committed"),
+            )
+            assert rowcount == 1
+            assert pool.borrowed_size == 0
+            assert await observer.fetch_value(f"SELECT COUNT(*) FROM {table} WHERE id = :1", (1,)) == 1
+
+            client = await pool.acquire()
+            try:
+                await client.begin()
+                await client.execute_dml(
+                    f"INSERT INTO {table} (id, label) VALUES (:1, :2)",
+                    (2, "uncommitted"),
+                )
+            finally:
+                await pool.release(client)
+            assert pool.borrowed_size == 0
+            assert await observer.fetch_value(f"SELECT COUNT(*) FROM {table} WHERE id = :1", (2,)) == 0
+        finally:
+            await observer.execute_dml(f"DROP TABLE IF EXISTS {table} PURGE")
+    finally:
+        await observer.close()
+        await pool.close()
+
+
+@pytest.mark.anyio
+async def test_async_single_call_pool_concurrent_gather(
+    oracle_config: OracleConfig,
+) -> None:
+    """Verify `asyncio.gather` over five concurrent `AsyncOraclePool.fetch_value` calls returns all five values."""
+    mod = ensure_module(
+        "vertebra._oracle",
+        package="vertebra-core[oracle]",
+        install_package="vertebra-core[oracle]",
+        extra="oracle",
+    )
+    _, pool_kwargs = OracleConfig.resolve_pool_kwargs(oracle_config, {"min_size": 1, "max_size": 5})
+    pool = mod.AsyncOraclePool(**pool_kwargs)
+    try:
+        values = await asyncio.gather(*(pool.fetch_value("SELECT :1 FROM dual", (i,)) for i in range(1, 6)))
+        assert list(values) == [1, 2, 3, 4, 5]
+        assert pool.borrowed_size == 0
+    finally:
+        await pool.close()

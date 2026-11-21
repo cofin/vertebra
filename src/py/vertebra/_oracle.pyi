@@ -1,6 +1,6 @@
 """Type stubs for the vertebra._oracle native extension module."""
 
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from types import TracebackType
 from typing import Any, final
 
@@ -188,6 +188,7 @@ class SyncOracleClient:
         module: str | None = None,
         action: str | None = None,
         ecid: str | None = None,
+        enable_reset_relay: bool = True,
     ) -> SyncOracleClient: ...
     def set_session_attrs(
         self,
@@ -206,23 +207,6 @@ class SyncOracleClient:
     def rollback(self) -> None: ...
     def savepoint(self, name: str) -> None: ...
     def rollback_to_savepoint(self, name: str) -> None: ...
-    def query(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        out_binds: Sequence[str] | Mapping[str, str] | None = None,
-        fetch_decimals: bool = False,
-        enable_lowercase_column_names: bool | None = None,
-    ) -> OracleQueryResult: ...
-    def query_one(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        fetch_decimals: bool = False,
-        enable_lowercase_column_names: bool | None = None,
-    ) -> tuple[Any, ...] | None: ...
     def execute(
         self,
         sql: str,
@@ -274,6 +258,119 @@ class SyncOracleClient:
         consumer_name: str | None = None,
         correlation_id: str | None = None,
     ) -> bytes: ...
+    def attach_lease(self, release: Callable[[], None]) -> None: ...
+    def release_lease(self) -> None: ...
+    def cursor(
+        self,
+        *,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+        lazy_begin: bool = False,
+    ) -> SyncOracleCursor: ...
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]: ...
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> list[dict[str, Any]]: ...
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any: ...
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool]: ...
+
+@final
+class OracleOutBindVar:
+    type_code: Any
+    size: int
+    arraysize: int
+    outconverter: Callable[[Any], Any] | None
+    values: list[Any]
+    def __new__(
+        cls,
+        type_code: Any,
+        size: int = 0,
+        arraysize: int = 1,
+        outconverter: Callable[[Any], Any] | None = None,
+    ) -> OracleOutBindVar: ...
+    def getvalue(self, pos: int = 0) -> Any: ...
+    def setvalue(self, pos: int, value: Any) -> None: ...
+
+@final
+class SyncOracleCursor:
+    arraysize: int
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, None], ...] | None: ...
+    @property
+    def rowcount(self) -> int: ...
+    @property
+    def lastrowid(self) -> str | None: ...
+    @property
+    def touches_session_context(self) -> bool: ...
+    @property
+    def out_binds(self) -> dict[str, Any] | tuple[Any, ...] | None: ...
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+    ) -> SyncOracleCursor: ...
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> SyncOracleCursor: ...
+    def fetchone(self) -> tuple[Any, ...] | None: ...
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]: ...
+    def fetchall(self) -> list[tuple[Any, ...]]: ...
+    def var(
+        self,
+        type_code: Any,
+        size: int = 0,
+        arraysize: int = 1,
+        outconverter: Callable[[Any], Any] | None = None,
+    ) -> OracleOutBindVar: ...
+    def setinputsizes(self, *sizes: Any) -> None: ...
+    def setoutputsize(self, size: int, column: int | None = None) -> None: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> SyncOracleCursor: ...
+    def __exit__(self, exc_type: Any = None, exc_val: Any = None, exc_tb: Any = None) -> bool: ...
 
 @final
 class AsyncOracleClient:
@@ -330,6 +427,7 @@ class AsyncOracleClient:
         module: str | None = None,
         action: str | None = None,
         ecid: str | None = None,
+        enable_reset_relay: bool = True,
     ) -> AsyncOracleClient: ...
     def set_session_attrs(
         self,
@@ -348,23 +446,6 @@ class AsyncOracleClient:
     def rollback(self) -> Awaitable[None]: ...
     def savepoint(self, name: str) -> Awaitable[None]: ...
     def rollback_to_savepoint(self, name: str) -> Awaitable[None]: ...
-    def query(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        out_binds: Sequence[str] | Mapping[str, str] | None = None,
-        fetch_decimals: bool = False,
-        enable_lowercase_column_names: bool | None = None,
-    ) -> Awaitable[OracleQueryResult]: ...
-    def query_one(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        fetch_decimals: bool = False,
-        enable_lowercase_column_names: bool | None = None,
-    ) -> Awaitable[tuple[Any, ...] | None]: ...
     def execute(
         self,
         sql: str,
@@ -416,6 +497,100 @@ class AsyncOracleClient:
         consumer_name: str | None = None,
         correlation_id: str | None = None,
     ) -> Awaitable[bytes]: ...
+    def attach_lease(self, release: Callable[[], None]) -> None: ...
+    def release_lease(self) -> None: ...
+    def cursor(
+        self,
+        *,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+        lazy_begin: bool = False,
+    ) -> AsyncOracleCursor: ...
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Awaitable[tuple[list[tuple[Any, ...]], tuple[str, ...]]]: ...
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Awaitable[list[dict[str, Any]]]: ...
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Awaitable[Any]: ...
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Awaitable[tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool]]: ...
+
+@final
+class AsyncOracleCursor:
+    arraysize: int
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, None], ...] | None: ...
+    @property
+    def rowcount(self) -> int: ...
+    @property
+    def lastrowid(self) -> str | None: ...
+    @property
+    def touches_session_context(self) -> bool: ...
+    @property
+    def out_binds(self) -> dict[str, Any] | tuple[Any, ...] | None: ...
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+    ) -> Awaitable[AsyncOracleCursor]: ...
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> Awaitable[AsyncOracleCursor]: ...
+    def fetchone(self) -> Awaitable[tuple[Any, ...] | None]: ...
+    def fetchmany(self, size: int | None = None) -> Awaitable[list[tuple[Any, ...]]]: ...
+    def fetchall(self) -> Awaitable[list[tuple[Any, ...]]]: ...
+    def var(
+        self,
+        type_code: Any,
+        size: int = 0,
+        arraysize: int = 1,
+        outconverter: Callable[[Any], Any] | None = None,
+    ) -> OracleOutBindVar: ...
+    def setinputsizes(self, *sizes: Any) -> None: ...
+    def setoutputsize(self, size: int, column: int | None = None) -> None: ...
+    def close(self) -> Awaitable[None]: ...
 
 @final
 class SyncOraclePool:
@@ -474,6 +649,7 @@ class SyncOraclePool:
         max_lifetime_seconds: float = 3600.0,
         idle_timeout_seconds: float = 600.0,
         health_check_interval_seconds: float = 30.0,
+        enable_reset_relay: bool = True,
     ) -> SyncOraclePool: ...
     def acquire(
         self,
@@ -514,6 +690,50 @@ class SyncOraclePool:
     def evict(self, client: SyncOracleClient) -> None: ...
     def stats(self) -> dict[str, int]: ...
     def close(self) -> None: ...
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]: ...
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> list[dict[str, Any]]: ...
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any: ...
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool]: ...
 
 @final
 class AsyncOraclePool:
@@ -572,6 +792,7 @@ class AsyncOraclePool:
         max_lifetime_seconds: float = 3600.0,
         idle_timeout_seconds: float = 600.0,
         health_check_interval_seconds: float = 30.0,
+        enable_reset_relay: bool = True,
     ) -> AsyncOraclePool: ...
     def acquire(
         self,
@@ -612,9 +833,54 @@ class AsyncOraclePool:
     def evict(self, client: AsyncOracleClient) -> Awaitable[None]: ...
     def stats(self) -> dict[str, int]: ...
     def close(self) -> Awaitable[None]: ...
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Awaitable[tuple[list[tuple[Any, ...]], tuple[str, ...]]]: ...
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Awaitable[list[dict[str, Any]]]: ...
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Awaitable[Any]: ...
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Awaitable[tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool]]: ...
 
 __all__ = [
     "AsyncOracleClient",
+    "AsyncOracleCursor",
     "AsyncOracleListener",
     "AsyncOraclePool",
     "FREE_THREADED",
@@ -622,9 +888,11 @@ __all__ = [
     "ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED",
     "OracleColumn",
     "OracleNotification",
+    "OracleOutBindVar",
     "OraclePipelineOutcome",
     "OracleQueryResult",
     "SyncOracleClient",
+    "SyncOracleCursor",
     "SyncOracleListener",
     "SyncOraclePool",
     "__version__",

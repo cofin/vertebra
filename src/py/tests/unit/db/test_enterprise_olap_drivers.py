@@ -8,8 +8,6 @@ import importlib.util
 import io
 import mmap
 import os
-import re
-import sqlite3
 import struct
 import sys
 import zipfile
@@ -33,7 +31,7 @@ import vertebra.db.adapters.sqlite as db_sqlite_mod
 import vertebra.db.arrow as db_arrow_mod
 from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresCluster, FakeSyncPostgresPool
 from vertebra._vertebra import ArrowCursor as NativeArrowCursor
-from vertebra._vertebra import LeaseBroker, ProgrammingError
+from vertebra._vertebra import ProgrammingError
 from vertebra.db import (
     ARROW_SHM_THRESHOLD_ROWS,
     AlloyDBAuthType,
@@ -95,13 +93,6 @@ from vertebra.db.dbapi import (
     AsyncDBAPIConnection,
     InterfaceError,
     SyncDBAPIConnection,
-    SyncDBAPICursor,
-)
-from vertebra.db.driver._common import (
-    DUCKDB_DIALECT_TAG,
-    MSSQL_DIALECT_TAG,
-    ORACLE_DIALECT_TAG,
-    CommonDriverMixin,
 )
 from vertebra.extensions.sqlalchemy.dialects import (
     ALL_DIALECT_SCHEMES,
@@ -301,60 +292,6 @@ class _AsyncOracleSessionPort:
         """Release nothing; the stub holds no resources."""
 
 
-class _MockMSSQLClient:
-    """In-memory SQLite-backed SyncMSSQLClient test double for broker and DBAPI forwarding checks."""
-
-    def __init__(self) -> None:
-        self._conn = sqlite3.connect(":memory:", check_same_thread=False)
-
-    @staticmethod
-    def _adapt(sql: str, params: Any) -> tuple[str, tuple[Any, ...]]:
-        if not params:
-            return re.sub(r"@P\d+", "?", sql), ()
-        if isinstance(params, dict):
-            ordered: list[Any] = []
-
-            def _rep(m: re.Match[str]) -> str:
-                key = m.group(1)
-                ordered.append(params.get(key, params.get(f"@{key}")))
-                return "?"
-
-            return re.sub(r"@([A-Za-z_][A-Za-z0-9_]*)", _rep, sql), tuple(ordered)
-        return re.sub(r"@P\d+", "?", sql), tuple(params)
-
-    def begin(self, isolation_level: str | None = None) -> None:
-        _ = isolation_level
-
-    def commit(self) -> None:
-        self._conn.commit()
-
-    def rollback(self) -> None:
-        self._conn.rollback()
-
-    def execute(self, sql: str, params: Any = None) -> int:
-        adapted, bound = self._adapt(sql, params)
-        cur = self._conn.execute(adapted, bound)
-        self._conn.commit()
-        return max(0, int(cur.rowcount or 0))
-
-    def query(self, sql: str, params: Any = None) -> dict[str, Any]:
-        adapted, bound = self._adapt(sql, params)
-        cur = self._conn.execute(adapted, bound)
-        cols = [str(c[0]) for c in (cur.description or ())]
-        rows = [tuple(r) for r in cur.fetchall()] if cur.description is not None else []
-        if cur.description is None:
-            self._conn.commit()
-        return {"columns": cols, "rows": rows, "affected_rows": max(0, int(cur.rowcount or 0))}
-
-    def fetch_all(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
-        raw = self.query(sql, params)
-        cols = raw["columns"]
-        return [dict(zip(cols, row, strict=False)) for row in raw["rows"]]
-
-    def close(self) -> None:
-        self._conn.close()
-
-
 def test_postgres_jsonb_pgcopy_and_arrow_shm_cursor() -> None:
     """Verify PostgreSQL JSONB wire helpers, PGCOPY binary framing, and zero-copy Arrow SHM cursor."""
     encoded_jsonb = PostgreSQLCore.encode_jsonb({"tenant": "acme", "active": True})
@@ -379,8 +316,8 @@ def test_postgres_jsonb_pgcopy_and_arrow_shm_cursor() -> None:
     assert cursor.to_pylist() == dict_rows
 
 
-def test_sqlite_initialization_pragmas_and_broker_coordination(tmp_path: Path) -> None:
-    """Verify SQLite WAL initialization pragmas, broker lease coordination, and Arrow SHM threshold."""
+def test_sqlite_initialization_pragmas_and_no_broker_lease(tmp_path: Path) -> None:
+    """Verify SQLite WAL initialization pragmas, zero broker leases on the query path, and the Arrow SHM threshold."""
     db_file = tmp_path / "test_shm.sqlite3"
     cfg = SQLiteConfig(path=str(db_file), mmap_size=67_108_864, busy_timeout_ms=3000)
     pragmas = cfg.initialization_pragmas()
@@ -398,12 +335,14 @@ def test_sqlite_initialization_pragmas_and_broker_coordination(tmp_path: Path) -
 
     rows = driver.select("SELECT id, label FROM items ORDER BY id")
     assert rows == [{"id": 1, "label": "first"}, {"id": 2, "label": "second"}]
-    assert broker.lease_table.acquired == 4
-    assert broker.lease_table.released == 4
+    assert broker.lease_table.acquired == 0
+    assert broker.lease_table.released == 0
 
     arrow_cur = driver.select_to_arrow("SELECT id, label FROM items ORDER BY id", threshold_rows=1)
     assert arrow_cur.shm_region is not None
     assert arrow_cur.to_pylist() == rows
+    assert broker.lease_table.acquired == 0
+    assert broker.lease_table.released == 0
     driver.close()
 
 
@@ -550,7 +489,7 @@ def test_oracle_26ai_vector_oson_and_ttc_piggyback_codecs() -> None:
 
 
 def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
-    """Verify single-pass @P1 placeholder rewriting and broker statement cache integration."""
+    """Verify single-pass @P1 placeholder rewriting skips string literals, quoted identifiers, and comments."""
     sql = (
         "SELECT 'a?b''$1', \"col?name\", [col$2?], * FROM t "
         "WHERE a = ? AND b = $2 -- ? $3 comment\n AND /* ? $4 */ c = ?"
@@ -561,15 +500,6 @@ def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
         "WHERE a = @P1 AND b = @P2 -- ? $3 comment\n AND /* ? $4 */ c = @P3"
     )
     assert count == 3
-
-    broker = _MockBroker()
-    mssql_driver = SyncMSSQLDriver(MSSQLConfig(), broker=broker, client=_MockMSSQLClient())
-    mssql_driver.execute("CREATE TABLE ledger (id INTEGER PRIMARY KEY, code TEXT)")
-    mssql_driver.execute("INSERT INTO ledger (id, code) VALUES (?, ?)", (7, "USD"))
-    assert mssql_driver.last_rewritten_sql == "INSERT INTO ledger (id, code) VALUES (@P1, @P2)"
-    assert mssql_driver.select("SELECT id, code FROM ledger WHERE id = ?", (7,)) == [{"id": 7, "code": "USD"}]
-    assert broker.statement_cache().hits >= 0
-    mssql_driver.close()
 
 
 def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
@@ -690,31 +620,24 @@ def test_sqlalchemy_vtb_dialect_nullpool_selection(dialect_name: str) -> None:
     "url",
     [
         "sqlite+vtb:///:memory:",
-        "mssql+vtb://localhost:1433/master",
         "duckdb+vtb:///:memory:",
     ],
 )
-def test_sqlalchemy_dbapi_broker_forwarding(url: str) -> None:
-    """Verify SyncDBAPIConnection forwards DBAPI operations through the SHM broker."""
+def test_sqlalchemy_dbapi_embedded_engines_take_no_broker_lease(url: str) -> None:
+    """Verify embedded DB-API connections run statements on the native cursor and take no broker lease."""
     if url.startswith("duckdb"):
         pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     broker = _MockBroker()
-    injected_driver = (
-        SyncMSSQLDriver(MSSQLConfig.from_url(url), broker=broker, client=_MockMSSQLClient())
-        if url.startswith("mssql+vtb")
-        else None
-    )
-    conn = SyncDBAPIConnection(url, driver=injected_driver, broker=broker)
+    conn = SyncDBAPIConnection(url, broker=broker)
     cur = conn.cursor()
-    assert isinstance(cur, SyncDBAPICursor)
     cur.execute("CREATE TABLE items (id INTEGER, name TEXT)")
     cur.execute("INSERT INTO items VALUES (1, 'vtb')")
     cur.execute("SELECT id, name FROM items")
     assert cur.fetchone() == (1, "vtb")
     cur.close()
     conn.close()
-    assert broker.lease_table.acquired >= 2
-    assert broker.lease_table.released >= 2
+    assert broker.lease_table.acquired == 0
+    assert broker.lease_table.released == 0
 
 
 class _LedgerRow(msgspec.Struct, frozen=True, gc=False):
@@ -1407,177 +1330,6 @@ def test_core_probe_helpers_removed(core_cls: type[Any], method_name: str) -> No
     assert not hasattr(core_cls, method_name)
 
 
-class _SyncOracleLeaseTestClient:
-    def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> int:
-        _ = (parameters, kwargs)
-        if sql == "RAISE":
-            msg = "simulated oracle execution failure"
-            raise RuntimeError(msg)
-        return 1
-
-    def close(self) -> None:
-        return None
-
-
-class _AsyncOracleLeaseTestClient:
-    async def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> int:
-        _ = (parameters, kwargs)
-        if sql == "RAISE":
-            msg = "simulated async oracle execution failure"
-            raise RuntimeError(msg)
-        return 1
-
-    async def close(self) -> None:
-        return None
-
-
-def test_sync_oracle_driver_uses_common_mixin_broker_and_bytes_statement_cache() -> None:
-    """SyncOracleDriver caches bytes-keyed StatementPlan entries and releases leases on error."""
-    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
-    driver = SyncOracleDriver(OracleConfig(), broker=broker, client=_SyncOracleLeaseTestClient())
-    try:
-        sql = "INSERT INTO items (id) VALUES (:1)"
-        assert driver.execute(sql, [1]) == 1
-        sc = broker.statement_cache()
-        assert sc is not None
-        stats_after_first = sc.stats()
-        assert stats_after_first.misses == 1
-        assert stats_after_first.hits == 0
-        assert stats_after_first.inserts == 1
-
-        assert driver.execute(sql, [2]) == 1
-        stats_after_second = sc.stats()
-        assert stats_after_second.hits == 1
-        plan = sc.lookup(ORACLE_DIALECT_TAG, sql.encode("utf-8"))
-        assert plan is not None
-        assert plan.param_count == 1
-        assert plan.compiled_sql == sql.encode("utf-8")
-        assert plan.param_plan == b"\x00\x01"
-
-        with pytest.raises(RuntimeError, match="simulated oracle execution failure"):
-            driver.execute("RAISE")
-        broker_stats = broker.stats()
-        assert broker_stats.active_leases == 0
-        assert broker_stats.total_acquired == 3
-        assert broker_stats.total_released == 3
-    finally:
-        driver.close()
-
-
-@pytest.mark.anyio
-async def test_async_oracle_driver_uses_common_mixin_broker_and_bytes_statement_cache() -> None:
-    """AsyncOracleDriver caches bytes-keyed StatementPlan entries and releases leases on error."""
-    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
-    driver = AsyncOracleDriver(OracleConfig(), broker=broker, client=_AsyncOracleLeaseTestClient())
-    try:
-        sql = "INSERT INTO items (id) VALUES (:1)"
-        assert await driver.execute(sql, [1]) == 1
-        assert await driver.execute(sql, [2]) == 1
-        sc = broker.statement_cache()
-        assert sc is not None
-        assert sc.stats().hits == 1
-        plan = sc.lookup(ORACLE_DIALECT_TAG, sql.encode("utf-8"))
-        assert plan is not None
-        assert plan.param_count == 1
-
-        with pytest.raises(RuntimeError, match="simulated async oracle execution failure"):
-            await driver.execute("RAISE")
-        broker_stats = broker.stats()
-        assert broker_stats.active_leases == 0
-        assert broker_stats.total_acquired == 3
-        assert broker_stats.total_released == 3
-    finally:
-        await driver.close()
-
-
-def test_sync_duckdb_driver_uses_real_lease_broker_and_releases_on_error() -> None:
-    """SyncDuckDBDriver routes through CommonDriverMixin bytes StatementCache and LeaseBroker."""
-    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
-    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
-    driver = SyncDuckDBDriver(DuckDBConfig(path=":memory:"), broker=broker)
-    try:
-        driver.execute("CREATE TABLE items (id INTEGER)")
-        insert_sql = "INSERT INTO items VALUES (?)"
-        assert driver.execute(insert_sql, (1,)) == 1
-        assert driver.execute(insert_sql, (2,)) == 1
-
-        sc = broker.statement_cache()
-        assert sc is not None
-        assert sc.stats().hits >= 1
-        plan = sc.lookup(DUCKDB_DIALECT_TAG, insert_sql.encode("utf-8"))
-        assert plan is not None
-        assert plan.param_count == 1
-
-        with pytest.raises(ProgrammingError, match="nonexistent_table_for_lease_test"):
-            driver.execute_tuples("SELECT * FROM nonexistent_table_for_lease_test")
-        broker_stats = broker.stats()
-        assert broker_stats.active_leases == 0
-        assert broker_stats.total_acquired == 4
-        assert broker_stats.total_released == 4
-    finally:
-        driver.close()
-
-
-@pytest.mark.anyio
-async def test_async_duckdb_driver_uses_real_lease_broker_and_releases_on_error() -> None:
-    """AsyncDuckDBDriver routes through CommonDriverMixin bytes StatementCache and LeaseBroker."""
-    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
-    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
-    driver = AsyncDuckDBDriver(DuckDBConfig(path=":memory:"), broker=broker)
-    try:
-        await driver.execute("CREATE TABLE items (id INTEGER)")
-        insert_sql = "INSERT INTO items VALUES (?)"
-        assert await driver.execute(insert_sql, (1,)) == 1
-        assert await driver.execute(insert_sql, (2,)) == 1
-
-        sc = broker.statement_cache()
-        assert sc is not None
-        assert sc.stats().hits >= 1
-        plan = sc.lookup(DUCKDB_DIALECT_TAG, insert_sql.encode("utf-8"))
-        assert plan is not None
-        assert plan.param_count == 1
-
-        with pytest.raises(ProgrammingError, match="nonexistent_table_for_lease_test"):
-            await driver.execute_tuples("SELECT * FROM nonexistent_table_for_lease_test")
-        broker_stats = broker.stats()
-        assert broker_stats.active_leases == 0
-        assert broker_stats.total_acquired == 4
-        assert broker_stats.total_released == 4
-    finally:
-        await driver.close()
-
-
-def test_common_driver_mixin_statement_cache_propagates_invalid_dialect_tag() -> None:
-    """CommonDriverMixin._lookup_or_cache_statement does not swallow native dialect errors."""
-
-    class _BadDialectDriver(CommonDriverMixin[DuckDBConfig]):
-        dialect_tag = -1
-
-    broker = LeaseBroker(pool_size=1, max_overflow=0, stmt_capacity=8)
-    driver = _BadDialectDriver(DuckDBConfig(path=":memory:"), broker=broker)
-    with pytest.raises(OverflowError):
-        driver._lookup_or_cache_statement("SELECT 1")
-
-
-class _AsyncMSSQLBrokerTestClient:
-    """Async MSSQL client double delegating to an in-memory SQLite connection."""
-
-    def __init__(self) -> None:
-        self._sync = _MockMSSQLClient()
-
-    async def execute(self, sql: str, params: Any = None) -> int:
-        return self._sync.execute(sql, params)
-
-    async def query(self, sql: str, params: Any = None) -> dict[str, Any]:
-        return self._sync.query(sql, params)
-
-    async def fetch_all(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
-        return self._sync.fetch_all(sql, params)
-
-    async def close(self) -> None:
-        self._sync.close()
-
-
 @pytest.mark.parametrize(
     ("target", "method_name"),
     [
@@ -1592,66 +1344,6 @@ class _AsyncMSSQLBrokerTestClient:
 def test_mssql_and_sqlite_probe_helpers_removed(target: type[Any], method_name: str) -> None:
     """MSSQLCore and SQLite drivers no longer carry broker/statement-cache probe helpers."""
     assert not hasattr(target, method_name)
-
-
-def test_sync_mssql_driver_uses_common_mixin_broker_and_bytes_statement_cache() -> None:
-    """SyncMSSQLDriver caches rewritten @P1 bytes plans and releases leases on error."""
-    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
-    driver = SyncMSSQLDriver(MSSQLConfig(), broker=broker, client=_MockMSSQLClient())
-    try:
-        driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, code TEXT)")
-        insert_sql = "INSERT INTO items (id, code) VALUES (?, ?)"
-        assert driver.execute(insert_sql, (1, "USD")) == 1
-        assert driver.last_rewritten_sql == "INSERT INTO items (id, code) VALUES (@P1, @P2)"
-        assert driver.execute(insert_sql, (2, "EUR")) == 1
-        assert driver.last_rewritten_sql == "INSERT INTO items (id, code) VALUES (@P1, @P2)"
-
-        sc = broker.statement_cache()
-        assert sc is not None
-        assert sc.stats().hits >= 1
-        plan = sc.lookup(MSSQL_DIALECT_TAG, insert_sql.encode("utf-8"))
-        assert plan is not None
-        assert plan.param_count == 2
-        assert plan.compiled_sql == b"INSERT INTO items (id, code) VALUES (@P1, @P2)"
-
-        with pytest.raises(sqlite3.OperationalError):
-            driver.select("SELECT * FROM nonexistent_mssql_table")
-        broker_stats = broker.stats()
-        assert broker_stats.active_leases == 0
-        assert broker_stats.total_acquired == 4
-        assert broker_stats.total_released == 4
-    finally:
-        driver.close()
-
-
-@pytest.mark.anyio
-async def test_async_mssql_driver_uses_common_mixin_broker_and_bytes_statement_cache() -> None:
-    """AsyncMSSQLDriver caches rewritten @P1 bytes plans and releases leases on error."""
-    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
-    driver = AsyncMSSQLDriver(MSSQLConfig(), broker=broker, client=_AsyncMSSQLBrokerTestClient())
-    try:
-        await driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, code TEXT)")
-        insert_sql = "INSERT INTO items (id, code) VALUES (?, ?)"
-        assert await driver.execute(insert_sql, (1, "USD")) == 1
-        assert await driver.execute(insert_sql, (2, "EUR")) == 1
-        assert driver.last_rewritten_sql == "INSERT INTO items (id, code) VALUES (@P1, @P2)"
-
-        sc = broker.statement_cache()
-        assert sc is not None
-        assert sc.stats().hits >= 1
-        plan = sc.lookup(MSSQL_DIALECT_TAG, insert_sql.encode("utf-8"))
-        assert plan is not None
-        assert plan.param_count == 2
-        assert plan.compiled_sql == b"INSERT INTO items (id, code) VALUES (@P1, @P2)"
-
-        with pytest.raises(sqlite3.OperationalError):
-            await driver.select("SELECT * FROM nonexistent_mssql_table")
-        broker_stats = broker.stats()
-        assert broker_stats.active_leases == 0
-        assert broker_stats.total_acquired == 4
-        assert broker_stats.total_released == 4
-    finally:
-        await driver.close()
 
 
 @pytest.mark.parametrize(
@@ -1786,6 +1478,94 @@ class _FakeMSSQLProtocolError(Exception):
         self.vendor_code = vendor_code
 
 
+class _FakeMSSQLProtocolCursor:
+    """Minimal PEP 249 sync cursor backed by _FakeMSSQLSyncProtocolDriver."""
+
+    def __init__(self, driver: _FakeMSSQLSyncProtocolDriver) -> None:
+        self._driver = driver
+        self._rows: list[tuple[Any, ...]] = []
+        self._pos = 0
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount = -1
+        self.arraysize = 1
+
+    def execute(self, sql: str, parameters: Any = ()) -> _FakeMSSQLProtocolCursor:
+        self._rows, self.description = self._driver.execute_with_description(sql, parameters)
+        self._pos = 0
+        self.rowcount = len(self._rows)
+        return self
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        n = self.arraysize if size is None else size
+        batch = self._rows[self._pos : self._pos + n]
+        self._pos += len(batch)
+        return batch
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        rest = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return rest
+
+    def nextset(self) -> bool | None:
+        result = self._driver.nextset()
+        if isinstance(result, tuple):
+            self._rows, self.description = result
+            self._pos = 0
+            self.rowcount = len(self._rows)
+            return True
+        if result:
+            return True
+        self._rows = []
+        self.description = None
+        self._pos = 0
+        self.rowcount = -1
+        return None
+
+    def close(self) -> None:
+        self._rows = []
+
+
+class _FakeMSSQLAsyncProtocolCursor:
+    """Minimal PEP 249 async cursor backed by _FakeMSSQLAsyncProtocolDriver."""
+
+    def __init__(self, sync_cursor: _FakeMSSQLProtocolCursor) -> None:
+        self._sync = sync_cursor
+
+    @property
+    def description(self) -> tuple[tuple[Any, ...], ...] | None:
+        return self._sync.description
+
+    @property
+    def rowcount(self) -> int:
+        return self._sync.rowcount
+
+    async def execute(self, sql: str, parameters: Any = ()) -> _FakeMSSQLAsyncProtocolCursor:
+        self._sync.execute(sql, parameters)
+        return self
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        return self._sync.fetchone()
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        return self._sync.fetchmany(size)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._sync.fetchall()
+
+    async def nextset(self) -> bool | None:
+        return self._sync.nextset()
+
+    async def close(self) -> None:
+        self._sync.close()
+
+
 class _FakeMSSQLSyncProtocolDriver:
     """Protocol-fake sync SQL Server driver supporting metadata, OUTPUT, and nextset()."""
 
@@ -1805,6 +1585,10 @@ class _FakeMSSQLSyncProtocolDriver:
         self.nextset_calls = 0
         self._pending_sets: list[tuple[list[tuple[Any, ...]], tuple[tuple[Any, ...], ...] | None]] = []
         self.queries: list[str] = []
+
+    def cursor(self, *, lazy_begin: bool = False) -> _FakeMSSQLProtocolCursor:
+        _ = lazy_begin
+        return _FakeMSSQLProtocolCursor(self)
 
     def begin(self, isolation_level: str | None = None) -> None:
         _ = isolation_level
@@ -1868,6 +1652,10 @@ class _FakeMSSQLAsyncProtocolDriver:
         self._sync = sync_driver
         if hasattr(sync_driver, "server_version_info"):
             self.server_version_info = sync_driver.server_version_info
+
+    def cursor(self, *, lazy_begin: bool = False) -> _FakeMSSQLAsyncProtocolCursor:
+        _ = lazy_begin
+        return _FakeMSSQLAsyncProtocolCursor(_FakeMSSQLProtocolCursor(self._sync))
 
     async def begin(self, isolation_level: str | None = None) -> None:
         self._sync.begin(isolation_level)

@@ -8,7 +8,6 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Final
-from uuid import UUID
 
 from sqlglot import exp, parse
 from sqlglot.errors import ParseError
@@ -16,7 +15,6 @@ from sqlspec.core import (
     DriverParameterProfile,
     ParameterStyle,
     StatementConfig,
-    TypedParameter,
     build_statement_config_from_profile,
 )
 from sqlspec.exceptions import (
@@ -62,11 +60,8 @@ __all__ = (
     "format_duckdb_identifier",
     "is_duckdb_table_missing",
     "map_duckdb_exception",
-    "normalize_duckdb_many_parameters",
-    "normalize_duckdb_parameters",
     "order_duckdb_copy_parameters",
     "split_schema_and_table",
-    "unwrap_typed_parameters",
 )
 
 ARROW_MIN_ROWS: Final[int] = 64
@@ -374,54 +369,6 @@ def build_connection_config(
 
     resolved_db = str(database) if database is not None else ":memory:"
     return DuckDBConfig(path=resolved_db, database=resolved_db, **kwargs)
-
-
-def normalize_duckdb_scalar(value: Any) -> Any:
-    """Normalize rich Python scalar types for DuckDB parameter binding."""
-    if isinstance(value, UUID):
-        return str(value)
-    return value
-
-
-def unwrap_typed_parameters(bound: Any) -> Any:
-    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
-    if isinstance(bound, dict):
-        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
-    if isinstance(bound, tuple):
-        return tuple(unwrap_typed_parameters(value) for value in bound)
-    if isinstance(bound, list):
-        return [unwrap_typed_parameters(value) for value in bound]
-    if isinstance(bound, TypedParameter):
-        return unwrap_typed_parameters(bound.value)
-    return bound
-
-
-def normalize_duckdb_parameters(params: Any) -> Any:
-    """Unwrap `TypedParameter` markers and normalize bind shapes for DuckDB execution."""
-    if params is None:
-        return None
-    unwrapped = unwrap_typed_parameters(params)
-    if isinstance(unwrapped, Mapping):
-        return {str(k): normalize_duckdb_scalar(v) for k, v in unwrapped.items()} if unwrapped else None
-    if isinstance(unwrapped, list):
-        return tuple(normalize_duckdb_scalar(v) for v in unwrapped) if unwrapped else None
-    if isinstance(unwrapped, tuple):
-        return tuple(normalize_duckdb_scalar(v) for v in unwrapped) if unwrapped else None
-    return normalize_duckdb_scalar(unwrapped)
-
-
-def normalize_duckdb_many_parameters(prepared: Any) -> list[tuple[Any, ...]]:
-    """Normalize `execute_many` parameter batches into `list[tuple[Any, ...]]`."""
-    if not prepared:
-        return []
-    unwrapped = unwrap_typed_parameters(prepared)
-    rows: list[tuple[Any, ...]] = []
-    for item in unwrapped:
-        if isinstance(item, (tuple, list)):
-            rows.append(tuple(normalize_duckdb_scalar(v) for v in item))
-        else:
-            rows.append((normalize_duckdb_scalar(item),))
-    return rows
 
 
 def map_duckdb_exception(exc: BaseException) -> Exception | None:

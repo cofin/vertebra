@@ -9,10 +9,9 @@ from typing import TYPE_CHECKING, Any, Final
 from vertebra.db.adapters.postgres.binds import (
     CompiledPostgresBinds,
     compile_postgres_binds,
-    normalize_postgres_parameters,
 )
 from vertebra.db.adapters.postgres.options import build_native_client_options
-from vertebra.db.adapters.postgres.types import PostgresArrowResult, PostgresQueryResult, _project_public_row
+from vertebra.db.adapters.postgres.types import PostgresArrowResult
 from vertebra.db.arrow import ArrowCursor
 from vertebra.db.driver import ProgrammingError
 from vertebra.db.rls import TenantPredicate, TenantScopeConfig
@@ -209,11 +208,6 @@ class PostgreSQLCore:
         return compile_postgres_binds(sql, parameters)
 
     @staticmethod
-    def normalize_parameters(parameters: Sequence[Any] | None) -> tuple[Any, ...]:
-        """Copy mutable parameter buffers and FFI views into immutable owned values."""
-        return normalize_postgres_parameters(parameters)
-
-    @staticmethod
     def reject_memory_dsn(dsn: str) -> None:
         """Reject unsupported ``memory://`` DSNs cleanly with ``ImproperConfigurationError``."""
         if dsn.strip().lower().startswith("memory://"):
@@ -237,13 +231,6 @@ class PostgreSQLCore:
         """Compile SQL placeholders and normalize parameters for native execution and pipelining."""
         compiled = compile_postgres_binds(sql, parameters)
         return compiled.sql, compiled.params
-
-    @staticmethod
-    def project_query_rows(result: PostgresQueryResult) -> tuple[list[tuple[Any, ...]], tuple[str, ...], int]:
-        """Convert a native ``PostgresQueryResult`` into ``(rows, column_names, affected_rows)``."""
-        cols = tuple(col.name for col in result.columns)
-        rows = [_project_public_row(row) for row in result.rows]
-        return rows, cols, int(result.affected_rows)
 
     @staticmethod
     def arrow_result_to_cursor(result: PostgresArrowResult) -> ArrowCursor:

@@ -188,18 +188,18 @@ pub fn classify_oracle_error(vendor_code: Option<i32>, message: &str) -> OracleE
     }
 }
 
-struct CachedOracleExceptionTypes {
+pub(crate) struct CachedOracleExceptionTypes {
     database: Py<PyType>,
-    interface: Py<PyType>,
+    pub(crate) interface: Py<PyType>,
     data: Py<PyType>,
-    not_found: Py<PyType>,
+    pub(crate) not_found: Py<PyType>,
     operational: Py<PyType>,
     connection_failure: Py<PyType>,
     query_cancelled: Py<PyType>,
     pool_exhausted: Py<PyType>,
     serialization_failure: Py<PyType>,
     integrity: Py<PyType>,
-    programming: Py<PyType>,
+    pub(crate) programming: Py<PyType>,
 }
 
 static ORACLE_EXCEPTION_TYPES: PyOnceLock<CachedOracleExceptionTypes> = PyOnceLock::new();
@@ -283,7 +283,9 @@ fn load_from_driver_module(
     })
 }
 
-fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static CachedOracleExceptionTypes> {
+pub(crate) fn resolve_exception_types(
+    py: Python<'_>,
+) -> PyResult<&'static CachedOracleExceptionTypes> {
     ORACLE_EXCEPTION_TYPES.get_or_try_init(py, || {
         if let Ok(driver_mod) = py.import("vertebra.db.driver")
             && let Ok(cached) = load_from_driver_module(&driver_mod)

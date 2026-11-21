@@ -16,6 +16,20 @@ from vertebra.utils.module_loader import ensure_module
 
 _SQL_DIR = Path(__file__).parent / "sql"
 _DEFAULT_DB = Path(__file__).parent / "results" / "benchmarks.duckdb"
+_RESULT_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("topology", "VARCHAR DEFAULT 'unknown'"),
+    ("adapter", "VARCHAR DEFAULT 'none'"),
+    ("protocol", "VARCHAR DEFAULT 'http1'"),
+    ("transport", "VARCHAR DEFAULT 'native'"),
+    ("broker_mode", "VARCHAR DEFAULT 'none'"),
+    ("load_mode", "VARCHAR DEFAULT 'closed_loop'"),
+    ("target_rps", "DOUBLE DEFAULT NULL"),
+    ("pool_size", "INTEGER DEFAULT NULL"),
+    ("gil_enabled", "BOOLEAN DEFAULT TRUE"),
+)
+_RESULT_FILTER_COLUMNS: frozenset[str] = frozenset(
+    {"adapter", "protocol", "transport", "broker_mode", "load_mode", "gil_enabled"}
+)
 
 
 class BenchmarkStore:
@@ -38,18 +52,19 @@ class BenchmarkStore:
         self._conn.execute(self._schema["create_bench_result_seq"])
         self._conn.execute(self._schema["create_benchmark_runs"])
         self._conn.execute(self._schema["create_benchmark_results"])
-        self._migrate_add_topology()
+        self._migrate_result_columns()
 
-    def _migrate_add_topology(self) -> None:
-        """Add topology column to benchmark_results if missing (pre-existing DBs)."""
+    def _migrate_result_columns(self) -> None:
+        """Add missing matrix columns to benchmark_results for pre-existing DBs."""
         cols = {
             row[0]
             for row in self._conn.execute(
                 "SELECT column_name FROM information_schema.columns WHERE table_name = 'benchmark_results'"
             ).fetchall()
         }
-        if "topology" not in cols:
-            self._conn.execute("ALTER TABLE benchmark_results ADD COLUMN topology VARCHAR DEFAULT 'unknown'")
+        for col_name, col_def in _RESULT_COLUMN_MIGRATIONS:
+            if col_name not in cols:
+                self._conn.execute(f"ALTER TABLE benchmark_results ADD COLUMN {col_name} {col_def}")
 
     def create_run(self, note: str = "") -> str:
         """Create a new benchmark run and return its run_id."""
@@ -74,6 +89,15 @@ class BenchmarkStore:
 
     def insert_result(self, run_id: str, result: dict[str, Any]) -> None:
         """Insert a single benchmark result, converting latency s to ms."""
+        adapter_val = result.get("adapter")
+        protocol_val = result.get("protocol")
+        transport_val = result.get("transport")
+        broker_mode_val = result.get("broker_mode")
+        load_mode_val = result.get("load_mode")
+        target_rps_val = result.get("target_rps")
+        pool_size_val = result.get("pool_size")
+        gil_enabled_val = result.get("gil_enabled")
+
         self._conn.execute(
             self._inserts["insert_result"],
             [
@@ -92,6 +116,14 @@ class BenchmarkStore:
                 result["errors"],
                 result["url"],
                 result["timestamp"],
+                str(adapter_val) if adapter_val is not None else "none",
+                str(protocol_val) if protocol_val is not None else "http1",
+                str(transport_val) if transport_val is not None else "native",
+                str(broker_mode_val) if broker_mode_val is not None else "none",
+                str(load_mode_val) if load_mode_val is not None else "closed_loop",
+                float(target_rps_val) if target_rps_val is not None else None,
+                int(pool_size_val) if pool_size_val is not None else None,
+                bool(gil_enabled_val) if gil_enabled_val is not None else True,
             ],
         )
 
@@ -125,9 +157,53 @@ class BenchmarkStore:
         columns = [desc[0] for desc in result.description]
         return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
 
-    def get_run_results(self, run_id: str) -> list[dict[str, Any]]:
-        """Get all results for a specific run."""
-        result = self._conn.execute(self._queries["select_run_results"], [run_id])
+    def get_run_results(
+        self,
+        run_id: str,
+        *,
+        adapter: str | None = None,
+        protocol: str | None = None,
+        transport: str | None = None,
+        broker_mode: str | None = None,
+        load_mode: str | None = None,
+        gil_enabled: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get results for a specific run, optionally filtered by matrix dimensions."""
+        filters: list[tuple[str, Any]] = [
+            (col, val)
+            for col, val in (
+                ("adapter", adapter),
+                ("protocol", protocol),
+                ("transport", transport),
+                ("broker_mode", broker_mode),
+                ("load_mode", load_mode),
+                ("gil_enabled", gil_enabled),
+            )
+            if val is not None
+        ]
+        if not filters:
+            result = self._conn.execute(self._queries["select_run_results"], [run_id])
+        else:
+            clauses = ["run_id = $1"]
+            params: list[Any] = [run_id]
+            for idx, (col, val) in enumerate(filters, start=2):
+                if col not in _RESULT_FILTER_COLUMNS:
+                    msg = f"Unsupported filter column: {col}"
+                    raise ValueError(msg)
+                clauses.append(f"{col} = ${idx}")
+                params.append(val)
+            sql = (
+                "SELECT\n"
+                "    target, topology, scenario, concurrency, duration_s,\n"
+                "    rps, latency_mean_ms, latency_p50_ms, latency_p99_ms, latency_max_ms,\n"
+                "    total_requests, errors, url, timestamp,\n"
+                "    adapter, protocol, transport, broker_mode, load_mode,\n"
+                "    target_rps, pool_size, gil_enabled\n"
+                "FROM benchmark_results\n"
+                f"WHERE {' AND '.join(clauses)}\n"
+                "ORDER BY target, scenario, protocol, adapter, broker_mode, load_mode, concurrency"
+            )
+            result = self._conn.execute(sql, params)
         columns = [desc[0] for desc in result.description]
         return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
 

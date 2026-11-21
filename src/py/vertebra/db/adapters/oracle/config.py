@@ -342,6 +342,8 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Maximum number of pooled sessions permitted per worker."""
     statement_cache_size: int = 256
     """Maximum number of compiled statements cached in the shared-memory statement cache."""
+    enable_reset_relay: bool = True
+    """Route TCP sessions through the in-process TNS relay that recovers from reset markers; False connects directly."""
     broker: Any = None
     """Optional shared-memory `DatabaseBroker` coordinating cross-worker connection and statement leases."""
 
@@ -517,6 +519,7 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
             "module": self.module,
             "action": self.action,
             "ecid": self.ecid,
+            "enable_reset_relay": self.enable_reset_relay,
         }
 
     @classmethod

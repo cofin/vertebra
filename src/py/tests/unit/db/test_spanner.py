@@ -7,6 +7,7 @@ import contextlib
 import gc
 import importlib
 import inspect
+import os
 import re
 import sqlite3
 import sys
@@ -14,6 +15,8 @@ import threading
 import time as _time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 
 import pytest
@@ -22,13 +25,18 @@ import vertebra.db.adapters.spanner as sp_pkg
 import vertebra.db.adapters.spanner.config as sp_config_mod
 from vertebra._spanner import (
     AsyncSpannerClient,
+    AsyncSpannerCursor,
     SyncSpannerClient,
+    SyncSpannerCursor,
 )
 from vertebra._vertebra import (
     BigQueryError,
     BigQueryRowError,
     GoogleCloudAuthError,
     GoogleCloudError,
+    InterfaceError,
+    LeaseBroker,
+    ProgrammingError,
     SpannerAbortedError,
     SpannerError,
 )
@@ -49,6 +57,245 @@ from vertebra.db.driver import DatabaseError, DataError, OperationalError
 from vertebra.storage import SyncObjectStore
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError, reset_dependency_cache
 from vertebra.utils.serializers import decode_json, encode_json
+
+
+def _strip_leading_sql_comments(sql: str) -> str:
+    text = sql.lstrip()
+    while True:
+        if text.startswith("/*"):
+            end = text.find("*/")
+            if end == -1:
+                break
+            text = text[end + 2 :].lstrip()
+        elif text.startswith("--"):
+            nl = text.find("\n")
+            if nl == -1:
+                return ""
+            text = text[nl + 1 :].lstrip()
+        else:
+            break
+    return text
+
+
+class FakeSyncSpannerCursor:
+    """Test-only synchronous PEP 249 cursor backed by `FakeSpannerClient` or `FakeSyncReadWriteTransaction`."""
+
+    __slots__ = (
+        "_arraysize",
+        "_client",
+        "_closed",
+        "_description",
+        "_index",
+        "_param_encoder",
+        "_request_tag",
+        "_rowcount",
+        "_rows",
+        "_staleness_mode",
+        "_staleness_value",
+        "_transaction_tag",
+        "_tx",
+    )
+
+    def __init__(
+        self,
+        client: FakeSpannerClient,
+        *,
+        tx: FakeSyncReadWriteTransaction | None = None,
+        staleness_mode: str = "strong",
+        staleness_value: int = 0,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+    ) -> None:
+        self._client = client
+        self._tx = tx
+        self._staleness_mode = staleness_mode
+        self._staleness_value = staleness_value
+        self._request_tag = request_tag
+        self._transaction_tag = transaction_tag
+        self._param_encoder = param_encoder
+        self._description: tuple[tuple[str, str, None, None, None, None, None], ...] | None = None
+        self._rows: list[tuple[Any, ...]] = []
+        self._index = 0
+        self._rowcount = -1
+        self._arraysize = 1
+        self._closed = False
+
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, None], ...] | None:
+        return self._description
+
+    @property
+    def rowcount(self) -> int:
+        return self._rowcount
+
+    @property
+    def lastrowid(self) -> Any | None:
+        return None
+
+    @property
+    def arraysize(self) -> int:
+        return self._arraysize
+
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        if value <= 0:
+            msg = "arraysize must be positive"
+            raise ProgrammingError(msg)
+        self._arraysize = value
+
+    def _encode_params(self, params: Any) -> str | None:
+        if params is None or params == () or params == [] or params == {}:
+            return None
+        if isinstance(params, str):
+            return params
+        if self._param_encoder is not None:
+            return self._param_encoder(params)
+        msg = "Spanner cursor needs encoded parameters or a param_encoder"
+        raise InterfaceError(msg)
+
+    def execute(
+        self,
+        sql: str,
+        params: str | Sequence[Any] | Mapping[str, Any] = (),
+    ) -> FakeSyncSpannerCursor:
+        if self._closed:
+            msg = "Cursor is closed"
+            raise InterfaceError(msg)
+        self._description = None
+        self._rows = []
+        self._index = 0
+        self._rowcount = -1
+
+        uncommented = _strip_leading_sql_comments(sql)
+        upper = uncommented.upper()
+        if SpannerCore.is_ddl_statement(uncommented):
+            if self._tx is not None:
+                msg = "DDL statements cannot be executed inside a Spanner ReadWrite transaction"
+                raise NotSupportedError(msg)
+            self._client.update_ddl([uncommented])
+            self._rowcount = -1
+            return self
+
+        params_json = self._encode_params(params)
+        if upper.startswith(("SELECT", "WITH", "GRAPH", "VALUES", "EXPLAIN", "SHOW", "PRAGMA")):
+            if self._tx is not None:
+                raw = self._tx.query(sql, params_json, self._request_tag)
+            else:
+                raw = self._client.query(sql, params_json, self._staleness_mode, self._staleness_value)
+            cols = raw.get("columns", ())
+            self._description = tuple((str(c), "UNKNOWN", None, None, None, None, None) for c in cols)
+            self._rows = [tuple(r) for r in raw.get("rows", ())]
+            self._rowcount = len(self._rows)
+            return self
+
+        if self._tx is not None:
+            count = self._tx.execute_dml(sql, params_json, self._request_tag)
+        else:
+            count = self._client.execute_dml(sql, params_json, self._request_tag, self._transaction_tag)
+        self._rowcount = int(count)
+        return self
+
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[str | Sequence[Any] | Mapping[str, Any]],
+    ) -> FakeSyncSpannerCursor:
+        if self._closed:
+            msg = "Cursor is closed"
+            raise InterfaceError(msg)
+        total = 0
+        for p in seq_of_params:
+            self.execute(sql, p)
+            total += max(self._rowcount, 0)
+        self._rowcount = total
+        return self
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        if self._index >= len(self._rows):
+            return None
+        row = self._rows[self._index]
+        self._index += 1
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        count = self._arraysize if size is None else size
+        if count < 0:
+            msg = "fetchmany size must be non-negative"
+            raise ProgrammingError(msg)
+        if count == 0:
+            return []
+        end = min(len(self._rows), self._index + count)
+        batch = self._rows[self._index : end]
+        self._index = end
+        return batch
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        rest = self._rows[self._index :]
+        self._index = len(self._rows)
+        return rest
+
+    def close(self) -> None:
+        self._closed = True
+        self._rows.clear()
+        self._description = None
+
+
+class FakeAsyncSpannerCursor:
+    """Test-only asynchronous PEP 249 cursor wrapping `FakeSyncSpannerCursor`."""
+
+    __slots__ = ("_sync",)
+
+    def __init__(self, sync_cursor: FakeSyncSpannerCursor) -> None:
+        self._sync = sync_cursor
+
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, None], ...] | None:
+        return self._sync.description
+
+    @property
+    def rowcount(self) -> int:
+        return self._sync.rowcount
+
+    @property
+    def lastrowid(self) -> Any | None:
+        return self._sync.lastrowid
+
+    @property
+    def arraysize(self) -> int:
+        return self._sync.arraysize
+
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        self._sync.arraysize = value
+
+    async def execute(
+        self,
+        sql: str,
+        params: str | Sequence[Any] | Mapping[str, Any] = (),
+    ) -> FakeAsyncSpannerCursor:
+        self._sync.execute(sql, params)
+        return self
+
+    async def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[str | Sequence[Any] | Mapping[str, Any]],
+    ) -> FakeAsyncSpannerCursor:
+        self._sync.executemany(sql, seq_of_params)
+        return self
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        return self._sync.fetchone()
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        return self._sync.fetchmany(size)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._sync.fetchall()
+
+    async def close(self) -> None:
+        self._sync.close()
 
 
 class FakeSyncReadWriteTransaction:
@@ -154,6 +401,20 @@ class FakeSyncReadWriteTransaction:
             self._client.tx_rollbacks.append(self._transaction_id)
             self._closed = True
 
+    def cursor(
+        self,
+        *,
+        request_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+    ) -> FakeSyncSpannerCursor:
+        """Create a synchronous cursor bound to this transaction double."""
+        return FakeSyncSpannerCursor(
+            self._client,
+            tx=self,
+            request_tag=request_tag,
+            param_encoder=param_encoder,
+        )
+
 
 class FakeSpannerClient:
     """Test-only in-memory Spanner wire client double for unit testing `SyncSpannerDriver` and `AsyncSpannerDriver`."""
@@ -163,6 +424,7 @@ class FakeSpannerClient:
         "_lock",
         "_tx_counter",
         "begin_tx_calls",
+        "cursor_calls",
         "ddl_history",
         "last_max_commit_delay_ms",
         "tx_rollbacks",
@@ -174,9 +436,41 @@ class FakeSpannerClient:
         self._lock = threading.RLock()
         self._tx_counter = 0
         self.begin_tx_calls: list[dict[str, Any]] = []
+        self.cursor_calls: list[dict[str, Any]] = []
         self.ddl_history: list[str] = []
         self.last_max_commit_delay_ms: int | None = None
         self.tx_rollbacks: list[bytes] = []
+
+    def cursor(
+        self,
+        *,
+        staleness_mode: str = "strong",
+        staleness_value: int = 0,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+        lazy_begin: bool = False,
+    ) -> FakeSyncSpannerCursor:
+        """Create a synchronous cursor bound to this client double."""
+        if lazy_begin:
+            msg = "Spanner cursors do not support lazy_begin"
+            raise NotSupportedError(msg)
+        self.cursor_calls.append(
+            {
+                "staleness_mode": staleness_mode,
+                "staleness_value": staleness_value,
+                "request_tag": request_tag,
+                "transaction_tag": transaction_tag,
+            }
+        )
+        return FakeSyncSpannerCursor(
+            self,
+            staleness_mode=staleness_mode,
+            staleness_value=staleness_value,
+            request_tag=request_tag,
+            transaction_tag=transaction_tag,
+            param_encoder=param_encoder,
+        )
 
     def begin_read_write_transaction(
         self,
@@ -714,6 +1008,15 @@ class FakeAsyncReadWriteTransaction:
         """Roll back any uncommitted DML asynchronously."""
         self._sync_tx.rollback()
 
+    def cursor(
+        self,
+        *,
+        request_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+    ) -> FakeAsyncSpannerCursor:
+        """Create an asynchronous cursor bound to this transaction double."""
+        return FakeAsyncSpannerCursor(self._sync_tx.cursor(request_tag=request_tag, param_encoder=param_encoder))
+
 
 class FakeAsyncSpannerClient:
     """Test-only in-memory Spanner wire client double for unit testing `AsyncSpannerDriver`."""
@@ -827,6 +1130,28 @@ class FakeAsyncSpannerClient:
             data_boost_enabled,
             staleness_mode,
             staleness_ms,
+        )
+
+    def cursor(
+        self,
+        *,
+        staleness_mode: str = "strong",
+        staleness_value: int = 0,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+        lazy_begin: bool = False,
+    ) -> FakeAsyncSpannerCursor:
+        """Create an asynchronous cursor bound to this client double."""
+        return FakeAsyncSpannerCursor(
+            self._sync_client.cursor(
+                staleness_mode=staleness_mode,
+                staleness_value=staleness_value,
+                request_tag=request_tag,
+                transaction_tag=transaction_tag,
+                param_encoder=param_encoder,
+                lazy_begin=lazy_begin,
+            )
         )
 
     async def close(self) -> None:
@@ -2267,3 +2592,862 @@ async def test_async_spanner_native_client_close_is_idempotent_and_rejects_opera
             await client.begin_read_write_transaction()
     assert excinfo.value.code == 9
     assert "Spanner client is closed" in str(excinfo.value)
+
+
+class _SpannerWireState:
+    """Shared state and RPC methods for the in-process `google.spanner.v1.Spanner` gRPC handler."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.sql_requests: list[Any] = []
+        self.batch_dml_requests: list[Any] = []
+        self.ddl_requests: list[list[str]] = []
+        self.rpc_count: int = 0
+        self.delay_event: threading.Event | None = None
+        self.entered_delay: threading.Event | None = None
+        self._session_name = "projects/p/instances/i/databases/d/sessions/mux-1"
+        self._grpc: Any = importlib.import_module("grpc")
+        self._spanner_pb: Any = importlib.import_module("google.cloud.spanner_v1.types")
+        self._empty_pb2: Any = importlib.import_module("google.protobuf.empty_pb2")
+        self._struct_pb2: Any = importlib.import_module("google.protobuf.struct_pb2")
+        self._timestamp_pb2: Any = importlib.import_module("google.protobuf.timestamp_pb2")
+        self._status_pb2: Any = importlib.import_module("google.rpc.status_pb2")
+
+    def _record_rpc(self) -> None:
+        with self.lock:
+            self.rpc_count += 1
+
+    def _create_session(self, request_bytes: bytes, context: Any) -> bytes:
+        _ = (request_bytes, context)
+        self._record_rpc()
+        pb = self._spanner_pb
+        return bytes(pb.Session.serialize(pb.Session(name=self._session_name, multiplexed=True)))
+
+    def _batch_create_sessions(self, request_bytes: bytes, context: Any) -> bytes:
+        _ = (request_bytes, context)
+        self._record_rpc()
+        pb = self._spanner_pb
+        resp = pb.BatchCreateSessionsResponse(session=[pb.Session(name=self._session_name, multiplexed=True)])
+        return bytes(pb.BatchCreateSessionsResponse.serialize(resp))
+
+    def _begin_transaction(self, request_bytes: bytes, context: Any) -> bytes:
+        _ = (request_bytes, context)
+        self._record_rpc()
+        pb = self._spanner_pb
+        return bytes(pb.Transaction.serialize(pb.Transaction(id=b"tx-wire-1")))
+
+    def _commit(self, request_bytes: bytes, context: Any) -> bytes:
+        _ = (request_bytes, context)
+        self._record_rpc()
+        pb = self._spanner_pb
+        resp = pb.CommitResponse(commit_timestamp=self._timestamp_pb2.Timestamp(seconds=1_700_000_000))
+        return bytes(pb.CommitResponse.serialize(resp))
+
+    def _rollback(self, request_bytes: bytes, context: Any) -> bytes:
+        _ = (request_bytes, context)
+        self._record_rpc()
+        return bytes(self._empty_pb2.Empty().SerializeToString())
+
+    def _handle_sql_common(self, req: Any, context: Any) -> tuple[Any, list[Any], int | None]:
+        self._record_rpc()
+        pb = self._spanner_pb
+        with self.lock:
+            self.sql_requests.append(req)
+            delay_event = self.delay_event
+            entered_delay = self.entered_delay
+
+        if "SLOW_WAIT" in req.sql and delay_event is not None:
+            if entered_delay is not None:
+                entered_delay.set()
+            delay_event.wait(timeout=5.0)
+
+        upper = req.sql.upper()
+        if "DUPLICATE" in upper:
+            context.abort(self._grpc.StatusCode.ALREADY_EXISTS, "Duplicate key violation")
+
+        if "THEN RETURN" in upper:
+            meta = pb.ResultSetMetadata(
+                row_type=pb.StructType(
+                    fields=[
+                        pb.StructType.Field(
+                            name="id",
+                            type_=pb.Type(code=pb.TypeCode.INT64),
+                        )
+                    ]
+                )
+            )
+            return meta, [self._struct_pb2.Value(string_value="1")], 1
+
+        if upper.startswith(("UPDATE", "INSERT", "DELETE")):
+            return None, [], 2 if upper.startswith("UPDATE") else 1
+
+        if "MULTI_ROWS" in upper:
+            meta = pb.ResultSetMetadata(
+                row_type=pb.StructType(
+                    fields=[
+                        pb.StructType.Field(
+                            name="n",
+                            type_=pb.Type(code=pb.TypeCode.INT64),
+                        )
+                    ]
+                )
+            )
+            return meta, [self._struct_pb2.Value(string_value=str(i)) for i in (1, 2, 3, 4, 5)], None
+
+        if "EMPTY_ROWS" in upper:
+            meta = pb.ResultSetMetadata(
+                row_type=pb.StructType(
+                    fields=[
+                        pb.StructType.Field(
+                            name="a",
+                            type_=pb.Type(code=pb.TypeCode.INT64),
+                        )
+                    ]
+                )
+            )
+            return meta, [], None
+
+        a_val = "1"
+        if req.params and "a" in req.params:
+            a_val = str(req.params["a"])
+        meta = pb.ResultSetMetadata(
+            row_type=pb.StructType(
+                fields=[
+                    pb.StructType.Field(
+                        name="a",
+                        type_=pb.Type(code=pb.TypeCode.INT64),
+                    ),
+                    pb.StructType.Field(
+                        name="b",
+                        type_=pb.Type(code=pb.TypeCode.STRING),
+                    ),
+                ]
+            )
+        )
+        return (
+            meta,
+            [self._struct_pb2.Value(string_value=a_val), self._struct_pb2.Value(string_value="x")],
+            None,
+        )
+
+    def _execute_streaming_sql(self, request_bytes: bytes, context: Any) -> Any:
+        pb = self._spanner_pb
+        req = pb.ExecuteSqlRequest.deserialize(request_bytes)
+        meta, values, row_count_exact = self._handle_sql_common(req, context)
+        stats = pb.ResultSetStats(row_count_exact=row_count_exact) if row_count_exact is not None else None
+        chunk = pb.PartialResultSet(
+            metadata=meta,
+            stats=stats,
+        )
+        chunk._pb.values.extend(values)
+        yield bytes(pb.PartialResultSet.serialize(chunk))
+
+    def _execute_sql(self, request_bytes: bytes, context: Any) -> bytes:
+        pb = self._spanner_pb
+        req = pb.ExecuteSqlRequest.deserialize(request_bytes)
+        meta, values, row_count_exact = self._handle_sql_common(req, context)
+        if meta is None:
+            meta = pb.ResultSetMetadata(transaction=pb.Transaction(id=b"tx-inline-1"))
+        else:
+            meta.transaction = pb.Transaction(id=b"tx-inline-1")
+        stats = pb.ResultSetStats(row_count_exact=row_count_exact) if row_count_exact is not None else None
+        rs = pb.ResultSet(metadata=meta, stats=stats)
+        if values:
+            rs._pb.rows.add(values=values)
+        return bytes(pb.ResultSet.serialize(rs))
+
+    def _execute_batch_dml(self, request_bytes: bytes, context: Any) -> bytes:
+        _ = context
+        self._record_rpc()
+        pb = self._spanner_pb
+        req = pb.ExecuteBatchDmlRequest.deserialize(request_bytes)
+        with self.lock:
+            self.batch_dml_requests.append(req)
+        result_sets = [
+            pb.ResultSet(
+                metadata=pb.ResultSetMetadata(transaction=pb.Transaction(id=b"tx-batch-1")),
+                stats=pb.ResultSetStats(row_count_exact=1),
+            )
+            for _ in req.statements
+        ]
+        resp = pb.ExecuteBatchDmlResponse(
+            result_sets=result_sets,
+            status=self._status_pb2.Status(code=0),
+        )
+        return bytes(pb.ExecuteBatchDmlResponse.serialize(resp))
+
+    def service(self, handler_call_details: Any) -> Any:
+        """Route Spanner v1 gRPC methods to the in-process handlers."""
+        method = handler_call_details.method
+        if method == "/google.spanner.v1.Spanner/CreateSession":
+            return self._grpc.unary_unary_rpc_method_handler(self._create_session)
+        if method == "/google.spanner.v1.Spanner/BatchCreateSessions":
+            return self._grpc.unary_unary_rpc_method_handler(self._batch_create_sessions)
+        if method == "/google.spanner.v1.Spanner/BeginTransaction":
+            return self._grpc.unary_unary_rpc_method_handler(self._begin_transaction)
+        if method == "/google.spanner.v1.Spanner/ExecuteStreamingSql":
+            return self._grpc.unary_stream_rpc_method_handler(self._execute_streaming_sql)
+        if method == "/google.spanner.v1.Spanner/ExecuteSql":
+            return self._grpc.unary_unary_rpc_method_handler(self._execute_sql)
+        if method == "/google.spanner.v1.Spanner/ExecuteBatchDml":
+            return self._grpc.unary_unary_rpc_method_handler(self._execute_batch_dml)
+        if method == "/google.spanner.v1.Spanner/Commit":
+            return self._grpc.unary_unary_rpc_method_handler(self._commit)
+        if method == "/google.spanner.v1.Spanner/Rollback":
+            return self._grpc.unary_unary_rpc_method_handler(self._rollback)
+        return None
+
+
+@contextlib.contextmanager
+def _in_process_spanner_wire_server() -> Any:
+    """Start an in-process Spanner gRPC data server and REST admin DDL server."""
+    grpc_mod: Any = importlib.import_module("grpc")
+    rpc_handler = _SpannerWireState()
+    grpc_server = grpc_mod.server(ThreadPoolExecutor(max_workers=4))
+    grpc_server.add_generic_rpc_handlers((rpc_handler,))
+    grpc_port = grpc_server.add_insecure_port("127.0.0.1:0")
+    grpc_server.start()
+
+    class _AdminHandler(BaseHTTPRequestHandler):
+        def do_PATCH(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            payload = decode_json(body)
+            statements = list(payload.get("statements", []))
+            with rpc_handler.lock:
+                rpc_handler.ddl_requests.append(statements)
+                rpc_handler.rpc_count += 1
+            response_bytes = encode_json({"name": "operations/op-ddl-1", "done": True, "response": {}}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_bytes)))
+            self.end_headers()
+            self.wfile.write(response_bytes)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            _ = (format, args)
+
+    admin_server = ThreadingHTTPServer(("127.0.0.1", 0), _AdminHandler)
+    admin_port = admin_server.server_address[1]
+    admin_thread = threading.Thread(target=admin_server.serve_forever, daemon=True)
+    admin_thread.start()
+
+    prev_no_proxy = os.environ.get("NO_PROXY")
+    prev_no_proxy_lower = os.environ.get("no_proxy")
+    os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+    os.environ["no_proxy"] = "127.0.0.1,localhost"
+    try:
+        yield (
+            f"http://127.0.0.1:{grpc_port}",
+            f"http://127.0.0.1:{admin_port}",
+            rpc_handler,
+        )
+    finally:
+        if prev_no_proxy is None:
+            os.environ.pop("NO_PROXY", None)
+        else:
+            os.environ["NO_PROXY"] = prev_no_proxy
+        if prev_no_proxy_lower is None:
+            os.environ.pop("no_proxy", None)
+        else:
+            os.environ["no_proxy"] = prev_no_proxy_lower
+        grpc_server.stop(grace=0)
+        admin_server.shutdown()
+        admin_server.server_close()
+        admin_thread.join(timeout=2.0)
+
+
+def test_sync_cursor_select_stale_dml_ddl_and_fetch_controls() -> None:
+    """Verify SyncSpannerCursor SELECT, staleness, DML, DML THEN RETURN, DDL, and fetch controls."""
+    with _in_process_spanner_wire_server() as (endpoint, admin_endpoint, handler):
+        client = SyncSpannerClient(
+            database="projects/p/instances/i/databases/d",
+            endpoint=endpoint,
+            admin_endpoint=admin_endpoint,
+        )
+        try:
+            with client.cursor() as cur:
+                assert isinstance(cur, SyncSpannerCursor)
+                assert cur.description is None
+                assert cur.rowcount == -1
+                assert cur.lastrowid is None
+                assert cur.arraysize == 1
+
+                returned = cur.execute("SELECT 1 AS a, 'x' AS b")
+                assert returned is cur
+                assert cur.fetchall() == [(1, "x")]
+                select_desc = cast("Any", cur.description)
+                assert select_desc is not None
+                assert [col[0] for col in select_desc] == ["a", "b"]
+                assert all(len(col) == 7 for col in select_desc)
+                assert cur.rowcount == 1
+                assert cur.lastrowid is None
+
+                cur.execute("SELECT n FROM t WHERE MULTI_ROWS")
+                cur.arraysize = 2
+                assert cur.fetchmany(0) == []
+                assert cur.fetchmany() == [(1,), (2,)]
+                assert cur.fetchone() == (3,)
+                assert cur.fetchall() == [(4,), (5,)]
+                assert cur.fetchone() is None
+
+                with pytest.raises(ProgrammingError):
+                    cur.arraysize = 0
+                with pytest.raises(ProgrammingError):
+                    cur.fetchmany(-1)
+
+                cur.execute("SELECT a FROM t WHERE EMPTY_ROWS")
+                assert cur.description is not None
+                assert cur.fetchall() == []
+
+                cur.execute("UPDATE t SET v = 1 WHERE true")
+                assert cur.rowcount == 2
+                assert cur.description is None
+                assert cur.fetchone() is None
+                assert cur.fetchall() == []
+
+                cur.execute("INSERT INTO t (id) VALUES (1) THEN RETURN id")
+                dml_desc = cast("Any", cur.description)
+                assert dml_desc is not None
+                assert [col[0] for col in dml_desc] == ["id"]
+                assert cur.fetchall() == [(1,)]
+                assert cur.rowcount == 1
+
+                cur.execute("CREATE TABLE t (id INT64) PRIMARY KEY (id)")
+                assert cur.description is None
+                assert cur.rowcount == -1
+                assert handler.ddl_requests == [["CREATE TABLE t (id INT64) PRIMARY KEY (id)"]]
+
+            with pytest.raises(InterfaceError):
+                cur.execute("SELECT 1")
+            cur.close()
+
+            stale_cur = client.cursor(staleness_mode="max_staleness", staleness_value=5000)
+            stale_cur.execute("SELECT 1 AS a, 'x' AS b")
+            stale_req = handler.sql_requests[-1]
+            assert stale_req.transaction.single_use.read_only.max_staleness.seconds == 5
+            stale_cur.close()
+        finally:
+            client.close()
+
+
+def test_sync_cursor_parameters_executemany_tx_ddl_lazy_begin_and_errors() -> None:
+    """Verify SyncSpannerCursor parameter encoding, executemany, tx DDL, lazy_begin, and SpannerError."""
+    with _in_process_spanner_wire_server() as (endpoint, admin_endpoint, handler):
+        client = SyncSpannerClient(
+            database="projects/p/instances/i/databases/d",
+            endpoint=endpoint,
+            admin_endpoint=admin_endpoint,
+        )
+        try:
+            with pytest.raises(NotSupportedError):
+                client.cursor(lazy_begin=True)
+            assert handler.rpc_count == 0
+
+            cur_no_enc = client.cursor()
+            encoded_json = SpannerCore.encode_parameters_json({"a": 42})
+            assert encoded_json is not None
+            cur_no_enc.execute("SELECT @a AS a, 'x' AS b", encoded_json)
+            assert cur_no_enc.fetchall() == [(42, "x")]
+
+            with pytest.raises(InterfaceError, match="Spanner cursor needs encoded parameters or a param_encoder"):
+                cur_no_enc.execute("SELECT @a AS a, 'x' AS b", {"a": 7})
+            assert cur_no_enc.description is None
+            assert cur_no_enc.rowcount == -1
+
+            calls: list[Any] = []
+
+            def _encode(value: Any) -> str | None:
+                calls.append(value)
+                return SpannerCore.encode_parameters_json(value)
+
+            cur_enc = client.cursor(param_encoder=_encode)
+            cur_enc.execute("SELECT @a AS a, 'x' AS b", {"a": 99})
+            assert len(calls) == 1
+            assert cur_enc.fetchall() == [(99, "x")]
+
+            def _boom(value: Any) -> str | None:
+                _ = value
+                msg = "encoder boom"
+                raise ValueError(msg)
+
+            cur_boom = client.cursor(param_encoder=_boom)
+            cur_boom.execute("SELECT 1 AS a, 'x' AS b")
+            with pytest.raises(ValueError, match="encoder boom"):
+                cur_boom.execute("SELECT @a AS a, 'x' AS b", {"a": 1})
+            assert cur_boom.description is None
+            assert cur_boom.rowcount == -1
+
+            cur_enc.executemany(
+                "INSERT INTO t (id) VALUES (@a)",
+                [{"a": 1}, {"a": 2}, {"a": 3}],
+            )
+            assert cur_enc.rowcount == 3
+            assert cur_enc.description is None
+            assert len(handler.batch_dml_requests) == 1
+            assert len(handler.batch_dml_requests[0].statements) == 3
+
+            with pytest.raises(NotSupportedError):
+                cur_enc.executemany("SELECT @a", [{"a": 1}])
+            with pytest.raises(NotSupportedError):
+                cur_enc.executemany("CREATE TABLE t (id INT64) PRIMARY KEY (id)", [()])
+
+            with pytest.raises(SpannerError) as dup_exc:
+                cur_enc.execute("INSERT INTO t (id) VALUES (1) -- DUPLICATE")
+            assert dup_exc.value.code == 6
+            assert cur_enc.description is None
+            assert cur_enc.rowcount == -1
+
+            tx = client.begin_read_write_transaction()
+            tx_cur = tx.cursor(request_tag="tx-tag", param_encoder=_encode)
+            tx_cur.execute("SELECT @a AS a, 'x' AS b", {"a": 5})
+            assert tx_cur.fetchall() == [(5, "x")]
+            tx_cur.execute("UPDATE t SET v = 1 WHERE true")
+            assert tx_cur.rowcount == 2
+            assert tx_cur.description is None
+            tx_cur.execute("INSERT INTO t (id) VALUES (1) THEN RETURN id")
+            assert tx_cur.description is not None
+            assert tx_cur.fetchall() == [(1,)]
+            with pytest.raises(
+                NotSupportedError,
+                match="DDL statements cannot be executed inside a Spanner ReadWrite transaction",
+            ):
+                tx_cur.execute("CREATE TABLE t2 (id INT64) PRIMARY KEY (id)")
+            tx_cur.close()
+            tx.rollback()
+        finally:
+            client.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_select_stale_dml_ddl_and_fetch_controls() -> None:
+    """Verify AsyncSpannerCursor SELECT, staleness, DML, DML THEN RETURN, DDL, and fetch controls."""
+    with _in_process_spanner_wire_server() as (endpoint, admin_endpoint, handler):
+        client = AsyncSpannerClient(
+            database="projects/p/instances/i/databases/d",
+            endpoint=endpoint,
+            admin_endpoint=admin_endpoint,
+        )
+        try:
+            cur = client.cursor()
+            assert isinstance(cur, AsyncSpannerCursor)
+            assert cur.description is None
+            assert cur.rowcount == -1
+            assert cur.lastrowid is None
+            assert cur.arraysize == 1
+
+            returned = await cur.execute("SELECT 1 AS a, 'x' AS b")
+            assert returned is cur
+            assert await cur.fetchall() == [(1, "x")]
+            select_desc = cast("Any", cur.description)
+            assert select_desc is not None
+            assert [col[0] for col in select_desc] == ["a", "b"]
+            assert cur.rowcount == 1
+            assert cur.lastrowid is None
+
+            await cur.execute("SELECT n FROM t WHERE MULTI_ROWS")
+            cur.arraysize = 2
+            assert await cur.fetchmany(0) == []
+            assert await cur.fetchmany() == [(1,), (2,)]
+            assert await cur.fetchone() == (3,)
+            assert await cur.fetchall() == [(4,), (5,)]
+            assert await cur.fetchone() is None
+
+            with pytest.raises(ProgrammingError):
+                cur.arraysize = 0
+            with pytest.raises(ProgrammingError):
+                await cur.fetchmany(-1)
+
+            await cur.execute("UPDATE t SET v = 1 WHERE true")
+            assert cur.rowcount == 2
+            assert cur.description is None
+
+            await cur.execute("INSERT INTO t (id) VALUES (1) THEN RETURN id")
+            dml_desc = cast("Any", cur.description)
+            assert dml_desc is not None
+            assert [col[0] for col in dml_desc] == ["id"]
+            assert await cur.fetchall() == [(1,)]
+            assert cur.rowcount == 1
+
+            await cur.execute("CREATE TABLE t (id INT64) PRIMARY KEY (id)")
+            assert cur.description is None
+            assert cur.rowcount == -1
+            assert handler.ddl_requests == [["CREATE TABLE t (id INT64) PRIMARY KEY (id)"]]
+
+            await cur.close()
+            await cur.close()
+            with pytest.raises(InterfaceError):
+                await cur.execute("SELECT 1")
+
+            stale_cur = client.cursor(staleness_mode="max_staleness", staleness_value=5000)
+            await stale_cur.execute("SELECT 1 AS a, 'x' AS b")
+            stale_req = handler.sql_requests[-1]
+            assert stale_req.transaction.single_use.read_only.max_staleness.seconds == 5
+            await stale_cur.close()
+        finally:
+            client.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_fetch_returns_completed_awaitable() -> None:
+    """Verify AsyncSpannerCursor.fetchall returns a completed awaitable without yielding."""
+    with _in_process_spanner_wire_server() as (endpoint, admin_endpoint, _handler):
+        client = AsyncSpannerClient(
+            database="projects/p/instances/i/databases/d",
+            endpoint=endpoint,
+            admin_endpoint=admin_endpoint,
+        )
+        try:
+            cur = client.cursor()
+            await cur.execute("SELECT 1 AS a, 'x' AS b")
+            expected = await cur.fetchall()
+            assert expected
+
+            await cur.execute("SELECT 1 AS a, 'x' AS b")
+            step = cur.fetchall().__await__()
+            with pytest.raises(StopIteration) as exc_info:
+                next(step)
+            assert exc_info.value.value == expected
+            await cur.close()
+        finally:
+            client.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("method", ["fetchone", "fetchmany", "close"])
+async def test_async_cursor_ready_methods_complete_without_loop(method: str) -> None:
+    """Verify fetchone, fetchmany, and close return completed awaitables."""
+    with _in_process_spanner_wire_server() as (endpoint, admin_endpoint, _handler):
+        client = AsyncSpannerClient(
+            database="projects/p/instances/i/databases/d",
+            endpoint=endpoint,
+            admin_endpoint=admin_endpoint,
+        )
+        try:
+            cur = client.cursor()
+            await cur.execute("SELECT 1 AS a, 'x' AS b")
+            expected_values: dict[str, Any] = {
+                "fetchone": (1, "x"),
+                "fetchmany": [(1, "x")],
+                "close": None,
+            }
+            step = getattr(cur, method)().__await__()
+            with pytest.raises(StopIteration) as exc_info:
+                next(step)
+            assert exc_info.value.value == expected_values[method]
+            if method != "close":
+                await cur.close()
+        finally:
+            client.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_state_errors_raise_at_call() -> None:
+    """Verify AsyncSpannerCursor fetch state errors raise immediately at the call."""
+    with _in_process_spanner_wire_server() as (endpoint, admin_endpoint, _handler):
+        client = AsyncSpannerClient(
+            database="projects/p/instances/i/databases/d",
+            endpoint=endpoint,
+            admin_endpoint=admin_endpoint,
+        )
+        try:
+            cur = client.cursor()
+            with pytest.raises(ProgrammingError):
+                cur.fetchmany(-1)
+
+            await cur.close()
+            with pytest.raises(InterfaceError):
+                cur.fetchone()
+            with pytest.raises(InterfaceError):
+                cur.fetchmany()
+            with pytest.raises(InterfaceError):
+                cur.fetchall()
+        finally:
+            client.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("params", [(), [], {}])
+async def test_async_cursor_empty_container_matches_no_parameters(
+    params: tuple[Any, ...] | list[Any] | dict[str, Any],
+) -> None:
+    """Verify empty exact parameter containers bypass param_encoder and match no parameters."""
+    with _in_process_spanner_wire_server() as (endpoint, admin_endpoint, _handler):
+        client = AsyncSpannerClient(
+            database="projects/p/instances/i/databases/d",
+            endpoint=endpoint,
+            admin_endpoint=admin_endpoint,
+        )
+        try:
+            cur = client.cursor()
+            await cur.execute("SELECT 1 AS a, 'x' AS b")
+            expected = await cur.fetchall()
+
+            await cur.execute("SELECT 1 AS a, 'x' AS b", params)
+            assert await cur.fetchall() == expected
+            await cur.close()
+        finally:
+            client.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_parameters_executemany_tx_ddl_concurrency_and_errors() -> None:
+    """Verify AsyncSpannerCursor encoding, executemany, tx DDL, lazy_begin, concurrency, and SpannerError."""
+    with _in_process_spanner_wire_server() as (endpoint, admin_endpoint, handler):
+        client = AsyncSpannerClient(
+            database="projects/p/instances/i/databases/d",
+            endpoint=endpoint,
+            admin_endpoint=admin_endpoint,
+        )
+        try:
+            with pytest.raises(NotSupportedError):
+                client.cursor(lazy_begin=True)
+            assert handler.rpc_count == 0
+
+            cur_no_enc = client.cursor()
+            encoded_json = SpannerCore.encode_parameters_json({"a": 42})
+            assert encoded_json is not None
+            await cur_no_enc.execute("SELECT @a AS a, 'x' AS b", encoded_json)
+            assert await cur_no_enc.fetchall() == [(42, "x")]
+
+            with pytest.raises(InterfaceError, match="Spanner cursor needs encoded parameters or a param_encoder"):
+                await cur_no_enc.execute("SELECT @a AS a, 'x' AS b", {"a": 7})
+            assert cur_no_enc.description is None
+            assert cur_no_enc.rowcount == -1
+
+            calls: list[Any] = []
+
+            def _encode(value: Any) -> str | None:
+                calls.append(value)
+                return SpannerCore.encode_parameters_json(value)
+
+            cur_enc = client.cursor(param_encoder=_encode)
+            await cur_enc.execute("SELECT @a AS a, 'x' AS b", {"a": 77})
+            assert len(calls) == 1
+            assert await cur_enc.fetchall() == [(77, "x")]
+
+            await cur_enc.executemany(
+                "INSERT INTO t (id) VALUES (@a)",
+                [{"a": 1}, {"a": 2}, {"a": 3}],
+            )
+            assert cur_enc.rowcount == 3
+            assert cur_enc.description is None
+            assert len(handler.batch_dml_requests) == 1
+            assert len(handler.batch_dml_requests[0].statements) == 3
+
+            with pytest.raises(NotSupportedError):
+                await cur_enc.executemany("SELECT @a", [{"a": 1}])
+
+            with pytest.raises(SpannerError) as dup_exc:
+                await cur_enc.execute("INSERT INTO t (id) VALUES (1) -- DUPLICATE")
+            assert dup_exc.value.code == 6
+            assert cur_enc.description is None
+            assert cur_enc.rowcount == -1
+
+            handler.delay_event = threading.Event()
+            handler.entered_delay = threading.Event()
+
+            async def _run_slow() -> AsyncSpannerCursor:
+                return await cur_enc.execute("SELECT 1 AS a, 'x' AS b -- SLOW_WAIT")
+
+            in_flight = asyncio.create_task(_run_slow())
+            try:
+                await asyncio.to_thread(handler.entered_delay.wait, 5.0)
+                with pytest.raises(InterfaceError, match="cursor is already executing"):
+                    cur_enc.execute("SELECT 1 AS a, 'x' AS b")
+            finally:
+                handler.delay_event.set()
+            await in_flight
+            handler.delay_event = None
+            handler.entered_delay = None
+
+            tx = await client.begin_read_write_transaction()
+            tx_cur = tx.cursor(request_tag="tx-tag", param_encoder=_encode)
+            await tx_cur.execute("SELECT @a AS a, 'x' AS b", {"a": 5})
+            assert await tx_cur.fetchall() == [(5, "x")]
+            await tx_cur.execute("UPDATE t SET v = 1 WHERE true")
+            assert tx_cur.rowcount == 2
+            await tx_cur.execute("INSERT INTO t (id) VALUES (1) THEN RETURN id")
+            assert tx_cur.description is not None
+            assert await tx_cur.fetchall() == [(1,)]
+            with pytest.raises(
+                NotSupportedError,
+                match="DDL statements cannot be executed inside a Spanner ReadWrite transaction",
+            ):
+                await tx_cur.execute("CREATE TABLE t2 (id INT64) PRIMARY KEY (id)")
+            await tx_cur.close()
+            await tx.rollback()
+        finally:
+            client.close()
+
+
+class _RecordingStatementCache:
+    """Test double that records any shared-memory statement cache access."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def lookup(self, *args: Any) -> Any:
+        self.calls.append(("lookup", args))
+        return None
+
+    def insert(self, *args: Any) -> Any:
+        self.calls.append(("insert", args))
+        return None
+
+
+def test_sync_spanner_driver_on_native_cursor_matrix() -> None:
+    """Verify SyncSpannerDriver query, DML, DDL, tx, staleness, params, error class, and zero SHM cache access."""
+    with _in_process_spanner_wire_server() as (endpoint, admin_endpoint, handler):
+        broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+        recording_cache = _RecordingStatementCache()
+        cfg = SpannerConfig(
+            project_id="p",
+            instance_id="i",
+            database_id="d",
+            endpoint=endpoint,
+            admin_endpoint=admin_endpoint,
+        )
+        driver = SyncSpannerDriver(cfg, broker=broker, statement_cache=recording_cache)
+        try:
+            assert not hasattr(driver, "_statement_cache")
+            assert not hasattr(driver, "_dialect_tag")
+
+            assert driver.select("SELECT 1 AS a, 'x' AS b") == [{"a": 1, "b": "x"}]
+            rows, cols = driver.execute_with_description("SELECT 1 AS a, 'x' AS b")
+            assert rows == [(1, "x")]
+            assert cols == ("a", "b")
+            assert driver.select_one("SELECT 1 AS a, 'x' AS b") == {"a": 1, "b": "x"}
+            assert driver.select_one_or_none("SELECT 1 AS a, 'x' AS b") == {"a": 1, "b": "x"}
+            assert driver.select_value("SELECT 1 AS a, 'x' AS b") == 1
+
+            assert driver.execute("UPDATE t SET v = 1 WHERE true") == 2
+            assert driver.execute("CREATE TABLE t (id INT64) PRIMARY KEY (id)") == 0
+            assert handler.ddl_requests == [["CREATE TABLE t (id INT64) PRIMARY KEY (id)"]]
+
+            with pytest.raises(NotSupportedError):
+                driver.cursor(lazy_begin=True)
+
+            with driver.transaction():
+                assert driver.select("SELECT 1 AS a, 'x' AS b") == [{"a": 1, "b": "x"}]
+                assert handler.sql_requests[-1].transaction.id == b"tx-wire-1"
+                with pytest.raises(NotSupportedError):
+                    driver.execute("CREATE TABLE t2 (id INT64) PRIMARY KEY (id)")
+                with pytest.raises(NotSupportedError):
+                    driver.cursor(lazy_begin=True)
+
+            def _tx_body(tx: SyncSpannerTransaction) -> tuple[int, list[Any], Any, Any]:
+                dml_count = tx.execute("UPDATE t SET v = 1 WHERE true")
+                queried = tx.query("SELECT @a AS a, 'x' AS b", {"a": 9})
+                one = tx.query_one("SELECT @a AS a, 'x' AS b", {"a": 11})
+                scalar = tx.select_value("SELECT @a AS a, 'x' AS b", {"a": 13})
+                return dml_count, queried, one, scalar
+
+            tx_res = driver.run_in_transaction(_tx_body)
+            assert tx_res == (2, [{"a": 9, "b": "x"}], {"a": 11, "b": "x"}, 13)
+
+            assert driver.select(
+                "SELECT 1 AS a, 'x' AS b",
+                staleness=StalenessBound.max_staleness(5000),
+            ) == [{"a": 1, "b": "x"}]
+            assert handler.sql_requests[-1].transaction.single_use.read_only.max_staleness.seconds == 5
+
+            assert driver.select("SELECT @a AS a, 'x' AS b", {"a": 5}) == [{"a": 5, "b": "x"}]
+
+            for idx in range(10):
+                assert driver.select("SELECT @a AS a, 'x' AS b", {"a": idx}) == [{"a": idx, "b": "x"}]
+
+            with pytest.raises(SpannerError) as dup_exc:
+                driver.execute("INSERT INTO t (id) VALUES (1) -- DUPLICATE")
+            assert dup_exc.value.code == 6
+
+            assert recording_cache.calls == []
+            broker_stats = broker.stats()
+            assert broker_stats.total_acquired == 0
+            assert broker_stats.active_leases == 0
+            sc = broker.statement_cache()
+            assert sc is not None
+            cache_stats = sc.stats()
+            assert cache_stats.inserts == 0
+            assert cache_stats.hits == 0
+        finally:
+            driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_spanner_driver_on_native_cursor_matrix() -> None:
+    """Verify AsyncSpannerDriver query, DML, DDL, tx, staleness, params, error class, and zero SHM cache access."""
+    with _in_process_spanner_wire_server() as (endpoint, admin_endpoint, handler):
+        broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+        recording_cache = _RecordingStatementCache()
+        cfg = SpannerConfig(
+            project_id="p",
+            instance_id="i",
+            database_id="d",
+            endpoint=endpoint,
+            admin_endpoint=admin_endpoint,
+        )
+        driver = AsyncSpannerDriver(cfg, broker=broker, statement_cache=recording_cache)
+        try:
+            assert not hasattr(driver, "_statement_cache")
+            assert not hasattr(driver, "_dialect_tag")
+
+            assert await driver.select("SELECT 1 AS a, 'x' AS b") == [{"a": 1, "b": "x"}]
+            rows, cols = await driver.execute_with_description("SELECT 1 AS a, 'x' AS b")
+            assert rows == [(1, "x")]
+            assert cols == ("a", "b")
+            assert await driver.select_one("SELECT 1 AS a, 'x' AS b") == {"a": 1, "b": "x"}
+            assert await driver.select_one_or_none("SELECT 1 AS a, 'x' AS b") == {"a": 1, "b": "x"}
+            assert await driver.select_value("SELECT 1 AS a, 'x' AS b") == 1
+
+            assert await driver.execute("UPDATE t SET v = 1 WHERE true") == 2
+            assert await driver.execute("CREATE TABLE t (id INT64) PRIMARY KEY (id)") == 0
+            assert handler.ddl_requests == [["CREATE TABLE t (id INT64) PRIMARY KEY (id)"]]
+
+            with pytest.raises(NotSupportedError):
+                driver.cursor(lazy_begin=True)
+
+            async with driver.transaction():
+                assert await driver.select("SELECT 1 AS a, 'x' AS b") == [{"a": 1, "b": "x"}]
+                assert handler.sql_requests[-1].transaction.id == b"tx-wire-1"
+                with pytest.raises(NotSupportedError):
+                    await driver.execute("CREATE TABLE t2 (id INT64) PRIMARY KEY (id)")
+                with pytest.raises(NotSupportedError):
+                    driver.cursor(lazy_begin=True)
+
+            async def _tx_body(tx: Any) -> tuple[int, list[Any], Any, Any]:
+                dml_count = await tx.execute("UPDATE t SET v = 1 WHERE true")
+                queried = await tx.query("SELECT @a AS a, 'x' AS b", {"a": 9})
+                one = await tx.query_one("SELECT @a AS a, 'x' AS b", {"a": 11})
+                scalar = await tx.select_value("SELECT @a AS a, 'x' AS b", {"a": 13})
+                return dml_count, queried, one, scalar
+
+            tx_res = await driver.run_in_transaction(_tx_body)
+            assert tx_res == (2, [{"a": 9, "b": "x"}], {"a": 11, "b": "x"}, 13)
+
+            assert await driver.select(
+                "SELECT 1 AS a, 'x' AS b",
+                staleness=StalenessBound.max_staleness(5000),
+            ) == [{"a": 1, "b": "x"}]
+            assert handler.sql_requests[-1].transaction.single_use.read_only.max_staleness.seconds == 5
+
+            assert await driver.select("SELECT @a AS a, 'x' AS b", {"a": 5}) == [{"a": 5, "b": "x"}]
+
+            for idx in range(10):
+                assert await driver.select("SELECT @a AS a, 'x' AS b", {"a": idx}) == [{"a": idx, "b": "x"}]
+
+            with pytest.raises(SpannerError) as dup_exc:
+                await driver.execute("INSERT INTO t (id) VALUES (1) -- DUPLICATE")
+            assert dup_exc.value.code == 6
+
+            assert recording_cache.calls == []
+            broker_stats = broker.stats()
+            assert broker_stats.total_acquired == 0
+            assert broker_stats.active_leases == 0
+            sc = broker.statement_cache()
+            assert sc is not None
+            cache_stats = sc.stats()
+            assert cache_stats.inserts == 0
+            assert cache_stats.hits == 0
+        finally:
+            await driver.close()

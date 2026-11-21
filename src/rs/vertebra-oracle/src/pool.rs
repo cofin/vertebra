@@ -7,14 +7,25 @@ use std::time::{Duration, Instant};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use tokio::sync::Notify;
-use vertebra_db::py_async::{RustDbTaskAwaitable, spawn_rust_db_task_with_attr};
+use vertebra_db::py_async::{RustDbTaskAwaitable, db_runtime_handle, spawn_rust_db_task_with_attr};
 
 use crate::client::{
     AsyncOracleClient, ORACLE_COMPLETION_DRAINER_ATTR, OracleWorkerHandle, SyncOracleClient,
     WorkerCommand, build_raw_oracle_options,
 };
 use crate::config::NativeOracleConfig;
+use crate::cursor::{
+    BuiltReply, PreparedExecute, build_reply, prepare_execute, reply_dicts, reply_dml,
+    reply_first_value, reply_rows_and_names,
+};
 use crate::errors::OracleError;
+use crate::types::{OracleValueOptions, VectorReturnFormat};
+
+fn is_fatal_transport(err: &OracleError) -> bool {
+    let classification = err.classify();
+    classification.sqlstate == "08006"
+        || matches!(classification.vendor_code, Some(3113 | 3114 | 3135 | 12537))
+}
 
 /// Validated connection pool configuration options.
 #[derive(Clone, Debug)]
@@ -531,7 +542,7 @@ impl OraclePoolCore {
         }
 
         if worker
-            .rollback_with_timeout(self.options.reset_timeout)
+            .reset_with_timeout(self.options.reset_timeout)
             .is_err()
             || worker.is_closed()
         {
@@ -638,6 +649,7 @@ fn build_pool_options_from_py(
     max_lifetime_seconds: f64,
     idle_timeout_seconds: f64,
     health_check_interval_seconds: f64,
+    enable_reset_relay: bool,
 ) -> Result<OraclePoolOptions, OracleError> {
     let raw = build_raw_oracle_options(
         user,
@@ -673,7 +685,8 @@ fn build_pool_options_from_py(
         action,
         ecid,
     );
-    let cfg = NativeOracleConfig::validate(raw)?;
+    let mut cfg = NativeOracleConfig::validate(raw)?;
+    cfg.enable_reset_relay = enable_reset_relay;
     OraclePoolOptions::validate(
         cfg,
         min_size,
@@ -711,6 +724,67 @@ fn build_stats_dict(py: Python<'_>, core: &OraclePoolCore) -> PyResult<Py<PyDict
 )]
 pub struct SyncOraclePool {
     inner: Arc<OraclePoolCore>,
+}
+
+impl SyncOraclePool {
+    #[allow(clippy::too_many_arguments)]
+    fn single_call(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+        shape: fn(Python<'_>, BuiltReply) -> PyResult<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let parsed_format =
+            VectorReturnFormat::parse(vector_return_format).map_err(|e| e.to_py_err(py))?;
+        let options = OracleValueOptions {
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format: parsed_format,
+        };
+        let PreparedExecute {
+            cmd,
+            facts,
+            out_spec,
+            out_vars,
+            options,
+            lowercase,
+        } = prepare_execute(
+            py,
+            sql,
+            params,
+            out_binds,
+            options,
+            enable_lowercase_column_names,
+        )?;
+        let inner = Arc::clone(&self.inner);
+        let reply = py
+            .detach(|| {
+                let worker = inner.acquire_sync(None, None, None, None, None, None, None)?;
+                let exec_res = worker.dispatch_sync(cmd);
+                let discard =
+                    worker.is_closed() || exec_res.as_ref().is_err_and(is_fatal_transport);
+                let release_res = inner.release_sync(&worker, None, discard);
+                match exec_res {
+                    Ok(reply) => {
+                        release_res?;
+                        Ok(reply)
+                    }
+                    Err(err) => {
+                        let _ = release_res;
+                        Err(err)
+                    }
+                }
+            })
+            .map_err(|e| e.to_py_err(py))?;
+        let built = build_reply(py, reply, facts, options, lowercase, &out_spec, &out_vars)?;
+        shape(py, built)
+    }
 }
 
 #[pymethods]
@@ -758,6 +832,7 @@ impl SyncOraclePool {
         max_lifetime_seconds=3600.0,
         idle_timeout_seconds=600.0,
         health_check_interval_seconds=30.0,
+        enable_reset_relay=true,
     ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -802,6 +877,7 @@ impl SyncOraclePool {
         max_lifetime_seconds: f64,
         idle_timeout_seconds: f64,
         health_check_interval_seconds: f64,
+        enable_reset_relay: bool,
     ) -> PyResult<Self> {
         let options = build_pool_options_from_py(
             user,
@@ -844,6 +920,7 @@ impl SyncOraclePool {
             max_lifetime_seconds,
             idle_timeout_seconds,
             health_check_interval_seconds,
+            enable_reset_relay,
         )
         .map_err(|e| e.to_py_err(py))?;
         Ok(Self {
@@ -1005,6 +1082,194 @@ impl SyncOraclePool {
         py.detach(|| inner.close_sync())
             .map_err(|e| e.to_py_err(py))
     }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_rows(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_rows_and_names,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_dicts(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_dicts,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_first_value,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_dml,
+        )
+    }
+}
+
+struct AsyncPoolReleaseGuard {
+    inner: Arc<OraclePoolCore>,
+    worker: Option<Arc<OracleWorkerHandle>>,
+}
+
+impl AsyncPoolReleaseGuard {
+    fn new(inner: Arc<OraclePoolCore>, worker: Arc<OracleWorkerHandle>) -> Self {
+        Self {
+            inner,
+            worker: Some(worker),
+        }
+    }
+
+    fn worker(&self) -> &Arc<OracleWorkerHandle> {
+        self.worker
+            .as_ref()
+            .expect("guard worker present before disarm")
+    }
+
+    fn disarm(mut self) -> (Arc<OraclePoolCore>, Arc<OracleWorkerHandle>) {
+        let worker = self.worker.take().expect("guard disarmed once");
+        (Arc::clone(&self.inner), worker)
+    }
+}
+
+impl Drop for AsyncPoolReleaseGuard {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            let inner = Arc::clone(&self.inner);
+            db_runtime_handle().spawn_blocking(move || {
+                let _ = inner.release_sync(&worker, None, true);
+            });
+        }
+    }
 }
 
 /// Bounded asynchronous physical Oracle connection pool (`vertebra._oracle.AsyncOraclePool`).
@@ -1016,6 +1281,82 @@ impl SyncOraclePool {
 )]
 pub struct AsyncOraclePool {
     inner: Arc<OraclePoolCore>,
+}
+
+impl AsyncOraclePool {
+    #[allow(clippy::too_many_arguments)]
+    fn single_call(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+        shape: fn(Python<'_>, BuiltReply) -> PyResult<Py<PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let parsed_format =
+            VectorReturnFormat::parse(vector_return_format).map_err(|e| e.to_py_err(py))?;
+        let options = OracleValueOptions {
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format: parsed_format,
+        };
+        let PreparedExecute {
+            cmd,
+            facts,
+            out_spec,
+            out_vars,
+            options,
+            lowercase,
+        } = prepare_execute(
+            py,
+            sql,
+            params,
+            out_binds,
+            options,
+            enable_lowercase_column_names,
+        )?;
+        let inner = Arc::clone(&self.inner);
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let worker = Arc::clone(&inner)
+                    .acquire_async(None, None, None, None, None, None, None)
+                    .await?;
+                let guard = AsyncPoolReleaseGuard::new(inner, worker);
+                let exec_res = guard.worker().dispatch_async_raw(cmd).await;
+                let discard =
+                    guard.worker().is_closed() || exec_res.as_ref().is_err_and(is_fatal_transport);
+                let (release_inner, release_worker) = guard.disarm();
+                let release_res = tokio::task::spawn_blocking(move || {
+                    release_inner.release_sync(&release_worker, None, discard)
+                })
+                .await
+                .map_err(|e| OracleError::Interface(format!("pool release task panicked: {e}")))
+                .and_then(|res| res);
+                match exec_res {
+                    Ok(reply) => {
+                        release_res?;
+                        Ok(reply)
+                    }
+                    Err(err) => {
+                        let _ = release_res;
+                        Err(err)
+                    }
+                }
+            },
+            move |py, reply| {
+                let built =
+                    build_reply(py, reply, facts, options, lowercase, &out_spec, &out_vars)?;
+                shape(py, built)
+            },
+            |py, err| err.to_py_err(py),
+            ORACLE_COMPLETION_DRAINER_ATTR,
+        )
+    }
 }
 
 #[pymethods]
@@ -1063,6 +1404,7 @@ impl AsyncOraclePool {
         max_lifetime_seconds=3600.0,
         idle_timeout_seconds=600.0,
         health_check_interval_seconds=30.0,
+        enable_reset_relay=true,
     ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1107,6 +1449,7 @@ impl AsyncOraclePool {
         max_lifetime_seconds: f64,
         idle_timeout_seconds: f64,
         health_check_interval_seconds: f64,
+        enable_reset_relay: bool,
     ) -> PyResult<Self> {
         let options = build_pool_options_from_py(
             user,
@@ -1149,6 +1492,7 @@ impl AsyncOraclePool {
             max_lifetime_seconds,
             idle_timeout_seconds,
             health_check_interval_seconds,
+            enable_reset_relay,
         )
         .map_err(|e| e.to_py_err(py))?;
         Ok(Self {
@@ -1350,5 +1694,191 @@ impl AsyncOraclePool {
             |py, err| err.to_py_err(py),
             ORACLE_COMPLETION_DRAINER_ATTR,
         )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_rows(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_rows_and_names,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_dicts(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_dicts,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_first_value,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_dml,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_fatal_transport;
+    use crate::errors::OracleError;
+
+    #[test]
+    fn fatal_transport_rule_matches_sqlstate_and_vendor_codes() {
+        for code in [3113, 3114, 3135, 12537] {
+            let err = OracleError::Server {
+                code,
+                message: format!("ORA-{code:05}: broken session"),
+            };
+            assert!(is_fatal_transport(&err), "ORA-{code} should be fatal");
+        }
+        let transport_err = OracleError::Transport {
+            code: None,
+            message: "broken pipe".to_owned(),
+        };
+        assert!(is_fatal_transport(&transport_err));
+
+        let table_missing = OracleError::Server {
+            code: 942,
+            message: "ORA-00942: table or view does not exist".to_owned(),
+        };
+        assert!(!is_fatal_transport(&table_missing));
+
+        let unique_violation = OracleError::Server {
+            code: 1,
+            message: "ORA-00001: unique constraint violated".to_owned(),
+        };
+        assert!(!is_fatal_transport(&unique_violation));
     }
 }

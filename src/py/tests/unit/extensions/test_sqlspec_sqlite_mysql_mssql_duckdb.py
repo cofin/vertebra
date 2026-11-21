@@ -3,12 +3,15 @@
 import asyncio
 import contextlib
 import importlib.util
+import sqlite3
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from importlib import import_module
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import msgspec
 import pytest
@@ -46,6 +49,10 @@ from sqlspec.migrations.context import MigrationContext
 from sqlspec.utils.adapters import resolve_adapter_name, resolve_extension_store_class
 from sqlspec.utils.schema import to_schema as sqlspec_to_schema
 
+from vertebra._vertebra import IntegrityError as NativeIntegrityError
+from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
+from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.dbapi import AsyncDBAPIConnection, SyncDBAPIConnection
 from vertebra.extensions.sqlspec.adapters.duckdb import (
     DUCKDB_COPY_FILENAME_FOLLOWS_QUERY,
     DuckDBAsyncConfig,
@@ -192,13 +199,118 @@ from vertebra.extensions.sqlspec.adapters.sqlite.core import (
     cosine_similarity,
     extension_pragma_statements,
     map_sqlite_exception,
-    normalize_sqlite_parameters,
     pack_embedding,
     unpack_embedding,
     validate_fts_options,
 )
+from vertebra.extensions.sqlspec.adapters.sqlite.core import (
+    default_statement_config as sqlite_default_statement_config,
+)
+from vertebra.extensions.sqlspec.adapters.sqlite.core import (
+    driver_profile as sqlite_driver_profile,
+)
 from vertebra.storage import ArtifactReference
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
+
+
+def _is_row_returning_sql(sql: str) -> bool:
+    """Heuristically identify row-returning statements for recording test-double cursors."""
+    upper = sql.lstrip().upper()
+    return (
+        upper.startswith(("SELECT", "WITH", "SHOW", "PRAGMA", "VALUES")) or "RETURNING" in upper or " OUTPUT " in upper
+    )
+
+
+class _DelegatingSyncCursor:
+    """Sync DB-API cursor double delegating to a recording fake connection's methods."""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: Any = None
+        self._rows: list[tuple[Any, ...]] = []
+
+    def execute(self, sql: str, parameters: Any = None) -> None:
+        params = None if parameters in (None, (), [], {}) else parameters
+        if _is_row_returning_sql(sql):
+            rows, cols = self._conn.execute_with_description(sql, params)
+            self.description = tuple((str(col), None, None, None, None, None, None) for col in cols)
+            self._rows = [tuple(row[col] for col in cols) if isinstance(row, dict) else tuple(row) for row in rows]
+            self.rowcount = -1
+            return
+        res = self._conn.execute(sql, params)
+        self.description = None
+        self._rows = []
+        self.rowcount = int(res) if res is not None else 0
+
+    def executemany(self, sql: str, param_sets: Any) -> None:
+        res = self._conn.execute_many(sql, param_sets)
+        self.description = None
+        self._rows = []
+        self.rowcount = int(res) if res is not None else 0
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = self._rows
+        self._rows = []
+        return rows
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows.pop(0) if self._rows else None
+
+    def fetchmany(self, size: int = 1) -> list[tuple[Any, ...]]:
+        chunk = self._rows[:size]
+        self._rows = self._rows[size:]
+        return chunk
+
+    def close(self) -> None:
+        return None
+
+
+class _DelegatingAsyncCursor:
+    """Async DB-API cursor double delegating to a recording async fake connection's methods."""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: Any = None
+        self._rows: list[tuple[Any, ...]] = []
+
+    async def execute(self, sql: str, parameters: Any = None) -> None:
+        params = None if parameters in (None, (), [], {}) else parameters
+        if _is_row_returning_sql(sql):
+            rows, cols = await self._conn.execute_with_description(sql, params)
+            self.description = tuple((str(col), None, None, None, None, None, None) for col in cols)
+            self._rows = [tuple(row[col] for col in cols) if isinstance(row, dict) else tuple(row) for row in rows]
+            self.rowcount = -1
+            return
+        res = await self._conn.execute(sql, params)
+        self.description = None
+        self._rows = []
+        self.rowcount = int(res) if res is not None else 0
+
+    async def executemany(self, sql: str, param_sets: Any) -> None:
+        res = await self._conn.execute_many(sql, param_sets)
+        self.description = None
+        self._rows = []
+        self.rowcount = int(res) if res is not None else 0
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = self._rows
+        self._rows = []
+        return rows
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows.pop(0) if self._rows else None
+
+    async def fetchmany(self, size: int = 1) -> list[tuple[Any, ...]]:
+        chunk = self._rows[:size]
+        self._rows = self._rows[size:]
+        return chunk
+
+    async def close(self) -> None:
+        return None
 
 
 class _RecordingSyncConn:
@@ -219,6 +331,7 @@ class _RecordingSyncConn:
         self.calls: list[tuple[str, str, Any]] = []
         self.scripts: list[str] = []
         self.tx_events: list[str] = []
+        self.rowcount: int = 0
 
     @property
     def closed(self) -> bool:
@@ -237,13 +350,21 @@ class _RecordingSyncConn:
     def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> int:
         _ = kwargs
         self.calls.append(("execute", sql, parameters))
+        self.rowcount = 1
         return 1
 
     def execute_many(self, sql: str, param_sets: Any = None, **kwargs: Any) -> int:
         _ = kwargs
         batch = list(param_sets or [])
         self.calls.append(("execute_many", sql, batch))
+        self.rowcount = len(batch)
         return len(batch)
+
+    def executemany(self, sql: str, param_sets: Any = None, **kwargs: Any) -> None:
+        _ = kwargs
+        batch = list(param_sets or [])
+        self.calls.append(("executemany", sql, batch))
+        self.rowcount = len(batch)
 
     def execute_script(self, sql: str, **kwargs: Any) -> int:
         _ = kwargs
@@ -286,6 +407,10 @@ class _RecordingSyncConn:
         self._in_tx = False
         self.tx_events.append("rollback")
 
+    def cursor(self, *, lazy_begin: bool = False) -> _DelegatingSyncCursor:
+        _ = lazy_begin
+        return _DelegatingSyncCursor(self)
+
 
 class _RecordingAsyncConn:
     """In-memory recording native async driver double for relational adapter tests."""
@@ -298,6 +423,7 @@ class _RecordingAsyncConn:
         self.calls: list[tuple[str, str, Any]] = []
         self.scripts: list[str] = []
         self.tx_events: list[str] = []
+        self.rowcount: int = 0
 
     @property
     def closed(self) -> bool:
@@ -316,13 +442,21 @@ class _RecordingAsyncConn:
     async def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> int:
         _ = kwargs
         self.calls.append(("execute", sql, parameters))
+        self.rowcount = 1
         return 1
 
     async def execute_many(self, sql: str, param_sets: Any = None, **kwargs: Any) -> int:
         _ = kwargs
         batch = list(param_sets or [])
         self.calls.append(("execute_many", sql, batch))
+        self.rowcount = len(batch)
         return len(batch)
+
+    async def executemany(self, sql: str, param_sets: Any = None, **kwargs: Any) -> None:
+        _ = kwargs
+        batch = list(param_sets or [])
+        self.calls.append(("executemany", sql, batch))
+        self.rowcount = len(batch)
 
     async def execute_script(self, sql: str, **kwargs: Any) -> int:
         _ = kwargs
@@ -362,6 +496,10 @@ class _RecordingAsyncConn:
     async def rollback(self) -> None:
         self._in_tx = False
         self.tx_events.append("rollback")
+
+    def cursor(self, *, lazy_begin: bool = False) -> _DelegatingAsyncCursor:
+        _ = lazy_begin
+        return _DelegatingAsyncCursor(self)
 
 
 class _StubCodeError(Exception):
@@ -538,12 +676,6 @@ def test_sqlite_core_julian_embeddings_pragmas_and_fts_validation() -> None:
     assert cosine_similarity(unpacked, [1.0, 0.0, 0.5]) == pytest.approx(1.0, abs=1e-6)
     assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0, abs=1e-6)
 
-    named = normalize_sqlite_parameters(
-        "SELECT * FROM items WHERE id = :id AND 'literal :ignored' != ''",
-        {"id": TypedParameter(7, int, semantic_name="INTEGER"), "unused": 99},
-    )
-    assert named == {":id": 7}
-
     class _FakeCfg:
         extension_config = {
             "litestar": {"pragma_profile": True, "pragma_overrides": {"synchronous": "NORMAL"}},
@@ -620,6 +752,150 @@ async def test_sqlite_real_async_driver_execution(tmp_path: Path) -> None:
         version = await driver.data_dictionary.get_version(driver)
         assert version is not None
         assert isinstance(driver.data_dictionary, SQLiteAsyncDataDictionary)
+
+
+@pytest.mark.parametrize(
+    ("statement", "params", "is_many", "expected_sql", "expected_params"),
+    [
+        (
+            "select * from t where a = :a and b = :b and c = :a",
+            ({"a": 1, "b": 2},),
+            False,
+            "select * from t where a = ? and b = ? and c = ?",
+            (1, 2, 1),
+        ),
+        (
+            "select * from t where a = ?",
+            (1,),
+            False,
+            "select * from t where a = ?",
+            [1],
+        ),
+        (
+            "insert into t values (:a, :b)",
+            ([{"a": 1, "b": 2}, {"a": 3, "b": 4}],),
+            True,
+            "insert into t values (?, ?)",
+            [(1, 2), (3, 4)],
+        ),
+        (
+            "select 1",
+            (),
+            False,
+            "select 1",
+            [],
+        ),
+    ],
+)
+def test_sqlite_default_statement_config_executes_qmark_only(
+    statement: str,
+    params: tuple[Any, ...],
+    is_many: bool,
+    expected_sql: str,
+    expected_params: Any,
+) -> None:
+    """Verify SQLite profile and statement config accept `:name` input and compile to `?` execution."""
+    profile = sqlite_driver_profile()
+    assert profile.supported_execution_styles == frozenset({ParameterStyle.QMARK})
+    assert profile.supported_styles == {ParameterStyle.QMARK, ParameterStyle.NAMED_COLON}
+
+    stmt_cfg = sqlite_default_statement_config()
+    assert stmt_cfg.parameter_config.supported_execution_parameter_styles == frozenset({ParameterStyle.QMARK})
+    assert stmt_cfg.parameter_config.supported_parameter_styles == {
+        ParameterStyle.QMARK,
+        ParameterStyle.NAMED_COLON,
+    }
+
+    compiled_sql, compiled_params = SQL(
+        statement,
+        *params,
+        statement_config=stmt_cfg,
+        is_many=is_many,
+    ).compile()
+    assert compiled_sql == expected_sql
+    assert compiled_params == expected_params
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_sqlite_named_parameters_round_trip_through_session(mode: str) -> None:
+    """Verify repeated `:name` bindings and literal `':x'` strings round-trip through SQLite sessions."""
+    if mode == "sync":
+        cfg = SQLiteSyncConfig(database=":memory:", share_pool=False)
+        with cfg.provide_session() as driver:
+            row = driver.select_one("select :a as a, :b as b, :a as c", {"a": 1, "b": 2})
+            assert row == {"a": 1, "b": 2, "c": 1}
+            literal_row = driver.select_one("select :a as a, ':x' as lit", {"a": 1})
+            assert literal_row == {"a": 1, "lit": ":x"}
+    else:
+        acfg = SQLiteAsyncConfig(database=":memory:", share_pool=False)
+        async with acfg.provide_session() as driver:
+            row = await driver.select_one("select :a as a, :b as b, :a as c", {"a": 1, "b": 2})
+            assert row == {"a": 1, "b": 2, "c": 1}
+            literal_row = await driver.select_one("select :a as a, ':x' as lit", {"a": 1})
+            assert literal_row == {"a": 1, "lit": ":x"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_sqlite_named_execute_many_inserts_all_rows(mode: str) -> None:
+    """Verify `execute_many` with named dict batches inserts all rows and reports `rows_affected`."""
+    batch = [
+        {"a": 1, "b": "one"},
+        {"a": 2, "b": "two"},
+        {"a": 3, "b": "three"},
+    ]
+    if mode == "sync":
+        cfg = SQLiteSyncConfig(database=":memory:", share_pool=False)
+        with cfg.provide_session() as driver:
+            driver.execute_script("CREATE TABLE pairs (a INTEGER PRIMARY KEY, b TEXT NOT NULL);")
+            result = driver.execute_many("INSERT INTO pairs (a, b) VALUES (:a, :b)", batch)
+            assert result.rows_affected == 3
+            rows = driver.select("SELECT a, b FROM pairs ORDER BY a")
+            assert rows == batch
+    else:
+        acfg = SQLiteAsyncConfig(database=":memory:", share_pool=False)
+        async with acfg.provide_session() as driver:
+            await driver.execute_script("CREATE TABLE pairs (a INTEGER PRIMARY KEY, b TEXT NOT NULL);")
+            result = await driver.execute_many("INSERT INTO pairs (a, b) VALUES (:a, :b)", batch)
+            assert result.rows_affected == 3
+            rows = await driver.select("SELECT a, b FROM pairs ORDER BY a")
+            assert rows == batch
+
+
+def test_sqlite_adapter_holds_no_parameter_normalizers() -> None:
+    """Verify SQLite core exports no parameter normalizers and SQLite drivers inherit base dispatch hooks."""
+    sqlite_core = importlib.import_module("vertebra.extensions.sqlspec.adapters.sqlite.core")
+    deleted_names = (
+        "unwrap_typed_parameters",
+        "_QUOTED_SQL_SEGMENT",
+        "_extract_named_colon_placeholders",
+        "normalize_sqlite_parameters",
+        "normalize_sqlite_many_parameters",
+    )
+    for name in deleted_names:
+        assert not hasattr(sqlite_core, name)
+        assert name not in sqlite_core.__all__
+
+    for driver_cls in (SQLiteSyncDriver, SQLiteAsyncDriver):
+        assert "_prepare_native_parameters" not in driver_cls.__dict__
+        assert "dispatch_execute_many" not in driver_cls.__dict__
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_sqlite_select_to_arrow_with_named_parameters(mode: str) -> None:
+    """Verify `select_to_arrow` with `:name` parameters returns the expected single row in sync and async modes."""
+    if mode == "sync":
+        cfg = SQLiteSyncConfig(database=":memory:", share_pool=False)
+        with cfg.provide_session() as driver:
+            arrow_result = driver.select_to_arrow("select :a as a", {"a": 7})
+            assert arrow_result.to_dict() == [{"a": 7}]
+    else:
+        acfg = SQLiteAsyncConfig(database=":memory:", share_pool=False)
+        async with acfg.provide_session() as driver:
+            arrow_result = await driver.select_to_arrow("select :a as a", {"a": 7})
+            assert arrow_result.to_dict() == [{"a": 7}]
 
 
 @pytest.mark.parametrize(
@@ -1589,12 +1865,13 @@ def test_mysql_core_driver_dictionary_events_and_litestar() -> None:
     conn = _RecordingSyncConn(rows=[{"id": 1, "name": "row1"}], columns=["id", "name"])
     driver = MySQLSyncDriver(conn)
     result = driver.execute("SELECT id, name FROM docs WHERE id = ?", TypedParameter(1, int, semantic_name="INT"))
-    assert result.data == [{"id": 1, "name": "row1"}]
-    assert conn.calls[-1][2] == (1,)
+    assert result.all() == [{"id": 1, "name": "row1"}]
+    assert list(conn.calls[-1][2]) == [1]
 
-    driver.execute_many("INSERT INTO docs (id) VALUES (?)", [(1,), (2,)])
-    assert conn.calls[-1][0] == "execute_many"
+    many_result = driver.execute_many("INSERT INTO docs (id) VALUES (?)", [(1,), (2,)])
+    assert conn.calls[-1][0] in {"execute_many", "executemany"}
     assert conn.calls[-1][2] == [(1,), (2,)]
+    assert many_result.rows_affected == 2
 
     dict_sync = MySQLSyncDataDictionary()
     maria_conn = _RecordingSyncConn(scalar="11.7.2-MariaDB")
@@ -1623,7 +1900,229 @@ async def test_mysql_async_driver_dispatch() -> None:
     driver = MySQLAsyncDriver(conn)
     selected = await driver.select("SELECT id FROM items WHERE id = ?", (9,))
     assert selected == [{"id": 9}]
-    assert conn.calls[-1][2] == (9,)
+    assert conn.calls[-1][2] == [9]
+
+
+def test_mysql_adapter_holds_no_parameter_normalizers() -> None:
+    """Verify MySQL SQLSpec core removes parameter normalizers and drivers omit _prepare_native_parameters."""
+    mysql_core = import_module("vertebra.extensions.sqlspec.adapters.mysql.core")
+    deleted_names = (
+        "unwrap_typed_parameters",
+        "_coerce_param",
+        "normalize_mysql_parameters",
+        "normalize_mysql_many_parameters",
+    )
+    for name in deleted_names:
+        assert not hasattr(mysql_core, name)
+        assert name not in mysql_core.__all__
+
+    for driver_cls in (MySQLSyncDriver, MySQLAsyncDriver):
+        assert "_prepare_native_parameters" not in driver_cls.__dict__
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_mysql_native_cursor_cache_hit_crud_json_error_and_dbapi(asynchronous: bool) -> None:
+    """Verify MySQL SQLSpec cache hit performs one native execute, CRUD/many/JSON/errors, and DB-API cursor."""
+    raw = sqlite3.connect(":memory:")
+    raw.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, payload TEXT, flag INTEGER, ts TEXT)")
+    raw.execute("INSERT INTO items (id, name, payload, flag, ts) VALUES (7, 'alpha', '{\"k\": 1}', 1, '2026-01-01')")
+    raw.commit()
+    cfg = MySQLConfig(dsn="mysql://localhost:3306/app")
+    counts = {"execute": 0, "fetchall": 0}
+
+    def _adapt_param(val: Any) -> Any:
+        if isinstance(val, datetime):
+            return val.isoformat()
+        return val
+
+    class _SyncCountingMySQLCursor:
+        def __init__(self) -> None:
+            self._cur = raw.cursor()
+
+        @property
+        def description(self) -> Any:
+            return self._cur.description
+
+        @property
+        def rowcount(self) -> int:
+            return int(self._cur.rowcount)
+
+        @property
+        def lastrowid(self) -> Any:
+            return self._cur.lastrowid
+
+        def execute(self, sql: str, params: Any = None) -> Any:
+            counts["execute"] += 1
+            if "DUPLICATE_TRIGGER" in sql:
+                raise NativeIntegrityError("ERROR 1062 (23000): Duplicate entry '7' for key 'PRIMARY'")
+            bound = [_adapt_param(p) for p in params] if params else ()
+            self._cur.execute(sql, bound)
+            return self
+
+        def executemany(self, sql: str, param_sets: Any) -> Any:
+            adapted = [[_adapt_param(p) for p in row] for row in param_sets]
+            self._cur.executemany(sql, adapted)
+            return self
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            counts["fetchall"] += 1
+            return list(self._cur.fetchall())
+
+        def close(self) -> None:
+            self._cur.close()
+
+    class _SyncFakeMySQLClient:
+        in_transaction: bool = False
+
+        def cursor(self, *, lazy_begin: bool = False) -> _SyncCountingMySQLCursor:
+            _ = lazy_begin
+            return _SyncCountingMySQLCursor()
+
+        def close(self) -> None:
+            raw.close()
+
+    class _AsyncCountingMySQLCursor:
+        def __init__(self) -> None:
+            self._inner = _SyncCountingMySQLCursor()
+
+        @property
+        def description(self) -> Any:
+            return self._inner.description
+
+        @property
+        def rowcount(self) -> int:
+            return self._inner.rowcount
+
+        @property
+        def lastrowid(self) -> Any:
+            return self._inner.lastrowid
+
+        async def execute(self, sql: str, params: Any = None) -> Any:
+            self._inner.execute(sql, params)
+            return self
+
+        async def executemany(self, sql: str, param_sets: Any) -> Any:
+            self._inner.executemany(sql, param_sets)
+            return self
+
+        async def fetchall(self) -> list[tuple[Any, ...]]:
+            return self._inner.fetchall()
+
+        async def close(self) -> None:
+            self._inner.close()
+
+    class _AsyncFakeMySQLClient:
+        in_transaction: bool = False
+
+        def cursor(self, *, lazy_begin: bool = False) -> _AsyncCountingMySQLCursor:
+            _ = lazy_begin
+            return _AsyncCountingMySQLCursor()
+
+        async def close(self) -> None:
+            raw.close()
+
+    aware_ts = datetime(2026, 4, 15, 10, 30, 45, tzinfo=UTC)
+
+    if asynchronous:
+        native_async = AsyncMySQLDriver(cfg, client=_AsyncFakeMySQLClient())
+        adapter_async = MySQLAsyncDriver(native_async, statement_config=MySQLAsyncConfig(cfg).statement_config)
+        try:
+            assert await adapter_async.select("SELECT 1 AS a") == [{"a": 1}]
+            assert await adapter_async.select("SELECT id, name FROM items WHERE id = ?", 7) == [
+                {"id": 7, "name": "alpha"}
+            ]
+            counts["execute"] = 0
+            counts["fetchall"] = 0
+            assert await adapter_async.select("SELECT id, name FROM items WHERE id = ?", 7) == [
+                {"id": 7, "name": "alpha"}
+            ]
+            assert counts == {"execute": 1, "fetchall": 1}
+
+            upd = await adapter_async.execute("UPDATE items SET name = ? WHERE id = ?", ("beta", 7))
+            assert upd.rows_affected == 1
+
+            empty_many = await adapter_async.execute_many("INSERT INTO items (id, name) VALUES (?, ?)", [])
+            assert empty_many.rows_affected == 0
+            many = await adapter_async.execute_many(
+                "INSERT INTO items (id, name, payload, flag, ts) VALUES (?, ?, ?, ?, ?)",
+                [
+                    (10, "x", "{}", True, aware_ts),
+                    (11, "y", "{}", False, aware_ts),
+                    (12, "z", "{}", True, aware_ts),
+                ],
+            )
+            assert many.rows_affected == 3
+
+            await adapter_async.execute(
+                "INSERT INTO items (id, name, payload, flag, ts) VALUES (?, ?, ?, ?, ?)",
+                (20, "json-row", {"nested": True}, TypedParameter(True, bool), aware_ts),
+            )
+            row = await adapter_async.select_one("SELECT payload, flag, ts FROM items WHERE id = ?", 20)
+            assert row is not None
+            assert mysql_json_dict(row["payload"]) == {"nested": True}
+            assert row["flag"] == 1
+            assert row["ts"] == aware_ts.replace(tzinfo=None).isoformat()
+
+            with pytest.raises(UniqueViolationError):
+                await adapter_async.execute("INSERT INTO items (id) VALUES (7) /* DUPLICATE_TRIGGER */")
+
+            dbapi_async = AsyncDBAPIConnection("mysql+vtb_async://localhost/app", driver=native_async, share_pool=False)
+            try:
+                cur = dbapi_async.cursor()
+                assert isinstance(cur, _AsyncCountingMySQLCursor)
+            finally:
+                await dbapi_async.close()
+        finally:
+            await native_async.close()
+        return
+
+    native_sync = SyncMySQLDriver(cfg, client=_SyncFakeMySQLClient())
+    adapter_sync = MySQLSyncDriver(native_sync, statement_config=MySQLSyncConfig(cfg).statement_config)
+    try:
+        assert adapter_sync.select("SELECT 1 AS a") == [{"a": 1}]
+        assert adapter_sync.select("SELECT id, name FROM items WHERE id = ?", 7) == [{"id": 7, "name": "alpha"}]
+        counts["execute"] = 0
+        counts["fetchall"] = 0
+        assert adapter_sync.select("SELECT id, name FROM items WHERE id = ?", 7) == [{"id": 7, "name": "alpha"}]
+        assert counts == {"execute": 1, "fetchall": 1}
+
+        upd = adapter_sync.execute("UPDATE items SET name = ? WHERE id = ?", ("beta", 7))
+        assert upd.rows_affected == 1
+
+        empty_many = adapter_sync.execute_many("INSERT INTO items (id, name) VALUES (?, ?)", [])
+        assert empty_many.rows_affected == 0
+        many = adapter_sync.execute_many(
+            "INSERT INTO items (id, name, payload, flag, ts) VALUES (?, ?, ?, ?, ?)",
+            [
+                (10, "x", "{}", True, aware_ts),
+                (11, "y", "{}", False, aware_ts),
+                (12, "z", "{}", True, aware_ts),
+            ],
+        )
+        assert many.rows_affected == 3
+
+        adapter_sync.execute(
+            "INSERT INTO items (id, name, payload, flag, ts) VALUES (?, ?, ?, ?, ?)",
+            (20, "json-row", {"nested": True}, TypedParameter(True, bool), aware_ts),
+        )
+        row = adapter_sync.select_one("SELECT payload, flag, ts FROM items WHERE id = ?", 20)
+        assert row is not None
+        assert mysql_json_dict(row["payload"]) == {"nested": True}
+        assert row["flag"] == 1
+        assert row["ts"] == aware_ts.replace(tzinfo=None).isoformat()
+
+        with pytest.raises(UniqueViolationError):
+            adapter_sync.execute("INSERT INTO items (id) VALUES (7) /* DUPLICATE_TRIGGER */")
+
+        dbapi_sync = SyncDBAPIConnection("mysql+vtb://localhost/app", driver=native_sync, share_pool=False)
+        try:
+            cur = dbapi_sync.cursor()
+            assert isinstance(cur, _SyncCountingMySQLCursor)
+        finally:
+            dbapi_sync.close()
+    finally:
+        native_sync.close()
 
 
 @pytest.mark.parametrize(
@@ -2060,6 +2559,10 @@ class _MySQLADKScriptedConn:
         self._in_tx = False
         self.tx_events.append("rollback")
 
+    def cursor(self, *, lazy_begin: bool = False) -> _DelegatingSyncCursor:
+        _ = lazy_begin
+        return _DelegatingSyncCursor(self)
+
 
 class _MySQLADKAsyncScriptedConn:
     """Async query-routing recording MySQL connection double for statement-shape and transaction tests."""
@@ -2132,6 +2635,10 @@ class _MySQLADKAsyncScriptedConn:
     async def rollback(self) -> None:
         self._in_tx = False
         self.tx_events.append("rollback")
+
+    def cursor(self, *, lazy_begin: bool = False) -> _DelegatingAsyncCursor:
+        _ = lazy_begin
+        return _DelegatingAsyncCursor(self)
 
 
 def test_mysql_adk_upstream_bases_config_slots_and_missing_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2498,7 +3005,7 @@ async def test_mysql_adk_memory_vector_guards_sql_ranking_and_owner_scoped_delet
         assert deleted == 2
         del_call = next(c for c in conn.calls if c[0] == "execute")
         assert del_call[1] == "DELETE FROM adk_memory WHERE session_id = ? AND app_name = ? AND user_id = ?"
-        assert del_call[2] == ("s1", "app-a", "u1")
+        assert del_call[2] == ["s1", "app-a", "u1"]
         return
 
     aconn = _MySQLADKAsyncScriptedConn(_handler)
@@ -2538,7 +3045,7 @@ async def test_mysql_adk_memory_vector_guards_sql_ranking_and_owner_scoped_delet
     assert deleted_a == 2
     del_call_a = next(c for c in aconn.calls if c[0] == "execute")
     assert del_call_a[1] == "DELETE FROM adk_memory WHERE session_id = ? AND app_name = ? AND user_id = ?"
-    assert del_call_a[2] == ("s1", "app-a", "u1")
+    assert del_call_a[2] == ["s1", "app-a", "u1"]
 
 
 @pytest.mark.anyio
@@ -2968,6 +3475,207 @@ async def test_mssql_async_driver_savepoints() -> None:
     assert isinstance(driver.data_dictionary, MSSQLAsyncDataDictionary)
 
 
+def test_mssql_adapter_holds_no_parameter_normalizers() -> None:
+    """Verify MSSQL SQLSpec core removes parameter normalizers and drivers omit _prepare_native_parameters."""
+    mssql_core = import_module("vertebra.extensions.sqlspec.adapters.mssql.core")
+    deleted_names = (
+        "unwrap_typed_parameters",
+        "normalize_mssql_parameters",
+        "normalize_mssql_many_parameters",
+    )
+    for name in deleted_names:
+        assert not hasattr(mssql_core, name)
+        assert name not in mssql_core.__all__
+
+    for driver_cls in (MSSQLSyncDriver, MSSQLAsyncDriver):
+        assert "_prepare_native_parameters" not in driver_cls.__dict__
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_mssql_native_cursor_cache_hit_crud_output_error_and_dbapi(asynchronous: bool) -> None:
+    """Verify MSSQL SQLSpec cache hit performs one native execute, CRUD/many/OUTPUT/errors, and DB-API cursor."""
+    raw = sqlite3.connect(":memory:")
+    raw.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+    raw.execute("INSERT INTO items (id, name) VALUES (7, 'alpha')")
+    raw.commit()
+    cfg = MSSQLConfig(host="127.0.0.1", port=1433, database="app")
+    counts = {"execute": 0, "fetchall": 0}
+
+    class _SyncCountingMSSQLCursor:
+        def __init__(self) -> None:
+            self._cur = raw.cursor()
+
+        @property
+        def description(self) -> Any:
+            return self._cur.description
+
+        @property
+        def rowcount(self) -> int:
+            return int(self._cur.rowcount)
+
+        @property
+        def lastrowid(self) -> Any:
+            return self._cur.lastrowid
+
+        def execute(self, sql: str, params: Any = None) -> Any:
+            counts["execute"] += 1
+            if "DUPLICATE_TRIGGER" in sql:
+                raise NativeIntegrityError("Msg 2627, Level 14, State 1: Violation of PRIMARY KEY constraint")
+            bound = tuple(params) if params else ()
+            if "OUTPUT INSERTED.id" in sql:
+                translated = sql.replace(" OUTPUT INSERTED.id", "") + " RETURNING id"
+                self._cur.execute(translated, bound)
+                return self
+            self._cur.execute(sql, bound)
+            return self
+
+        def executemany(self, sql: str, param_sets: Any) -> Any:
+            self._cur.executemany(sql, [tuple(row) for row in param_sets])
+            return self
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            counts["fetchall"] += 1
+            return list(self._cur.fetchall())
+
+        def close(self) -> None:
+            self._cur.close()
+
+    class _SyncFakeMSSQLClient:
+        in_transaction: bool = False
+
+        def cursor(self, *, lazy_begin: bool = False) -> _SyncCountingMSSQLCursor:
+            _ = lazy_begin
+            return _SyncCountingMSSQLCursor()
+
+        def close(self) -> None:
+            raw.close()
+
+    class _AsyncCountingMSSQLCursor:
+        def __init__(self) -> None:
+            self._inner = _SyncCountingMSSQLCursor()
+
+        @property
+        def description(self) -> Any:
+            return self._inner.description
+
+        @property
+        def rowcount(self) -> int:
+            return self._inner.rowcount
+
+        @property
+        def lastrowid(self) -> Any:
+            return self._inner.lastrowid
+
+        async def execute(self, sql: str, params: Any = None) -> Any:
+            self._inner.execute(sql, params)
+            return self
+
+        async def executemany(self, sql: str, param_sets: Any) -> Any:
+            self._inner.executemany(sql, param_sets)
+            return self
+
+        async def fetchall(self) -> list[tuple[Any, ...]]:
+            return self._inner.fetchall()
+
+        async def close(self) -> None:
+            self._inner.close()
+
+    class _AsyncFakeMSSQLClient:
+        in_transaction: bool = False
+
+        def cursor(self, *, lazy_begin: bool = False) -> _AsyncCountingMSSQLCursor:
+            _ = lazy_begin
+            return _AsyncCountingMSSQLCursor()
+
+        async def close(self) -> None:
+            raw.close()
+
+    if asynchronous:
+        native_async = AsyncMSSQLDriver(cfg, client=_AsyncFakeMSSQLClient())
+        adapter_async = MSSQLAsyncDriver(native_async, statement_config=MSSQLAsyncConfig(cfg).statement_config)
+        try:
+            assert await adapter_async.select("SELECT 1 AS a") == [{"a": 1}]
+            assert await adapter_async.select("SELECT id, name FROM items WHERE id = ?", 7) == [
+                {"id": 7, "name": "alpha"}
+            ]
+            counts["execute"] = 0
+            counts["fetchall"] = 0
+            assert await adapter_async.select("SELECT id, name FROM items WHERE id = ?", 7) == [
+                {"id": 7, "name": "alpha"}
+            ]
+            assert counts == {"execute": 1, "fetchall": 1}
+
+            upd = await adapter_async.execute("UPDATE items SET name = ? WHERE id = ?", ("beta", 7))
+            assert upd.rows_affected == 1
+
+            empty_many = await adapter_async.execute_many("INSERT INTO items (id, name) VALUES (?, ?)", [])
+            assert empty_many.rows_affected == 0
+            many = await adapter_async.execute_many(
+                "INSERT INTO items (id, name) VALUES (?, ?)",
+                [(10, "x"), (11, "y"), (12, "z")],
+            )
+            assert many.rows_affected == 3
+
+            output_rows = await adapter_async.select(
+                "INSERT INTO items (id, name) OUTPUT INSERTED.id VALUES (?, ?)",
+                (30, "out-row"),
+            )
+            assert output_rows == [{"id": 30}]
+
+            with pytest.raises(UniqueViolationError):
+                await adapter_async.execute("INSERT INTO items (id, name) VALUES (7, 'dup') /* DUPLICATE_TRIGGER */")
+
+            dbapi_async = AsyncDBAPIConnection("mssql+vtb_async://localhost/app", driver=native_async, share_pool=False)
+            try:
+                cur = dbapi_async.cursor()
+                assert isinstance(cur, _AsyncCountingMSSQLCursor)
+            finally:
+                await dbapi_async.close()
+        finally:
+            await native_async.close()
+        return
+
+    native_sync = SyncMSSQLDriver(cfg, client=_SyncFakeMSSQLClient())
+    adapter_sync = MSSQLSyncDriver(native_sync, statement_config=MSSQLSyncConfig(cfg).statement_config)
+    try:
+        assert adapter_sync.select("SELECT 1 AS a") == [{"a": 1}]
+        assert adapter_sync.select("SELECT id, name FROM items WHERE id = ?", 7) == [{"id": 7, "name": "alpha"}]
+        counts["execute"] = 0
+        counts["fetchall"] = 0
+        assert adapter_sync.select("SELECT id, name FROM items WHERE id = ?", 7) == [{"id": 7, "name": "alpha"}]
+        assert counts == {"execute": 1, "fetchall": 1}
+
+        upd = adapter_sync.execute("UPDATE items SET name = ? WHERE id = ?", ("beta", 7))
+        assert upd.rows_affected == 1
+
+        empty_many = adapter_sync.execute_many("INSERT INTO items (id, name) VALUES (?, ?)", [])
+        assert empty_many.rows_affected == 0
+        many = adapter_sync.execute_many(
+            "INSERT INTO items (id, name) VALUES (?, ?)",
+            [(10, "x"), (11, "y"), (12, "z")],
+        )
+        assert many.rows_affected == 3
+
+        output_rows = adapter_sync.select(
+            "INSERT INTO items (id, name) OUTPUT INSERTED.id VALUES (?, ?)",
+            (30, "out-row"),
+        )
+        assert output_rows == [{"id": 30}]
+
+        with pytest.raises(UniqueViolationError):
+            adapter_sync.execute("INSERT INTO items (id, name) VALUES (7, 'dup') /* DUPLICATE_TRIGGER */")
+
+        dbapi_sync = SyncDBAPIConnection("mssql+vtb://localhost/app", driver=native_sync, share_pool=False)
+        try:
+            cur = dbapi_sync.cursor()
+            assert isinstance(cur, _SyncCountingMSSQLCursor)
+        finally:
+            dbapi_sync.close()
+    finally:
+        native_sync.close()
+
+
 @pytest.mark.parametrize(
     "slotted_cls",
     [
@@ -3383,6 +4091,10 @@ class _MSSQLADKScriptedConn:
         self._in_tx = False
         self.tx_events.append("rollback")
 
+    def cursor(self, *, lazy_begin: bool = False) -> _DelegatingSyncCursor:
+        _ = lazy_begin
+        return _DelegatingSyncCursor(self)
+
 
 class _MSSQLADKAsyncScriptedConn:
     """Async query-routing recording MSSQL connection double for statement-shape and transaction tests."""
@@ -3455,6 +4167,10 @@ class _MSSQLADKAsyncScriptedConn:
     async def rollback(self) -> None:
         self._in_tx = False
         self.tx_events.append("rollback")
+
+    def cursor(self, *, lazy_begin: bool = False) -> _DelegatingAsyncCursor:
+        _ = lazy_begin
+        return _DelegatingAsyncCursor(self)
 
 
 def test_mssql_adk_upstream_bases_config_slots_and_missing_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3821,7 +4537,7 @@ async def test_mssql_adk_memory_json_type_like_search_and_owner_scoped_delete(
             del_call[1]
             == "DELETE FROM [sales].[adk_memory_custom] WHERE session_id = ? AND app_name = ? AND user_id = ?"
         )
-        assert del_call[2] == ("s1", "app-a", "u1")
+        assert del_call[2] == ["s1", "app-a", "u1"]
         return
 
     aconn = _MSSQLADKAsyncScriptedConn(_handler)
@@ -3856,7 +4572,7 @@ async def test_mssql_adk_memory_json_type_like_search_and_owner_scoped_delete(
     assert (
         del_call_a[1] == "DELETE FROM [sales].[adk_memory_custom] WHERE session_id = ? AND app_name = ? AND user_id = ?"
     )
-    assert del_call_a[2] == ("s1", "app-a", "u1")
+    assert del_call_a[2] == ["s1", "app-a", "u1"]
 
 
 @pytest.mark.anyio
@@ -4051,6 +4767,77 @@ async def test_duckdb_async_driver_dictionary() -> None:
     await driver.rollback_to_savepoint("sp_async_duck")
     assert ("execute", "SAVEPOINT sp_async_duck", None) in conn.calls
     assert isinstance(driver.data_dictionary, DuckDBAsyncDataDictionary)
+
+
+def test_duckdb_adapter_holds_no_parameter_normalizers() -> None:
+    """Verify DuckDB core exports no parameter normalizers and DuckDB drivers inherit base dispatch hooks."""
+    duckdb_core = import_module("vertebra.extensions.sqlspec.adapters.duckdb.core")
+    deleted_names = (
+        "normalize_duckdb_scalar",
+        "unwrap_typed_parameters",
+        "normalize_duckdb_parameters",
+        "normalize_duckdb_many_parameters",
+    )
+    for name in deleted_names:
+        assert not hasattr(duckdb_core, name)
+        assert name not in duckdb_core.__all__
+
+    for driver_cls in (DuckDBSyncDriver, DuckDBAsyncDriver):
+        assert "_prepare_native_parameters" not in driver_cls.__dict__
+        assert "dispatch_execute_many" not in driver_cls.__dict__
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_duckdb_uuid_decimal_and_datetime_parameters_round_trip(mode: str) -> None:
+    """Verify UUID, Decimal, and datetime parameters round-trip through DuckDB SQLSpec profile coercions."""
+    sample_uuid = UUID("12345678-1234-5678-1234-567812345678")
+    sample_decimal = Decimal("12345.67")
+    sample_dt = datetime(2026, 4, 15, 10, 30, 45, tzinfo=UTC)
+    if mode == "sync":
+        cfg = DuckDBSyncConfig(database=":memory:", share_pool=False)
+        try:
+            with cfg.provide_session() as session:
+                assert UUID(str(session.select_value("select ?::uuid", sample_uuid))) == sample_uuid
+                assert session.select_value("select ?::decimal(10,2)", sample_decimal) == sample_decimal
+                assert session.select_value("select ?::timestamp", sample_dt) == sample_dt
+        finally:
+            cfg.close()
+    else:
+        acfg = DuckDBAsyncConfig(database=":memory:", share_pool=False)
+        try:
+            async with acfg.provide_session() as session:
+                assert UUID(str(await session.select_value("select ?::uuid", sample_uuid))) == sample_uuid
+                assert await session.select_value("select ?::decimal(10,2)", sample_decimal) == sample_decimal
+                assert await session.select_value("select ?::timestamp", sample_dt) == sample_dt
+        finally:
+            await acfg.close()
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_duckdb_prepare_copy_to_query_orders_parameters(mode: str) -> None:
+    """Verify `prepare_copy_to_query` orders query parameters and destination using SQLSpec compiled output."""
+    driver: DuckDBSyncDriver | DuckDBAsyncDriver = (
+        DuckDBSyncDriver(_RecordingSyncConn()) if mode == "sync" else DuckDBAsyncDriver(_RecordingAsyncConn())
+    )
+    destination = "s3://bucket/events.parquet"
+    copy_sql_with_param, params_with_param = driver.prepare_copy_to_query(
+        "SELECT id FROM events WHERE user_id = ?",
+        42,
+        destination=destination,
+        file_format="parquet",
+    )
+    assert "FORMAT PARQUET" in copy_sql_with_param.upper()
+    expected_with_param = (42, destination) if duckdb_copy_filename_follows_query() else (destination, 42)
+    assert params_with_param == expected_with_param
+
+    copy_sql_no_param, params_no_param = driver.prepare_copy_to_query(
+        "SELECT id FROM events",
+        destination=destination,
+        file_format="parquet",
+    )
+    assert "FORMAT PARQUET" in copy_sql_no_param.upper()
+    assert params_no_param == (destination,)
 
 
 @pytest.mark.parametrize(

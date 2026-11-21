@@ -27,8 +27,30 @@ def _fmt_ms(seconds: float) -> str:
     return f"{seconds * 1000:.2f}"
 
 
-def _fmt_delta(pct: float) -> str:
+def _has_matrix_dimensions(rows: list[dict[str, Any]]) -> bool:
+    """Return True when any benchmark row contains non-default matrix dimensions."""
+    for row in rows:
+        if row.get("adapter") not in (None, "none"):
+            return True
+        if row.get("protocol") not in (None, "http1"):
+            return True
+        if row.get("transport") not in (None, "native"):
+            return True
+        if row.get("broker_mode") not in (None, "none"):
+            return True
+        if row.get("load_mode") not in (None, "closed_loop"):
+            return True
+        if row.get("target_rps") is not None:
+            return True
+        if row.get("gil_enabled") is False:
+            return True
+    return False
+
+
+def _fmt_delta(pct: float | None) -> str:
     """Format a delta percentage with color (green=improvement, red=regression)."""
+    if pct is None:
+        return "-"
     if abs(pct) < _DELTA_SIGNIFICANT_PCT:
         return f"{pct:+.1f}%"
     if pct > 0:
@@ -36,12 +58,58 @@ def _fmt_delta(pct: float) -> str:
     return f"[red]{pct:+.1f}%[/red]"
 
 
-def print_summary_table(results: list[dict[str, Any]]) -> None:
+def _fmt_load(load_mode: str, target_rps: float | None) -> str:
+    """Format load mode and optional open-loop target RPS for table display."""
+    if load_mode == "open_loop":
+        if target_rps is not None:
+            return f"open@{target_rps:,.0f}"
+        return "open"
+    return "closed"
+
+
+def _fmt_gil(gil_enabled: bool | None) -> str:
+    """Format GIL enabled state for table display."""
+    if gil_enabled is False:
+        return "off"
+    if gil_enabled is True:
+        return "on"
+    return "-"
+
+
+def _fmt_optional_rps(value: float | None) -> str:
+    """Format an optional RPS figure with thousands separators or a dash."""
+    if value is None:
+        return "-"
+    return f"{value:,.0f}"
+
+
+def _fmt_optional_ms(value: float | None) -> str:
+    """Format an optional millisecond latency with 2 decimal places or a dash."""
+    if value is None:
+        return "-"
+    return f"{value:.2f}"
+
+
+def print_summary_table(
+    results: list[dict[str, Any]],
+    *,
+    show_matrix: bool | None = None,
+    output_console: Console | None = None,
+) -> None:
     """Print a Rich table summarizing both live (seconds) and stored DuckDB (ms) results."""
+    target_console = output_console if output_console is not None else console
+    include_matrix = _has_matrix_dimensions(results) if show_matrix is None else show_matrix
+
     table = Table(title="Benchmark Results", show_lines=True)
     table.add_column("Target", style="cyan", no_wrap=True)
     table.add_column("Topology", style="yellow")
     table.add_column("Scenario", style="magenta")
+    if include_matrix:
+        table.add_column("Protocol", style="blue")
+        table.add_column("Adapter", style="green")
+        table.add_column("Broker", style="cyan")
+        table.add_column("Load")
+        table.add_column("GIL", justify="center")
     table.add_column("Conc", justify="right")
     table.add_column("RPS", justify="right")
     table.add_column("Avg (ms)", justify="right")
@@ -56,25 +124,55 @@ def print_summary_table(results: list[dict[str, Any]]) -> None:
             avg_ms = _fmt_ms(r.get("latency_mean_s", 0.0))
             p99_ms = _fmt_ms(r.get("latency_p99_s", 0.0))
 
-        table.add_row(
-            r.get("target", ""),
-            r.get("topology", "unknown"),
-            r.get("scenario", ""),
-            str(r.get("concurrency", "")),
-            _fmt_rps(r.get("rps", 0.0)),
-            avg_ms,
-            p99_ms,
-            str(r.get("errors", 0)),
+        row_values: list[str] = [
+            str(r.get("target", "")),
+            str(r.get("topology", "unknown")),
+            str(r.get("scenario", "")),
+        ]
+        if include_matrix:
+            row_values.extend(
+                [
+                    str(r.get("protocol") or "http1"),
+                    str(r.get("adapter") or "none"),
+                    str(r.get("broker_mode") or "none"),
+                    _fmt_load(str(r.get("load_mode") or "closed_loop"), r.get("target_rps")),
+                    _fmt_gil(r.get("gil_enabled")),
+                ]
+            )
+        row_values.extend(
+            [
+                str(r.get("concurrency", "")),
+                _fmt_rps(r.get("rps", 0.0)),
+                avg_ms,
+                p99_ms,
+                str(r.get("errors", 0)),
+            ]
         )
+        table.add_row(*row_values)
 
-    console.print(table)
+    target_console.print(table)
 
 
-def print_comparison_table(rows: list[dict[str, Any]], current_label: str, baseline_label: str) -> None:
+def print_comparison_table(
+    rows: list[dict[str, Any]],
+    current_label: str,
+    baseline_label: str,
+    *,
+    show_matrix: bool | None = None,
+    output_console: Console | None = None,
+) -> None:
     """Print a comparison table between two benchmark runs, inverting P99 delta sign."""
+    target_console = output_console if output_console is not None else console
+    include_matrix = _has_matrix_dimensions(rows) if show_matrix is None else show_matrix
+
     table = Table(title=f"Comparison: {current_label} vs {baseline_label}", show_lines=True)
     table.add_column("Target", style="cyan", no_wrap=True)
     table.add_column("Scenario", style="magenta")
+    if include_matrix:
+        table.add_column("Protocol", style="blue")
+        table.add_column("Adapter", style="green")
+        table.add_column("Broker", style="cyan")
+        table.add_column("Load")
     table.add_column("Conc", justify="right")
     table.add_column(f"RPS ({current_label})", justify="right")
     table.add_column(f"RPS ({baseline_label})", justify="right")
@@ -84,22 +182,37 @@ def print_comparison_table(rows: list[dict[str, Any]], current_label: str, basel
     table.add_column("P99 Delta", justify="right")
 
     for r in rows:
-        rps_delta = r.get("rps_delta_pct", 0.0)
-        p99_delta = r.get("p99_delta_pct", 0.0)
+        rps_delta = r.get("rps_delta_pct")
+        p99_delta = r.get("p99_delta_pct")
+        inverted_p99_delta = -p99_delta if p99_delta is not None else None
 
-        table.add_row(
-            r.get("target", ""),
-            r.get("scenario", ""),
-            str(r.get("concurrency", "")),
-            f"{r.get('current_rps', 0.0):,.0f}",
-            f"{r.get('baseline_rps', 0.0):,.0f}",
-            _fmt_delta(rps_delta),
-            f"{r.get('current_p99_ms', 0.0):.2f}",
-            f"{r.get('baseline_p99_ms', 0.0):.2f}",
-            _fmt_delta(-p99_delta),
+        row_values: list[str] = [
+            str(r.get("target", "")),
+            str(r.get("scenario", "")),
+        ]
+        if include_matrix:
+            row_values.extend(
+                [
+                    str(r.get("protocol") or "http1"),
+                    str(r.get("adapter") or "none"),
+                    str(r.get("broker_mode") or "none"),
+                    _fmt_load(str(r.get("load_mode") or "closed_loop"), r.get("target_rps")),
+                ]
+            )
+        row_values.extend(
+            [
+                str(r.get("concurrency", "")),
+                _fmt_optional_rps(r.get("current_rps")),
+                _fmt_optional_rps(r.get("baseline_rps")),
+                _fmt_delta(rps_delta),
+                _fmt_optional_ms(r.get("current_p99_ms")),
+                _fmt_optional_ms(r.get("baseline_p99_ms")),
+                _fmt_delta(inverted_p99_delta),
+            ]
         )
+        table.add_row(*row_values)
 
-    console.print(table)
+    target_console.print(table)
 
 
 def print_runs_table(runs: list[dict[str, Any]]) -> None:

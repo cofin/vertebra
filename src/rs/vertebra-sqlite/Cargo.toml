@@ -22,7 +22,7 @@ arrow-ipc = { version = "=60.1.0", default-features = false }
 arrow-schema = { version = "=60.1.0", default-features = false }
 parking_lot = "0.12"
 pyo3 = { workspace = true }
-rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled", "modern_sqlite", "hooks", "serialize", "blob", "column_decltype", "backup"] }
+rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled", "modern_sqlite", "hooks", "serialize", "blob", "column_decltype", "backup", "cache"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

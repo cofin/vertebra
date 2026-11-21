@@ -3,14 +3,15 @@
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::os::raw::c_char;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use pyo3::exceptions::{PyBufferError, PyTypeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyString, PyTuple};
+use vertebra_db::LeaseGuard;
 use vertebra_db::py_async::block_on_db;
 
 use crate::arrow::{
@@ -689,17 +690,22 @@ pub(crate) fn build_validated_config(
 )]
 pub struct PySyncPostgresClient {
     pub(crate) session: Arc<SessionHandle>,
+    lease: Mutex<Option<LeaseGuard>>,
 }
 
 impl PySyncPostgresClient {
     /// Wrap an existing [`SessionHandle`] (such as a checked-out pool lease).
     pub fn from_session(session: Arc<SessionHandle>) -> Self {
-        Self { session }
+        Self {
+            session,
+            lease: Mutex::new(None),
+        }
     }
 
-    /// Register synchronous client, portal, Arrow stream, and COPY types on `vertebra._postgres`.
+    /// Register synchronous client, cursor, portal, Arrow stream, and COPY types on `vertebra._postgres`.
     pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<Self>()?;
+        m.add_class::<crate::cursor::PySyncPostgresCursor>()?;
         m.add_class::<PySyncPostgresPortal>()?;
         m.add_class::<PySyncPostgresArrowStream>()?;
         m.add_class::<PySyncPostgresCopyOut>()?;
@@ -1216,7 +1222,142 @@ impl PySyncPostgresClient {
         )?;
         Ok(Self {
             session: Arc::new(SessionHandle::from_config(cfg)),
+            lease: Mutex::new(None),
         })
+    }
+
+    /// Create a synchronous PEP 249 cursor bound to this client's session without network I/O.
+    #[pyo3(signature = (*, lazy_begin = false))]
+    pub fn cursor(&self, lazy_begin: bool) -> crate::cursor::PySyncPostgresCursor {
+        crate::cursor::PySyncPostgresCursor::new(Arc::clone(&self.session), lazy_begin)
+    }
+
+    /// Run one statement and return its rows and column names.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn fetch_rows(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::run_single_call(
+            py,
+            crate::cursor::CursorSource::Session(Arc::clone(&self.session)),
+            "",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::rows_and_names,
+        )
+    }
+
+    /// Run one statement and return one dictionary per row.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn fetch_dicts(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::run_single_call(
+            py,
+            crate::cursor::CursorSource::Session(Arc::clone(&self.session)),
+            "",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::row_dicts,
+        )
+    }
+
+    /// Run one statement and return the first column of the first row.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn fetch_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::run_single_call(
+            py,
+            crate::cursor::CursorSource::Session(Arc::clone(&self.session)),
+            "",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::first_value,
+        )
+    }
+
+    /// Run one statement and return its row count and no last row id.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::run_single_call(
+            py,
+            crate::cursor::CursorSource::Session(Arc::clone(&self.session)),
+            "",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::dml_outcome,
+        )
+    }
+
+    /// Attach a broker lease release callable to this client, releasing any previously held guard.
+    pub fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
+        let prev = {
+            let mut guard = self
+                .lease
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.replace(LeaseGuard::new(release))
+        };
+        if let Some(mut old) = prev {
+            old.release(py);
+        }
+    }
+
+    /// Release any attached broker lease guard immediately. Idempotent.
+    pub fn release_lease(&self, py: Python<'_>) {
+        let prev = {
+            let mut guard = self
+                .lease
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take()
+        };
+        if let Some(mut old) = prev {
+            old.release(py);
+        }
     }
 
     /// Establish a physical PostgreSQL session, releasing the GIL while awaiting startup completion.
@@ -1238,25 +1379,29 @@ impl PySyncPostgresClient {
 
     /// Close the physical PostgreSQL session idempotently, sending `Terminate` (`'X'`) once if direct or releasing if pooled.
     pub fn close(&self, py: Python<'_>) -> PyResult<()> {
-        let action = self
-            .session
-            .begin_close_action()
-            .map_err(|e| postgres_error_to_py(py, e))?;
-        match action {
-            CloseAction::Immediate(Some(backing)) => py
-                .detach(|| block_on_db(async move { backing.close().await }))
-                .map_err(|e| postgres_error_to_py(py, e))?,
-            CloseAction::Immediate(None) => {}
-            CloseAction::WaitInFlight(notified) => {
-                let timeout = self.session.config().connect_timeout;
-                py.detach(|| {
-                    block_on_db(async move {
-                        let _ = tokio::time::timeout(timeout, notified).await;
-                    })
-                });
+        let result = (|| {
+            let action = self
+                .session
+                .begin_close_action()
+                .map_err(|e| postgres_error_to_py(py, e))?;
+            match action {
+                CloseAction::Immediate(Some(backing)) => py
+                    .detach(|| block_on_db(async move { backing.close().await }))
+                    .map_err(|e| postgres_error_to_py(py, e))?,
+                CloseAction::Immediate(None) => {}
+                CloseAction::WaitInFlight(notified) => {
+                    let timeout = self.session.config().connect_timeout;
+                    py.detach(|| {
+                        block_on_db(async move {
+                            let _ = tokio::time::timeout(timeout, notified).await;
+                        })
+                    });
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.release_lease(py);
+        result
     }
 
     /// Trigger an out-of-band generation-fenced protocol `CancelRequest` for any currently active operation without waiting on the session execution lock.

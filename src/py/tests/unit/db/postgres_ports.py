@@ -9,12 +9,13 @@ import sqlite3
 import struct
 import threading
 from collections import deque
-from collections.abc import Buffer, Callable, Sequence
+from collections.abc import Buffer, Callable, Mapping, Sequence
 from typing import Any, Literal
 
 import pyarrow as pa
 
-from vertebra._vertebra import InterfaceError, OperationalError, PoolExhaustedError
+from vertebra._vertebra import IntegrityError, InterfaceError, NotFoundError, OperationalError, PoolExhaustedError
+from vertebra.db.adapters.postgres.binds import compile_postgres_binds
 from vertebra.db.adapters.postgres.types import (
     PgJson,
     PostgresArrowResult,
@@ -31,6 +32,7 @@ __all__ = (
     "FakeAsyncPostgresClient",
     "FakeAsyncPostgresCopyIn",
     "FakeAsyncPostgresCopyOut",
+    "FakeAsyncPostgresCursor",
     "FakeAsyncPostgresListener",
     "FakeAsyncPostgresPool",
     "FakeAsyncPostgresReplication",
@@ -41,6 +43,7 @@ __all__ = (
     "FakeSyncPostgresClient",
     "FakeSyncPostgresCopyIn",
     "FakeSyncPostgresCopyOut",
+    "FakeSyncPostgresCursor",
     "FakeSyncPostgresPool",
 )
 
@@ -303,6 +306,15 @@ class FakePostgresCluster:
                     transaction_status="T" if in_tx else "I",
                 )
 
+            if upper.startswith("SET "):
+                return PostgresQueryResult(
+                    columns=(),
+                    rows=(),
+                    affected_rows=0,
+                    command_tag="SET",
+                    transaction_status="T" if in_tx else "I",
+                )
+
             sqlite_sql, positions = _sql_placeholders_to_sqlite(cleaned)
             ordered_params = (
                 tuple(_coerce_sqlite_param(params_tuple[pos]) for pos in positions)
@@ -311,7 +323,10 @@ class FakePostgresCluster:
             )
             cur = self._conn.cursor()
             try:
-                cur.execute(sqlite_sql, ordered_params)
+                try:
+                    cur.execute(sqlite_sql, ordered_params)
+                except sqlite3.IntegrityError as exc:
+                    raise IntegrityError(str(exc)) from exc
                 if cur.description:
                     col_objs = tuple(
                         _make_col(str(desc[0]), attribute_number=idx + 1) for idx, desc in enumerate(cur.description)
@@ -355,6 +370,7 @@ class _BaseFakeSession:
         self.cancel_calls = 0
         self.active_pipeline_scopes: dict[int, bool] = {}
         self._next_pipe_scope = 0
+        self._lease_releaser: Callable[[], None] | None = None
 
     def reset_for_pool_reuse(self) -> None:
         """Reset transient session state upon clean pool check-in."""
@@ -647,8 +663,242 @@ class FakeSyncPostgresArrowStream:
         return False
 
 
+class FakeSyncPostgresCursor:
+    """Protocol-faithful synchronous ``SyncPostgresCursor`` double backed by a client or pool."""
+
+    def __init__(
+        self,
+        *,
+        client: FakeSyncPostgresClient | None = None,
+        pool: FakeSyncPostgresPool | None = None,
+        lazy_begin: bool = False,
+    ) -> None:
+        self._client = client
+        self._pool = pool
+        self._lazy_begin = lazy_begin
+        self._rows: list[tuple[Any, ...]] = []
+        self._pos = 0
+        self._description: tuple[tuple[str, int, None, None, None, None, None], ...] | None = None
+        self._rowcount = -1
+        self._arraysize = 1
+        self._closed = False
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            msg = "Cursor is closed"
+            raise InterfaceError(msg)
+
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> FakeSyncPostgresCursor:
+        self._ensure_open()
+        compiled = compile_postgres_binds(sql, params)
+        compiled_params = compiled.params if compiled.params else None
+        if self._client is not None:
+            if self._lazy_begin and not self._client.in_transaction:
+                self._client.begin()
+            res = self._client.query(
+                compiled.sql,
+                compiled_params,
+                parameter_oids=parameter_oids,
+                timeout=timeout,
+            )
+        else:
+            assert self._pool is not None
+            client = self._pool.acquire()
+            try:
+                res = client.query(
+                    compiled.sql,
+                    compiled_params,
+                    parameter_oids=parameter_oids,
+                    timeout=timeout,
+                )
+            except BaseException:
+                self._pool.evict(client)
+                raise
+            else:
+                client.close()
+        self._rows = [
+            tuple(None if isinstance(cell, PgJson) and cell.value is None else cell for cell in row) for row in res.rows
+        ]
+        self._pos = 0
+        self._description = (
+            tuple((col.name, col.type_oid, None, None, None, None, None) for col in res.columns)
+            if res.columns
+            else None
+        )
+        self._rowcount = len(self._rows) if res.columns else int(res.affected_rows)
+        return self
+
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> FakeSyncPostgresCursor:
+        self._ensure_open()
+        total = 0
+        for item in seq_of_params:
+            self.execute(sql, item)
+            total += max(self._rowcount, 0)
+        self._rows = []
+        self._pos = 0
+        self._description = None
+        self._rowcount = total
+        return self
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        self._ensure_open()
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        self._ensure_open()
+        count = self._arraysize if size is None else size
+        if count <= 0:
+            return []
+        end = min(self._pos + count, len(self._rows))
+        batch = self._rows[self._pos : end]
+        self._pos = end
+        return batch
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        self._ensure_open()
+        remaining = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return remaining
+
+    def close(self) -> None:
+        self._closed = True
+        self._rows.clear()
+        self._pos = 0
+
+    @property
+    def description(self) -> tuple[tuple[str, int, None, None, None, None, None], ...] | None:
+        return self._description
+
+    @property
+    def rowcount(self) -> int:
+        return self._rowcount
+
+    @property
+    def lastrowid(self) -> Any | None:
+        return None
+
+    @property
+    def arraysize(self) -> int:
+        return self._arraysize
+
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        if value < 1:
+            msg = "arraysize must be >= 1"
+            raise ValueError(msg)
+        self._arraysize = value
+
+
 class FakeSyncPostgresClient(_BaseFakeSession):
     """Protocol-faithful synchronous ``SyncPostgresClient`` double."""
+
+    def cursor(self, *, lazy_begin: bool = False) -> FakeSyncPostgresCursor:
+        return FakeSyncPostgresCursor(client=self, lazy_begin=lazy_begin)
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run one statement and return its rows and column names."""
+        cur = self.cursor()
+        try:
+            cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                return ([], ())
+            return (cur.fetchall(), tuple(col[0] for col in cur.description))
+        finally:
+            cur.close()
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run one statement and return one dictionary per row."""
+        cur = self.cursor()
+        try:
+            cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                return []
+            names = tuple(col[0] for col in cur.description)
+            return [dict(zip(names, row, strict=False)) for row in cur.fetchall()]
+        finally:
+            cur.close()
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        """Run one statement and return the first column of the first row."""
+        cur = self.cursor()
+        try:
+            cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                msg = "Query returned no rows"
+                raise NotFoundError(msg)
+            row = cur.fetchone()
+            if row is None:
+                msg = "Query returned no rows"
+                raise NotFoundError(msg)
+            return row[0] if row else None
+        finally:
+            cur.close()
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, None]:
+        """Run one statement and return its row count and no last row id."""
+        cur = self.cursor()
+        try:
+            cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            return (max(cur.rowcount, 0), None)
+        finally:
+            cur.close()
+
+    def attach_lease(self, release: Callable[[], None]) -> None:
+        self.release_lease()
+        self._lease_releaser = release
+
+    def release_lease(self) -> None:
+        releaser = self._lease_releaser
+        self._lease_releaser = None
+        if releaser is not None:
+            releaser()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.release_lease()
 
     def connect(self) -> FakeSyncPostgresClient:
         self.closed = False
@@ -769,6 +1019,89 @@ class FakeSyncPostgresPool:
         self.evicted: list[FakeSyncPostgresClient] = []
         self.closed = False
         self.reset_count = 0
+
+    def cursor(self, *, lazy_begin: bool = False) -> FakeSyncPostgresCursor:
+        if self.closed:
+            raise InterfaceError("FakeSyncPostgresPool is closed")
+        if lazy_begin:
+            raise InterfaceError("lazy_begin is not supported on a pooled cursor")
+        return FakeSyncPostgresCursor(pool=self)
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run one statement and return its rows and column names."""
+        cur = self.cursor()
+        try:
+            cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                return ([], ())
+            return (cur.fetchall(), tuple(col[0] for col in cur.description))
+        finally:
+            cur.close()
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run one statement and return one dictionary per row."""
+        cur = self.cursor()
+        try:
+            cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                return []
+            names = tuple(col[0] for col in cur.description)
+            return [dict(zip(names, row, strict=False)) for row in cur.fetchall()]
+        finally:
+            cur.close()
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        """Run one statement and return the first column of the first row."""
+        cur = self.cursor()
+        try:
+            cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                msg = "Query returned no rows"
+                raise NotFoundError(msg)
+            row = cur.fetchone()
+            if row is None:
+                msg = "Query returned no rows"
+                raise NotFoundError(msg)
+            return row[0] if row else None
+        finally:
+            cur.close()
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, None]:
+        """Run one statement and return its row count and no last row id."""
+        cur = self.cursor()
+        try:
+            cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            return (max(cur.rowcount, 0), None)
+        finally:
+            cur.close()
 
     def acquire(self) -> FakeSyncPostgresClient:
         if self.closed:
@@ -1018,6 +1351,147 @@ class FakeAsyncPostgresReplication:
         await self.aclose()
 
 
+class FakeAsyncPostgresCursor:
+    """Protocol-faithful asynchronous ``AsyncPostgresCursor`` double backed by a client or pool."""
+
+    def __init__(
+        self,
+        *,
+        client: FakeAsyncPostgresClient | None = None,
+        pool: FakeAsyncPostgresPool | None = None,
+        lazy_begin: bool = False,
+    ) -> None:
+        self._client = client
+        self._pool = pool
+        self._lazy_begin = lazy_begin
+        self._rows: list[tuple[Any, ...]] = []
+        self._pos = 0
+        self._description: tuple[tuple[str, int, None, None, None, None, None], ...] | None = None
+        self._rowcount = -1
+        self._arraysize = 1
+        self._closed = False
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            msg = "Cursor is closed"
+            raise InterfaceError(msg)
+
+    async def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> FakeAsyncPostgresCursor:
+        self._ensure_open()
+        compiled = compile_postgres_binds(sql, params)
+        compiled_params = compiled.params if compiled.params else None
+        if self._client is not None:
+            if self._lazy_begin and not self._client.in_transaction:
+                await self._client.begin()
+            res = await self._client.query(
+                compiled.sql,
+                compiled_params,
+                parameter_oids=parameter_oids,
+                timeout=timeout,
+            )
+        else:
+            assert self._pool is not None
+            client = await self._pool.acquire()
+            try:
+                res = await client.query(
+                    compiled.sql,
+                    compiled_params,
+                    parameter_oids=parameter_oids,
+                    timeout=timeout,
+                )
+            except BaseException:
+                await self._pool.evict(client)
+                raise
+            else:
+                await client.close()
+        self._rows = [
+            tuple(None if isinstance(cell, PgJson) and cell.value is None else cell for cell in row) for row in res.rows
+        ]
+        self._pos = 0
+        self._description = (
+            tuple((col.name, col.type_oid, None, None, None, None, None) for col in res.columns)
+            if res.columns
+            else None
+        )
+        self._rowcount = len(self._rows) if res.columns else int(res.affected_rows)
+        return self
+
+    async def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> FakeAsyncPostgresCursor:
+        self._ensure_open()
+        total = 0
+        for item in seq_of_params:
+            await self.execute(sql, item)
+            total += max(self._rowcount, 0)
+        self._rows = []
+        self._pos = 0
+        self._description = None
+        self._rowcount = total
+        return self
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        self._ensure_open()
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        self._ensure_open()
+        count = self._arraysize if size is None else size
+        if count <= 0:
+            return []
+        end = min(self._pos + count, len(self._rows))
+        batch = self._rows[self._pos : end]
+        self._pos = end
+        return batch
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        self._ensure_open()
+        remaining = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return remaining
+
+    async def close(self) -> None:
+        self._closed = True
+        self._rows.clear()
+        self._pos = 0
+
+    @property
+    def description(self) -> tuple[tuple[str, int, None, None, None, None, None], ...] | None:
+        return self._description
+
+    @property
+    def rowcount(self) -> int:
+        return self._rowcount
+
+    @property
+    def lastrowid(self) -> Any | None:
+        return None
+
+    @property
+    def arraysize(self) -> int:
+        return self._arraysize
+
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        if value < 1:
+            msg = "arraysize must be >= 1"
+            raise ValueError(msg)
+        self._arraysize = value
+
+
 class FakeAsyncPostgresClient(_BaseFakeSession):
     """Protocol-faithful asynchronous ``AsyncPostgresClient`` double."""
 
@@ -1030,6 +1504,99 @@ class FakeAsyncPostgresClient(_BaseFakeSession):
     ) -> None:
         super().__init__(cluster, release_hook=release_hook)
         self.client_kwargs = dict(client_kwargs or {})
+
+    def cursor(self, *, lazy_begin: bool = False) -> FakeAsyncPostgresCursor:
+        return FakeAsyncPostgresCursor(client=self, lazy_begin=lazy_begin)
+
+    async def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run one statement and return its rows and column names."""
+        cur = self.cursor()
+        try:
+            await cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                return ([], ())
+            return (await cur.fetchall(), tuple(col[0] for col in cur.description))
+        finally:
+            await cur.close()
+
+    async def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run one statement and return one dictionary per row."""
+        cur = self.cursor()
+        try:
+            await cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                return []
+            names = tuple(col[0] for col in cur.description)
+            return [dict(zip(names, row, strict=False)) for row in await cur.fetchall()]
+        finally:
+            await cur.close()
+
+    async def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        """Run one statement and return the first column of the first row."""
+        cur = self.cursor()
+        try:
+            await cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                msg = "Query returned no rows"
+                raise NotFoundError(msg)
+            row = await cur.fetchone()
+            if row is None:
+                msg = "Query returned no rows"
+                raise NotFoundError(msg)
+            return row[0] if row else None
+        finally:
+            await cur.close()
+
+    async def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, None]:
+        """Run one statement and return its row count and no last row id."""
+        cur = self.cursor()
+        try:
+            await cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            return (max(cur.rowcount, 0), None)
+        finally:
+            await cur.close()
+
+    def attach_lease(self, release: Callable[[], None]) -> None:
+        self.release_lease()
+        self._lease_releaser = release
+
+    def release_lease(self) -> None:
+        releaser = self._lease_releaser
+        self._lease_releaser = None
+        if releaser is not None:
+            releaser()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.release_lease()
 
     async def connect(self) -> FakeAsyncPostgresClient:
         self.closed = False
@@ -1196,6 +1763,89 @@ class FakeAsyncPostgresPool:
         self.closed = False
         self.acquire_calls = 0
         self.reset_count = 0
+
+    def cursor(self, *, lazy_begin: bool = False) -> FakeAsyncPostgresCursor:
+        if self.closed:
+            raise InterfaceError("FakeAsyncPostgresPool is closed")
+        if lazy_begin:
+            raise InterfaceError("lazy_begin is not supported on a pooled cursor")
+        return FakeAsyncPostgresCursor(pool=self)
+
+    async def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run one statement and return its rows and column names."""
+        cur = self.cursor()
+        try:
+            await cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                return ([], ())
+            return (await cur.fetchall(), tuple(col[0] for col in cur.description))
+        finally:
+            await cur.close()
+
+    async def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run one statement and return one dictionary per row."""
+        cur = self.cursor()
+        try:
+            await cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                return []
+            names = tuple(col[0] for col in cur.description)
+            return [dict(zip(names, row, strict=False)) for row in await cur.fetchall()]
+        finally:
+            await cur.close()
+
+    async def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        """Run one statement and return the first column of the first row."""
+        cur = self.cursor()
+        try:
+            await cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            if cur.description is None:
+                msg = "Query returned no rows"
+                raise NotFoundError(msg)
+            row = await cur.fetchone()
+            if row is None:
+                msg = "Query returned no rows"
+                raise NotFoundError(msg)
+            return row[0] if row else None
+        finally:
+            await cur.close()
+
+    async def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, None]:
+        """Run one statement and return its row count and no last row id."""
+        cur = self.cursor()
+        try:
+            await cur.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            return (max(cur.rowcount, 0), None)
+        finally:
+            await cur.close()
 
     async def acquire(self) -> FakeAsyncPostgresClient:
         if self.closed:

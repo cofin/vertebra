@@ -3,28 +3,48 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import socket
 import struct
 import threading
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
 
-from vertebra._postgres import AsyncPostgresClient, SyncPostgresClient
-from vertebra._vertebra import DataError, InterfaceError
+from tests.unit.db.postgres_data_peers import (
+    _bind_frame_stmt_params_and_formats,
+    _parse_frame_stmt_and_sql,
+    _reply_extended_query,
+)
+from vertebra._postgres import (
+    AsyncPostgresClient,
+    AsyncPostgresCursor,
+    SyncPostgresClient,
+    SyncPostgresCursor,
+)
+from vertebra._vertebra import (
+    DataError,
+    IntegrityError,
+    InterfaceError,
+    NotFoundError,
+    OperationalError,
+    ProgrammingError,
+)
+from vertebra.db import dbapi
 from vertebra.db.adapters.postgres import (
     AsyncPostgresQueueStore,
     SyncPostgresQueueStore,
 )
 from vertebra.db.adapters.postgres.types import (
+    PG_UNCHANGED_TOAST,
     PgTemporal,
     PostgresPipelineOperation,
     PostgresQueryResult,
     _project_public_row,
 )
-from vertebra.db.dbapi._async import AsyncDBAPIConnection
 from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry, QueueReservation, SyncQueueStore
 from vertebra.framework.queues.postgres import PostgreSQLQueueBackend
 
@@ -595,85 +615,6 @@ async def test_postgres_queue_store_table_validation_reap_stale_and_pop_dead_let
     assert "DELETE FROM custom_queue_jobs" in async_drv.executed[-1][0]
 
 
-@pytest.mark.anyio
-async def test_async_dbapi_cursor_awaits_lastrowid_across_insert_branches() -> None:
-    """Verify AsyncDBAPICursor.execute awaits async last_insert_rowid across DML and RETURNING INSERT paths."""
-
-    class _DmlNoRowidDriver:
-        url = "postgresql://localhost:5432/appdb"
-
-        async def execute_dml(self, sql: str, params: Any) -> tuple[int, int | None]:
-            _ = (sql, params)
-            return 1, None
-
-        async def last_insert_rowid(self) -> int:
-            await asyncio.sleep(0)
-            return 101
-
-    class _ExecuteOnlyDriver:
-        url = "postgresql://localhost:5432/appdb"
-
-        async def execute(self, sql: str, params: Any) -> int:
-            _ = (sql, params)
-            return 1
-
-        async def last_insert_rowid(self) -> int:
-            await asyncio.sleep(0)
-            return 202
-
-    class _ReturningDescDriver:
-        url = "postgresql://localhost:5432/appdb"
-
-        async def execute_with_description(
-            self, sql: str, params: Any
-        ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-            _ = (sql, params)
-            return [(303,)], ("id",)
-
-        async def last_insert_rowid(self) -> int:
-            await asyncio.sleep(0)
-            return 303
-
-    class _ReturningSelectDriver:
-        url = "postgresql://localhost:5432/appdb"
-
-        async def select(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
-            _ = (sql, params)
-            return [{"id": 404}]
-
-        async def last_insert_rowid(self) -> int:
-            await asyncio.sleep(0)
-            return 404
-
-    conn_dml = AsyncDBAPIConnection(driver=_DmlNoRowidDriver(), share_pool=False)
-    cur_dml = conn_dml.cursor()
-    await cur_dml.execute("INSERT INTO widgets (name) VALUES ($1)", ("a",))
-    assert cur_dml.lastrowid == 101
-    await conn_dml.close()
-
-    conn_exec = AsyncDBAPIConnection(driver=_ExecuteOnlyDriver(), share_pool=False)
-    cur_exec = conn_exec.cursor()
-    await cur_exec.execute("INSERT INTO widgets (name) VALUES ($1)", ("b",))
-    assert cur_exec.lastrowid == 202
-    await cur_exec.execute("UPDATE widgets SET name = $1", ("c",))
-    assert cur_exec.lastrowid is None
-    await conn_exec.close()
-
-    conn_ret = AsyncDBAPIConnection(driver=_ReturningDescDriver(), share_pool=False)
-    cur_ret = conn_ret.cursor()
-    await cur_ret.execute("INSERT INTO widgets (name) VALUES ($1) RETURNING id", ("d",))
-    assert cur_ret.lastrowid == 303
-    assert await cur_ret.fetchone() == (303,)
-    await conn_ret.close()
-
-    conn_sel = AsyncDBAPIConnection(driver=_ReturningSelectDriver(), share_pool=False)
-    cur_sel = conn_sel.cursor()
-    await cur_sel.execute("INSERT INTO widgets (name) VALUES ($1) RETURNING id", ("e",))
-    assert cur_sel.lastrowid == 404
-    assert await cur_sel.fetchone() == (404,)
-    await conn_sel.close()
-
-
 @pytest.mark.parametrize("bad_limit", [0, -1, -100])
 @pytest.mark.anyio
 async def test_postgres_queue_store_rejects_non_positive_limits(bad_limit: int) -> None:
@@ -822,3 +763,2017 @@ async def test_postgres_queue_store_extended_capabilities_sync_and_async() -> No
     assert replayed is not None
     assert replayed.task_name == "tasks.bill"
     assert any("DELETE FROM custom_pg_jobs" in sql for sql, _ in async_drv.executed)
+
+
+def _error_response(sqlstate: str, message: str) -> bytes:
+    """Build a PostgreSQL ErrorResponse ('E') frame."""
+    body = b"SERROR\x00C" + sqlstate.encode("ascii") + b"\x00M" + message.encode("utf-8") + b"\x00\x00"
+    return _frame(b"E", body)
+
+
+def _extract_sql_from_frames(
+    frames: list[tuple[bytes, bytes]],
+    prepared: dict[bytes, str] | None = None,
+) -> str:
+    """Extract the SQL text from a Query ('Q'), Parse ('P'), or cached Bind ('B') frame."""
+    for tag, body in frames:
+        if tag == b"Q":
+            return body.rstrip(b"\x00").decode("utf-8")
+        if tag == b"P":
+            parts = body.split(b"\x00", 2)
+            stmt_name = parts[0]
+            sql = parts[1].decode("utf-8")
+            if prepared is not None:
+                prepared[stmt_name] = sql
+            return sql
+    if prepared is not None:
+        for tag, body in frames:
+            if tag == b"B":
+                parts = body.split(b"\x00", 2)
+                return prepared.get(parts[1], "")
+    return ""
+
+
+def _extract_bind_params_from_frames(frames: list[tuple[bytes, bytes]]) -> list[bytes | None]:
+    """Decode parameter payloads from the first Bind ('B') frame."""
+    for tag, body in frames:
+        if tag != b"B":
+            continue
+        idx = body.index(b"\x00") + 1
+        idx = body.index(b"\x00", idx) + 1
+        (num_fmt,) = struct.unpack("!h", body[idx : idx + 2])
+        idx += 2 + 2 * num_fmt
+        (num_params,) = struct.unpack("!h", body[idx : idx + 2])
+        idx += 2
+        values: list[bytes | None] = []
+        for _ in range(num_params):
+            (plen,) = struct.unpack("!i", body[idx : idx + 4])
+            idx += 4
+            if plen < 0:
+                values.append(None)
+            else:
+                values.append(body[idx : idx + plen])
+                idx += plen
+        return values
+    return []
+
+
+def _extended_ok(
+    param_oids: tuple[int, ...],
+    cols: tuple[tuple[str, int, int], ...],
+    rows: Sequence[tuple[bytes | None, ...]],
+    command_tag: bytes,
+    tx_status: bytes = b"I",
+    *,
+    is_simple: bool = False,
+    has_parse: bool = True,
+    has_describe: bool = False,
+) -> bytes:
+    """Encode an extended (parsed or cached) or simple query reply sequence ending in ReadyForQuery."""
+    parts: list[bytes] = []
+    if is_simple:
+        if cols:
+            parts.append(_row_desc(cols))
+            for row in rows:
+                parts.append(_data_row_text(row))
+        parts.append(_frame(b"C", command_tag + b"\x00"))
+        parts.append(_frame(b"Z", tx_status))
+        return b"".join(parts)
+
+    if has_parse:
+        parts.append(_frame(b"1", b""))
+        oid_body = struct.pack("!h", len(param_oids)) + b"".join(struct.pack("!I", oid) for oid in param_oids)
+        parts.append(_frame(b"t", oid_body))
+        if cols:
+            parts.append(_row_desc(cols))
+        else:
+            parts.append(_frame(b"n", b""))
+        parts.append(_frame(b"2", b""))
+        if cols:
+            parts.append(_row_desc(cols))
+        else:
+            parts.append(_frame(b"n", b""))
+    else:
+        parts.append(_frame(b"2", b""))
+        if has_describe:
+            if cols:
+                parts.append(_row_desc(cols))
+            else:
+                parts.append(_frame(b"n", b""))
+    for row in rows:
+        parts.append(_data_row_text(row))
+    parts.append(_frame(b"C", command_tag + b"\x00"))
+    if has_parse:
+        parts.append(_frame(b"3", b""))
+    parts.append(_frame(b"Z", tx_status))
+    return b"".join(parts)
+
+
+def _run_loopback_pg(
+    handler: Callable[[socket.socket], None],
+    *,
+    backlog: int = 2,
+) -> tuple[int, threading.Thread, list[BaseException], socket.socket]:
+    """Start a loopback TCP server running handler(conn) for each accepted client."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(backlog)
+    port = srv.getsockname()[1]
+    errors: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            conn, _ = srv.accept()
+            with conn:
+                handler(conn)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            srv.close()
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    return port, thread, errors, srv
+
+
+def _make_sync_client(port: int) -> SyncPostgresClient:
+    """Create a loopback SyncPostgresClient for tests."""
+    return SyncPostgresClient(
+        user="postgres",
+        database="app",
+        host="127.0.0.1",
+        port=port,
+        sslmode="disable",
+    )
+
+
+def test_sync_cursor_lifecycle_and_constructor_guard() -> None:
+    """Verify cursor creation does no I/O, constructor is hidden, and closed/state errors match PEP 249."""
+    with pytest.raises(TypeError):
+        SyncPostgresCursor()
+
+    client = _make_sync_client(1)
+    cur = client.cursor()
+    assert cur.description is None
+    assert cur.rowcount == -1
+    assert cur.lastrowid is None
+    assert cur.arraysize == 1
+
+    assert cur.fetchone() is None
+    assert cur.fetchmany() == []
+    assert cur.fetchall() == []
+    with pytest.raises(ProgrammingError):
+        cur.arraysize = 0
+    with pytest.raises(ProgrammingError):
+        cur.arraysize = -5
+    assert cur.arraysize == 1
+
+    cur.arraysize = 4
+    assert cur.arraysize == 4
+
+    cur.close()
+    cur.close()
+
+    with pytest.raises(InterfaceError):
+        cur.execute("SELECT 1")
+    with pytest.raises(InterfaceError):
+        cur.executemany("INSERT INTO t VALUES (%s)", [(1,)])
+    with pytest.raises(InterfaceError):
+        cur.fetchone()
+    with pytest.raises(InterfaceError):
+        cur.fetchmany()
+    with pytest.raises(InterfaceError):
+        cur.fetchall()
+
+
+def test_sync_cursor_select_and_fetch_modes() -> None:
+    """Verify SELECT tuples, 7-item description, fetchone/fetchmany/fetchall, and row replacement."""
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+
+        f1 = _read_until_sync_or_query(conn)
+        assert _extract_sql_from_frames(f1) == "SELECT 1 AS a, 'x' AS b"
+        conn.sendall(
+            _extended_ok(
+                (),
+                (("a", 23, 0), ("b", 25, 0)),
+                [(b"1", b"x")],
+                b"SELECT 1",
+            )
+        )
+
+        f2 = _read_until_sync_or_query(conn)
+        assert _extract_sql_from_frames(f2) == "SELECT n FROM seq"
+        conn.sendall(
+            _extended_ok(
+                (),
+                (("n", 23, 0),),
+                [(b"1",), (b"2",), (b"3",), (b"4",), (b"5",)],
+                b"SELECT 5",
+            )
+        )
+
+        f3 = _read_until_sync_or_query(conn)
+        assert _extract_sql_from_frames(f3) == "SELECT 99 AS z"
+        conn.sendall(_extended_ok((), (("z", 23, 0),), [(b"99",)], b"SELECT 1"))
+
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        cur = client.cursor()
+        returned = cur.execute("SELECT 1 AS a, 'x' AS b")
+        assert returned is cur
+        assert cur.description == (
+            ("a", 23, None, None, None, None, None),
+            ("b", 25, None, None, None, None, None),
+        )
+        assert cur.rowcount == 1
+        assert cur.lastrowid is None
+        assert cur.fetchall() == [(1, "x")]
+        assert cur.fetchall() == []
+        assert cur.fetchone() is None
+
+        cur.execute("SELECT n FROM seq")
+        assert cur.rowcount == 5
+        assert cur.fetchone() == (1,)
+        cur.arraysize = 2
+        assert cur.fetchmany(0) == []
+        with pytest.raises(ProgrammingError):
+            cur.fetchmany(-1)
+        assert cur.fetchmany() == [(2,), (3,)]
+
+        cur.execute("SELECT 99 AS z")
+        assert cur.rowcount == 1
+        assert cur.fetchall() == [(99,)]
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+
+@pytest.mark.parametrize(
+    ("sql", "cols", "rows", "tag", "expected_rowcount", "expect_desc", "expected_rows"),
+    [
+        ("CREATE TEMP TABLE t (id int)", (), [], b"CREATE TABLE", -1, False, None),
+        ("INSERT INTO t VALUES (1), (2), (3)", (), [], b"INSERT 0 3", 3, False, None),
+        (
+            "INSERT INTO t VALUES (10), (20) RETURNING id",
+            (("id", 23, 0),),
+            [(b"10",), (b"20",)],
+            b"INSERT 0 2",
+            2,
+            True,
+            [(10,), (20,)],
+        ),
+        ("SELECT 1 WHERE false", (("col", 23, 0),), [], b"SELECT 0", 0, True, []),
+    ],
+)
+def test_sync_cursor_command_dml_returning_and_empty_set(
+    sql: str,
+    cols: tuple[tuple[str, int, int], ...],
+    rows: list[tuple[bytes | None, ...]],
+    tag: bytes,
+    expected_rowcount: int,
+    expect_desc: bool,
+    expected_rows: list[tuple[Any, ...]] | None,
+) -> None:
+    """Verify DDL command, DML count, RETURNING, and empty SELECT contracts."""
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        frames = _read_until_sync_or_query(conn)
+        assert _extract_sql_from_frames(frames) == sql
+        conn.sendall(_extended_ok((), cols, rows, tag))
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        cur = client.cursor()
+        cur.execute(sql)
+        assert cur.rowcount == expected_rowcount
+        if expect_desc:
+            assert cur.description is not None
+            assert cur.fetchall() == expected_rows
+        else:
+            assert cur.description is None
+            assert cur.fetchall() == []
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+
+def test_sync_cursor_named_format_and_normalized_parameters() -> None:
+    """Verify named, format, and non-primitive parameter rewriting, normalization, and error conversion."""
+    seen_sql: list[str] = []
+    seen_params: list[list[bytes | None]] = []
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+
+        f1 = _read_until_sync_or_query(conn)
+        seen_sql.append(_extract_sql_from_frames(f1))
+        seen_params.append(_extract_bind_params_from_frames(f1))
+        conn.sendall(_extended_ok((23, 23), (("s", 23, 0),), [(b"5",)], b"SELECT 1"))
+
+        f2 = _read_until_sync_or_query(conn)
+        seen_sql.append(_extract_sql_from_frames(f2))
+        seen_params.append(_extract_bind_params_from_frames(f2))
+        conn.sendall(_extended_ok((23, 23), (("s", 23, 0),), [(b"10",)], b"SELECT 1"))
+
+        f3 = _read_until_sync_or_query(conn)
+        seen_sql.append(_extract_sql_from_frames(f3))
+        seen_params.append(_extract_bind_params_from_frames(f3))
+        conn.sendall(_extended_ok((17,), (("b", 25, 0),), [(b"ok",)], b"SELECT 1"))
+
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        cur = client.cursor()
+        cur.execute("SELECT %(a)s + %(b)s", {"a": 2, "b": 3})
+        assert cur.fetchall() == [(5,)]
+
+        cur.execute("SELECT %s::int + %s::int", (4, 6))
+        assert cur.fetchall() == [(10,)]
+
+        cur.execute("SELECT %s", (bytearray(b"abc"),))
+        assert cur.fetchall() == [("ok",)]
+
+        with pytest.raises(InterfaceError):
+            cur.execute("SELECT %s", (PG_UNCHANGED_TOAST,))
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.fetchone() is None
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+
+    assert not errors
+    assert seen_sql == [
+        "SELECT $1 + $2",
+        "SELECT $1::int + $2::int",
+        "SELECT $1",
+    ]
+    assert len(seen_params[0]) == 2
+    assert len(seen_params[1]) == 2
+    assert seen_params[2] == [b"\\x616263"]
+
+
+def test_sync_cursor_executemany_counts_and_empty() -> None:
+    """Verify executemany sums row counts across parameter sets and sends nothing on empty input."""
+    exec_count = 0
+
+    def _serve(conn: socket.socket) -> None:
+        nonlocal exec_count
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        prepared: dict[bytes, str] = {}
+        while True:
+            frames = _read_until_sync_or_query(conn)
+            if any(tag == b"X" for tag, _ in frames):
+                break
+            has_parse = any(tag == b"P" for tag, _ in frames)
+            exec_count += 1
+            assert _extract_sql_from_frames(frames, prepared) == "INSERT INTO t VALUES ($1)"
+            conn.sendall(_extended_ok((23,), (), [], b"INSERT 0 1", has_parse=has_parse))
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        cur = client.cursor()
+        ret = cur.executemany("INSERT INTO t VALUES (%s)", [(1,), (2,), (3,)])
+        assert ret is cur
+        assert cur.rowcount == 3
+        assert cur.description is None
+        assert cur.fetchall() == []
+
+        cur.executemany("INSERT INTO t VALUES (%s)", [])
+        assert cur.rowcount == 0
+        assert cur.description is None
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+    assert exec_count == 3
+
+
+def test_sync_cursor_server_errors_and_result_clearing() -> None:
+    """Verify IntegrityError(23505) and ProgrammingError(42601) match dbapi classes and clear state."""
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+
+        _read_until_sync_or_query(conn)
+        conn.sendall(_extended_ok((), (("a", 23, 0),), [(b"1",)], b"SELECT 1"))
+
+        _read_until_sync_or_query(conn)
+        conn.sendall(_error_response("23505", "duplicate key value violates unique constraint") + _frame(b"Z", b"I"))
+
+        _read_until_sync_or_query(conn)
+        conn.sendall(_extended_ok((), (("a", 23, 0),), [(b"2",)], b"SELECT 1"))
+
+        _read_until_sync_or_query(conn)
+        conn.sendall(_error_response("42601", "syntax error at or near SELEC") + _frame(b"Z", b"I"))
+
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        cur = client.cursor()
+        cur.execute("SELECT 1 AS a")
+        assert cur.description is not None
+
+        with pytest.raises(IntegrityError) as exc_info:
+            cur.execute("INSERT INTO t VALUES (1)")
+        assert exc_info.value.sqlstate == "23505"
+        assert dbapi.IntegrityError is IntegrityError
+        assert type(exc_info.value) is dbapi.IntegrityError
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.fetchone() is None
+
+        cur.execute("SELECT 2 AS a")
+        assert cur.description is not None
+        with pytest.raises(ProgrammingError):
+            cur.execute("SELEC 1")
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.fetchone() is None
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+
+def test_sync_cursor_timeout_matches_client_query() -> None:
+    """Verify cursor timeout raises the same OperationalError subclass as SyncPostgresClient.query."""
+
+    def _run_timeout(use_cursor: bool) -> type[BaseException]:
+        def _serve(conn: socket.socket) -> None:
+            _read_startup(conn)
+            conn.sendall(_auth_ok_and_ready())
+            _read_until_sync_or_query(conn)
+            time.sleep(0.3)
+
+        port, thread, _errors, _ = _run_loopback_pg(_serve)
+        client = _make_sync_client(port)
+        client.connect()
+        try:
+            if use_cursor:
+                cur = client.cursor()
+                with pytest.raises(OperationalError) as exc_info:
+                    cur.execute("SELECT pg_sleep(1)", timeout=0.05)
+                assert cur.description is None
+                assert cur.rowcount == -1
+                return type(exc_info.value)
+            with pytest.raises(OperationalError) as exc_info:
+                client.query("SELECT pg_sleep(1)", timeout=0.05)
+            return type(exc_info.value)
+        finally:
+            client.close()
+            thread.join(timeout=5.0)
+
+    cursor_exc_type = _run_timeout(use_cursor=True)
+    client_exc_type = _run_timeout(use_cursor=False)
+    assert cursor_exc_type is client_exc_type
+    assert issubclass(cursor_exc_type, OperationalError)
+
+
+def test_sync_cursor_lazy_begin_and_default_cursor() -> None:
+    """Verify lazy_begin opens transactions on demand, reopens after commit, clears on failed begin, and default opens none."""
+    seen_commands: list[str] = []
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        tx_status = b"I"
+        inserted_rows: list[int] = []
+        committed_rows: list[int] = []
+        fail_next_begin = False
+        prepared: dict[bytes, str] = {}
+
+        while True:
+            frames = _read_until_sync_or_query(conn)
+            if any(tag == b"X" for tag, _ in frames):
+                break
+            is_simple = any(tag == b"Q" for tag, _ in frames)
+            has_parse = any(tag == b"P" for tag, _ in frames)
+            has_describe = any(tag == b"D" for tag, _ in frames)
+            sql = _extract_sql_from_frames(frames, prepared)
+            seen_commands.append(sql)
+
+            if sql.upper() == "BEGIN":
+                if fail_next_begin:
+                    fail_next_begin = False
+                    conn.sendall(_error_response("40001", "begin failed") + _frame(b"Z", b"I"))
+                else:
+                    tx_status = b"T"
+                    conn.sendall(
+                        _extended_ok(
+                            (),
+                            (),
+                            [],
+                            b"BEGIN",
+                            tx_status,
+                            is_simple=is_simple,
+                            has_parse=has_parse,
+                            has_describe=has_describe,
+                        )
+                    )
+            elif sql.upper() == "ROLLBACK":
+                inserted_rows.clear()
+                tx_status = b"I"
+                conn.sendall(
+                    _extended_ok(
+                        (),
+                        (),
+                        [],
+                        b"ROLLBACK",
+                        tx_status,
+                        is_simple=is_simple,
+                        has_parse=has_parse,
+                        has_describe=has_describe,
+                    )
+                )
+            elif sql.upper() == "COMMIT":
+                committed_rows.extend(inserted_rows)
+                inserted_rows.clear()
+                tx_status = b"I"
+                conn.sendall(
+                    _extended_ok(
+                        (),
+                        (),
+                        [],
+                        b"COMMIT",
+                        tx_status,
+                        is_simple=is_simple,
+                        has_parse=has_parse,
+                        has_describe=has_describe,
+                    )
+                )
+            elif sql == "SELECT arm_fail_begin":
+                fail_next_begin = True
+                conn.sendall(
+                    _extended_ok(
+                        (),
+                        (("ok", 23, 0),),
+                        [(b"1",)],
+                        b"SELECT 1",
+                        tx_status,
+                        has_parse=has_parse,
+                        has_describe=has_describe,
+                    )
+                )
+            elif sql == "SELECT COUNT(*) FROM t":
+                total = len(committed_rows) + len(inserted_rows)
+                if has_parse:
+                    c_cols = (("c", 23, 0),)
+                    c_rows = [(str(total).encode(),)]
+                else:
+                    c_cols = (("c", 23, 1),)
+                    c_rows = [(struct.pack("!i", total),)]
+                conn.sendall(
+                    _extended_ok(
+                        (),
+                        c_cols,
+                        c_rows,
+                        b"SELECT 1",
+                        tx_status,
+                        has_parse=has_parse,
+                        has_describe=has_describe,
+                    )
+                )
+            else:
+                inserted_rows.append(1)
+                if tx_status == b"I":
+                    committed_rows.extend(inserted_rows)
+                    inserted_rows.clear()
+                param_oids = (23,) if "$1" in sql else ()
+                conn.sendall(
+                    _extended_ok(
+                        param_oids,
+                        (),
+                        [],
+                        b"INSERT 0 1",
+                        tx_status,
+                        has_parse=has_parse,
+                        has_describe=has_describe,
+                    )
+                )
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        default_cur = client.cursor()
+        default_cur.execute("INSERT INTO t VALUES (1)")
+        assert seen_commands == ["INSERT INTO t VALUES (1)"]
+
+        lazy_cur = client.cursor(lazy_begin=True)
+        lazy_cur.execute("INSERT INTO t VALUES (2)")
+        lazy_cur.execute("SELECT COUNT(*) FROM t")
+        assert lazy_cur.fetchall() == [(2,)]
+        client.rollback()
+
+        default_cur.execute("SELECT COUNT(*) FROM t")
+        assert default_cur.fetchall() == [(1,)]
+
+        lazy_cur.execute("INSERT INTO t VALUES (3)")
+        client.commit()
+
+        lazy_cur.execute("INSERT INTO t VALUES (4)")
+        client.commit()
+
+        default_cur.execute("SELECT COUNT(*) FROM t")
+        assert default_cur.fetchall() == [(3,)]
+
+        lazy_cur.execute("SELECT COUNT(*) FROM t")
+        assert lazy_cur.description is not None
+        client.rollback()
+
+        default_cur.execute("SELECT arm_fail_begin")
+        assert default_cur.fetchall() == [(1,)]
+        with pytest.raises(OperationalError):
+            lazy_cur.execute("INSERT INTO t VALUES (5)")
+        assert lazy_cur.description is None
+        assert lazy_cur.rowcount == -1
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+
+    assert not errors
+    begin_count = sum(1 for cmd in seen_commands if cmd.upper() == "BEGIN")
+    assert begin_count == 5
+
+
+def test_sync_cursor_client_lease_attach_release_close_and_drop() -> None:
+    """Verify attach_lease, release_lease, close, and GC drop release semantics on SyncPostgresClient."""
+    calls_a = 0
+
+    def _release_a() -> None:
+        nonlocal calls_a
+        calls_a += 1
+
+    client1 = _make_sync_client(1)
+    client1.attach_lease(_release_a)
+    client1.release_lease()
+    client1.release_lease()
+    assert calls_a == 1
+
+    calls_b = 0
+
+    def _release_b() -> None:
+        nonlocal calls_b
+        calls_b += 1
+
+    client2 = _make_sync_client(1)
+    client2.attach_lease(_release_b)
+    del client2
+    gc.collect()
+    assert calls_b == 1
+
+    calls_c = 0
+    calls_d = 0
+
+    def _release_c() -> None:
+        nonlocal calls_c
+        calls_c += 1
+
+    def _release_d() -> None:
+        nonlocal calls_d
+        calls_d += 1
+
+    client3 = _make_sync_client(1)
+    client3.attach_lease(_release_c)
+    client3.attach_lease(_release_d)
+    assert calls_c == 1
+    assert calls_d == 0
+    client3.close()
+    client3.close()
+    assert calls_d == 1
+
+
+def _make_async_client(port: int) -> AsyncPostgresClient:
+    """Create a loopback AsyncPostgresClient for tests."""
+    return AsyncPostgresClient(
+        user="postgres",
+        database="app",
+        host="127.0.0.1",
+        port=port,
+        sslmode="disable",
+    )
+
+
+@pytest.mark.anyio
+async def test_async_cursor_lifecycle_and_constructor_guard() -> None:
+    """Verify async cursor creation is plain with no I/O, constructor is hidden, and closed/state errors match PEP 249."""
+    with pytest.raises(TypeError):
+        AsyncPostgresCursor()
+
+    client = _make_async_client(1)
+    cur = client.cursor()
+    assert isinstance(cur, AsyncPostgresCursor)
+    assert cur.description is None
+    assert cur.rowcount == -1
+    assert cur.lastrowid is None
+    assert cur.arraysize == 1
+
+    assert await cur.fetchone() is None
+    assert await cur.fetchmany() == []
+    assert await cur.fetchall() == []
+    with pytest.raises(ProgrammingError):
+        cur.arraysize = 0
+    with pytest.raises(ProgrammingError):
+        cur.arraysize = -5
+    assert cur.arraysize == 1
+
+    cur.arraysize = 4
+    assert cur.arraysize == 4
+
+    await cur.close()
+    await cur.close()
+
+    with pytest.raises(InterfaceError):
+        cur.execute("SELECT 1")
+    with pytest.raises(InterfaceError):
+        cur.executemany("INSERT INTO t VALUES (%s)", [(1,)])
+    with pytest.raises(InterfaceError):
+        await cur.fetchone()
+    with pytest.raises(InterfaceError):
+        await cur.fetchmany()
+    with pytest.raises(InterfaceError):
+        await cur.fetchall()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_select_attributes_and_fetch_modes() -> None:
+    """Verify SELECT tuples, plain attributes without await, and fetchone/fetchmany/fetchall modes."""
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+
+        f1 = _read_until_sync_or_query(conn)
+        assert _extract_sql_from_frames(f1) == "SELECT 1"
+        conn.sendall(_extended_ok((), (("col", 23, 0),), [(b"1",)], b"SELECT 1"))
+
+        f2 = _read_until_sync_or_query(conn)
+        assert _extract_sql_from_frames(f2) == "SELECT n FROM seq"
+        conn.sendall(
+            _extended_ok(
+                (),
+                (("n", 23, 0),),
+                [(b"1",), (b"2",), (b"3",), (b"4",), (b"5",)],
+                b"SELECT 5",
+            )
+        )
+
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+        cur = client.cursor()
+        returned = await cur.execute("SELECT 1")
+        assert returned is cur
+        assert cur.description == (("col", 23, None, None, None, None, None),)
+        assert cur.rowcount == 1
+        assert cur.lastrowid is None
+        assert await cur.fetchall() == [(1,)]
+        assert await cur.fetchall() == []
+        assert await cur.fetchone() is None
+
+        await cur.execute("SELECT n FROM seq")
+        assert cur.rowcount == 5
+        assert await cur.fetchone() == (1,)
+        cur.arraysize = 2
+        assert await cur.fetchmany(0) == []
+        with pytest.raises(ProgrammingError):
+            await cur.fetchmany(-1)
+        assert await cur.fetchmany() == [(2,), (3,)]
+        assert await cur.fetchall() == [(4,), (5,)]
+    finally:
+        await client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("sql", "cols", "rows", "tag", "expected_rowcount", "expect_desc", "expected_rows"),
+    [
+        ("CREATE TEMP TABLE t (id int)", (), [], b"CREATE TABLE", -1, False, None),
+        ("INSERT INTO t VALUES (1), (2), (3)", (), [], b"INSERT 0 3", 3, False, None),
+        (
+            "INSERT INTO t VALUES (10), (20) RETURNING id",
+            (("id", 23, 0),),
+            [(b"10",), (b"20",)],
+            b"INSERT 0 2",
+            2,
+            True,
+            [(10,), (20,)],
+        ),
+        ("SELECT 1 WHERE false", (("col", 23, 0),), [], b"SELECT 0", 0, True, []),
+    ],
+)
+async def test_async_cursor_command_ddl_and_empty_set(
+    sql: str,
+    cols: tuple[tuple[str, int, int], ...],
+    rows: list[tuple[bytes | None, ...]],
+    tag: bytes,
+    expected_rowcount: int,
+    expect_desc: bool,
+    expected_rows: list[tuple[Any, ...]] | None,
+) -> None:
+    """Verify DDL, DML, DML RETURNING, and empty SELECT metadata on AsyncPostgresCursor."""
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        _read_until_sync_or_query(conn)
+        conn.sendall(_extended_ok((), cols, rows, tag))
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+        cur = client.cursor()
+        await cur.execute(sql)
+        assert cur.rowcount == expected_rowcount
+        if expect_desc:
+            assert cur.description is not None
+            assert await cur.fetchall() == expected_rows
+        else:
+            assert cur.description is None
+            assert await cur.fetchall() == []
+            assert cur.rowcount == expected_rowcount
+    finally:
+        await client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+
+@pytest.mark.anyio
+async def test_async_cursor_executemany_and_call_time_param_errors() -> None:
+    """Verify executemany rowcount summation, empty batch handling, and call-time InterfaceError on bad params."""
+    seen_binds: list[list[bytes | None]] = []
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        for _ in range(3):
+            frames = _read_until_sync_or_query(conn)
+            has_parse = any(tag == b"P" for tag, _ in frames)
+            has_describe = any(tag == b"D" for tag, _ in frames)
+            seen_binds.append(_extract_bind_params_from_frames(frames))
+            conn.sendall(
+                _extended_ok(
+                    (23,),
+                    (),
+                    [],
+                    b"INSERT 0 1",
+                    has_parse=has_parse,
+                    has_describe=has_describe,
+                )
+            )
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+        cur = client.cursor()
+        with pytest.raises(InterfaceError):
+            cur.execute("SELECT 1", timeout=cast("Any", "bad"))
+        with pytest.raises(InterfaceError):
+            cur.executemany("INSERT INTO t VALUES (%s)", cast("Any", 123))
+
+        returned = await cur.executemany("INSERT INTO t VALUES (%s)", [(1,), (2,), (3,)])
+        assert returned is cur
+        assert cur.rowcount == 3
+        assert cur.description is None
+
+        returned_empty = await cur.executemany("INSERT INTO t VALUES (%s)", [])
+        assert returned_empty is cur
+        assert cur.rowcount == 0
+        assert cur.description is None
+    finally:
+        await client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+    assert len(seen_binds) == 3
+
+
+@pytest.mark.anyio
+async def test_async_cursor_error_class_integrity_and_clearing() -> None:
+    """Verify duplicate key SQLSTATE 23505 raises IntegrityError and clears prior cursor result."""
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+
+        _read_until_sync_or_query(conn)
+        conn.sendall(_extended_ok((), (("id", 23, 0),), [(b"1",)], b"SELECT 1"))
+
+        _read_until_sync_or_query(conn)
+        conn.sendall(_error_response("23505", "duplicate key value violates unique constraint") + _frame(b"Z", b"I"))
+
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+        cur = client.cursor()
+        await cur.execute("SELECT 1 AS id")
+        assert cur.description is not None
+        assert cur.rowcount == 1
+
+        with pytest.raises(IntegrityError) as exc_info:
+            await cur.execute("INSERT INTO t VALUES (1)")
+        assert getattr(exc_info.value, "sqlstate", None) == "23505"
+        assert cur.description is None
+        assert cur.rowcount == -1
+    finally:
+        await client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+
+@pytest.mark.anyio
+async def test_async_cursor_concurrent_execute_raises_interface_error() -> None:
+    """Verify starting a second execute while one is in flight raises InterfaceError with the expected message."""
+    query_received = threading.Event()
+    release_response = threading.Event()
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+
+        _read_until_sync_or_query(conn)
+        query_received.set()
+        assert release_response.wait(timeout=5.0)
+        conn.sendall(_extended_ok((), (("v", 23, 0),), [(b"7",)], b"SELECT 1"))
+
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+        cur = client.cursor()
+
+        async def _run_first() -> AsyncPostgresCursor:
+            return await cur.execute("SELECT 7 AS v")
+
+        first_task = asyncio.create_task(_run_first())
+        assert await asyncio.to_thread(query_received.wait, 5.0)
+
+        with pytest.raises(InterfaceError, match="cursor is already executing"):
+            await cur.execute("SELECT 8")
+
+        release_response.set()
+        await first_task
+        assert await cur.fetchall() == [(7,)]
+    finally:
+        release_response.set()
+        await client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+
+@pytest.mark.anyio
+async def test_async_cursor_cancellation_cancels_server_and_recovers() -> None:
+    """Verify cancelling an awaiting task sends CancelRequest, clears cursor state, and allows the next execute."""
+    sleep_started = threading.Event()
+    cancel_received = threading.Event()
+    cancel_payload: list[bytes] = []
+    errors: list[BaseException] = []
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+
+    def _serve_main(conn: socket.socket) -> None:
+        with conn:
+            _read_startup(conn)
+            conn.sendall(_auth_ok_and_ready())
+
+            f1 = _read_until_sync_or_query(conn)
+            assert _extract_sql_from_frames(f1) == "SELECT 10"
+            conn.sendall(_extended_ok((), (("v", 23, 0),), [(b"10",)], b"SELECT 1"))
+
+            f2 = _read_until_sync_or_query(conn)
+            assert "pg_sleep" in _extract_sql_from_frames(f2)
+            sleep_started.set()
+            assert cancel_received.wait(timeout=5.0)
+            conn.sendall(_error_response("57014", "canceling statement due to user request") + _frame(b"Z", b"I"))
+
+            _read_until_sync_or_query(conn)
+
+    def _runner() -> None:
+        try:
+            main_conn, _ = srv.accept()
+            main_thread = threading.Thread(target=_serve_main, args=(main_conn,), daemon=True)
+            main_thread.start()
+
+            cancel_conn, _ = srv.accept()
+            with cancel_conn:
+                data = cancel_conn.recv(16)
+                cancel_payload.append(data)
+                cancel_received.set()
+
+            main_thread.join(timeout=5.0)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            srv.close()
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+        cur = client.cursor()
+        await cur.execute("SELECT 10")
+        assert cur.description is not None
+
+        async def _run_sleep() -> AsyncPostgresCursor:
+            return await cur.execute("SELECT pg_sleep(5)")
+
+        task = asyncio.create_task(_run_sleep())
+        assert await asyncio.to_thread(sleep_started.wait, 5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert cur.description is None
+        assert cur.rowcount == -1
+
+        with pytest.raises(InterfaceError, match="session is not connected"):
+            await cur.execute("SELECT 1")
+        assert client.closed
+    finally:
+        await client.close()
+        thread.join(timeout=5.0)
+
+    assert not errors
+    assert cancel_payload == [struct.pack("!iiii", 16, 80877102, 101, 202)]
+
+
+@pytest.mark.anyio
+async def test_async_cursor_lazy_begin_and_default_cursor() -> None:
+    """Verify lazy_begin opens transactions on demand, reopens after commit, clears on failed begin, and default opens none."""
+    seen_commands: list[str] = []
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        tx_status = b"I"
+        inserted_rows: list[int] = []
+        committed_rows: list[int] = []
+        fail_next_begin = False
+        prepared: dict[bytes, str] = {}
+
+        while True:
+            frames = _read_until_sync_or_query(conn)
+            if any(tag == b"X" for tag, _ in frames):
+                break
+            is_simple = any(tag == b"Q" for tag, _ in frames)
+            has_parse = any(tag == b"P" for tag, _ in frames)
+            has_describe = any(tag == b"D" for tag, _ in frames)
+            sql = _extract_sql_from_frames(frames, prepared)
+            seen_commands.append(sql)
+
+            if sql.upper() == "BEGIN":
+                if fail_next_begin:
+                    fail_next_begin = False
+                    conn.sendall(_error_response("40001", "begin failed") + _frame(b"Z", b"I"))
+                else:
+                    tx_status = b"T"
+                    conn.sendall(
+                        _extended_ok(
+                            (),
+                            (),
+                            [],
+                            b"BEGIN",
+                            tx_status,
+                            is_simple=is_simple,
+                            has_parse=has_parse,
+                            has_describe=has_describe,
+                        )
+                    )
+            elif sql.upper() == "ROLLBACK":
+                inserted_rows.clear()
+                tx_status = b"I"
+                conn.sendall(
+                    _extended_ok(
+                        (),
+                        (),
+                        [],
+                        b"ROLLBACK",
+                        tx_status,
+                        is_simple=is_simple,
+                        has_parse=has_parse,
+                        has_describe=has_describe,
+                    )
+                )
+            elif sql.upper() == "COMMIT":
+                committed_rows.extend(inserted_rows)
+                inserted_rows.clear()
+                tx_status = b"I"
+                conn.sendall(
+                    _extended_ok(
+                        (),
+                        (),
+                        [],
+                        b"COMMIT",
+                        tx_status,
+                        is_simple=is_simple,
+                        has_parse=has_parse,
+                        has_describe=has_describe,
+                    )
+                )
+            elif sql == "SELECT arm_fail_begin":
+                fail_next_begin = True
+                conn.sendall(
+                    _extended_ok(
+                        (),
+                        (("ok", 23, 0),),
+                        [(b"1",)],
+                        b"SELECT 1",
+                        tx_status,
+                        has_parse=has_parse,
+                        has_describe=has_describe,
+                    )
+                )
+            elif sql == "SELECT COUNT(*) FROM t":
+                total = len(committed_rows) + len(inserted_rows)
+                if has_parse:
+                    c_cols = (("c", 23, 0),)
+                    c_rows = [(str(total).encode(),)]
+                else:
+                    c_cols = (("c", 23, 1),)
+                    c_rows = [(struct.pack("!i", total),)]
+                conn.sendall(
+                    _extended_ok(
+                        (),
+                        c_cols,
+                        c_rows,
+                        b"SELECT 1",
+                        tx_status,
+                        has_parse=has_parse,
+                        has_describe=has_describe,
+                    )
+                )
+            else:
+                inserted_rows.append(1)
+                if tx_status == b"I":
+                    committed_rows.extend(inserted_rows)
+                    inserted_rows.clear()
+                param_oids = (23,) if "$1" in sql else ()
+                conn.sendall(
+                    _extended_ok(
+                        param_oids,
+                        (),
+                        [],
+                        b"INSERT 0 1",
+                        tx_status,
+                        has_parse=has_parse,
+                        has_describe=has_describe,
+                    )
+                )
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+        default_cur = client.cursor()
+        await default_cur.execute("INSERT INTO t VALUES (1)")
+        assert seen_commands == ["INSERT INTO t VALUES (1)"]
+
+        lazy_cur = client.cursor(lazy_begin=True)
+        await lazy_cur.execute("INSERT INTO t VALUES (2)")
+        await lazy_cur.execute("SELECT COUNT(*) FROM t")
+        assert await lazy_cur.fetchall() == [(2,)]
+        await client.rollback()
+
+        await default_cur.execute("SELECT COUNT(*) FROM t")
+        assert await default_cur.fetchall() == [(1,)]
+
+        await lazy_cur.execute("INSERT INTO t VALUES (3)")
+        await client.commit()
+
+        await lazy_cur.executemany("INSERT INTO t VALUES (%s)", [(4,), (5,)])
+        assert lazy_cur.rowcount == 2
+        await client.commit()
+
+        await default_cur.execute("SELECT COUNT(*) FROM t")
+        assert await default_cur.fetchall() == [(4,)]
+
+        await lazy_cur.execute("SELECT COUNT(*) FROM t")
+        assert lazy_cur.description is not None
+        await client.rollback()
+
+        await default_cur.execute("SELECT arm_fail_begin")
+        assert await default_cur.fetchall() == [(1,)]
+        with pytest.raises(OperationalError):
+            await lazy_cur.execute("INSERT INTO t VALUES (6)")
+        assert lazy_cur.description is None
+        assert lazy_cur.rowcount == -1
+    finally:
+        await client.close()
+        thread.join(timeout=5.0)
+
+    assert not errors
+    begin_count = sum(1 for cmd in seen_commands if cmd.upper() == "BEGIN")
+    assert begin_count == 5
+
+
+@pytest.mark.anyio
+async def test_async_cursor_client_lease_attach_release_close_and_drop() -> None:
+    """Verify attach_lease, release_lease, close, and GC drop release semantics on AsyncPostgresClient."""
+    calls_a = 0
+
+    def _release_a() -> None:
+        nonlocal calls_a
+        calls_a += 1
+
+    client1 = _make_async_client(1)
+    client1.attach_lease(_release_a)
+    client1.release_lease()
+    client1.release_lease()
+    assert calls_a == 1
+
+    calls_b = 0
+
+    def _release_b() -> None:
+        nonlocal calls_b
+        calls_b += 1
+
+    client2 = _make_async_client(1)
+    client2.attach_lease(_release_b)
+    del client2
+    gc.collect()
+    assert calls_b == 1
+
+    calls_c = 0
+    calls_d = 0
+
+    def _release_c() -> None:
+        nonlocal calls_c
+        calls_c += 1
+
+    def _release_d() -> None:
+        nonlocal calls_d
+        calls_d += 1
+
+    client3 = _make_async_client(1)
+    client3.attach_lease(_release_c)
+    client3.attach_lease(_release_d)
+    assert calls_c == 1
+    assert calls_d == 0
+    await client3.close()
+    await client3.close()
+    assert calls_d == 1
+
+
+def _reply_per_frame_extended(
+    frames: Sequence[tuple[bytes, bytes]],
+    param_oids: Sequence[int],
+    cols: Sequence[tuple[str, int]],
+    rows: Sequence[Sequence[str | None]],
+    command_tag: str,
+    tx_status: bytes = b"I",
+) -> bytes:
+    """Answer extended frames per-frame, matching Bind result format codes for cold and cached runs."""
+    result_fmts: list[int] = []
+    for tag, body in frames:
+        if tag == b"B":
+            _, _, result_fmts = _bind_frame_stmt_params_and_formats(body)
+            break
+    if cols:
+        return _reply_extended_query(frames, param_oids, cols, rows, command_tag, tx_status, result_fmts)
+    pdesc = _frame(
+        b"t",
+        struct.pack("!h", len(param_oids)) + b"".join(struct.pack("!I", oid) for oid in param_oids),
+    )
+    parts: list[bytes] = []
+    for tag, body in frames:
+        if tag == b"P":
+            parts.append(_frame(b"1", b""))
+        elif tag == b"D":
+            if body[:1] == b"S":
+                parts.append(pdesc)
+                parts.append(_frame(b"n", b""))
+            else:
+                parts.append(_frame(b"n", b""))
+        elif tag == b"B":
+            parts.append(_frame(b"2", b""))
+        elif tag == b"E":
+            parts.append(_frame(b"C", command_tag.encode("ascii") + b"\x00"))
+        elif tag == b"C":
+            parts.append(_frame(b"3", b""))
+        elif tag == b"S":
+            parts.append(_frame(b"Z", tx_status))
+    return b"".join(parts)
+
+
+def _resolve_batch_sql(frames: Sequence[tuple[bytes, bytes]], prepared: dict[str, str]) -> str:
+    """Resolve SQL for a cold or cached extended batch, recording newly parsed statement names."""
+    for tag, body in frames:
+        if tag == b"Q":
+            return body.rstrip(b"\x00").decode("utf-8")
+        if tag == b"P":
+            stmt_name, sql = _parse_frame_stmt_and_sql(body)
+            prepared[stmt_name] = sql
+            return sql
+    for tag, body in frames:
+        if tag == b"B":
+            stmt_name, _, _ = _bind_frame_stmt_params_and_formats(body)
+            return prepared.get(stmt_name, "")
+    return ""
+
+
+def test_sync_single_call_select_equality_dicts_and_null() -> None:
+    """Verify fetch_rows matches cursor output on cold and cached runs, fetch_dicts builds dicts, and fetch_value returns NULL as None."""
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        prepared: dict[str, str] = {}
+        while True:
+            frames = _read_until_sync_or_query(conn)
+            if any(tag == b"X" for tag, _ in frames):
+                break
+            sql = _resolve_batch_sql(frames, prepared)
+            if sql == "SELECT 1 AS a, 'x' AS b":
+                conn.sendall(
+                    _reply_per_frame_extended(
+                        frames,
+                        (),
+                        (("a", 23), ("b", 25)),
+                        [("1", "x")],
+                        "SELECT 1",
+                    )
+                )
+            elif sql == "SELECT 1 AS dup, 2 AS dup":
+                conn.sendall(
+                    _reply_per_frame_extended(
+                        frames,
+                        (),
+                        (("dup", 23), ("dup", 23)),
+                        [("1", "2")],
+                        "SELECT 1",
+                    )
+                )
+            elif sql == "SELECT NULL":
+                conn.sendall(
+                    _reply_per_frame_extended(
+                        frames,
+                        (),
+                        (("val", 25),),
+                        [(None,)],
+                        "SELECT 1",
+                    )
+                )
+            else:
+                raise AssertionError(f"unexpected SQL: {sql!r}")
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        sql = "SELECT 1 AS a, 'x' AS b"
+        cur = client.cursor()
+        cur.execute(sql)
+        cur_rows = cur.fetchall()
+        assert cur.description is not None
+        cur_names = tuple(col[0] for col in cur.description)
+        cur.close()
+
+        rows, names = client.fetch_rows(sql)
+        assert rows == cur_rows
+        assert names == cur_names
+
+        assert client.fetch_dicts(sql) == [{"a": 1, "b": "x"}]
+        assert client.fetch_dicts("SELECT 1 AS dup, 2 AS dup") == [{"dup": 2}]
+        assert client.fetch_value("SELECT NULL") is None
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+
+def test_sync_single_call_empty_result_no_result_set_dml_and_returning() -> None:
+    """Verify empty result sets, DDL without result set, DML counts, and INSERT RETURNING on SyncPostgresClient."""
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        prepared: dict[str, str] = {}
+        while True:
+            frames = _read_until_sync_or_query(conn)
+            if any(tag == b"X" for tag, _ in frames):
+                break
+            sql = _resolve_batch_sql(frames, prepared)
+            if sql == "SELECT 1 AS a WHERE false":
+                conn.sendall(_reply_per_frame_extended(frames, (), (("a", 23),), [], "SELECT 0"))
+            elif sql == "CREATE TABLE t (id int)":
+                conn.sendall(_reply_per_frame_extended(frames, (), (), [], "CREATE TABLE"))
+            elif sql == "UPDATE t SET v = 1":
+                conn.sendall(_reply_per_frame_extended(frames, (), (), [], "UPDATE 2"))
+            elif sql == "INSERT INTO t VALUES (1) RETURNING id":
+                conn.sendall(_reply_per_frame_extended(frames, (), (("id", 23),), [("42",)], "INSERT 0 1"))
+            else:
+                raise AssertionError(f"unexpected SQL: {sql!r}")
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        assert client.fetch_rows("SELECT 1 AS a WHERE false") == ([], ("a",))
+        assert client.fetch_dicts("SELECT 1 AS a WHERE false") == []
+        with pytest.raises(NotFoundError, match="Query returned no rows"):
+            client.fetch_value("SELECT 1 AS a WHERE false")
+
+        assert client.fetch_rows("CREATE TABLE t (id int)") == ([], ())
+        assert client.fetch_dicts("CREATE TABLE t (id int)") == []
+        with pytest.raises(NotFoundError, match="Query returned no rows"):
+            client.fetch_value("CREATE TABLE t (id int)")
+        assert client.execute_dml("CREATE TABLE t (id int)") == (0, None)
+
+        assert client.execute_dml("UPDATE t SET v = 1") == (2, None)
+
+        assert client.fetch_rows("INSERT INTO t VALUES (1) RETURNING id") == ([(42,)], ("id",))
+        assert client.execute_dml("INSERT INTO t VALUES (1) RETURNING id") == (1, None)
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+
+def test_sync_single_call_parameters_and_validation_errors() -> None:
+    """Verify named params, empty params, mismatched positional params, and unsupported parameter errors."""
+    seen_sql: list[str] = []
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        prepared: dict[str, str] = {}
+        while True:
+            frames = _read_until_sync_or_query(conn)
+            if any(tag == b"X" for tag, _ in frames):
+                break
+            sql = _resolve_batch_sql(frames, prepared)
+            seen_sql.append(sql)
+            if sql == "SELECT $1::int":
+                conn.sendall(_reply_per_frame_extended(frames, (23,), (("n", 23),), [("7",)], "SELECT 1"))
+            elif sql == "SELECT 1":
+                conn.sendall(_reply_per_frame_extended(frames, (), (("v", 23),), [("1",)], "SELECT 1"))
+            else:
+                raise AssertionError(f"unexpected SQL: {sql!r}")
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        assert client.fetch_value("SELECT %(n)s::int", {"n": 7}) == 7
+        assert client.fetch_value("SELECT 1", ()) == 1
+
+        with pytest.raises(ProgrammingError):
+            client.fetch_value("SELECT 1", (1,))
+        with pytest.raises(InterfaceError):
+            client.fetch_value("SELECT %s", (PG_UNCHANGED_TOAST,))
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+    assert seen_sql == ["SELECT $1::int", "SELECT 1"]
+
+
+def test_sync_single_call_timeout_and_server_error() -> None:
+    """Verify unique violation raises IntegrityError(23505) and timeout matches cursor exception class."""
+
+    def _serve_unique(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        _read_until_sync_or_query(conn)
+        conn.sendall(_error_response("23505", "duplicate key value violates unique constraint") + _frame(b"Z", b"I"))
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve_unique)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        with pytest.raises(IntegrityError) as exc_info:
+            client.execute_dml("INSERT INTO t VALUES (1)")
+        assert exc_info.value.sqlstate == "23505"
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+    def _run_timeout(use_single_call: bool) -> type[BaseException]:
+        def _serve_delay(conn: socket.socket) -> None:
+            _read_startup(conn)
+            conn.sendall(_auth_ok_and_ready())
+            _read_until_sync_or_query(conn)
+            time.sleep(0.3)
+
+        t_port, t_thread, _t_errors, _ = _run_loopback_pg(_serve_delay)
+        t_client = _make_sync_client(t_port)
+        t_client.connect()
+        try:
+            if use_single_call:
+                with pytest.raises(OperationalError) as exc_info:
+                    t_client.fetch_value("SELECT pg_sleep(1)", timeout=0.05)
+                return type(exc_info.value)
+            cur = t_client.cursor()
+            with pytest.raises(OperationalError) as exc_info:
+                cur.execute("SELECT pg_sleep(1)", timeout=0.05)
+            return type(exc_info.value)
+        finally:
+            t_client.close()
+            t_thread.join(timeout=5.0)
+
+    single_exc = _run_timeout(use_single_call=True)
+    cursor_exc = _run_timeout(use_single_call=False)
+    assert single_exc is cursor_exc
+    assert issubclass(single_exc, OperationalError)
+
+
+def test_sync_single_call_in_transaction_rollback() -> None:
+    """Verify client single-call methods run inside an open transaction without starting one and respect rollback."""
+    seen_commands: list[str] = []
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        tx_status = b"I"
+        staged: list[int] = []
+        committed: list[int] = []
+        prepared: dict[str, str] = {}
+        while True:
+            frames = _read_until_sync_or_query(conn)
+            if any(tag == b"X" for tag, _ in frames):
+                break
+            sql = _resolve_batch_sql(frames, prepared)
+            seen_commands.append(sql)
+            upper = sql.upper()
+            if upper == "BEGIN":
+                tx_status = b"T"
+                staged = list(committed)
+                conn.sendall(_frame(b"C", b"BEGIN\x00") + _frame(b"Z", tx_status))
+            elif upper == "ROLLBACK":
+                tx_status = b"I"
+                staged = list(committed)
+                conn.sendall(_frame(b"C", b"ROLLBACK\x00") + _frame(b"Z", tx_status))
+            elif upper.startswith("INSERT"):
+                if tx_status == b"T":
+                    staged.append(1)
+                else:
+                    committed.append(1)
+                    staged = list(committed)
+                conn.sendall(_reply_per_frame_extended(frames, (), (), [], "INSERT 0 1", tx_status))
+            elif "COUNT(*)" in upper:
+                count = len(staged) if tx_status == b"T" else len(committed)
+                conn.sendall(
+                    _reply_per_frame_extended(frames, (), (("count", 23),), [(str(count),)], "SELECT 1", tx_status)
+                )
+            else:
+                raise AssertionError(f"unexpected SQL: {sql!r}")
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_sync_client(port)
+    client.connect()
+    try:
+        client.begin()
+        assert client.execute_dml("INSERT INTO t VALUES (1)") == (1, None)
+        assert client.fetch_value("SELECT COUNT(*) FROM t") == 1
+        client.rollback()
+        assert client.fetch_value("SELECT COUNT(*) FROM t") == 0
+    finally:
+        client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+    assert sum(1 for cmd in seen_commands if cmd.upper() == "BEGIN") == 1
+
+
+@pytest.mark.anyio
+async def test_async_cursor_fetch_ready_does_not_iterate_loop() -> None:
+    """Verify fetchone, fetchmany, fetchall, and close return ReadyAwaitable and complete without a loop turn."""
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        _read_until_sync_or_query(conn)
+        conn.sendall(
+            _extended_ok(
+                (),
+                (("n", 23, 0),),
+                [(b"1",), (b"2",), (b"3",), (b"4",)],
+                b"SELECT 4",
+            )
+        )
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+        cur = client.cursor()
+        await cur.execute("SELECT n FROM seq")
+        loop = asyncio.get_running_loop()
+
+        ran: list[int] = []
+        aw_one = cur.fetchone()
+        assert type(aw_one).__name__ == "ReadyAwaitable"
+        loop.call_soon(ran.append, 1)
+        assert await aw_one == (1,)
+        assert ran == []
+        await asyncio.sleep(0)
+        assert ran == [1]
+
+        ran.clear()
+        aw_many = cur.fetchmany(2)
+        assert type(aw_many).__name__ == "ReadyAwaitable"
+        loop.call_soon(ran.append, 1)
+        assert await aw_many == [(2,), (3,)]
+        assert ran == []
+        await asyncio.sleep(0)
+        assert ran == [1]
+
+        ran.clear()
+        aw_all = cur.fetchall()
+        assert type(aw_all).__name__ == "ReadyAwaitable"
+        loop.call_soon(ran.append, 1)
+        assert await aw_all == [(4,)]
+        assert ran == []
+        await asyncio.sleep(0)
+        assert ran == [1]
+
+        ran.clear()
+        aw_close = cur.close()
+        assert type(aw_close).__name__ == "ReadyAwaitable"
+        loop.call_soon(ran.append, 1)
+        await aw_close
+        assert ran == []
+        await asyncio.sleep(0)
+        assert ran == [1]
+    finally:
+        await client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("method_name", ["fetchone", "fetchmany", "fetchall"])
+async def test_async_cursor_fetch_ready_closed_error_on_await(method_name: str) -> None:
+    """Verify fetch methods on a closed async cursor return ReadyAwaitable and raise InterfaceError on await."""
+    client = _make_async_client(1)
+    cur = client.cursor()
+    await cur.close()
+    aw = getattr(cur, method_name)()
+    assert type(aw).__name__ == "ReadyAwaitable"
+    with pytest.raises(InterfaceError):
+        await aw
+
+
+@pytest.mark.anyio
+async def test_async_cursor_fetch_ready_negative_size_error_on_await() -> None:
+    """Verify fetchmany(-1) on an open async cursor returns ReadyAwaitable and raises ProgrammingError on await."""
+    client = _make_async_client(1)
+    cur = client.cursor()
+    aw = cur.fetchmany(-1)
+    assert type(aw).__name__ == "ReadyAwaitable"
+    with pytest.raises(ProgrammingError):
+        await aw
+
+
+@pytest.mark.anyio
+async def test_async_single_call_select_dicts_empty_dml_and_tx() -> None:
+    """Verify async client single-call methods match sync semantics across SELECT, dicts, NULL, empty, DDL, DML, RETURNING, params, and transactions."""
+    seen_commands: list[str] = []
+
+    def _serve(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        tx_status = b"I"
+        staged: list[int] = []
+        committed: list[int] = []
+        prepared: dict[str, str] = {}
+        while True:
+            frames = _read_until_sync_or_query(conn)
+            if any(tag == b"X" for tag, _ in frames):
+                break
+            sql = _resolve_batch_sql(frames, prepared)
+            seen_commands.append(sql)
+            upper = sql.upper()
+            if upper == "BEGIN":
+                tx_status = b"T"
+                staged = list(committed)
+                conn.sendall(_frame(b"C", b"BEGIN\x00") + _frame(b"Z", tx_status))
+            elif upper == "ROLLBACK":
+                tx_status = b"I"
+                staged = list(committed)
+                conn.sendall(_frame(b"C", b"ROLLBACK\x00") + _frame(b"Z", tx_status))
+            elif sql == "SELECT 1 AS a, 'x' AS b":
+                conn.sendall(
+                    _reply_per_frame_extended(
+                        frames,
+                        (),
+                        (("a", 23), ("b", 25)),
+                        [("1", "x")],
+                        "SELECT 1",
+                        tx_status,
+                    )
+                )
+            elif sql == "SELECT 1 AS dup, 2 AS dup":
+                conn.sendall(
+                    _reply_per_frame_extended(
+                        frames,
+                        (),
+                        (("dup", 23), ("dup", 23)),
+                        [("1", "2")],
+                        "SELECT 1",
+                        tx_status,
+                    )
+                )
+            elif sql == "SELECT NULL":
+                conn.sendall(_reply_per_frame_extended(frames, (), (("val", 25),), [(None,)], "SELECT 1", tx_status))
+            elif sql == "SELECT 1 AS a WHERE false":
+                conn.sendall(_reply_per_frame_extended(frames, (), (("a", 23),), [], "SELECT 0", tx_status))
+            elif sql == "CREATE TABLE t (id int)":
+                conn.sendall(_reply_per_frame_extended(frames, (), (), [], "CREATE TABLE", tx_status))
+            elif sql == "UPDATE t SET v = 1":
+                conn.sendall(_reply_per_frame_extended(frames, (), (), [], "UPDATE 2", tx_status))
+            elif sql == "INSERT INTO t VALUES (1) RETURNING id":
+                conn.sendall(_reply_per_frame_extended(frames, (), (("id", 23),), [("42",)], "INSERT 0 1", tx_status))
+            elif sql == "SELECT $1::int":
+                conn.sendall(_reply_per_frame_extended(frames, (23,), (("n", 23),), [("7",)], "SELECT 1", tx_status))
+            elif sql == "SELECT 1":
+                conn.sendall(_reply_per_frame_extended(frames, (), (("v", 23),), [("1",)], "SELECT 1", tx_status))
+            elif sql == "INSERT INTO t VALUES (1)":
+                if tx_status == b"T":
+                    staged.append(1)
+                else:
+                    committed.append(1)
+                    staged = list(committed)
+                conn.sendall(_reply_per_frame_extended(frames, (), (), [], "INSERT 0 1", tx_status))
+            elif sql == "SELECT COUNT(*) FROM t":
+                count = len(staged) if tx_status == b"T" else len(committed)
+                conn.sendall(
+                    _reply_per_frame_extended(frames, (), (("count", 23),), [(str(count),)], "SELECT 1", tx_status)
+                )
+            else:
+                raise AssertionError(f"unexpected SQL: {sql!r}")
+
+    port, thread, errors, _ = _run_loopback_pg(_serve)
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+        sql = "SELECT 1 AS a, 'x' AS b"
+        cur = client.cursor()
+        await cur.execute(sql)
+        cur_rows = await cur.fetchall()
+        assert cur.description is not None
+        cur_names = tuple(col[0] for col in cur.description)
+        await cur.close()
+
+        rows, names = await client.fetch_rows(sql)
+        assert rows == cur_rows
+        assert names == cur_names
+        assert await client.fetch_dicts(sql) == [{"a": 1, "b": "x"}]
+        assert await client.fetch_dicts("SELECT 1 AS dup, 2 AS dup") == [{"dup": 2}]
+        assert await client.fetch_value("SELECT NULL") is None
+
+        assert await client.fetch_rows("SELECT 1 AS a WHERE false") == ([], ("a",))
+        assert await client.fetch_dicts("SELECT 1 AS a WHERE false") == []
+        with pytest.raises(NotFoundError, match="Query returned no rows"):
+            await client.fetch_value("SELECT 1 AS a WHERE false")
+
+        assert await client.fetch_rows("CREATE TABLE t (id int)") == ([], ())
+        assert await client.fetch_dicts("CREATE TABLE t (id int)") == []
+        with pytest.raises(NotFoundError, match="Query returned no rows"):
+            await client.fetch_value("CREATE TABLE t (id int)")
+        assert await client.execute_dml("CREATE TABLE t (id int)") == (0, None)
+
+        assert await client.execute_dml("UPDATE t SET v = 1") == (2, None)
+        assert await client.fetch_rows("INSERT INTO t VALUES (1) RETURNING id") == ([(42,)], ("id",))
+        assert await client.execute_dml("INSERT INTO t VALUES (1) RETURNING id") == (1, None)
+
+        assert await client.fetch_value("SELECT %(n)s::int", {"n": 7}) == 7
+        assert await client.fetch_value("SELECT 1", ()) == 1
+
+        await client.begin()
+        assert await client.execute_dml("INSERT INTO t VALUES (1)") == (1, None)
+        assert await client.fetch_value("SELECT COUNT(*) FROM t") == 1
+        await client.rollback()
+        assert await client.fetch_value("SELECT COUNT(*) FROM t") == 0
+    finally:
+        await client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+    assert sum(1 for cmd in seen_commands if cmd.upper() == "BEGIN") == 1
+
+
+@pytest.mark.anyio
+async def test_async_single_call_errors_and_timeout() -> None:
+    """Verify call-time validation errors, server IntegrityError on await, and timeout matching AsyncPostgresCursor."""
+
+    def _serve_unique(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        _read_until_sync_or_query(conn)
+        conn.sendall(_error_response("23505", "duplicate key value violates unique constraint") + _frame(b"Z", b"I"))
+        _read_until_sync_or_query(conn)
+
+    port, thread, errors, _ = _run_loopback_pg(_serve_unique)
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+        with pytest.raises(ProgrammingError):
+            client.fetch_rows("SELECT 1", (1,))
+        with pytest.raises(InterfaceError):
+            client.fetch_value("SELECT %s", (PG_UNCHANGED_TOAST,))
+        with pytest.raises(IntegrityError) as exc_info:
+            await client.execute_dml("INSERT INTO t VALUES (1)")
+        assert exc_info.value.sqlstate == "23505"
+    finally:
+        await client.close()
+        thread.join(timeout=5.0)
+    assert not errors
+
+    async def _run_timeout(use_single_call: bool) -> type[BaseException]:
+        def _serve_delay(conn: socket.socket) -> None:
+            _read_startup(conn)
+            conn.sendall(_auth_ok_and_ready())
+            _read_until_sync_or_query(conn)
+            time.sleep(0.3)
+
+        t_port, t_thread, _t_errors, _ = _run_loopback_pg(_serve_delay)
+        t_client = _make_async_client(t_port)
+        await t_client.connect()
+        try:
+            if use_single_call:
+                with pytest.raises(OperationalError) as exc_info:
+                    await t_client.fetch_value("SELECT pg_sleep(1)", timeout=0.05)
+                return type(exc_info.value)
+            cur = t_client.cursor()
+            with pytest.raises(OperationalError) as exc_info:
+                await cur.execute("SELECT pg_sleep(1)", timeout=0.05)
+            return type(exc_info.value)
+        finally:
+            await t_client.close()
+            t_thread.join(timeout=5.0)
+
+    single_exc = await _run_timeout(use_single_call=True)
+    cursor_exc = await _run_timeout(use_single_call=False)
+    assert single_exc is cursor_exc
+    assert issubclass(single_exc, OperationalError)
+
+
+@pytest.mark.anyio
+async def test_async_single_call_cancellation() -> None:
+    """Verify cancelling an in-flight fetch_rows sends CancelRequest and cancelling a queued call leaves the client usable."""
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    def _serve_queued(conn: socket.socket) -> None:
+        _read_startup(conn)
+        conn.sendall(_auth_ok_and_ready())
+        prepared: dict[str, str] = {}
+        while True:
+            frames = _read_until_sync_or_query(conn)
+            if any(tag == b"X" for tag, _ in frames):
+                break
+            sql = _resolve_batch_sql(frames, prepared)
+            if sql == "SELECT 1 AS first":
+                first_started.set()
+                assert release_first.wait(timeout=5.0)
+                conn.sendall(_reply_per_frame_extended(frames, (), (("first", 23),), [("1",)], "SELECT 1"))
+            elif sql == "SELECT 3 AS after_cancel":
+                conn.sendall(_reply_per_frame_extended(frames, (), (("after_cancel", 23),), [("3",)], "SELECT 1"))
+            else:
+                raise AssertionError(f"unexpected SQL: {sql!r}")
+
+    q_port, q_thread, q_errors, _ = _run_loopback_pg(_serve_queued)
+    q_client = _make_async_client(q_port)
+    await q_client.connect()
+    try:
+
+        async def _run_first() -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            return await q_client.fetch_rows("SELECT 1 AS first")
+
+        async def _run_queued() -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            return await q_client.fetch_rows("SELECT 2 AS cancelled")
+
+        first_task = asyncio.create_task(_run_first())
+        assert await asyncio.to_thread(first_started.wait, 5.0)
+
+        queued_task = asyncio.create_task(_run_queued())
+        await asyncio.sleep(0)
+        queued_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued_task
+
+        release_first.set()
+        assert await first_task == ([(1,)], ("first",))
+        assert await q_client.fetch_rows("SELECT 3 AS after_cancel") == ([(3,)], ("after_cancel",))
+    finally:
+        release_first.set()
+        await q_client.close()
+        q_thread.join(timeout=5.0)
+    assert not q_errors
+
+    sleep_started = threading.Event()
+    cancel_received = threading.Event()
+    cancel_payload: list[bytes] = []
+    errors: list[BaseException] = []
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+
+    def _serve_main(conn: socket.socket) -> None:
+        with conn:
+            _read_startup(conn)
+            conn.sendall(_auth_ok_and_ready())
+
+            f1 = _read_until_sync_or_query(conn)
+            assert "pg_sleep" in _extract_sql_from_frames(f1)
+            sleep_started.set()
+            assert cancel_received.wait(timeout=5.0)
+            conn.sendall(_error_response("57014", "canceling statement due to user request") + _frame(b"Z", b"I"))
+
+            _read_until_sync_or_query(conn)
+
+    def _runner() -> None:
+        try:
+            main_conn, _ = srv.accept()
+            main_thread = threading.Thread(target=_serve_main, args=(main_conn,), daemon=True)
+            main_thread.start()
+
+            cancel_conn, _ = srv.accept()
+            with cancel_conn:
+                data = cancel_conn.recv(16)
+                cancel_payload.append(data)
+                cancel_received.set()
+
+            main_thread.join(timeout=5.0)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            srv.close()
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+
+    client = _make_async_client(port)
+    await client.connect()
+    try:
+
+        async def _run_sleep() -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            return await client.fetch_rows("SELECT pg_sleep(5)")
+
+        task = asyncio.create_task(_run_sleep())
+        assert await asyncio.to_thread(sleep_started.wait, 5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert await asyncio.to_thread(cancel_received.wait, 5.0)
+        with pytest.raises(InterfaceError, match="session is not connected"):
+            await client.fetch_rows("SELECT 1")
+        assert client.closed
+    finally:
+        await client.close()
+        thread.join(timeout=5.0)
+
+    assert not errors
+    assert cancel_payload == [struct.pack("!iiii", 16, 80877102, 101, 202)]

@@ -42,7 +42,6 @@ __all__ = [
     "BrokerStats",
     "CloudSQLDialer",
     "ConnectionFailure",
-    "classify_sql_statement",
     "DataError",
     "DatabaseError",
     "GcpIdTokenSnapshot",
@@ -69,6 +68,7 @@ __all__ = [
     "PyValueAwaitable",
     "QueryCancelledError",
     "RateLimiter",
+    "ReadyAwaitable",
     "Request",
     "RequestBatch",
     "RequestBatchIterator",
@@ -792,7 +792,6 @@ def drive_rsgi_batch(
 def parse_traceparent(header: str) -> tuple[str, str, int] | None: ...
 def format_traceparent(trace_id: str, span_id: str, trace_flags: int) -> str: ...
 def sanitize_sql(sql: str) -> str: ...
-def classify_sql_statement(operation: str) -> tuple[bool, bool, bool]: ...
 def instantiate_struct_vectorcall[T](
     cls: Callable[..., T],
     args: tuple[object, ...] | None = None,
@@ -1778,6 +1777,14 @@ class BigQueryRowError(BigQueryError, DataError):
 
     row_errors: Sequence[dict[str, object]]
     """Rejected {"index": int, "code": int, "message": str} row error dictionaries reported by BigQuery Storage Write."""
+
+@final
+class ReadyAwaitable[T]:
+    """Awaitable that is already complete with a value or an error."""
+
+    def __await__(self) -> Generator[object, None, T]: ...
+    def __iter__(self) -> Self: ...
+    def __next__(self) -> object: ...
 
 @final
 class RustDbTaskAwaitable[T]:

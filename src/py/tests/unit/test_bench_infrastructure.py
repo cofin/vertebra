@@ -11,9 +11,16 @@ from pathlib import Path
 import pytest
 import yaml
 from tools.benchmarks import targets as bench_targets
+from tools.benchmarks.apps._data_backend import load_backend_config
 from tools.benchmarks.apps.asgi import app as asgi_app
 from tools.benchmarks.apps.vertebra_app import native_app
 from tools.benchmarks.apps.wsgi import app as wsgi_app
+from tools.benchmarks.fixtures import (
+    FIXTURE_SPECS,
+    STORAGE_LOCAL_BACKENDS,
+    build_storage_config,
+    get_fixture_spec,
+)
 from tools.benchmarks.runner import ServerRunner
 from tools.benchmarks.scenarios import (
     DEFAULT_SCENARIOS,
@@ -506,3 +513,65 @@ def test_server_runner_exits_with_utf8_and_non_utf8_binary_stderr() -> None:
         assert "\ufffd" in message
     finally:
         runner.stop()
+
+
+def _extract_package_name(spec: object) -> str:
+    if not isinstance(spec, str):
+        return ""
+    for sep in ("[", ">", "<", "=", "!", "~", ";"):
+        spec = spec.split(sep, 1)[0]
+    return spec.strip().lower()
+
+
+def test_bench_comparators_group_isolation() -> None:
+    """Verify bench-comparators isolation in pyproject.toml, zero --group duckdb in Makefile, and MinIO ban."""
+    makefile_text = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "--group duckdb" not in makefile_text
+
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dep_groups = pyproject["dependency-groups"]
+    assert "bench-comparators" in dep_groups
+    comparators = dep_groups["bench-comparators"]
+    assert comparators
+
+    project_deps = {_extract_package_name(entry) for entry in pyproject["project"].get("dependencies", [])}
+    optional_deps_map = pyproject["project"].get("optional-dependencies", {})
+    assert "bench-comparators" not in optional_deps_map
+    optional_deps = {_extract_package_name(entry) for entries in optional_deps_map.values() for entry in entries}
+    dev_entries = dep_groups["dev"]
+    assert not any(
+        isinstance(entry, dict) and entry.get("include-group") == "bench-comparators" for entry in dev_entries
+    )
+    dev_direct_deps = {_extract_package_name(entry) for entry in dev_entries if isinstance(entry, str)}
+
+    comparator_exclusive_packages = {
+        "pymysql",
+        "aiomysql",
+        "aiosqlite",
+        "oracledb",
+        "pymssql",
+        "redis",
+        "boto3",
+        "aiobotocore",
+        "obstore",
+        "azure-storage-blob",
+        "django-bolt",
+    }
+    comparator_names = {_extract_package_name(entry) for entry in comparators}
+    assert comparator_exclusive_packages.issubset(comparator_names)
+    assert comparator_exclusive_packages.isdisjoint(project_deps)
+    assert comparator_exclusive_packages.isdisjoint(optional_deps)
+    assert comparator_exclusive_packages.isdisjoint(dev_direct_deps)
+
+    for key, spec in FIXTURE_SPECS.items():
+        assert "minio" not in key.lower()
+        assert "minio" not in spec.image.lower()
+        assert "minio" not in spec.plugin_module.lower()
+    assert all("minio" not in backend.lower() for backend in STORAGE_LOCAL_BACKENDS)
+
+    with pytest.raises(ValueError, match="MinIO"):
+        get_fixture_spec("minio")
+    with pytest.raises(ValueError, match="MinIO"):
+        build_storage_config("minio")
+    with pytest.raises(ValueError, match="MinIO"):
+        load_backend_config({"VTB_BENCH_STORAGE_BACKEND": "minio"})

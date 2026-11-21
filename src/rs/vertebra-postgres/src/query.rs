@@ -74,6 +74,36 @@ where
     }
 }
 
+/// Parse one complete bounded backend [`Message`] already buffered in `buf`, or return `Ok(None)`
+/// when more socket bytes are needed.
+pub(crate) fn parse_buffered_message(buf: &mut BytesMut) -> Result<Option<Message>, PostgresError> {
+    if buf.len() < 5 {
+        return Ok(None);
+    }
+    let raw_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+    if !(4..=MAX_BACKEND_FRAME_LENGTH).contains(&raw_len) {
+        return Err(PostgresError::Protocol(format!(
+            "backend frame length {raw_len} is outside valid bounds 4..={MAX_BACKEND_FRAME_LENGTH}"
+        )));
+    }
+    let total_frame_bytes = 1 + raw_len;
+    if buf.len() < total_frame_bytes {
+        let missing = total_frame_bytes - buf.len();
+        buf.reserve(missing.min(64 * 1024));
+        return Ok(None);
+    }
+    match Message::parse(buf) {
+        Ok(Some(msg)) => Ok(Some(msg)),
+        Ok(None) => Err(PostgresError::Protocol(
+            "backend frame header matched buffered length but Message::parse returned None"
+                .to_string(),
+        )),
+        Err(err) => Err(PostgresError::Protocol(format!(
+            "malformed backend frame: {err}"
+        ))),
+    }
+}
+
 /// Read one bounded backend [`Message`] using the sole protocol parser under an optional non-renewing `deadline`.
 ///
 /// Cancellation-safe on `deadline` expiry: already-received bytes remain intact in `buf` so a subsequent

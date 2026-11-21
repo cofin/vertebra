@@ -1,12 +1,12 @@
-//! PyO3 client bindings for `SyncSQLiteClient`, `AsyncSQLiteClient`, and `broker_engine_capsule`.
+//! PyO3 client bindings for `SyncSQLiteClient`, `SyncSQLiteCursor`, `AsyncSQLiteClient`, `AsyncSQLiteCursor`, and `broker_engine_capsule`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use parking_lot::{Mutex, RwLock};
 use pyo3::prelude::*;
-use pyo3::types::{PyCapsule, PyList, PySequence, PyTuple};
+use pyo3::types::{PyCapsule, PyDict, PyList, PySequence, PyString, PyTuple};
 use vertebra_core::broker::DIALECT_TAG_SQLITE;
 use vertebra_core::dbrpc::DbRpcOp;
 use vertebra_core::shm::ShmRegion;
@@ -16,7 +16,8 @@ use vertebra_db::arrow_shm::{
 };
 use vertebra_db::broker_capsule::{BrokerEngineBackend, BrokerPoolBackend};
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr_and_cancel,
+    ReadyAwaitable, RustDbTaskAwaitable, construct_py_arrow_cursor, ready_ok,
+    spawn_rust_db_task_with_attr_and_cancel,
 };
 use vertebra_db::{
     DbRpcEncodedResponse, DbRpcScalar, PlaceholderStyle, decode_dbrpc_request_frame,
@@ -26,7 +27,7 @@ use vertebra_db::{
 use crate::arrow_bridge::ArrowResultPayload;
 use crate::config::{SqliteClientConfig, SqliteSynchronous};
 use crate::errors::SqliteClientError;
-use crate::value::{BoundParams, SqliteValue};
+use crate::value::{BoundParams, SqliteValue, StatementOutcome};
 use crate::worker::SqlitePool;
 
 const SQLITE_COMPLETION_DRAINER_ATTR: &str = "_vertebra_sqlite_completion_drainer";
@@ -536,10 +537,714 @@ fn arrow_payload_to_py_cursor(py: Python<'_>, payload: ArrowResultPayload) -> Py
     }
 }
 
+/// Reason a cursor rejects a call because of its own state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorStateError {
+    Closed,
+    InvalidArraysize,
+    NegativeFetchSize,
+}
+
+/// Buffered result and PEP 249 attributes shared by the sync and async cursors.
+struct CursorState {
+    closed: bool,
+    columns: Option<Vec<String>>,
+    description: Option<Py<PyTuple>>,
+    rows: VecDeque<Vec<SqliteValue>>,
+    rowcount: i64,
+    lastrowid: Option<i64>,
+    arraysize: usize,
+}
+
+impl CursorState {
+    fn new() -> Self {
+        Self {
+            closed: false,
+            columns: None,
+            description: None,
+            rows: VecDeque::new(),
+            rowcount: -1,
+            lastrowid: None,
+            arraysize: 1,
+        }
+    }
+
+    fn require_open(&self) -> Result<(), CursorStateError> {
+        if self.closed {
+            Err(CursorStateError::Closed)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Replace the buffered result with `outcome` and drop the cached description.
+    fn install(&mut self, outcome: StatementOutcome) {
+        self.columns = outcome.columns;
+        self.description = None;
+        self.rows = VecDeque::from(outcome.rows);
+        self.rowcount = outcome.rowcount;
+        self.lastrowid = outcome.lastrowid;
+    }
+
+    /// Drop the buffered result and reset the statement attributes.
+    fn clear_result(&mut self) {
+        self.columns = None;
+        self.description = None;
+        self.rows = VecDeque::new();
+        self.rowcount = -1;
+        self.lastrowid = None;
+    }
+
+    fn take_one(&mut self) -> Result<Option<Vec<SqliteValue>>, CursorStateError> {
+        self.require_open()?;
+        Ok(self.rows.pop_front())
+    }
+
+    fn take_many(&mut self, size: Option<i64>) -> Result<Vec<Vec<SqliteValue>>, CursorStateError> {
+        self.require_open()?;
+        let wanted = match size {
+            None => self.arraysize,
+            Some(n) => usize::try_from(n).map_err(|_| CursorStateError::NegativeFetchSize)?,
+        };
+        let count = wanted.min(self.rows.len());
+        Ok(self.rows.drain(..count).collect())
+    }
+
+    fn take_all(&mut self) -> Result<Vec<Vec<SqliteValue>>, CursorStateError> {
+        self.require_open()?;
+        Ok(std::mem::take(&mut self.rows).into())
+    }
+
+    fn set_arraysize(&mut self, value: i64) -> Result<(), CursorStateError> {
+        match usize::try_from(value) {
+            Ok(size) if size >= 1 => {
+                self.arraysize = size;
+                Ok(())
+            }
+            _ => Err(CursorStateError::InvalidArraysize),
+        }
+    }
+
+    /// Close the cursor; a second call changes nothing.
+    fn close(&mut self) {
+        self.closed = true;
+        self.clear_result();
+    }
+}
+
+fn cursor_state_err(py: Python<'_>, err: CursorStateError) -> PyErr {
+    let programming = |message: &str| SqliteClientError::Programming {
+        message: message.to_string(),
+        code: None,
+        sqlstate: None,
+    };
+    let client_err = match err {
+        CursorStateError::Closed => SqliteClientError::InvalidInput("cursor is closed".to_string()),
+        CursorStateError::InvalidArraysize => programming("arraysize must be at least 1"),
+        CursorStateError::NegativeFetchSize => programming("fetchmany size must not be negative"),
+    };
+    client_err.into_py_err(py)
+}
+
+fn row_to_py_tuple<'py>(py: Python<'py>, row: Vec<SqliteValue>) -> PyResult<Bound<'py, PyTuple>> {
+    PyTuple::new(py, row.into_iter().map(|value| value.into_py(py)))
+}
+
+fn rows_to_py_list<'py>(
+    py: Python<'py>,
+    rows: Vec<Vec<SqliteValue>>,
+) -> PyResult<Bound<'py, PyList>> {
+    let tuples = rows
+        .into_iter()
+        .map(|row| row_to_py_tuple(py, row))
+        .collect::<PyResult<Vec<_>>>()?;
+    PyList::new(py, tuples)
+}
+
+fn description_tuple<'py>(py: Python<'py>, columns: &[String]) -> PyResult<Bound<'py, PyTuple>> {
+    let entries = columns
+        .iter()
+        .map(|name| {
+            let name_obj = name.as_str().into_pyobject(py)?.into_any().unbind();
+            PyTuple::new(
+                py,
+                [
+                    name_obj,
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                ],
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    PyTuple::new(py, entries)
+}
+
+fn names_to_py_tuple<'py>(py: Python<'py>, columns: &[String]) -> PyResult<Bound<'py, PyTuple>> {
+    PyTuple::new(
+        py,
+        columns
+            .iter()
+            .map(|name| PyString::intern(py, name.as_str())),
+    )
+}
+
+fn outcome_to_rows<'py>(
+    py: Python<'py>,
+    outcome: StatementOutcome,
+) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyTuple>)> {
+    let Some(columns) = outcome.columns else {
+        return Ok((PyList::empty(py), PyTuple::empty(py)));
+    };
+    let names = names_to_py_tuple(py, &columns)?;
+    let rows = rows_to_py_list(py, outcome.rows)?;
+    Ok((rows, names))
+}
+
+fn outcome_to_dicts<'py>(
+    py: Python<'py>,
+    outcome: StatementOutcome,
+) -> PyResult<Bound<'py, PyList>> {
+    let Some(columns) = outcome.columns else {
+        return Ok(PyList::empty(py));
+    };
+    let keys = names_to_py_tuple(py, &columns)?;
+    let mut dicts = Vec::with_capacity(outcome.rows.len());
+    for row in outcome.rows {
+        let dict = PyDict::new(py);
+        for (key, value) in keys.iter_borrowed().zip(row) {
+            dict.set_item(key, value.into_py(py))?;
+        }
+        dicts.push(dict);
+    }
+    PyList::new(py, dicts)
+}
+
+fn outcome_to_value(
+    py: Python<'_>,
+    outcome: StatementOutcome,
+) -> Result<Py<PyAny>, SqliteClientError> {
+    if outcome.columns.is_none() {
+        return Err(SqliteClientError::NotFound(
+            "Query returned no rows".to_string(),
+        ));
+    }
+    let Some(first_row) = outcome.rows.into_iter().next() else {
+        return Err(SqliteClientError::NotFound(
+            "Query returned no rows".to_string(),
+        ));
+    };
+    Ok(first_row
+        .into_iter()
+        .next()
+        .map_or_else(|| py.None(), |value| value.into_py(py)))
+}
+
+const fn outcome_to_dml(outcome: &StatementOutcome) -> (i64, Option<i64>) {
+    let changes = if outcome.rowcount < 0 {
+        0
+    } else {
+        outcome.rowcount
+    };
+    (changes, outcome.lastrowid)
+}
+
+/// Held execute lock that can cross the `py.detach` boundary.
+///
+/// A `parking_lot` guard is not `Send`, so it cannot be returned from a detached closure.
+/// This gate takes the lock while detached and releases it on drop, after the caller has
+/// installed or cleared the result with the interpreter attached.
+struct ExecuteGate<'a>(&'a Mutex<()>);
+
+impl<'a> ExecuteGate<'a> {
+    fn acquire(lock: &'a Mutex<()>) -> Self {
+        std::mem::forget(lock.lock());
+        Self(lock)
+    }
+}
+
+impl Drop for ExecuteGate<'_> {
+    fn drop(&mut self) {
+        // SAFETY: `acquire` locked this mutex and forgot its guard, so this gate owns the lock.
+        unsafe { self.0.force_unlock() }
+    }
+}
+
+/// Synchronous PEP 249 cursor over a native SQLite worker pool.
+#[pyclass(name = "SyncSQLiteCursor", frozen, immutable_type)]
+pub struct SyncSQLiteCursor {
+    pool: Arc<SqlitePool>,
+    state: Mutex<CursorState>,
+    execute_lock: Mutex<()>,
+    lazy_begin: bool,
+}
+
+impl SyncSQLiteCursor {
+    fn new(pool: Arc<SqlitePool>, lazy_begin: bool) -> Self {
+        Self {
+            pool,
+            state: Mutex::new(CursorState::new()),
+            execute_lock: Mutex::new(()),
+            lazy_begin,
+        }
+    }
+
+    fn require_open(&self, py: Python<'_>) -> PyResult<()> {
+        self.state
+            .lock()
+            .require_open()
+            .map_err(|e| cursor_state_err(py, e))
+    }
+
+    /// Clear the buffered result and convert `err` for raising.
+    fn fail(&self, py: Python<'_>, err: SqliteClientError) -> PyErr {
+        self.state.lock().clear_result();
+        err.into_py_err(py)
+    }
+
+    /// Run one statement call under the execute lock and leave its outcome on the cursor.
+    ///
+    /// The execute lock is taken with the interpreter detached and released after the
+    /// result is installed or cleared. The state lock is taken only after re-attaching.
+    fn run_and_install<F>(&self, py: Python<'_>, begin: bool, run: F) -> PyResult<()>
+    where
+        F: FnOnce(&SqlitePool) -> Result<StatementOutcome, SqliteClientError> + Send,
+    {
+        let pool = &self.pool;
+        let execute_lock = &self.execute_lock;
+        let (gate, result) = py.detach(move || {
+            let gate = ExecuteGate::acquire(execute_lock);
+            let result = if begin && !pool.in_transaction() {
+                pool.begin("IMMEDIATE".to_string()).and_then(|()| run(pool))
+            } else {
+                run(pool)
+            };
+            (gate, result)
+        });
+        let mut state = self.state.lock();
+        let raised = match result {
+            Ok(outcome) => {
+                if state.closed {
+                    state.clear_result();
+                } else {
+                    state.install(outcome);
+                }
+                None
+            }
+            Err(err) => {
+                state.clear_result();
+                Some(err)
+            }
+        };
+        drop(state);
+        drop(gate);
+        raised.map_or(Ok(()), |err| Err(err.into_py_err(py)))
+    }
+}
+
+#[pymethods]
+impl SyncSQLiteCursor {
+    #[getter]
+    pub fn description(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        let columns = {
+            let state = self.state.lock();
+            if let Some(cached) = &state.description {
+                return Ok(Some(cached.clone_ref(py)));
+            }
+            match &state.columns {
+                Some(columns) => columns.clone(),
+                None => return Ok(None),
+            }
+        };
+        let built = description_tuple(py, &columns)?.unbind();
+        let mut state = self.state.lock();
+        if let Some(cached) = &state.description {
+            return Ok(Some(cached.clone_ref(py)));
+        }
+        if state.columns.as_deref() == Some(columns.as_slice()) {
+            state.description = Some(built.clone_ref(py));
+        }
+        Ok(Some(built))
+    }
+
+    #[getter]
+    pub fn rowcount(&self) -> i64 {
+        self.state.lock().rowcount
+    }
+
+    #[getter]
+    pub fn lastrowid(&self) -> Option<i64> {
+        self.state.lock().lastrowid
+    }
+
+    #[getter]
+    pub fn arraysize(&self) -> usize {
+        self.state.lock().arraysize
+    }
+
+    #[setter]
+    pub fn set_arraysize(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        self.state
+            .lock()
+            .set_arraysize(value)
+            .map_err(|e| cursor_state_err(py, e))
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn execute<'py>(
+        slf: &Bound<'py, Self>,
+        sql: &str,
+        params: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let this = slf.get();
+        this.require_open(py)?;
+        let bound = BoundParams::from_py(params).map_err(|e| this.fail(py, e))?;
+        this.run_and_install(py, this.lazy_begin, move |pool| pool.run(sql, bound))?;
+        Ok(slf.clone())
+    }
+
+    pub fn executemany<'py>(
+        slf: &Bound<'py, Self>,
+        sql: &str,
+        seq_of_params: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let this = slf.get();
+        this.require_open(py)?;
+        let params_seq = extract_params_sequence(seq_of_params).map_err(|e| this.fail(py, e))?;
+        let begin = this.lazy_begin && !params_seq.is_empty();
+        let sql_owned = sql.to_string();
+        this.run_and_install(py, begin, move |pool| pool.run_many(sql_owned, params_seq))?;
+        Ok(slf.clone())
+    }
+
+    pub fn fetchone<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        let row = self
+            .state
+            .lock()
+            .take_one()
+            .map_err(|e| cursor_state_err(py, e))?;
+        row.map(|values| row_to_py_tuple(py, values)).transpose()
+    }
+
+    #[pyo3(signature = (size = None))]
+    pub fn fetchmany<'py>(
+        &self,
+        py: Python<'py>,
+        size: Option<i64>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let rows = self
+            .state
+            .lock()
+            .take_many(size)
+            .map_err(|e| cursor_state_err(py, e))?;
+        rows_to_py_list(py, rows)
+    }
+
+    pub fn fetchall<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let rows = self
+            .state
+            .lock()
+            .take_all()
+            .map_err(|e| cursor_state_err(py, e))?;
+        rows_to_py_list(py, rows)
+    }
+
+    pub fn close(&self) {
+        self.state.lock().close();
+    }
+}
+
+/// In-flight marker of one async cursor statement.
+///
+/// The guard travels with the task output into the completion mapper, which installs or
+/// clears the result through `settle_with`. A guard dropped unsettled (cancelled awaitable,
+/// panicked task, failed bind, or failed spawn) clears the result itself. The in-flight flag
+/// is released last, so a later statement never races this one for the cursor state.
+struct ExecutingGuard {
+    state: Arc<Mutex<CursorState>>,
+    executing: Arc<AtomicBool>,
+    settled: Arc<AtomicBool>,
+}
+
+impl ExecutingGuard {
+    fn settle_with(self, apply: impl FnOnce(&mut CursorState)) {
+        let mut state = self.state.lock();
+        apply(&mut state);
+        self.settled.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for ExecutingGuard {
+    fn drop(&mut self) {
+        if !self.settled.load(Ordering::Acquire) {
+            let mut state = self.state.lock();
+            state.clear_result();
+            self.settled.store(true, Ordering::Release);
+        }
+        self.executing.store(false, Ordering::Release);
+    }
+}
+
+/// Awaitable PEP 249-shaped cursor over a native SQLite worker pool.
+#[pyclass(name = "AsyncSQLiteCursor", frozen, immutable_type)]
+pub struct AsyncSQLiteCursor {
+    pool: Arc<SqlitePool>,
+    state: Arc<Mutex<CursorState>>,
+    executing: Arc<AtomicBool>,
+    lazy_begin: bool,
+}
+
+impl AsyncSQLiteCursor {
+    fn new(pool: Arc<SqlitePool>, lazy_begin: bool) -> Self {
+        Self {
+            pool,
+            state: Arc::new(Mutex::new(CursorState::new())),
+            executing: Arc::new(AtomicBool::new(false)),
+            lazy_begin,
+        }
+    }
+
+    /// Check that the cursor is open and idle, then mark it in flight.
+    fn begin_statement(&self, py: Python<'_>) -> PyResult<ExecutingGuard> {
+        self.state
+            .lock()
+            .require_open()
+            .map_err(|e| cursor_state_err(py, e))?;
+        if self
+            .executing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(
+                SqliteClientError::InvalidInput("cursor is already executing".to_string())
+                    .into_py_err(py),
+            );
+        }
+        Ok(ExecutingGuard {
+            state: Arc::clone(&self.state),
+            executing: Arc::clone(&self.executing),
+            settled: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Spawn one statement call and resolve its awaitable to the cursor object.
+    ///
+    /// Cancelling the awaitable interrupts the operation and clears the result at once;
+    /// the completion mapper does not run for a cancelled awaitable.
+    fn spawn_statement<'py, F>(
+        slf: &Bound<'py, Self>,
+        guard: ExecutingGuard,
+        begin: bool,
+        run: F,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>>
+    where
+        F: FnOnce(&SqlitePool, u64) -> Result<StatementOutcome, SqliteClientError> + Send + 'static,
+    {
+        let this = slf.get();
+        let pool = Arc::clone(&this.pool);
+        let op_id = pool.next_op_id();
+        let cancel_pool = Arc::clone(&pool);
+        let cancel_state = Arc::clone(&this.state);
+        let cancel_settled = Arc::clone(&guard.settled);
+        let cursor = slf.clone().unbind();
+
+        spawn_rust_db_task_with_attr_and_cancel(
+            slf.py(),
+            async move {
+                let joined = tokio::task::spawn_blocking(move || {
+                    if begin && !pool.in_transaction() {
+                        pool.begin_with_op_id(op_id, "IMMEDIATE".to_string())?;
+                    }
+                    run(&pool, op_id)
+                })
+                .await;
+                let result = joined.unwrap_or_else(|e| {
+                    Err(SqliteClientError::Operational {
+                        message: e.to_string(),
+                        code: None,
+                        sqlstate: Some("08000"),
+                        is_transient: false,
+                    })
+                });
+                match result {
+                    Ok(outcome) => Ok((outcome, guard)),
+                    Err(err) => Err((err, guard)),
+                }
+            },
+            move |_py, (outcome, guard): (StatementOutcome, ExecutingGuard)| {
+                guard.settle_with(|state| {
+                    if state.closed {
+                        state.clear_result();
+                    } else {
+                        state.install(outcome);
+                    }
+                });
+                Ok(cursor.into_any())
+            },
+            |py, (err, guard): (SqliteClientError, ExecutingGuard)| {
+                guard.settle_with(CursorState::clear_result);
+                err.into_py_err(py)
+            },
+            move || {
+                cancel_pool.cancel_operation(op_id);
+                let mut state = cancel_state.lock();
+                if !cancel_settled.load(Ordering::Acquire) {
+                    state.clear_result();
+                }
+            },
+            SQLITE_COMPLETION_DRAINER_ATTR,
+        )
+    }
+}
+
+#[pymethods]
+impl AsyncSQLiteCursor {
+    #[getter]
+    pub fn description(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        let columns = {
+            let state = self.state.lock();
+            if let Some(cached) = &state.description {
+                return Ok(Some(cached.clone_ref(py)));
+            }
+            match &state.columns {
+                Some(columns) => columns.clone(),
+                None => return Ok(None),
+            }
+        };
+        let built = description_tuple(py, &columns)?.unbind();
+        let mut state = self.state.lock();
+        if let Some(cached) = &state.description {
+            return Ok(Some(cached.clone_ref(py)));
+        }
+        if state.columns.as_deref() == Some(columns.as_slice()) {
+            state.description = Some(built.clone_ref(py));
+        }
+        Ok(Some(built))
+    }
+
+    #[getter]
+    pub fn rowcount(&self) -> i64 {
+        self.state.lock().rowcount
+    }
+
+    #[getter]
+    pub fn lastrowid(&self) -> Option<i64> {
+        self.state.lock().lastrowid
+    }
+
+    #[getter]
+    pub fn arraysize(&self) -> usize {
+        self.state.lock().arraysize
+    }
+
+    #[setter]
+    pub fn set_arraysize(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        self.state
+            .lock()
+            .set_arraysize(value)
+            .map_err(|e| cursor_state_err(py, e))
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn execute<'py>(
+        slf: &Bound<'py, Self>,
+        sql: &str,
+        params: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let py = slf.py();
+        let this = slf.get();
+        let guard = this.begin_statement(py)?;
+        let bound = BoundParams::from_py(params).map_err(|e| e.into_py_err(py))?;
+        let sql_owned = sql.to_string();
+        Self::spawn_statement(slf, guard, this.lazy_begin, move |pool, op_id| {
+            pool.run_with_op_id(op_id, &sql_owned, bound)
+        })
+    }
+
+    pub fn executemany<'py>(
+        slf: &Bound<'py, Self>,
+        sql: &str,
+        seq_of_params: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let py = slf.py();
+        let this = slf.get();
+        let guard = this.begin_statement(py)?;
+        let params_seq = extract_params_sequence(seq_of_params).map_err(|e| e.into_py_err(py))?;
+        let begin = this.lazy_begin && !params_seq.is_empty();
+        let sql_owned = sql.to_string();
+        Self::spawn_statement(slf, guard, begin, move |pool, op_id| {
+            pool.run_many_with_op_id(op_id, sql_owned, params_seq)
+        })
+    }
+
+    pub fn fetchone(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
+        let row = self
+            .state
+            .lock()
+            .take_one()
+            .map_err(|e| cursor_state_err(py, e))?;
+        let value = match row {
+            Some(values) => row_to_py_tuple(py, values)?.into_any().unbind(),
+            None => py.None(),
+        };
+        ready_ok(py, value)
+    }
+
+    #[pyo3(signature = (size = None))]
+    pub fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<ReadyAwaitable>> {
+        let rows = self
+            .state
+            .lock()
+            .take_many(size)
+            .map_err(|e| cursor_state_err(py, e))?;
+        let value = rows_to_py_list(py, rows)?.into_any().unbind();
+        ready_ok(py, value)
+    }
+
+    pub fn fetchall(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
+        let rows = self
+            .state
+            .lock()
+            .take_all()
+            .map_err(|e| cursor_state_err(py, e))?;
+        let value = rows_to_py_list(py, rows)?.into_any().unbind();
+        ready_ok(py, value)
+    }
+
+    pub fn close(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
+        self.state.lock().close();
+        ready_ok(py, py.None())
+    }
+}
+
 /// Synchronous native SQLite 3.45+ client bridged via dedicated worker threads.
 #[pyclass(name = "SyncSQLiteClient", frozen, immutable_type)]
 pub struct SyncSQLiteClient {
     pool: Arc<SqlitePool>,
+    last_statement_rowid: AtomicI64,
+}
+
+impl SyncSQLiteClient {
+    fn run_once(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<StatementOutcome> {
+        let bound = BoundParams::from_py(params).map_err(|e| e.into_py_err(py))?;
+        let pool = &self.pool;
+        let outcome = py
+            .detach(|| pool.run(sql, bound))
+            .map_err(|e| e.into_py_err(py))?;
+        self.last_statement_rowid
+            .store(outcome.lastrowid.unwrap_or(0), Ordering::Release);
+        Ok(outcome)
+    }
 }
 
 #[pymethods]
@@ -583,7 +1288,10 @@ impl SyncSQLiteClient {
         let pool = py
             .detach(|| SqlitePool::open(config))
             .map_err(|e| e.into_py_err(py))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            last_statement_rowid: AtomicI64::new(0),
+        })
     }
 
     #[getter]
@@ -604,6 +1312,14 @@ impl SyncSQLiteClient {
     #[getter]
     pub fn last_insert_rowid(&self) -> i64 {
         self.pool.last_insert_rowid()
+    }
+
+    #[getter]
+    pub fn last_statement_rowid(&self) -> Option<i64> {
+        match self.last_statement_rowid.load(Ordering::Acquire) {
+            0 => None,
+            rowid => Some(rowid),
+        }
     }
 
     #[pyo3(signature = (sql, params = None))]
@@ -658,22 +1374,6 @@ impl SyncSQLiteClient {
             py_list.append(item.into_py(py)?)?;
         }
         Ok(py_list.unbind())
-    }
-
-    #[pyo3(signature = (sql, params = None))]
-    pub fn fetch_all(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let bound = BoundParams::from_py(params).map_err(|e| e.into_py_err(py))?;
-        let pool = Arc::clone(&self.pool);
-        let sql_owned = sql.to_string();
-        let qr = py
-            .detach(move || pool.fetch_all(sql_owned, bound))
-            .map_err(|e| e.into_py_err(py))?;
-        qr.into_py(py)
     }
 
     #[pyo3(signature = (sql, params = None, *, batch_size = 8192))]
@@ -768,7 +1468,57 @@ impl SyncSQLiteClient {
     pub fn to_async(&self) -> AsyncSQLiteClient {
         AsyncSQLiteClient {
             pool: Arc::clone(&self.pool),
+            last_statement_rowid: Arc::new(AtomicI64::new(0)),
         }
+    }
+
+    #[pyo3(signature = (*, lazy_begin = false))]
+    pub fn cursor(&self, lazy_begin: bool) -> SyncSQLiteCursor {
+        SyncSQLiteCursor::new(Arc::clone(&self.pool), lazy_begin)
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_rows<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyTuple>)> {
+        let outcome = self.run_once(py, sql, params)?;
+        outcome_to_rows(py, outcome)
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_dicts<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let outcome = self.run_once(py, sql, params)?;
+        outcome_to_dicts(py, outcome)
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let outcome = self.run_once(py, sql, params)?;
+        outcome_to_value(py, outcome).map_err(|e| e.into_py_err(py))
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(i64, Option<i64>)> {
+        let outcome = self.run_once(py, sql, params)?;
+        Ok(outcome_to_dml(&outcome))
     }
 }
 
@@ -776,6 +1526,50 @@ impl SyncSQLiteClient {
 #[pyclass(name = "AsyncSQLiteClient", frozen, immutable_type)]
 pub struct AsyncSQLiteClient {
     pool: Arc<SqlitePool>,
+    last_statement_rowid: Arc<AtomicI64>,
+}
+
+impl AsyncSQLiteClient {
+    fn spawn_single_call<'py, M>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        map_ok: M,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>>
+    where
+        M: FnOnce(Python<'_>, StatementOutcome) -> PyResult<Py<PyAny>> + Send + 'static,
+    {
+        let bound = BoundParams::from_py(params).map_err(|e| e.into_py_err(py))?;
+        let pool = Arc::clone(&self.pool);
+        let sql_owned = sql.to_string();
+        let op_id = pool.next_op_id();
+        let cancel_pool = Arc::clone(&pool);
+        let last_rowid = Arc::clone(&self.last_statement_rowid);
+
+        spawn_rust_db_task_with_attr_and_cancel(
+            py,
+            async move {
+                tokio::task::spawn_blocking(move || pool.run_with_op_id(op_id, &sql_owned, bound))
+                    .await
+                    .map_err(|e| SqliteClientError::Operational {
+                        message: e.to_string(),
+                        code: None,
+                        sqlstate: Some("08000"),
+                        is_transient: false,
+                    })?
+            },
+            move |py, outcome| {
+                last_rowid.store(outcome.lastrowid.unwrap_or(0), Ordering::Release);
+                map_ok(py, outcome)
+            },
+            |py, err| err.into_py_err(py),
+            move || {
+                cancel_pool.cancel_operation(op_id);
+            },
+            SQLITE_COMPLETION_DRAINER_ATTR,
+        )
+    }
 }
 
 #[pymethods]
@@ -819,7 +1613,10 @@ impl AsyncSQLiteClient {
         let pool = py
             .detach(|| SqlitePool::open(config))
             .map_err(|e| e.into_py_err(py))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            last_statement_rowid: Arc::new(AtomicI64::new(0)),
+        })
     }
 
     #[getter]
@@ -840,6 +1637,14 @@ impl AsyncSQLiteClient {
     #[getter]
     pub fn last_insert_rowid(&self) -> i64 {
         self.pool.last_insert_rowid()
+    }
+
+    #[getter]
+    pub fn last_statement_rowid(&self) -> Option<i64> {
+        match self.last_statement_rowid.load(Ordering::Acquire) {
+            0 => None,
+            rowid => Some(rowid),
+        }
     }
 
     pub fn cancel(&self) -> PyResult<()> {
@@ -984,42 +1789,6 @@ impl AsyncSQLiteClient {
                 }
                 Ok(py_list.unbind().into_any())
             },
-            |py, err| err.into_py_err(py),
-            move || {
-                cancel_pool.cancel_operation(op_id);
-            },
-            SQLITE_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, params = None))]
-    pub fn fetch_all<'py>(
-        &self,
-        py: Python<'py>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
-        let bound = BoundParams::from_py(params).map_err(|e| e.into_py_err(py))?;
-        let pool = Arc::clone(&self.pool);
-        let sql_owned = sql.to_string();
-        let op_id = pool.next_op_id();
-        let cancel_pool = Arc::clone(&pool);
-
-        spawn_rust_db_task_with_attr_and_cancel(
-            py,
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    pool.fetch_all_with_op_id(op_id, sql_owned, bound)
-                })
-                .await
-                .map_err(|e| SqliteClientError::Operational {
-                    message: e.to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })?
-            },
-            |py, qr| qr.into_py(py),
             |py, err| err.into_py_err(py),
             move || {
                 cancel_pool.cancel_operation(op_id);
@@ -1288,7 +2057,65 @@ impl AsyncSQLiteClient {
     pub fn to_sync(&self) -> SyncSQLiteClient {
         SyncSQLiteClient {
             pool: Arc::clone(&self.pool),
+            last_statement_rowid: AtomicI64::new(0),
         }
+    }
+
+    #[pyo3(signature = (*, lazy_begin = false))]
+    pub fn cursor(&self, lazy_begin: bool) -> AsyncSQLiteCursor {
+        AsyncSQLiteCursor::new(Arc::clone(&self.pool), lazy_begin)
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_rows<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_single_call(py, sql, params, |py, outcome| {
+            let (rows, names) = outcome_to_rows(py, outcome)?;
+            Ok((rows, names).into_pyobject(py)?.into_any().unbind())
+        })
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_dicts<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_single_call(py, sql, params, |py, outcome| {
+            Ok(outcome_to_dicts(py, outcome)?.into_any().unbind())
+        })
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn fetch_value<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_single_call(py, sql, params, |py, outcome| {
+            outcome_to_value(py, outcome).map_err(|e| e.into_py_err(py))
+        })
+    }
+
+    #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
+    pub fn execute_dml<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.spawn_single_call(py, sql, params, |py, outcome| {
+            Ok(outcome_to_dml(&outcome)
+                .into_pyobject(py)?
+                .into_any()
+                .unbind())
+        })
     }
 }
 

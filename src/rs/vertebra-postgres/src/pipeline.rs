@@ -163,6 +163,7 @@ pub(crate) struct PlannedPipelineOp {
     pub expect_parse: bool,
     pub expect_stmt_describe: bool,
     pub expect_portal_describe: bool,
+    pub known_columns: Vec<Column>,
     pub cache_candidate: Option<(String, StatementKey)>,
 }
 
@@ -574,20 +575,19 @@ impl PostgresConnection {
                         failing_index: idx,
                     });
                 }
-                frontend::describe(b'P', "", &mut outbound).map_err(|e| {
-                    PostgresError::Protocol(format!("failed to encode pipeline Describe(P): {e}"))
-                })?;
                 frontend::execute("", 0, &mut outbound).map_err(|e| {
                     PostgresError::Protocol(format!("failed to encode pipeline Execute: {e}"))
                 })?;
 
+                let known_columns = cached.description.portal_columns(&result_formats);
                 planned_ops.push(PlannedPipelineOp {
                     sql: op.sql.clone(),
                     expected_param_count: resolved.parameters.len(),
                     requested_result_formats: result_formats,
                     expect_parse: false,
                     expect_stmt_describe: false,
-                    expect_portal_describe: true,
+                    expect_portal_describe: false,
+                    known_columns,
                     cache_candidate: None,
                 });
             } else if let Some(desc) = warm_unnamed_desc {
@@ -670,6 +670,7 @@ impl PostgresConnection {
                     expect_parse: true,
                     expect_stmt_describe: false,
                     expect_portal_describe: true,
+                    known_columns: Vec::new(),
                     cache_candidate: None,
                 });
             } else {
@@ -745,6 +746,7 @@ impl PostgresConnection {
                     expect_parse: true,
                     expect_stmt_describe: true,
                     expect_portal_describe: true,
+                    known_columns: Vec::new(),
                     cache_candidate,
                 });
             }
@@ -1098,6 +1100,7 @@ impl PostgresConnection {
                             phase = if plan.expect_portal_describe {
                                 OpDemuxPhase::PortalDesc
                             } else {
+                                portal_columns = plan.known_columns.clone();
                                 OpDemuxPhase::RowsOrComplete
                             };
                             Ok(None)

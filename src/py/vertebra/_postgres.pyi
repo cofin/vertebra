@@ -1,8 +1,8 @@
 """Type stubs for the vertebra._postgres native extension module."""
 
-from collections.abc import Awaitable, Buffer, Mapping, Sequence
+from collections.abc import Awaitable, Buffer, Callable, Mapping, Sequence
 from types import TracebackType
-from typing import final
+from typing import Any, Self, final
 
 from vertebra._vertebra import ArrowCursor as _NativeArrowCursor
 from vertebra.db.adapters.postgres.types import (
@@ -55,6 +55,62 @@ class SyncPostgresClient:
         iam_auth_options: Mapping[str, str] | None = None,
     ) -> SyncPostgresClient:
         """Validate and construct a disconnected synchronous PostgreSQL client without network I/O."""
+        ...
+
+    def cursor(self, *, lazy_begin: bool = False) -> SyncPostgresCursor:
+        """Create a synchronous PEP 249 cursor bound to this client session without network I/O."""
+        ...
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run one statement and return its rows and column names."""
+        ...
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run one statement and return one dictionary per row."""
+        ...
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        """Run one statement and return the first column of the first row."""
+        ...
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, None]:
+        """Run one statement and return its row count and no last row id."""
+        ...
+
+    def attach_lease(self, release: Callable[[], None]) -> None:
+        """Attach a broker lease release callable, releasing any previously held lease."""
+        ...
+
+    def release_lease(self) -> None:
+        """Release any attached broker lease immediately. Idempotent."""
         ...
 
     def connect(self) -> None:
@@ -225,6 +281,70 @@ class SyncPostgresClient:
         ...
 
 @final
+class SyncPostgresCursor:
+    """Synchronous PEP 249 cursor bound to a PostgreSQL session."""
+
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> SyncPostgresCursor:
+        """Execute a single SQL statement and buffer its result set on this cursor."""
+        ...
+
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> SyncPostgresCursor:
+        """Execute a single SQL statement once per parameter set and sum affected rows."""
+        ...
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next buffered row tuple, or None when exhausted."""
+        ...
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to size (or arraysize when size is None) buffered row tuples."""
+        ...
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return all remaining buffered row tuples and leave the cursor exhausted."""
+        ...
+
+    def close(self) -> None:
+        """Close the cursor and release buffered rows. Idempotent."""
+        ...
+
+    @property
+    def description(self) -> tuple[tuple[str, int, None, None, None, None, None], ...] | None:
+        """Return 7-item column description tuples, or None when no result set is present."""
+        ...
+
+    @property
+    def rowcount(self) -> int:
+        """Return the number of rows returned or affected, or -1 before execute/without count."""
+        ...
+
+    @property
+    def lastrowid(self) -> Any | None:
+        """Return None (PostgreSQL does not populate a PEP 249 lastrowid)."""
+        ...
+
+    @property
+    def arraysize(self) -> int:
+        """Return the default batch size used by fetchmany()."""
+        ...
+
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        """Set the default batch size used by fetchmany() (must be >= 1)."""
+        ...
+
+@final
 class AsyncPostgresClient:
     """Asynchronous physical PostgreSQL Protocol 3.0 client."""
 
@@ -259,6 +379,62 @@ class AsyncPostgresClient:
         iam_auth_options: Mapping[str, str] | None = None,
     ) -> AsyncPostgresClient:
         """Validate and construct a disconnected asynchronous PostgreSQL client without network I/O."""
+        ...
+
+    def cursor(self, *, lazy_begin: bool = False) -> AsyncPostgresCursor:
+        """Create an asynchronous PEP 249 cursor bound to this client session without network I/O."""
+        ...
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Awaitable[tuple[list[tuple[Any, ...]], tuple[str, ...]]]:
+        """Run one statement asynchronously and return its rows and column names."""
+        ...
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Awaitable[list[dict[str, Any]]]:
+        """Run one statement asynchronously and return one dictionary per row."""
+        ...
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Awaitable[Any]:
+        """Run one statement asynchronously and return the first column of the first row."""
+        ...
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Awaitable[tuple[int, None]]:
+        """Run one statement asynchronously and return its row count and no last row id."""
+        ...
+
+    def attach_lease(self, release: Callable[[], None]) -> None:
+        """Attach a broker lease release callable, releasing any previously held lease."""
+        ...
+
+    def release_lease(self) -> None:
+        """Release any attached broker lease immediately. Idempotent."""
         ...
 
     def connect(self) -> Awaitable[None]:
@@ -439,6 +615,70 @@ class AsyncPostgresClient:
         ...
 
 @final
+class AsyncPostgresCursor:
+    """Asynchronous PEP 249 cursor bound to a PostgreSQL session."""
+
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Awaitable[Self]:
+        """Execute a single SQL statement asynchronously and buffer its result set on this cursor."""
+        ...
+
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> Awaitable[Self]:
+        """Execute a single SQL statement asynchronously once per parameter set and sum affected rows."""
+        ...
+
+    def fetchone(self) -> Awaitable[tuple[Any, ...] | None]:
+        """Return the next buffered row tuple, or None when exhausted."""
+        ...
+
+    def fetchmany(self, size: int | None = None) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return up to size (or arraysize when size is None) buffered row tuples."""
+        ...
+
+    def fetchall(self) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return all remaining buffered row tuples and leave the cursor exhausted."""
+        ...
+
+    def close(self) -> Awaitable[None]:
+        """Close the cursor and release buffered rows. Idempotent."""
+        ...
+
+    @property
+    def description(self) -> tuple[tuple[str, int, None, None, None, None, None], ...] | None:
+        """Return 7-item column description tuples, or None when no result set is present."""
+        ...
+
+    @property
+    def rowcount(self) -> int:
+        """Return the number of rows returned or affected, or -1 before execute/without count."""
+        ...
+
+    @property
+    def lastrowid(self) -> Any | None:
+        """Return None (PostgreSQL does not populate a PEP 249 lastrowid)."""
+        ...
+
+    @property
+    def arraysize(self) -> int:
+        """Return the default batch size used by fetchmany()."""
+        ...
+
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        """Set the default batch size used by fetchmany() (must be >= 1)."""
+        ...
+
+@final
 class SyncPostgresPool:
     """Synchronous physical PostgreSQL Protocol 3.0 connection pool."""
 
@@ -485,6 +725,54 @@ class SyncPostgresPool:
 
     def acquire(self) -> SyncPostgresClient:
         """Acquire a concrete pooled physical connection lease."""
+        ...
+
+    def cursor(self, *, lazy_begin: bool = False) -> SyncPostgresCursor:
+        """Create a synchronous PEP 249 cursor backed by this pool's one-shot path without I/O."""
+        ...
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Run one statement and return its rows and column names."""
+        ...
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run one statement and return one dictionary per row."""
+        ...
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        """Run one statement and return the first column of the first row."""
+        ...
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, None]:
+        """Run one statement and return its row count and no last row id."""
         ...
 
     def close(self) -> None:
@@ -584,6 +872,54 @@ class AsyncPostgresPool:
 
     def acquire(self) -> Awaitable[AsyncPostgresClient]:
         """Acquire a concrete pooled physical connection lease asynchronously."""
+        ...
+
+    def cursor(self, *, lazy_begin: bool = False) -> AsyncPostgresCursor:
+        """Create an asynchronous PEP 249 cursor backed by this pool's one-shot path without I/O."""
+        ...
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Awaitable[tuple[list[tuple[Any, ...]], tuple[str, ...]]]:
+        """Run one statement asynchronously and return its rows and column names."""
+        ...
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Awaitable[list[dict[str, Any]]]:
+        """Run one statement asynchronously and return one dictionary per row."""
+        ...
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Awaitable[Any]:
+        """Run one statement asynchronously and return the first column of the first row."""
+        ...
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Awaitable[tuple[int, None]]:
+        """Run one statement asynchronously and return its row count and no last row id."""
         ...
 
     def close(self) -> Awaitable[None]:
@@ -995,6 +1331,7 @@ __all__ = [
     "AsyncPostgresClient",
     "AsyncPostgresCopyIn",
     "AsyncPostgresCopyOut",
+    "AsyncPostgresCursor",
     "AsyncPostgresListener",
     "AsyncPostgresPool",
     "AsyncPostgresPortal",
@@ -1003,11 +1340,17 @@ __all__ = [
     "SyncPostgresClient",
     "SyncPostgresCopyIn",
     "SyncPostgresCopyOut",
+    "SyncPostgresCursor",
     "SyncPostgresListener",
     "SyncPostgresPool",
     "SyncPostgresPortal",
     "__version__",
     "broker_engine_capsule",
+    "compile_binds",
 ]
 
 def broker_engine_capsule() -> object: ...
+def compile_binds(
+    sql: str,
+    parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+) -> tuple[str, tuple[Any, ...]]: ...
