@@ -40,13 +40,13 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: ./.github/actions/setup-python-env
+        uses: $/.github/actions/setup-python-env
         with:
           python-version: "3.12"
           save-cache: true
 
       - name: Install Rust and cache
-        uses: ./.github/actions/setup-rust-build
+        uses: $/.github/actions/setup-rust-build
         with:
           shared-key: "vertebra-bench-release"
           save-cache: "true"

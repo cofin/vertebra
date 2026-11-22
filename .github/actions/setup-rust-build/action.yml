@@ -93,7 +93,6 @@ runs:
       if: runner.os == 'Linux' && inputs.enable-fast-linker == 'true'
       shell: bash
       run: |
-        selected_flag=""
         if ! command -v ld.mold >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mold >/dev/null 2>&1 || true
         fi
@@ -108,24 +107,34 @@ runs:
           rm -f "$tmp_bin"
           return 1
         }
+        linker=""
         if command -v ld.mold >/dev/null 2>&1 && probe_linker "-fuse-ld=mold"; then
-          selected_flag="-C link-arg=-fuse-ld=mold"
+          linker="mold"
         elif command -v ld.lld >/dev/null 2>&1 && probe_linker "-fuse-ld=lld"; then
-          selected_flag="-C link-arg=-fuse-ld=lld"
+          linker="lld"
         fi
-        if [ -n "$selected_flag" ]; then
-          arch="$(uname -m)"
-          if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
-            existing="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:-}"
-            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=${existing:+${existing} }${selected_flag}" >> "$GITHUB_ENV"
-          else
-            existing="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:-}"
-            echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=${existing:+${existing} }${selected_flag}" >> "$GITHUB_ENV"
-          fi
-          echo "Using fast Linux linker flags: ${selected_flag}"
-        else
-          echo "Fast linker probe skipped; retaining system default linker."
-        fi
+        arch="$(uname -m)"
+        case "${arch}:${linker}" in
+          aarch64:mold|arm64:mold)
+            printf '%s\n' 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold' >> "$GITHUB_ENV"
+            echo "Using fast Linux linker: mold (aarch64)"
+            ;;
+          aarch64:lld|arm64:lld)
+            printf '%s\n' 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=lld' >> "$GITHUB_ENV"
+            echo "Using fast Linux linker: lld (aarch64)"
+            ;;
+          *:mold)
+            printf '%s\n' 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold' >> "$GITHUB_ENV"
+            echo "Using fast Linux linker: mold (x86_64)"
+            ;;
+          *:lld)
+            printf '%s\n' 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=lld' >> "$GITHUB_ENV"
+            echo "Using fast Linux linker: lld (x86_64)"
+            ;;
+          *)
+            echo "Fast linker probe skipped; retaining system default linker."
+            ;;
+        esac
 
     - name: Install optional remote sccache
       if: inputs.sccache-backend != '' && inputs.sccache-bucket != ''

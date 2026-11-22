@@ -242,7 +242,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-python-env
+      - uses: $/.github/actions/setup-python-env
         with:
           python-version: "3.12"
           save-cache: ${{ github.ref == 'refs/heads/main' }}
@@ -281,7 +281,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust-build
+      - uses: $/.github/actions/setup-rust-build
         with:
           components: "clippy, rustfmt"
           shared-key: "vertebra-clippy"
@@ -321,7 +321,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: ts-bundle
-          path: .
+          path: src
       - name: Run TypeScript tests
         working-directory: src/ts/vertebra-client
         run: |
@@ -340,7 +340,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-python-env
+      - uses: $/.github/actions/setup-python-env
         with:
           python-version: "3.12"
           save-cache: ${{ github.ref == 'refs/heads/main' }}
@@ -383,7 +383,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust-build
+      - uses: $/.github/actions/setup-rust-build
         with:
           shared-key: "vertebra-dev"
           save-cache: ${{ github.ref == 'refs/heads/main' && matrix.python-version == '3.12' }}
@@ -392,7 +392,7 @@ jobs:
           sccache-bucket: ${{ vars.SCCACHE_BUCKET }}
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-region: ${{ vars.SCCACHE_REGION || 'auto' }}
-      - uses: ./.github/actions/setup-python-env
+      - uses: $/.github/actions/setup-python-env
         with:
           python-version: ${{ matrix.python-version }}
           cache-python: ${{ matrix.python-version == '3.14t' || matrix.python-version == '3.15t' }}
@@ -402,7 +402,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: ts-bundle
-          path: .
+          path: src
       - name: Install build and stubtest dependencies
         run: uv sync --frozen --no-install-local --group build --group lint
       - name: Build native wheels and server binary once for Python ${{ matrix.python-version }}
@@ -466,7 +466,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-python-env
+      - uses: $/.github/actions/setup-python-env
         with:
           python-version: ${{ matrix.python-version }}
           save-cache: false
@@ -478,7 +478,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: ts-bundle
-          path: .
+          path: src
       - name: Install test dependencies and prebuilt wheels
         run: |
           uv sync --frozen --no-install-local --group test
@@ -516,7 +516,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-python-env
+      - uses: $/.github/actions/setup-python-env
         with:
           python-version: "3.12"
           save-cache: false
@@ -548,7 +548,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust-build
+      - uses: $/.github/actions/setup-rust-build
         with:
           targets: "x86_64-pc-windows-msvc"
           shared-key: "vertebra-dev"
@@ -557,7 +557,7 @@ jobs:
           sccache-bucket: ${{ vars.SCCACHE_BUCKET }}
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-region: ${{ vars.SCCACHE_REGION || 'auto' }}
-      - uses: ./.github/actions/setup-python-env
+      - uses: $/.github/actions/setup-python-env
         with:
           python-version: "3.12"
           save-cache: false
@@ -585,7 +585,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust-build
+      - uses: $/.github/actions/setup-rust-build
         with:
           shared-key: "vertebra-macos"
           enable-fast-linker: "false"
@@ -595,7 +595,7 @@ jobs:
           sccache-bucket: ${{ vars.SCCACHE_BUCKET }}
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-region: ${{ vars.SCCACHE_REGION || 'auto' }}
-      - uses: ./.github/actions/setup-python-env
+      - uses: $/.github/actions/setup-python-env
         with:
           python-version: "3.12"
           save-cache: ${{ github.ref == 'refs/heads/main' }}
@@ -626,7 +626,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-python-env
+      - uses: $/.github/actions/setup-python-env
         with:
           python-version: "3.12"
           save-cache: false
@@ -670,7 +670,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-python-env
+      - uses: $/.github/actions/setup-python-env
         with:
           python-version: ${{ matrix.python-version }}
           save-cache: false
@@ -703,7 +703,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-python-env
+      - uses: $/.github/actions/setup-python-env
         with:
           python-version: "3.12"
           save-cache: false

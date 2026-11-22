@@ -82,10 +82,10 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: release-bin-ts-bundle
-          path: .
+          path: src
 
       - name: Setup Rust and cache
-        uses: ./.github/actions/setup-rust-build
+        uses: $/.github/actions/setup-rust-build
         with:
           shared-key: "vertebra-release-bin-${{ matrix.target }}"
           cache-targets: "false"
@@ -97,7 +97,7 @@ jobs:
           sccache-region: ${{ vars.SCCACHE_REGION || 'auto' }}
 
       - name: Install uv
-        uses: ./.github/actions/setup-python-env
+        uses: $/.github/actions/setup-python-env
         with:
           python-version: "3.12"
           save-cache: false
