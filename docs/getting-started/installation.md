@@ -37,7 +37,7 @@ Vertebra keeps its base dependency footprint minimal (`anyio`, `msgspec`, `rich`
 
 | Extra | Package Specifier | Included Capabilities |
 | --- | --- | --- |
-| `sqlspec` | `"vertebra-core[sqlspec]"` | First-class `sqlspec` (`>=0.73.0`) driver adapters, configs, and PyArrow integration |
+| `sqlspec` | `"vertebra-core[sqlspec]"` | First-class `sqlspec` (`>=0.74.0`) driver adapters, configs, and PyArrow integration |
 | `alchemy` | `"vertebra-core[alchemy]"` | `advanced-alchemy` (`>=1.13.0b3`), `sqlalchemy` (`>=2.1.0`), and `alembic` (`>=1.18.0`) |
 | `arrow` | `"vertebra-core[arrow]"` | Optional `pyarrow` (`>=18.0.0`) materialization (`to_arrow_table()`) and Parquet dataset staging |
 | `pydantic` | `"vertebra-core[pydantic]"` | Zero-copy `pydantic-core` (`validate_json` / `to_json`) schema integration |

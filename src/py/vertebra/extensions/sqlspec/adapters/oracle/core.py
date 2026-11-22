@@ -147,6 +147,10 @@ class OracleVersionCache:
             self.compatible_major = None
             self.is_autonomous = False
 
+    def reset(self) -> None:
+        """Alias `clear()` for interface parity with SQLSpec `OracleVersionCache`."""
+        self.clear()
+
 
 def oracle_identifier(name: str, label: str = "identifier") -> str:
     """Validate an unquoted Oracle SQL identifier against safe characters."""

@@ -26,7 +26,10 @@ from sqlspec.data_dictionary.dialects.bigquery import (
     format_bigquery_information_schema_tables,
     format_bigquery_schema_prefix,
 )
-from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
+from sqlspec.data_dictionary.dialects.bigquery.dictionary import (
+    BigQuerySyncDataDictionary as _UpstreamBigQuerySyncDataDictionary,
+)
+from sqlspec.driver import AsyncDataDictionaryBase
 
 from vertebra.extensions.sqlspec.adapters.bigquery.core import (
     resolve_dataset_id,
@@ -387,34 +390,12 @@ def _ddl_result_from_row(
     )
 
 
-class BigQuerySyncDataDictionary(SyncDataDictionaryBase):
+class BigQuerySyncDataDictionary(_UpstreamBigQuerySyncDataDictionary):
     """BigQuery synchronous SQLSpec data dictionary over ``INFORMATION_SCHEMA`` catalog SQL."""
 
     __slots__ = ()
 
     dialect: ClassVar[str] = "bigquery"
-
-    def get_version(self, driver: SyncDriverAdapterBase) -> VersionInfo | None:
-        """Return None because BigQuery is a versionless managed cloud service."""
-        _ = driver
-        return None
-
-    def get_feature_flag(self, driver: SyncDriverAdapterBase, feature: str) -> bool:
-        """Return whether ``feature`` is enabled by BigQuery GoogleSQL capabilities."""
-        _ = driver
-        return bool(self.get_dialect_config().get_feature_flag(feature))
-
-    def get_optimal_type(self, driver: SyncDriverAdapterBase, type_category: str) -> str:
-        """Return the canonical BigQuery SQL type name for ``type_category``."""
-        _ = driver
-        return self.get_dialect_config().get_optimal_type(type_category)
-
-    def get_metadata_capabilities(
-        self, driver: SyncDriverAdapterBase, domains: Sequence[str] | None = None
-    ) -> MetadataCapabilityProfile:
-        """Describe supported BigQuery metadata domains and billing/scope warnings."""
-        _ = driver
-        return _bigquery_capabilities(domains, type(self).__name__)
 
     def get_tables(self, driver: SyncDriverAdapterBase, schema: str | None = None) -> list[TableMetadata]:
         """List base tables sorted topologically by FK dependency depth."""

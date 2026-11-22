@@ -1,5 +1,7 @@
 """Unit tests for SQLSpec BaseSyncDriver/BaseAsyncDriver template-method dispatch and error mapping."""
 
+from __future__ import annotations
+
 import ast
 import importlib
 import io
@@ -10,13 +12,47 @@ from pathlib import Path
 from typing import Any, ClassVar, cast
 
 import pytest
-from sqlspec.core import SQL, ParameterStyle, ParameterStyleConfig, StatementConfig
-from sqlspec.data_dictionary import get_dialect_config
+from sqlspec.builder import QueryBuilder
+from sqlspec.core import SQL, ParameterStyle, ParameterStyleConfig, Statement, StatementConfig, StatementFilter
+from sqlspec.data_dictionary import MetadataResult, MetadataSupport, TableMetadata, get_dialect_config
+from sqlspec.data_dictionary.dialects.bigquery.dictionary import (
+    BigQuerySyncDataDictionary as UpstreamBigQuerySyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.duckdb.dictionary import (
+    DuckDBSyncDataDictionary as UpstreamDuckDBSyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.mssql.dictionary import (
+    MssqlSyncDataDictionary as UpstreamMssqlSyncDataDictionary,
+)
 from sqlspec.data_dictionary.dialects.mysql.dictionary import (
     MySQLAsyncDataDictionary as UpstreamMySQLAsyncDataDictionary,
 )
 from sqlspec.data_dictionary.dialects.mysql.dictionary import (
     MySQLSyncDataDictionary as UpstreamMySQLSyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.oracle.dictionary import (
+    OracleAsyncDataDictionary as UpstreamOracleAsyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.oracle.dictionary import (
+    OracleSyncDataDictionary as UpstreamOracleSyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.postgres.dictionary import (
+    PostgresAsyncDataDictionary as UpstreamPostgresAsyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.postgres.dictionary import (
+    PostgresSyncDataDictionary as UpstreamPostgresSyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.spanner.dictionary import (
+    SpannerAsyncDataDictionary as UpstreamSpannerAsyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.spanner.dictionary import (
+    SpannerSyncDataDictionary as UpstreamSpannerSyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.sqlite.dictionary import (
+    SqliteAsyncDataDictionary as UpstreamSqliteAsyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.sqlite.dictionary import (
+    SqliteSyncDataDictionary as UpstreamSqliteSyncDataDictionary,
 )
 from sqlspec.driver import (
     AsyncCachedStatementExecutor,
@@ -45,6 +81,7 @@ from sqlspec.exceptions import (
 )
 from sqlspec.extensions.events import AsyncEventBackendProtocol, SyncEventBackendProtocol
 from sqlspec.observability import ObservabilityConfig, ObservabilityRuntime
+from sqlspec.typing import StatementParameters
 
 from vertebra._vertebra import (
     BigQueryError,
@@ -102,7 +139,7 @@ from vertebra.typing import ImproperConfigurationError
 class _RecordingSyncCursor:
     """Minimal sync DB-API cursor double backed by `_RecordingSyncNativeDriver`."""
 
-    def __init__(self, driver: "_RecordingSyncNativeDriver") -> None:
+    def __init__(self, driver: _RecordingSyncNativeDriver) -> None:
         self._driver = driver
         self.description: tuple[tuple[Any, ...], ...] | None = None
         self.rowcount: int = -1
@@ -150,7 +187,7 @@ class _RecordingSyncCursor:
 class _RecordingAsyncCursor:
     """Minimal async DB-API cursor double backed by `_RecordingAsyncNativeDriver`."""
 
-    def __init__(self, driver: "_RecordingAsyncNativeDriver") -> None:
+    def __init__(self, driver: _RecordingAsyncNativeDriver) -> None:
         self._driver = driver
         self.description: tuple[tuple[Any, ...], ...] | None = None
         self.rowcount: int = -1
@@ -263,9 +300,9 @@ class _RecordingSyncNativeDriver(SyncDatabaseDriver[Any]):
 class _SingleCallSyncCursor(_RecordingSyncCursor):
     """Sync cursor double propagating configured errors, rowcount, and lastrowid."""
 
-    _driver: "_SingleCallSyncNative"
+    _driver: _SingleCallSyncNative
 
-    def __init__(self, driver: "_SingleCallSyncNative") -> None:
+    def __init__(self, driver: _SingleCallSyncNative) -> None:
         super().__init__(driver)
 
     def execute(self, sql: str, parameters: Any = None) -> None:
@@ -280,7 +317,7 @@ class _SingleCallSyncCursor(_RecordingSyncCursor):
 class _SingleCallSyncClient:
     """Sync client double recording single-call fetch_rows and execute_dml invocations."""
 
-    def __init__(self, driver: "_SingleCallSyncNative") -> None:
+    def __init__(self, driver: _SingleCallSyncNative) -> None:
         self._driver = driver
 
     def fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
@@ -416,9 +453,9 @@ class _RecordingAsyncNativeDriver(AsyncDatabaseDriver[Any]):
 class _SingleCallAsyncCursor(_RecordingAsyncCursor):
     """Async cursor double propagating configured errors, rowcount, and lastrowid."""
 
-    _driver: "_SingleCallAsyncNative"
+    _driver: _SingleCallAsyncNative
 
-    def __init__(self, driver: "_SingleCallAsyncNative") -> None:
+    def __init__(self, driver: _SingleCallAsyncNative) -> None:
         super().__init__(driver)
 
     async def execute(self, sql: str, parameters: Any = None) -> None:
@@ -434,7 +471,7 @@ class _SingleCallAsyncCursor(_RecordingAsyncCursor):
 class _SingleCallAsyncClient:
     """Async client double recording single-call fetch_rows and execute_dml invocations."""
 
-    def __init__(self, driver: "_SingleCallAsyncNative") -> None:
+    def __init__(self, driver: _SingleCallAsyncNative) -> None:
         self._driver = driver
 
     async def fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
@@ -1350,17 +1387,45 @@ def test_core_adapter_data_dictionaries_slots_bases_and_import_hygiene(
     assert "__slots__" in sync_cls.__dict__
     assert "__slots__" in async_cls.__dict__
 
-    if adapter_name == "mysql":
-        assert issubclass(sync_cls, UpstreamMySQLSyncDataDictionary)
-        assert issubclass(async_cls, UpstreamMySQLAsyncDataDictionary)
-    else:
-        assert issubclass(sync_cls, SyncDataDictionaryBase)
-        assert issubclass(async_cls, AsyncDataDictionaryBase)
+    upstream_bases: dict[str, tuple[type[Any], type[Any]]] = {
+        "mysql": (UpstreamMySQLSyncDataDictionary, UpstreamMySQLAsyncDataDictionary),
+        "sqlite": (UpstreamSqliteSyncDataDictionary, UpstreamSqliteAsyncDataDictionary),
+        "postgres": (UpstreamPostgresSyncDataDictionary, UpstreamPostgresAsyncDataDictionary),
+        "oracle": (UpstreamOracleSyncDataDictionary, UpstreamOracleAsyncDataDictionary),
+        "spanner": (UpstreamSpannerSyncDataDictionary, UpstreamSpannerAsyncDataDictionary),
+        "duckdb": (UpstreamDuckDBSyncDataDictionary, AsyncDataDictionaryBase),
+        "mssql": (UpstreamMssqlSyncDataDictionary, AsyncDataDictionaryBase),
+        "bigquery": (UpstreamBigQuerySyncDataDictionary, AsyncDataDictionaryBase),
+    }
+    expected_sync_base, expected_async_base = upstream_bases[adapter_name]
+    assert issubclass(sync_cls, expected_sync_base)
+    assert issubclass(async_cls, expected_async_base)
+    assert issubclass(sync_cls, SyncDataDictionaryBase)
+    assert issubclass(async_cls, AsyncDataDictionaryBase)
+    if adapter_name != "mysql":
         sync_dd = sync_cls()
         async_dd = async_cls()
         assert sync_dd.get_dialect_config() is get_dialect_config(adapter_name)
         assert async_dd.get_dialect_config() is get_dialect_config(adapter_name)
         assert len(sync_dd.list_available_features()) > 0
+
+
+def test_sqlspec_adapters_use_public_upstream_imports_only() -> None:
+    """Assert SQLSpec extension modules avoid private upstream helper modules and underscore symbols."""
+    violations: list[str] = []
+    root = _SQLSPEC_ADAPTERS_ROOT.parent
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module or not node.module.startswith("sqlspec"):
+                continue
+            parts = node.module.split(".")
+            if any(part.startswith("_") for part in parts) or (len(parts) >= 2 and parts[1] == "adapters"):
+                violations.append(f"{path.relative_to(root)}:{node.lineno}:{node.module}")
+            private_names = [alias.name for alias in node.names if alias.name.startswith("_")]
+            if private_names:
+                violations.append(f"{path.relative_to(root)}:{node.lineno}:{node.module}:{private_names}")
+    assert violations == []
 
 
 @pytest.mark.anyio
@@ -1460,34 +1525,120 @@ async def test_postgres_and_oracle_data_dictionary_version_cache_and_bindings() 
     )
 
     class _SyncVersionSpy:
-        def __init__(self, version_row: dict[str, Any]) -> None:
+        def __init__(self, version_row: dict[str, str]) -> None:
             self.version_calls = 0
-            self.select_calls: list[dict[str, Any]] = []
+            self.select_calls: list[dict[str, object]] = []
             self._version_row = version_row
 
-        def select_one_or_none(self, statement: Any) -> dict[str, Any]:
-            _ = statement
+        def select_one_or_none(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            schema_type: type[object] | None = None,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> dict[str, str] | None:
+            _ = (statement, parameters, schema_type, statement_config, kwargs)
             self.version_calls += 1
             return self._version_row
 
-        def select(self, statement: Any, **kwargs: Any) -> list[dict[str, Any]]:
-            _ = statement
+        def select_value_or_none(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            value_type: type[object] | None = None,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> str | None:
+            _ = (parameters, value_type, statement_config, kwargs)
+            statement_text = statement.raw_sql if isinstance(statement, SQL) else str(statement)
+            if "autonomous" in statement_text.lower() or "sys_context" in statement_text.lower():
+                return None
+            self.version_calls += 1
+            return self._version_row.get("version")
+
+        def select_value(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            value_type: type[object] | None = None,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> str | None:
+            _ = (statement, parameters, value_type, statement_config, kwargs)
+            return None
+
+        def select(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> list[dict[str, object]]:
+            _ = (statement, parameters, statement_config)
             self.select_calls.append(dict(kwargs))
             return []
 
     class _AsyncVersionSpy:
-        def __init__(self, version_row: dict[str, Any]) -> None:
+        def __init__(self, version_row: dict[str, str]) -> None:
             self.version_calls = 0
-            self.select_calls: list[dict[str, Any]] = []
+            self.select_calls: list[dict[str, object]] = []
             self._version_row = version_row
 
-        async def select_one_or_none(self, statement: Any) -> dict[str, Any]:
-            _ = statement
+        async def select_one_or_none(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            schema_type: type[object] | None = None,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> dict[str, str] | None:
+            _ = (statement, parameters, schema_type, statement_config, kwargs)
             self.version_calls += 1
             return self._version_row
 
-        async def select(self, statement: Any, **kwargs: Any) -> list[dict[str, Any]]:
-            _ = statement
+        async def select_value_or_none(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            value_type: type[object] | None = None,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> str | None:
+            _ = (parameters, value_type, statement_config, kwargs)
+            statement_text = statement.raw_sql if isinstance(statement, SQL) else str(statement)
+            if "autonomous" in statement_text.lower() or "sys_context" in statement_text.lower():
+                return None
+            self.version_calls += 1
+            return self._version_row.get("version")
+
+        async def select_value(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            value_type: type[object] | None = None,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> str | None:
+            _ = (statement, parameters, value_type, statement_config, kwargs)
+            return None
+
+        async def select(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> list[dict[str, object]]:
+            _ = (statement, parameters, statement_config)
             self.select_calls.append(dict(kwargs))
             return []
 
@@ -1497,7 +1648,11 @@ async def test_postgres_and_oracle_data_dictionary_version_cache_and_bindings() 
     assert pg_sync.get_feature_flag(pg_sync_drv, "supports_partitioning") is True
     assert pg_sync_drv.version_calls == 1
     pg_sync.get_tables(pg_sync_drv)
-    assert pg_sync_drv.select_calls[-1] == {"schema_name": "public", "table_name": None}
+    assert pg_sync_drv.select_calls[-1] == {
+        "schema_name": "public",
+        "table_name": None,
+        "schema_type": TableMetadata,
+    }
 
     pg_async = PostgresAsyncDataDictionary()
     pg_async_drv: Any = _AsyncVersionSpy({"version": "PostgreSQL 16.4"})
@@ -1516,6 +1671,27 @@ async def test_postgres_and_oracle_data_dictionary_version_cache_and_bindings() 
     assert await ora_async.get_optimal_type(ora_async_drv, "json") == "BLOB"
     assert await ora_async.get_feature_flag(ora_async_drv, "supports_vectors") is False
     assert ora_async_drv.version_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        (True, None),
+        (False, None),
+        (0, 0),
+        (42, 42),
+        ("AAARowId", "AAARowId"),
+        (3.14, None),
+    ],
+)
+def test_normalize_last_inserted_id_matches_sqlspec_contract(
+    raw_value: object,
+    expected: int | str | None,
+) -> None:
+    """Verify `_normalize_last_inserted_id` rejects `bool`, empty string, and non-scalar identifiers."""
+    assert BaseSyncDriver._normalize_last_inserted_id(raw_value) == expected
 
 
 @pytest.mark.anyio
@@ -1568,7 +1744,7 @@ async def test_extended_data_dictionary_capabilities_and_optimal_types(
     adapter_name: str,
     sync_name: str,
     async_name: str,
-    version_row: Any,
+    version_row: dict[str, str] | str | None,
     type_category: str,
     expected_type: str,
     expected_domain: str,
@@ -1579,21 +1755,53 @@ async def test_extended_data_dictionary_capabilities_and_optimal_types(
     async_dd = getattr(dd_module, async_name)()
 
     class _SyncProbeDriver:
-        def select_one_or_none(self, statement: Any) -> Any:
-            _ = statement
+        def select_one_or_none(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            schema_type: type[object] | None = None,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> dict[str, str] | str | None:
+            _ = (statement, parameters, schema_type, statement_config, kwargs)
             return version_row
 
-        def select_value_or_none(self, statement: Any) -> Any:
-            _ = statement
+        def select_value_or_none(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            value_type: type[object] | None = None,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> dict[str, str] | str | None:
+            _ = (statement, parameters, value_type, statement_config, kwargs)
             return version_row
 
     class _AsyncProbeDriver:
-        async def select_one_or_none(self, statement: Any) -> Any:
-            _ = statement
+        async def select_one_or_none(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            schema_type: type[object] | None = None,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> dict[str, str] | str | None:
+            _ = (statement, parameters, schema_type, statement_config, kwargs)
             return version_row
 
-        async def select_value_or_none(self, statement: Any) -> Any:
-            _ = statement
+        async def select_value_or_none(
+            self,
+            statement: Statement | QueryBuilder,
+            /,
+            *parameters: StatementParameters | StatementFilter,
+            value_type: type[object] | None = None,
+            statement_config: StatementConfig | None = None,
+            **kwargs: object,
+        ) -> dict[str, str] | str | None:
+            _ = (statement, parameters, value_type, statement_config, kwargs)
             return version_row
 
     sync_drv: Any = _SyncProbeDriver()
@@ -1625,8 +1833,6 @@ async def test_spanner_data_dictionary_dual_dialect_dispatch(
     supports_graphs: bool,
 ) -> None:
     """Spanner sync/async data dictionaries dispatch cleanly across GoogleSQL and Spangres dialects."""
-    from sqlspec.data_dictionary import MetadataSupport
-
     from vertebra.extensions.sqlspec.adapters.spanner.data_dictionary import (
         SpannerAsyncDataDictionary,
         SpannerSyncDataDictionary,
@@ -1706,6 +1912,15 @@ async def test_spanner_data_dictionary_dual_dialect_dispatch(
     assert async_tables[0]["schema_name"] == expected_schema
     assert async_cols[0]["column_name"] == "id"
     assert async_idxs[0]["index_name"] == "PRIMARY_KEY"
+
+    sync_streams = sync_dd.get_change_streams(sync_drv, schema=expected_schema)
+    async_streams = await async_dd.get_change_streams(async_drv, schema=expected_schema)
+    assert isinstance(sync_streams, MetadataResult)
+    assert isinstance(async_streams, MetadataResult)
+    assert sync_streams.domain == "change_streams"
+    assert async_streams.domain == "change_streams"
+    assert len(sync_streams.items) == 1
+    assert len(async_streams.items) == 1
 
 
 @pytest.mark.parametrize(
