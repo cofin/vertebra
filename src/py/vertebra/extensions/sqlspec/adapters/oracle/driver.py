@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlspec import SQLResult
 from sqlspec.core import SQL, ParameterStyle, StatementConfig
 from sqlspec.driver import validate_savepoint_name
-from sqlspec.driver._common import cache_hit_hooks_unchanged
 from sqlspec.exceptions import DialectNotSupportedError
 from sqlspec.storage import StorageBridgeJob
 
@@ -307,13 +306,12 @@ class OracleSyncDriver(BaseSyncDriver):
                 data_row_count=len(rows),
                 is_select_result=True,
                 row_format="tuple",
-                last_inserted_id=cursor.lastrowid,
+                last_inserted_id=BaseSyncDriver._normalize_last_inserted_id(cursor.lastrowid),
             )
-        rowcount = cursor.rowcount
         return self.create_execution_result(
             cursor,
-            rowcount_override=rowcount if rowcount > 0 else 0,
-            last_inserted_id=cursor.lastrowid,
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
+            last_inserted_id=BaseSyncDriver._normalize_last_inserted_id(cursor.lastrowid),
         )
 
     @classmethod
@@ -321,10 +319,12 @@ class OracleSyncDriver(BaseSyncDriver):
         """Build default Oracle `StatementConfig` targeting `:name` and `:1` binds."""
         return build_oracle_statement_config()
 
+    def _cache_hit_owner(self) -> type[BaseSyncDriver]:
+        """Return `OracleSyncDriver` because it overrides `with_cursor` for `checkout_cursor()`."""
+        return OracleSyncDriver
+
     def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
         """Return the cursor-checkout callables the cache-hit executor calls, or `None` to register no executor."""
-        if not cache_hit_hooks_unchanged(type(self), OracleSyncDriver):
-            return None
         if self.statement_config.execution_args:
             return None
         if not callable(getattr(self.native_driver, "checkout_cursor", None)):
@@ -351,8 +351,9 @@ class OracleSyncDriver(BaseSyncDriver):
         with self.connection.checkout_cursor() as cursor:
             cursor.execute(sql, params)
             self._record_out_binds(cursor)
-            rowcount = cursor.rowcount
-            return (rowcount if rowcount > 0 else 0), cursor.lastrowid
+            return BaseSyncDriver._normalize_rowcount(cursor.rowcount), BaseSyncDriver._normalize_last_inserted_id(
+                cursor.lastrowid
+            )
 
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_oracle_exception(exc)
@@ -700,13 +701,12 @@ class OracleAsyncDriver(BaseAsyncDriver):
                 data_row_count=len(rows),
                 is_select_result=True,
                 row_format="tuple",
-                last_inserted_id=cursor.lastrowid,
+                last_inserted_id=BaseSyncDriver._normalize_last_inserted_id(cursor.lastrowid),
             )
-        rowcount = cursor.rowcount
         return self.create_execution_result(
             cursor,
-            rowcount_override=rowcount if rowcount > 0 else 0,
-            last_inserted_id=cursor.lastrowid,
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
+            last_inserted_id=BaseSyncDriver._normalize_last_inserted_id(cursor.lastrowid),
         )
 
     @classmethod
@@ -714,10 +714,12 @@ class OracleAsyncDriver(BaseAsyncDriver):
         """Build default Oracle `StatementConfig` targeting `:name` and `:1` binds."""
         return build_oracle_statement_config()
 
+    def _cache_hit_owner(self) -> type[BaseAsyncDriver]:
+        """Return `OracleAsyncDriver` because it overrides `with_cursor` for async `checkout_cursor()`."""
+        return OracleAsyncDriver
+
     def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
         """Return the cursor-checkout callables the cache-hit executor awaits, or `None` to register no executor."""
-        if not cache_hit_hooks_unchanged(type(self), OracleAsyncDriver):
-            return None
         if self.statement_config.execution_args:
             return None
         if not callable(getattr(self.native_driver, "checkout_cursor", None)):
@@ -744,8 +746,9 @@ class OracleAsyncDriver(BaseAsyncDriver):
         async with self.connection.checkout_cursor() as cursor:
             await cursor.execute(sql, params)
             self._record_out_binds(cursor)
-            rowcount = cursor.rowcount
-            return (rowcount if rowcount > 0 else 0), cursor.lastrowid
+            return BaseSyncDriver._normalize_rowcount(cursor.rowcount), BaseSyncDriver._normalize_last_inserted_id(
+                cursor.lastrowid
+            )
 
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_oracle_exception(exc)

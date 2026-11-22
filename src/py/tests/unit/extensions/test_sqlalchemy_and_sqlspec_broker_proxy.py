@@ -20,7 +20,7 @@ from sqlalchemy.util.concurrency import greenlet_spawn
 from sqlspec import SQL, StatementStack, sql
 from sqlspec.core.filters import LimitOffsetFilter
 from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
-from sqlspec.core.result._base import ArrowResult
+from sqlspec.core.result import ArrowResult
 from sqlspec.core.statement import StatementConfig
 from sqlspec.driver import AsyncDriverAdapterBase, AsyncRowStream, SyncDriverAdapterBase, SyncRowStream
 from sqlspec.exceptions import ImproperConfigurationError as SQLSpecImproperConfigurationError

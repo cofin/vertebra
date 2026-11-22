@@ -2365,7 +2365,9 @@ def _wrap_oracle_cache_hit_state(adapter: Any, mode: str) -> dict[str, int]:
             counts["dml"] += 1
             return orig_dml(*args, **kwargs)
 
-        adapter._cache_hit_state = (counted_fetch, counted_dml, mapper)
+        adapter.set_cached_statement_executor(
+            BaseSyncDriver._run_cached_statement, state=(counted_fetch, counted_dml, mapper)
+        )
         return counts
 
     async def counted_async_fetch(*args: Any, **kwargs: Any) -> Any:
@@ -2376,7 +2378,9 @@ def _wrap_oracle_cache_hit_state(adapter: Any, mode: str) -> dict[str, int]:
         counts["dml"] += 1
         return await orig_dml(*args, **kwargs)
 
-    adapter._cache_hit_state = (counted_async_fetch, counted_async_dml, mapper)
+    adapter.set_cached_statement_executor(
+        BaseAsyncDriver._run_cached_statement, state=(counted_async_fetch, counted_async_dml, mapper)
+    )
     return counts
 
 
@@ -2470,7 +2474,7 @@ async def test_oracle_cache_hit_result_matches_method_path(
     """Verify cached executor results match the method path across select, empty select, update, and insert."""
     exec_adapter, _, exec_client = _build_oracle_cache_hit_fixture(mode)
     method_adapter, _, method_client = _build_oracle_cache_hit_fixture(mode)
-    method_adapter._cache_hit_executor = None
+    method_adapter.set_cached_statement_executor(None)
     counts = _wrap_oracle_cache_hit_state(exec_adapter, mode)
 
     exec_client.queued_results.extend([result_factory(), result_factory()])
@@ -2488,6 +2492,9 @@ async def test_oracle_cache_hit_result_matches_method_path(
     assert exec_res.all() == method_res.all()
     assert exec_res.column_names == method_res.column_names
     assert exec_res.rows_affected == method_res.rows_affected
+    assert exec_res.last_inserted_id == method_res.last_inserted_id
+    if sql.startswith("INSERT"):
+        assert exec_res.last_inserted_id == "AAAR3sAAEAAAACXAAB"
 
 
 @pytest.mark.anyio
@@ -2554,7 +2561,7 @@ async def test_oracle_cache_hit_errors_match_method_path(mode: str) -> None:
     """Verify native errors on a cached statement map identically to the method path and preserve `__cause__`."""
     exec_adapter, exec_proxy, exec_client = _build_oracle_cache_hit_fixture(mode)
     method_adapter, _, method_client = _build_oracle_cache_hit_fixture(mode)
-    method_adapter._cache_hit_executor = None
+    method_adapter.set_cached_statement_executor(None)
     counts = _wrap_oracle_cache_hit_state(exec_adapter, mode)
 
     exec_native_err = NativeIntegrityError("ORA-00001: unique constraint violated")
@@ -2599,3 +2606,19 @@ async def test_oracle_suspend_on_success_skips_executor(mode: str) -> None:
 
     assert counts["fetch"] == 0
     assert counts["dml"] == 0
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("hook_name", ["with_cursor", "resolve_last_inserted_id"])
+def test_oracle_subclass_overriding_watched_hook_declines_executor(mode: str, hook_name: str) -> None:
+    """Verify subclasses of OracleSyncDriver/OracleAsyncDriver overriding a watched hook decline executor registration."""
+    base_cls: type[Any] = SQLSpecOracleSyncDriver if mode == "sync" else SQLSpecOracleAsyncDriver
+
+    def _override(self: Any, *args: Any, **kwargs: Any) -> Any:
+        return getattr(base_cls, hook_name)(self, *args, **kwargs)
+
+    sub_cls = type(f"SubOracle_{mode}_{hook_name}", (base_cls,), {hook_name: _override})
+    _, proxy, _ = _build_oracle_cache_hit_fixture(mode)
+    adapter = sub_cls(proxy)
+    assert adapter._cache_hit_executor is None
+    assert adapter._cache_hit_state is None

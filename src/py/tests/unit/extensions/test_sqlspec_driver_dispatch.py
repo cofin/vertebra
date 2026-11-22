@@ -19,12 +19,13 @@ from sqlspec.data_dictionary.dialects.mysql.dictionary import (
     MySQLSyncDataDictionary as UpstreamMySQLSyncDataDictionary,
 )
 from sqlspec.driver import (
+    AsyncCachedStatementExecutor,
     AsyncDataDictionaryBase,
     AsyncDriverAdapterBase,
+    SyncCachedStatementExecutor,
     SyncDataDictionaryBase,
     SyncDriverAdapterBase,
 )
-from sqlspec.driver._common import cache_hit_hooks_unchanged
 from sqlspec.exceptions import (
     CheckViolationError,
     ConnectionTimeoutError,
@@ -2564,7 +2565,6 @@ def test_sync_cache_hit_executor_registration_follows_hook_overrides(
 ) -> None:
     """Sync cache-hit executor registers when base hooks match or the adapter defines its own callables."""
     _ = (fetch_call, dml_call)
-    assert cache_hit_hooks_unchanged(adapter_cls, BaseSyncDriver) is base_hooks_unchanged
     adapter = adapter_cls(_SingleCallSyncNative(with_client=with_client))
     if registered:
         assert adapter._cache_hit_executor is BaseSyncDriver._run_cached_statement
@@ -2573,6 +2573,16 @@ def test_sync_cache_hit_executor_registration_follows_hook_overrides(
     else:
         assert adapter._cache_hit_executor is None
         assert adapter._cache_hit_state is None
+    orig_state = adapter._cache_hit_state
+    probe_state = ("probe", "probe", "probe")
+    accepted = adapter.set_cached_statement_executor(
+        BaseSyncDriver._run_cached_statement,
+        state=probe_state,
+        owner=BaseSyncDriver,
+    )
+    assert accepted is base_hooks_unchanged
+    if not base_hooks_unchanged and registered:
+        assert adapter._cache_hit_state is orig_state
 
 
 @pytest.mark.parametrize(
@@ -2682,7 +2692,7 @@ def test_sync_cache_hit_result_matches_method_path(
     method_adapter = adapter_cls(method_native)
     assert exec_adapter._stmt_cache_enabled
     assert method_adapter._stmt_cache_enabled
-    method_adapter._cache_hit_executor = None
+    method_adapter.set_cached_statement_executor(None)
 
     exec_adapter.execute(sql)
     method_adapter.execute(sql)
@@ -2692,6 +2702,7 @@ def test_sync_cache_hit_result_matches_method_path(
     assert exec_result.all() == method_result.all()
     assert exec_result.column_names == method_result.column_names
     assert exec_result.rows_affected == method_result.rows_affected
+    assert exec_result.last_inserted_id == method_result.last_inserted_id
 
     if case_name == "select":
         assert exec_result.all() == [{"a": 1}]
@@ -2729,7 +2740,7 @@ def test_sync_cache_hit_returning_clause_builds_row_result(
     exec_adapter = adapter_cls(exec_native)
     method_adapter = adapter_cls(method_native)
     assert exec_adapter._stmt_cache_enabled
-    method_adapter._cache_hit_executor = None
+    method_adapter.set_cached_statement_executor(None)
 
     exec_adapter.execute(sql)
     method_adapter.execute(sql)
@@ -2805,7 +2816,7 @@ def test_sync_cache_hit_errors_match_method_path(
     exec_adapter = adapter_cls(exec_native)
     method_adapter = adapter_cls(method_native)
     assert exec_adapter._stmt_cache_enabled
-    method_adapter._cache_hit_executor = None
+    method_adapter.set_cached_statement_executor(None)
 
     exec_adapter.execute("SELECT 1 AS a")
     method_adapter.execute("SELECT 1 AS a")
@@ -2880,7 +2891,7 @@ def test_sync_cache_hit_on_real_embedded_engines(engine: str) -> None:
         native = SyncDuckDBDriver(DuckDBConfig(path=":memory:"))
         exec_adapter = DuckDBSyncDriver(native)
         method_adapter = DuckDBSyncDriver(native)
-    method_adapter._cache_hit_executor = None
+    method_adapter.set_cached_statement_executor(None)
 
     try:
         assert exec_adapter._stmt_cache_enabled
@@ -2893,10 +2904,23 @@ def test_sync_cache_hit_on_real_embedded_engines(engine: str) -> None:
         assert second_insert.rows_affected == 1
         if engine == "sqlite":
             assert second_insert.last_inserted_id == 2
+            method_first = method_adapter.execute("INSERT INTO cache_hit_items (id, name) VALUES (?, ?)", (3, "gamma"))
+            method_second = method_adapter.execute("INSERT INTO cache_hit_items (id, name) VALUES (?, ?)", (4, "delta"))
+            assert method_first.last_inserted_id == 3
+            assert method_second.last_inserted_id == 4
 
         first_select = exec_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
         second_select = exec_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
-        expected_rows = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+        expected_rows = (
+            [
+                {"id": 1, "name": "alpha"},
+                {"id": 2, "name": "beta"},
+                {"id": 3, "name": "gamma"},
+                {"id": 4, "name": "delta"},
+            ]
+            if engine == "sqlite"
+            else [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+        )
         assert first_select.all() == expected_rows
         assert second_select.all() == expected_rows
 
@@ -2974,7 +2998,6 @@ async def test_async_cache_hit_executor_registration_follows_hook_overrides(
 ) -> None:
     """Async cache-hit executor registers when base hooks match or the adapter defines its own callables."""
     _ = (fetch_call, dml_call)
-    assert cache_hit_hooks_unchanged(adapter_cls, BaseAsyncDriver) is base_hooks_unchanged
     adapter = adapter_cls(_SingleCallAsyncNative(with_client=with_client))
     if registered:
         assert adapter._cache_hit_executor is BaseAsyncDriver._run_cached_statement
@@ -2983,6 +3006,16 @@ async def test_async_cache_hit_executor_registration_follows_hook_overrides(
     else:
         assert adapter._cache_hit_executor is None
         assert adapter._cache_hit_state is None
+    orig_state = adapter._cache_hit_state
+    probe_state = ("probe", "probe", "probe")
+    accepted = adapter.set_cached_statement_executor(
+        BaseAsyncDriver._run_cached_statement,
+        state=probe_state,
+        owner=BaseAsyncDriver,
+    )
+    assert accepted is base_hooks_unchanged
+    if not base_hooks_unchanged and registered:
+        assert adapter._cache_hit_state is orig_state
 
 
 @pytest.mark.anyio
@@ -3097,7 +3130,7 @@ async def test_async_cache_hit_result_matches_method_path(
     method_adapter = adapter_cls(method_native)
     assert exec_adapter._stmt_cache_enabled
     assert method_adapter._stmt_cache_enabled
-    method_adapter._cache_hit_executor = None
+    method_adapter.set_cached_statement_executor(None)
 
     await exec_adapter.execute(sql)
     await method_adapter.execute(sql)
@@ -3107,6 +3140,7 @@ async def test_async_cache_hit_result_matches_method_path(
     assert exec_result.all() == method_result.all()
     assert exec_result.column_names == method_result.column_names
     assert exec_result.rows_affected == method_result.rows_affected
+    assert exec_result.last_inserted_id == method_result.last_inserted_id
 
     if case_name == "select":
         assert exec_result.all() == [{"a": 1}]
@@ -3145,7 +3179,7 @@ async def test_async_cache_hit_returning_clause_builds_row_result(
     exec_adapter = adapter_cls(exec_native)
     method_adapter = adapter_cls(method_native)
     assert exec_adapter._stmt_cache_enabled
-    method_adapter._cache_hit_executor = None
+    method_adapter.set_cached_statement_executor(None)
 
     await exec_adapter.execute(sql)
     await method_adapter.execute(sql)
@@ -3195,7 +3229,7 @@ async def test_async_cache_hit_errors_match_method_path(
     exec_adapter = adapter_cls(exec_native)
     method_adapter = adapter_cls(method_native)
     assert exec_adapter._stmt_cache_enabled
-    method_adapter._cache_hit_executor = None
+    method_adapter.set_cached_statement_executor(None)
 
     await exec_adapter.execute("SELECT 1 AS a")
     await method_adapter.execute("SELECT 1 AS a")
@@ -3273,7 +3307,7 @@ async def test_async_cache_hit_on_real_embedded_engines(engine: str) -> None:
         native = AsyncDuckDBDriver(DuckDBConfig(path=":memory:"))
         exec_adapter = DuckDBAsyncDriver(native)
         method_adapter = DuckDBAsyncDriver(native)
-    method_adapter._cache_hit_executor = None
+    method_adapter.set_cached_statement_executor(None)
 
     try:
         assert exec_adapter._stmt_cache_enabled
@@ -3286,10 +3320,27 @@ async def test_async_cache_hit_on_real_embedded_engines(engine: str) -> None:
         assert second_insert.rows_affected == 1
         if engine == "sqlite":
             assert second_insert.last_inserted_id == 2
+            method_first = await method_adapter.execute(
+                "INSERT INTO cache_hit_items (id, name) VALUES (?, ?)", (3, "gamma")
+            )
+            method_second = await method_adapter.execute(
+                "INSERT INTO cache_hit_items (id, name) VALUES (?, ?)", (4, "delta")
+            )
+            assert method_first.last_inserted_id == 3
+            assert method_second.last_inserted_id == 4
 
         first_select = await exec_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
         second_select = await exec_adapter.execute("SELECT id, name FROM cache_hit_items ORDER BY id")
-        expected_rows = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+        expected_rows = (
+            [
+                {"id": 1, "name": "alpha"},
+                {"id": 2, "name": "beta"},
+                {"id": 3, "name": "gamma"},
+                {"id": 4, "name": "delta"},
+            ]
+            if engine == "sqlite"
+            else [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+        )
         assert first_select.all() == expected_rows
         assert second_select.all() == expected_rows
 
@@ -3341,3 +3392,214 @@ async def test_thread_offload_execute_dml_delegates_to_sync_driver() -> None:
     result = await driver.execute_dml("UPDATE t SET a = 2")
     assert result == (1, None)
     assert sync_native.calls == [("execute", "UPDATE t SET a = 2", ())]
+
+
+@pytest.mark.parametrize(
+    "module_path",
+    _SQLSPEC_MODULE_PATHS,
+    ids=lambda path: str(path.relative_to(_SQLSPEC_PACKAGE_ROOT)),
+)
+def test_sqlspec_package_uses_public_driver_and_result_seams(module_path: Path) -> None:
+    """Every module under extensions/sqlspec avoids private sqlspec.driver/result imports and _cache_hit_* access."""
+    source = module_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(module_path))
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod.startswith(("sqlspec.driver._", "sqlspec.core.result._")):
+                violations.append(f"private import: from {mod}")
+            for alias in node.names:
+                if alias.name == "cache_hit_hooks_unchanged":
+                    violations.append("private helper import: cache_hit_hooks_unchanged")
+        elif isinstance(node, ast.Attribute) and node.attr in {"_cache_hit_executor", "_cache_hit_state"}:
+            violations.append(f"private attribute access: .{node.attr}")
+    assert violations == [], f"{module_path} uses private sqlspec internals: {violations}"
+
+
+def test_cached_statement_executors_conform_to_sqlspec_protocols() -> None:
+    """Static and runtime check that BaseSyncDriver and BaseAsyncDriver executors match sqlspec 0.73.0 protocols."""
+    sync_exec: SyncCachedStatementExecutor = BaseSyncDriver._run_cached_statement
+    async_exec: AsyncCachedStatementExecutor = BaseAsyncDriver._run_cached_statement
+    assert callable(sync_exec)
+    assert callable(async_exec)
+
+
+_WATCHED_CACHE_HIT_HOOKS = (
+    "with_cursor",
+    "collect_rows",
+    "resolve_rowcount",
+    "resolve_last_inserted_id",
+    "handle_database_exceptions",
+    "build_cached_select_result",
+    "_execute_cache_hit",
+    "_execute_cache_hit_with_cursor",
+)
+
+
+@pytest.mark.parametrize("hook_name", _WATCHED_CACHE_HIT_HOOKS)
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client"),
+    [
+        pytest.param(PostgresSyncDriver, False, id="postgres"),
+        pytest.param(MySQLSyncDriver, False, id="mysql"),
+        pytest.param(MSSQLSyncDriver, False, id="mssql"),
+        pytest.param(SQLiteSyncDriver, True, id="sqlite"),
+        pytest.param(DuckDBSyncDriver, True, id="duckdb"),
+        pytest.param(BigQuerySyncDriver, False, id="bigquery"),
+        pytest.param(SpannerSyncDriver, False, id="spanner"),
+    ],
+)
+def test_sync_subclass_overriding_watched_hook_declines_executor(
+    adapter_cls: type[BaseSyncDriver],
+    with_client: bool,
+    hook_name: str,
+) -> None:
+    """A sync adapter subclass overriding any watched cache-hit hook declines executor registration."""
+
+    def _override(self: Any, *args: Any, **kwargs: Any) -> Any:
+        return getattr(adapter_cls, hook_name)(self, *args, **kwargs)
+
+    sub_cls = type(f"Sub_{adapter_cls.__name__}_{hook_name}", (adapter_cls,), {hook_name: _override})
+    adapter = sub_cls(_SingleCallSyncNative(with_client=with_client))
+    assert adapter._cache_hit_executor is None
+    assert adapter._cache_hit_state is None
+
+
+@pytest.mark.parametrize("hook_name", _WATCHED_CACHE_HIT_HOOKS)
+@pytest.mark.parametrize(
+    ("adapter_cls", "with_client"),
+    [
+        pytest.param(PostgresAsyncDriver, False, id="postgres"),
+        pytest.param(MySQLAsyncDriver, False, id="mysql"),
+        pytest.param(MSSQLAsyncDriver, False, id="mssql"),
+        pytest.param(SQLiteAsyncDriver, True, id="sqlite"),
+        pytest.param(DuckDBAsyncDriver, True, id="duckdb"),
+        pytest.param(BigQueryAsyncDriver, False, id="bigquery"),
+        pytest.param(SpannerAsyncDriver, False, id="spanner"),
+    ],
+)
+def test_async_subclass_overriding_watched_hook_declines_executor(
+    adapter_cls: type[BaseAsyncDriver],
+    with_client: bool,
+    hook_name: str,
+) -> None:
+    """An async adapter subclass overriding any watched cache-hit hook declines executor registration."""
+
+    def _override(self: Any, *args: Any, **kwargs: Any) -> Any:
+        return getattr(adapter_cls, hook_name)(self, *args, **kwargs)
+
+    sub_cls = type(f"Sub_{adapter_cls.__name__}_{hook_name}", (adapter_cls,), {hook_name: _override})
+    adapter = sub_cls(_SingleCallAsyncNative(with_client=with_client))
+    assert adapter._cache_hit_executor is None
+    assert adapter._cache_hit_state is None
+
+
+def test_sync_subclass_resolve_last_inserted_id_controls_cached_insert() -> None:
+    """Overriding resolve_last_inserted_id declines the executor and applies custom IDs on cached INSERT."""
+
+    class _CustomLastIdSyncDriver(SQLiteSyncDriver):
+        def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
+            _ = cursor
+            return "custom-sync-id"
+
+    native = _SingleCallSyncNative(rowcount=1, lastrowid=99, with_client=True)
+    driver = _CustomLastIdSyncDriver(native)
+    assert driver._cache_hit_executor is None
+    sql = "INSERT INTO items (name) VALUES (1)"
+    driver.execute(sql)
+    cached_res = driver.execute(sql)
+    assert cached_res.rows_affected == 1
+    assert cached_res.last_inserted_id == "custom-sync-id"
+
+
+@pytest.mark.anyio
+async def test_async_subclass_resolve_last_inserted_id_controls_cached_insert() -> None:
+    """Overriding resolve_last_inserted_id on async drivers controls cached INSERT last_inserted_id."""
+
+    class _CustomLastIdAsyncDriver(SQLiteAsyncDriver):
+        def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
+            _ = cursor
+            return "custom-async-id"
+
+    native = _SingleCallAsyncNative(rowcount=1, lastrowid=99, with_client=True)
+    driver = _CustomLastIdAsyncDriver(native)
+    assert driver._cache_hit_executor is None
+    sql = "INSERT INTO items (name) VALUES (1)"
+    await driver.execute(sql)
+    cached_res = await driver.execute(sql)
+    assert cached_res.rows_affected == 1
+    assert cached_res.last_inserted_id == "custom-async-id"
+
+
+@pytest.mark.parametrize(
+    ("raw_rowcount", "raw_lastrowid", "expected_rc", "expected_id"),
+    [
+        pytest.param(True, 7, 0, None, id="bool-rowcount"),
+        pytest.param(False, 7, 0, None, id="false-rowcount"),
+        pytest.param(-1, 7, 0, None, id="negative-rowcount"),
+        pytest.param(0, 7, 0, None, id="zero-rowcount"),
+        pytest.param(1, True, 1, None, id="bool-lastrowid"),
+        pytest.param(1, object(), 1, None, id="object-lastrowid"),
+        pytest.param(1, 42, 1, 42, id="int-lastrowid"),
+        pytest.param(1, "rowid-1", 1, "rowid-1", id="str-lastrowid"),
+    ],
+)
+def test_sync_cache_hit_normalizes_rowcount_and_lastrowid(
+    raw_rowcount: Any,
+    raw_lastrowid: Any,
+    expected_rc: int,
+    expected_id: int | str | None,
+) -> None:
+    """Reject bool and invalid sentinels across resolve_rowcount, executor, and method cache-hit paths."""
+    sql = "INSERT INTO t (a) VALUES (1)"
+    exec_native = _SingleCallSyncNative(rowcount=raw_rowcount, lastrowid=raw_lastrowid)
+    method_native = _SingleCallSyncNative(rowcount=raw_rowcount, lastrowid=raw_lastrowid)
+    exec_adapter = PostgresSyncDriver(exec_native)
+    method_adapter = PostgresSyncDriver(method_native)
+    method_adapter.set_cached_statement_executor(None)
+
+    exec_adapter.execute(sql)
+    method_adapter.execute(sql)
+    exec_res = exec_adapter.execute(sql)
+    method_res = method_adapter.execute(sql)
+
+    assert exec_res.rows_affected == expected_rc
+    assert method_res.rows_affected == expected_rc
+    assert exec_res.last_inserted_id == expected_id
+    assert method_res.last_inserted_id == expected_id
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("raw_rowcount", "raw_lastrowid", "expected_rc", "expected_id"),
+    [
+        pytest.param(True, 7, 0, None, id="bool-rowcount"),
+        pytest.param(-1, 7, 0, None, id="negative-rowcount"),
+        pytest.param(1, True, 1, None, id="bool-lastrowid"),
+        pytest.param(1, "rowid-2", 1, "rowid-2", id="str-lastrowid"),
+    ],
+)
+async def test_async_cache_hit_normalizes_rowcount_and_lastrowid(
+    raw_rowcount: Any,
+    raw_lastrowid: Any,
+    expected_rc: int,
+    expected_id: int | str | None,
+) -> None:
+    """Reject bool and invalid sentinels on async executor and method cache-hit paths."""
+    sql = "INSERT INTO t (a) VALUES (1)"
+    exec_native = _SingleCallAsyncNative(rowcount=raw_rowcount, lastrowid=raw_lastrowid)
+    method_native = _SingleCallAsyncNative(rowcount=raw_rowcount, lastrowid=raw_lastrowid)
+    exec_adapter = PostgresAsyncDriver(exec_native)
+    method_adapter = PostgresAsyncDriver(method_native)
+    method_adapter.set_cached_statement_executor(None)
+
+    await exec_adapter.execute(sql)
+    await method_adapter.execute(sql)
+    exec_res = await exec_adapter.execute(sql)
+    method_res = await method_adapter.execute(sql)
+
+    assert exec_res.rows_affected == expected_rc
+    assert method_res.rows_affected == expected_rc
+    assert exec_res.last_inserted_id == expected_id
+    assert method_res.last_inserted_id == expected_id

@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from sqlspec.core import ParameterStyle, StatementConfig
 from sqlspec.driver import validate_savepoint_name
-from sqlspec.driver._common import cache_hit_hooks_unchanged
 
 from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver
 from vertebra.extensions.sqlspec.adapters.duckdb.core import (
@@ -70,8 +69,6 @@ class DuckDBSyncDriver(BaseSyncDriver):
 
     def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
         """Return the client-bound callables the native driver holds, or `None` to register no executor."""
-        if not cache_hit_hooks_unchanged(type(self), DuckDBSyncDriver):
-            return None
         if getattr(self.native_driver, "_dynamic_secrets", ()):
             return self._single_call_pair(self.native_driver, "execute_with_description", "execute_dml")
         return self._single_call_pair(self.native_driver, "_fetch_rows", "_run_dml")
@@ -188,8 +185,6 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
 
     def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
         """Return the client-bound callables the native async driver holds, or `None` to register no executor."""
-        if not cache_hit_hooks_unchanged(type(self), DuckDBAsyncDriver):
-            return None
         if getattr(self.native_driver, "_dynamic_secrets", ()):
             return BaseSyncDriver._single_call_pair(self.native_driver, "execute_with_description", "execute_dml")
         return BaseSyncDriver._single_call_pair(self.native_driver, "_fetch_rows", "_run_dml")

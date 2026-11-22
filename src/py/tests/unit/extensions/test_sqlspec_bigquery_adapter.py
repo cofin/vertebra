@@ -1211,7 +1211,9 @@ def _instrument_bigquery_cache_hit_state(adapter: Any, *, asynchronous: bool) ->
             counts["dml"] += 1
             return await orig_dml(*args, **kwargs)
 
-        adapter._cache_hit_state = (_wrapped_async_fetch, _wrapped_async_dml, orig_mapper)
+        adapter.set_cached_statement_executor(
+            BaseAsyncDriver._run_cached_statement, state=(_wrapped_async_fetch, _wrapped_async_dml, orig_mapper)
+        )
     else:
 
         def _wrapped_sync_fetch(*args: Any, **kwargs: Any) -> Any:
@@ -1222,7 +1224,9 @@ def _instrument_bigquery_cache_hit_state(adapter: Any, *, asynchronous: bool) ->
             counts["dml"] += 1
             return orig_dml(*args, **kwargs)
 
-        adapter._cache_hit_state = (_wrapped_sync_fetch, _wrapped_sync_dml, orig_mapper)
+        adapter.set_cached_statement_executor(
+            BaseSyncDriver._run_cached_statement, state=(_wrapped_sync_fetch, _wrapped_sync_dml, orig_mapper)
+        )
     return counts
 
 
@@ -1356,7 +1360,7 @@ def test_bigquery_cache_hit_result_matches_method_path(
     if mode == "sync":
         fast_adapter: Any = BigQuerySyncDriver(fast_conn)
         method_adapter: Any = BigQuerySyncDriver(method_conn)
-        method_adapter._cache_hit_executor = None
+        method_adapter.set_cached_statement_executor(None)
         fast_adapter.execute(sql)
         method_adapter.execute(sql)
         fast_res = fast_adapter.execute(sql)
@@ -1364,7 +1368,7 @@ def test_bigquery_cache_hit_result_matches_method_path(
     else:
         fast_adapter = BigQueryAsyncDriver(fast_conn)
         method_adapter = BigQueryAsyncDriver(method_conn)
-        method_adapter._cache_hit_executor = None
+        method_adapter.set_cached_statement_executor(None)
 
         async def _run() -> tuple[Any, Any]:
             await fast_adapter.execute(sql)
@@ -1376,6 +1380,8 @@ def test_bigquery_cache_hit_result_matches_method_path(
     assert fast_res.all() == method_res.all()
     assert fast_res.column_names == method_res.column_names
     assert fast_res.rows_affected == method_res.rows_affected
+    assert fast_res.last_inserted_id == method_res.last_inserted_id
+    assert fast_res.last_inserted_id is None
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
@@ -1438,7 +1444,7 @@ def test_bigquery_cache_hit_error_records_no_metadata_and_matches_method_path(mo
     if mode == "sync":
         fast_adapter: Any = BigQuerySyncDriver(fast_conn)
         method_adapter: Any = BigQuerySyncDriver(method_conn)
-        method_adapter._cache_hit_executor = None
+        method_adapter.set_cached_statement_executor(None)
         fast_adapter.execute(sql)
         method_adapter.execute(sql)
         fast_conn.last_query_metadata.clear()
@@ -1452,7 +1458,7 @@ def test_bigquery_cache_hit_error_records_no_metadata_and_matches_method_path(mo
     else:
         fast_adapter = BigQueryAsyncDriver(fast_conn)
         method_adapter = BigQueryAsyncDriver(method_conn)
-        method_adapter._cache_hit_executor = None
+        method_adapter.set_cached_statement_executor(None)
 
         async def _run() -> tuple[BaseException, BaseException]:
             await fast_adapter.execute(sql)
@@ -1494,3 +1500,15 @@ def test_bigquery_cache_hit_not_registered_without_cursor(mode: str) -> None:
     )
     assert adapter._cache_hit_executor is None
     assert adapter._cache_hit_state is None
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_bigquery_resolve_last_inserted_id_returns_none(mode: str) -> None:
+    """BigQuery drivers override resolve_last_inserted_id to return None matching dispatch_execute."""
+
+    class _FakeCursorWithRowId:
+        lastrowid = 99
+
+    conn = _CountingBigQueryConnection(asynchronous=(mode == "async"))
+    adapter: Any = BigQuerySyncDriver(conn) if mode == "sync" else BigQueryAsyncDriver(conn)
+    assert adapter.resolve_last_inserted_id(_FakeCursorWithRowId()) is None
