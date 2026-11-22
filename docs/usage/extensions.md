@@ -92,9 +92,9 @@ app = Litestar(
 )
 ```
 
-## SQLSpec 0.74.0+ Per-Engine Adapters, Stores & SHM Proxy (`vertebra.extensions.sqlspec`)
+## SQLSpec 0.74.1+ Per-Engine Adapters, Stores & SHM Proxy (`vertebra.extensions.sqlspec`)
 
-Vertebra provides first-class support for `sqlspec>=0.74.0` across 8 per-engine adapter packages (`vertebra.extensions.sqlspec.adapters.{postgres,sqlite,mysql,oracle,mssql,duckdb,bigquery,spanner}`), native statement pipelining, shared-memory connection pooling, and Google ADK / Litestar / Events stores:
+Vertebra provides first-class support for `sqlspec>=0.74.1` across 8 per-engine adapter packages (`vertebra.extensions.sqlspec.adapters.{postgres,sqlite,mysql,oracle,mssql,duckdb,bigquery,spanner}`), native statement pipelining, shared-memory connection pooling, and Google ADK / Litestar / Events stores:
 
 === "uv"
 

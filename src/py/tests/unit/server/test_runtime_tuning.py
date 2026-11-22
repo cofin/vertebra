@@ -583,6 +583,48 @@ def test_create_event_loop_attaches_eager_task_factory_across_backends(
 
 
 @pytest.mark.parametrize(
+    ("eager_start_arg", "expected_order"),
+    [
+        ("omit", ["before_suspend", "after_create_task", "after_suspend"]),
+        (None, ["before_suspend", "after_create_task", "after_suspend"]),
+        (True, ["before_suspend", "after_create_task", "after_suspend"]),
+        (False, ["after_create_task", "before_suspend", "after_suspend"]),
+    ],
+    ids=["omitted", "none-defaults-eager", "true-eager", "false-deferred"],
+)
+def test_event_loop_eager_task_factory_accepts_uvloop_eager_start_kwarg(
+    eager_start_arg: bool | str | None,
+    expected_order: list[str],
+) -> None:
+    """Verify the installed eager task factory handles uvloop 0.23+ eager_start=None and explicit bool values."""
+    loop = create_event_loop("asyncio")
+    try:
+        factory: Any = loop.get_task_factory()
+        assert factory is not None
+        order: list[str] = []
+
+        async def _child() -> str:
+            order.append("before_suspend")
+            await asyncio.sleep(0)
+            order.append("after_suspend")
+            return "ok"
+
+        async def _driver() -> str:
+            task: asyncio.Task[str] = (
+                factory(loop, _child())
+                if eager_start_arg == "omit"
+                else factory(loop, _child(), eager_start=eager_start_arg)
+            )
+            order.append("after_create_task")
+            return await task
+
+        assert loop.run_until_complete(_driver()) == "ok"
+        assert order == expected_order
+    finally:
+        loop.close()
+
+
+@pytest.mark.parametrize(
     "exc_type",
     [AttributeError, NotImplementedError, TypeError],
     ids=["attribute-error", "not-implemented", "type-error"],

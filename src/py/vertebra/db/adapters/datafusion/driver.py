@@ -61,7 +61,9 @@ class DataFusionEngine:
                 msg = f"Table {registration.name!r} uses format='arrow' without registered Arrow data"
                 raise ImproperConfigurationError(msg)
             if self._ctx is not None:
-                self._ctx.register_table(registration.name, self._arrow_tables[registration.name])
+                DataFusionCore.register_arrow_source(
+                    self._ctx, registration.name, self._arrow_tables[registration.name]
+                )
             self._tables[registration.name] = registration
             return registration
 
@@ -75,7 +77,7 @@ class DataFusionEngine:
         arrow_table = DataFusionCore.coerce_arrow_table(table)
         self._arrow_tables[name] = arrow_table
         if self._ctx is not None:
-            self._ctx.register_table(name, arrow_table)
+            DataFusionCore.register_arrow_source(self._ctx, name, arrow_table)
         reg = TableRegistration(name=name, uri=f"arrow://{name}", format="arrow")
         self._tables[name] = reg
         return reg
@@ -145,7 +147,7 @@ class DataFusionEngine:
             datafusion_mod = ensure_module("datafusion", package="datafusion", extra="datafusion")
             ctx = DataFusionCore.build_session_context(self._config, datafusion_mod=datafusion_mod)
             for tbl_name, tbl_obj in self._arrow_tables.items():
-                ctx.register_table(tbl_name, tbl_obj)
+                DataFusionCore.register_arrow_source(ctx, tbl_name, tbl_obj)
             for tbl_name, reg in self._tables.items():
                 if tbl_name not in self._arrow_tables:
                     DataFusionCore.register_file_source(ctx, reg)

@@ -9,18 +9,20 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from vertebra._postgres import (
-    AsyncPostgresClient,
-    AsyncPostgresPool,
-    SyncPostgresClient,
-    SyncPostgresPool,
-)
 from vertebra._vertebra import InterfaceError, OperationalError, QueryCancelledError
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from pytest_databases.docker.postgres import PostgresService
 
+pytestmark = pytest.mark.driver_engine("postgres")
+
 _DOCKER_ENV = "VERTEBRA_CONFORMANCE_DOCKER"
+
+
+def _postgres_native() -> Any:
+    """Load the optional native ``vertebra._postgres`` extension lazily."""
+    return ensure_module("vertebra._postgres", package="vertebra-core[postgres]", extra="postgres")
 
 
 @pytest.fixture
@@ -68,8 +70,9 @@ def test_invalid_timeout_rejected_before_io_sync_and_async(
     expected_exc: type[Exception],
 ) -> None:
     """Verify invalid timeout values fail synchronously before emission and keep sessions clean."""
+    pg_native = _postgres_native()
     kwargs = _client_kwargs(deadline_postgres_service)
-    client = SyncPostgresClient(**kwargs)
+    client = pg_native.SyncPostgresClient(**kwargs)
     client.connect()
     try:
         with pytest.raises(expected_exc):
@@ -82,7 +85,7 @@ def test_invalid_timeout_rejected_before_io_sync_and_async(
         client.close()
 
     async def _run_async() -> None:
-        aclient = AsyncPostgresClient(**kwargs)
+        aclient = pg_native.AsyncPostgresClient(**kwargs)
         await aclient.connect()
         try:
             with pytest.raises(expected_exc):
@@ -103,11 +106,12 @@ def test_live_client_deadline_cancels_pg_sleep_and_replaces_pooled_backend_pid(
     mode: str,
 ) -> None:
     """Verify timeout=0.1 raises OperationalError(sqlstate=None), cancels pg_sleep, and replaces PID."""
+    pg_native = _postgres_native()
     kwargs = _client_kwargs(deadline_postgres_service)
     marker = f"vtb_dl_probe_{mode}"
 
     if mode == "sync":
-        pool = SyncPostgresPool(min_size=0, max_size=1, **kwargs)
+        pool = pg_native.SyncPostgresPool(min_size=0, max_size=1, **kwargs)
         try:
             c1 = pool.acquire()
             try:
@@ -155,7 +159,7 @@ def test_live_client_deadline_cancels_pg_sleep_and_replaces_pooled_backend_pid(
         return
 
     async def _run_async() -> None:
-        apool = AsyncPostgresPool(min_size=0, max_size=1, **kwargs)
+        apool = pg_native.AsyncPostgresPool(min_size=0, max_size=1, **kwargs)
         try:
             ac1 = await apool.acquire()
             try:
@@ -211,10 +215,11 @@ def test_live_shared_query_multi_budget_and_statement_timeout_precedence(
     mode: str,
 ) -> None:
     """Verify query_multi shares one non-renewing budget and statement_timeout surfaces 57014."""
+    pg_native = _postgres_native()
     kwargs = _client_kwargs(deadline_postgres_service)
 
     if mode == "sync":
-        c_multi = SyncPostgresClient(**kwargs)
+        c_multi = pg_native.SyncPostgresClient(**kwargs)
         c_multi.connect()
         try:
             with pytest.raises(OperationalError) as multi_exc:
@@ -224,7 +229,7 @@ def test_live_shared_query_multi_budget_and_statement_timeout_precedence(
         finally:
             c_multi.close()
 
-        c_stmt = SyncPostgresClient(**kwargs)
+        c_stmt = pg_native.SyncPostgresClient(**kwargs)
         c_stmt.connect()
         try:
             c_stmt.query("SET statement_timeout = '50ms'")
@@ -236,7 +241,7 @@ def test_live_shared_query_multi_budget_and_statement_timeout_precedence(
         return
 
     async def _run_async() -> None:
-        ac_multi = AsyncPostgresClient(**kwargs)
+        ac_multi = pg_native.AsyncPostgresClient(**kwargs)
         await ac_multi.connect()
         try:
             with pytest.raises(OperationalError) as multi_exc:
@@ -246,7 +251,7 @@ def test_live_shared_query_multi_budget_and_statement_timeout_precedence(
         finally:
             await ac_multi.close()
 
-        apool = AsyncPostgresPool(min_size=0, max_size=1, **kwargs)
+        apool = pg_native.AsyncPostgresPool(min_size=0, max_size=1, **kwargs)
         try:
             ac_stmt = await apool.acquire()
             try:

@@ -2801,7 +2801,7 @@ class _SpannerWireState:
 @contextlib.contextmanager
 def _in_process_spanner_wire_server() -> Any:
     """Start an in-process Spanner gRPC data server and REST admin DDL server."""
-    grpc_mod: Any = importlib.import_module("grpc")
+    grpc_mod: Any = pytest.importorskip("grpc")
     rpc_handler = _SpannerWireState()
     grpc_server = grpc_mod.server(ThreadPoolExecutor(max_workers=4))
     grpc_server.add_generic_rpc_handlers((rpc_handler,))

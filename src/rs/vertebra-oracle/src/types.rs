@@ -543,13 +543,7 @@ impl OracleCellValue {
                 }
                 let json_slice =
                     decode_oson_payload(&oson_bytes).map_err(OracleError::data_error)?;
-                let ser_mod = py
-                    .import("vertebra.utils.serializers")
-                    .map_err(|e| OracleError::data_error(e.to_string()))?;
-                ser_mod
-                    .getattr("decode_json")
-                    .and_then(|fn_dec| fn_dec.call1((PyBytes::new(py, json_slice),)))
-                    .map_err(|e| OracleError::data_error(e.to_string()))
+                decode_json_bytes_py(py, json_slice)
             }
             Self::Vector(vec_data) => vec_data.into_py_vector_view(py),
         }
@@ -752,15 +746,7 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
     }
 
     if obj.is_instance_of::<PyDict>() {
-        let py = obj.py();
-        let ser_mod = py
-            .import("vertebra.utils.serializers")
-            .map_err(|e| OracleError::data_error(e.to_string()))?;
-        let json_bytes: Vec<u8> = ser_mod
-            .getattr("encode_json_bytes")
-            .and_then(|f| f.call1((obj,)))
-            .and_then(|b| b.extract())
-            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        let json_bytes = encode_json_bytes_py(obj)?;
         return Ok(OracleCellValue::Oson(
             encode_oson_payload(&json_bytes).to_vec(),
         ));
@@ -778,15 +764,7 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
         if is_numeric_vector && let Ok(vals) = obj.extract::<Vec<f32>>() {
             return Ok(OracleCellValue::Vector(OracleVectorData::Float32(vals)));
         }
-        let py = obj.py();
-        let ser_mod = py
-            .import("vertebra.utils.serializers")
-            .map_err(|e| OracleError::data_error(e.to_string()))?;
-        let json_bytes: Vec<u8> = ser_mod
-            .getattr("encode_json_bytes")
-            .and_then(|f| f.call1((obj,)))
-            .and_then(|b| b.extract())
-            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        let json_bytes = encode_json_bytes_py(obj)?;
         return Ok(OracleCellValue::Oson(
             encode_oson_payload(&json_bytes).to_vec(),
         ));
@@ -795,6 +773,45 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
     Err(OracleError::data_error(format!(
         "Unsupported Python bind parameter type: {type_name}"
     )))
+}
+
+fn encode_json_bytes_py(obj: &Bound<'_, PyAny>) -> Result<Vec<u8>, OracleError> {
+    let py = obj.py();
+    if let Ok(ser_mod) = py.import("vertebra.utils.serializers") {
+        return ser_mod
+            .getattr("encode_json_bytes")
+            .and_then(|f| f.call1((obj,)))
+            .and_then(|b| b.extract())
+            .map_err(|e| OracleError::data_error(e.to_string()));
+    }
+    let msgspec_json = py
+        .import("msgspec.json")
+        .map_err(|e| OracleError::data_error(e.to_string()))?;
+    msgspec_json
+        .getattr("encode")
+        .and_then(|f| f.call1((obj,)))
+        .and_then(|b| b.extract())
+        .map_err(|e| OracleError::data_error(e.to_string()))
+}
+
+fn decode_json_bytes_py<'py>(
+    py: Python<'py>,
+    json_slice: &[u8],
+) -> Result<Bound<'py, PyAny>, OracleError> {
+    let payload = PyBytes::new(py, json_slice);
+    if let Ok(ser_mod) = py.import("vertebra.utils.serializers") {
+        return ser_mod
+            .getattr("decode_json")
+            .and_then(|f| f.call1((&payload,)))
+            .map_err(|e| OracleError::data_error(e.to_string()));
+    }
+    let msgspec_json = py
+        .import("msgspec.json")
+        .map_err(|e| OracleError::data_error(e.to_string()))?;
+    msgspec_json
+        .getattr("decode")
+        .and_then(|f| f.call1((&payload,)))
+        .map_err(|e| OracleError::data_error(e.to_string()))
 }
 
 /// Convert an `oracledb::JsonValue` tree into a `serde_json::Value` and wrap in an `OSON` frame.

@@ -152,10 +152,35 @@ def create_event_loop(
     if loop is None:
         loop = asyncio.new_event_loop()
 
-    if hasattr(asyncio, "eager_task_factory"):
-        with suppress(AttributeError, NotImplementedError, TypeError):
-            loop.set_task_factory(asyncio.eager_task_factory)
+    with suppress(AttributeError, NotImplementedError, TypeError):
+        loop.set_task_factory(_eager_task_factory)
     return loop
+
+
+def _should_start_eagerly(coro: Any, eager_start: bool | None) -> bool:
+    """Return True when a task should start eagerly, deferring anyio TaskGroup wrappers."""
+    if eager_start is False:
+        return False
+    code = getattr(coro, "cr_code", None)
+    return not (code is not None and code.co_name == "_run_coro" and "anyio" in code.co_filename)
+
+
+def _eager_task_factory(
+    loop: asyncio.AbstractEventLoop,
+    coro: Any,
+    *,
+    name: str | None = None,
+    context: Any = None,
+    eager_start: bool | None = None,
+) -> asyncio.Task[Any]:
+    """Create an eagerly started asyncio Task compatible with uvloop 0.23+ across Python 3.12-3.15."""
+    return asyncio.Task(
+        coro,
+        loop=loop,
+        name=name,
+        context=context,
+        eager_start=_should_start_eagerly(coro, eager_start),
+    )
 
 
 def configure_worker_affinity(worker_index: int, *, enable_pinning: bool = False) -> bool:
@@ -713,38 +738,34 @@ class EventLoopPool:
                 return drain_name
             return f"{prefix}{next(counter)}"
 
-        if hasattr(asyncio, "create_eager_task_factory"):
-
-            def _build_shard_task(
-                coro: Any,
-                *,
-                loop: asyncio.AbstractEventLoop | None = None,
-                name: str | None = None,
-                context: Any = None,
-                eager_start: bool = False,
-            ) -> asyncio.Task[Any]:
-                nonlocal pending_name
-                resolved = name
-                if resolved is None:
-                    if pending_name is not None:
-                        resolved = pending_name
-                        pending_name = None
-                    else:
-                        resolved = _default_name_for_coro(coro)
-                else:
+        def _shard_task_factory(
+            target_loop: asyncio.AbstractEventLoop,
+            coro: Any,
+            *,
+            name: str | None = None,
+            context: Any = None,
+            eager_start: bool | None = None,
+        ) -> asyncio.Task[Any]:
+            nonlocal pending_name
+            resolved = name
+            if resolved is None:
+                if pending_name is not None:
+                    resolved = pending_name
                     pending_name = None
-                target = loop if loop is not None else orig_loop
-                return asyncio.Task(
-                    coro,
-                    loop=target,
-                    name=resolved,
-                    context=context,
-                    eager_start=eager_start,
-                )
+                else:
+                    resolved = _default_name_for_coro(coro)
+            else:
+                pending_name = None
+            return asyncio.Task(
+                coro,
+                loop=target_loop,
+                name=resolved,
+                context=context,
+                eager_start=_should_start_eagerly(coro, eager_start),
+            )
 
-            orig_loop = loop
-            with suppress(AttributeError, NotImplementedError, TypeError):
-                loop.set_task_factory(asyncio.create_eager_task_factory(_build_shard_task))
+        with suppress(AttributeError, NotImplementedError, TypeError):
+            loop.set_task_factory(_shard_task_factory)
 
         def _named_create_task(
             coro: Any,

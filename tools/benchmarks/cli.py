@@ -353,8 +353,9 @@ def list_scenarios() -> None:
             scenario.description,
         )
 
-    console.print(table)
-    console.print(
+    active_console = Console()
+    active_console.print(table)
+    active_console.print(
         f"\nPresets: quick={QUICK_SCENARIOS}, default={DEFAULT_SCENARIOS}, "
         f"data={DATA_SCENARIOS}, storage={STORAGE_SCENARIOS}, "
         f"grpc={GRPC_SCENARIOS}, grpc-native={GRPC_NATIVE_SCENARIOS}"
@@ -403,7 +404,7 @@ def list_targets(
             target.description,
         )
 
-    console.print(table)
+    Console().print(table)
 
 
 @cli.command()

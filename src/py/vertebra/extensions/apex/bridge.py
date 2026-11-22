@@ -278,10 +278,11 @@ class ApexFederatedSource(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class ApexFederatedQuery:
     """Federates Oracle APEX session and ORDS datasets with Arrow/Parquet/Postgres in DataFusion."""
 
-    __slots__ = ("_engine",)
+    __slots__ = ("_engine", "_logical_sources")
 
     def __init__(self, engine: DataFusionEngine | None = None) -> None:
         self._engine = engine or DataFusionEngine()
+        self._logical_sources: dict[str, TableRegistration] = {}
 
     @property
     def engine(self) -> DataFusionEngine:
@@ -291,7 +292,10 @@ class ApexFederatedQuery:
     def register_source(self, source: ApexFederatedSource) -> TableRegistration:
         """Register an Oracle, Postgres, Parquet, or Arrow source in the federated engine."""
         reg = TableRegistration(name=source.alias, uri=source.uri, format=source.format)
-        return self._engine.register_table(reg)
+        if self._is_local_datafusion_source(source):
+            return self._engine.register_table(reg)
+        self._logical_sources[source.alias] = reg
+        return reg
 
     def build_federated_plan(
         self,
@@ -299,7 +303,20 @@ class ApexFederatedQuery:
         sql: str,
     ) -> dict[str, Any]:
         """Compile a federated execution plan enriched with ``ApexSessionContext`` bindings."""
-        plan = self._engine.explain_plan(sql)
+        if self._logical_sources:
+            all_tables = {**self._engine.tables, **self._logical_sources}
+            referenced = [name for name in all_tables if re.search(rf"\b{re.escape(name)}\b", sql)]
+            plan: dict[str, Any] = {
+                "mode": self._engine.config.mode,
+                "media_type": self._engine.ARROW_STREAM_MEDIA_TYPE,
+                "logical_plan": "",
+                "physical_plan": "",
+                "plan": "",
+                "referenced_tables": referenced,
+                "sql": sql,
+            }
+        else:
+            plan = self._engine.explain_plan(sql)
         session_binds: dict[str, Any] = {
             "APP_ID": context.app_id,
             "APP_PAGE_ID": context.page_id,
@@ -317,3 +334,12 @@ class ApexFederatedQuery:
             },
             "session_binds": session_binds,
         }
+
+    @staticmethod
+    def _is_local_datafusion_source(source: ApexFederatedSource) -> bool:
+        """Return True when ``source`` can be registered directly on a local DataFusion context."""
+        if source.format == "arrow":
+            return True
+        if source.format != "parquet":
+            return False
+        return source.uri.startswith("file://") or "://" not in source.uri

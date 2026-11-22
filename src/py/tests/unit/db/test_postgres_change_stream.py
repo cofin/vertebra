@@ -637,11 +637,13 @@ async def test_change_source_bounded_aclose_raises_when_in_flight_ack_stalls() -
     await source.__anext__()
     hung_ack = asyncio.create_task(source.acknowledge(100))
     await store.save_started.wait()
+    store.load_gate = asyncio.Event()
     with pytest.raises(PostgresReplicationGapError) as close_gap:
         await source.aclose()
     assert close_gap.value.reason == "checkpoint_uncertain"
     assert stream.closed is True
     store.save_gate.set()
+    store.load_gate.set()
     with pytest.raises(PostgresReplicationGapError):
         await hung_ack
 

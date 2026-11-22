@@ -1699,6 +1699,55 @@ def test_build_ci_wheels_parsing_staging_and_server_profiles(tmp_path: Path) -> 
     assert "--target" not in ci_cmd
 
 
+def test_build_ci_wheels_resolves_symlinked_interpreter_for_pyo3_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify build_ci_distributions resolves symlinked venv interpreters so PYO3_PYTHON stays unique per version."""
+    real_py = tmp_path / "cpython-3.13" / "bin" / "python3.13"
+    real_py.parent.mkdir(parents=True)
+    real_py.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    symlink_py = venv_bin / "python"
+    symlink_py.symlink_to(real_py)
+    fake_maturin = venv_bin / "maturin"
+    fake_maturin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    wheel_dir = tmp_path / "dist" / "wheels"
+    recorded_cmds: list[list[str]] = []
+    recorded_envs: list[dict[str, str]] = []
+
+    def _fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        _ = (cwd, check)
+        recorded_cmds.append(list(cmd))
+        recorded_envs.append(dict(env or {}))
+        wheel_dir.mkdir(parents=True, exist_ok=True)
+        (wheel_dir / "vertebra_core-0.3.0-cp313-cp313-linux_x86_64.whl").write_bytes(b"PK")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    built = build_ci_wheels_mod.build_ci_distributions(
+        tmp_path,
+        wheel_dir=wheel_dir,
+        packages=("core",),
+        interpreter=symlink_py,
+    )
+    assert len(built) == 1
+    assert recorded_cmds[0][0] == str(fake_maturin)
+    interp_idx = recorded_cmds[0].index("--interpreter") + 1
+    assert recorded_cmds[0][interp_idx] == str(real_py.resolve())
+    assert recorded_envs[0]["PYO3_PYTHON"] == str(real_py.resolve())
+
+
 def _raise_missing_zstd(
     module_name: str,
     *,

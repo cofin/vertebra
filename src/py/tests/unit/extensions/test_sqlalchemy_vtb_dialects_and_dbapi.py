@@ -2027,8 +2027,14 @@ async def test_advanced_alchemy_1130b2_oracle_jsonb_blob_transport_and_returning
 
 @pytest.mark.parametrize(
     "url",
-    ["sqlite+vtb:///:memory:", "duckdb+vtb:///:memory:"],
-    ids=["sqlite", "duckdb"],
+    [
+        pytest.param("sqlite+vtb:///:memory:", id="sqlite"),
+        pytest.param(
+            "duckdb+vtb:///:memory:",
+            id="duckdb",
+            marks=pytest.mark.skipif(not _HAS_DUCKDB_ENGINE, reason="duckdb-engine not installed"),
+        ),
+    ],
 )
 def test_sqlalchemy_sync_engines_run_on_native_cursor(url: str) -> None:
     """Verify sync sqlite+vtb and duckdb+vtb engines execute on native cursors with rollback support."""
@@ -2062,8 +2068,14 @@ def test_sqlalchemy_sync_engines_run_on_native_cursor(url: str) -> None:
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "url",
-    ["sqlite+vtb_async:///:memory:", "duckdb+vtb_async:///:memory:"],
-    ids=["sqlite", "duckdb"],
+    [
+        pytest.param("sqlite+vtb_async:///:memory:", id="sqlite"),
+        pytest.param(
+            "duckdb+vtb_async:///:memory:",
+            id="duckdb",
+            marks=pytest.mark.skipif(not _HAS_DUCKDB_ENGINE, reason="duckdb-engine not installed"),
+        ),
+    ],
 )
 async def test_sqlalchemy_async_engines_run_on_native_cursor(url: str) -> None:
     """Verify asyncio sqlite+vtb_async and duckdb+vtb_async engines execute on native cursors with rollback support."""

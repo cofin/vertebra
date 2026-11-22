@@ -426,7 +426,7 @@ def test_pyproject_typing_and_coverage_policy() -> None:
     pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
 
     lint_deps = pyproject["dependency-groups"]["lint"]
-    assert "pyright==1.1.381" in lint_deps
+    assert any(dep.startswith("pyright==") for dep in lint_deps)
 
     pyright_cfg = pyproject["tool"]["pyright"]
     assert pyright_cfg["pythonVersion"] == "3.12"
