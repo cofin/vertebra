@@ -101,7 +101,26 @@ def _resolve_mssql_config(
     else:
         resolved_broker = None
     if config is not None:
-        return config, resolved_broker
+        has_retry_features = isinstance(driver_features, Mapping) and any(
+            key in driver_features
+            for key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay")
+        )
+        if not has_retry_features:
+            return config, resolved_broker
+        seed_conn: dict[str, Any] = {f: getattr(config, f) for f in MSSQLConfig.__struct_fields__ if f != "dsn"}
+        if config.dsn != "mssql://127.0.0.1:1433/master":
+            seed_conn["url"] = config.dsn
+        if isinstance(driver_features, Mapping):
+            for retry_key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay"):
+                if retry_key in driver_features:
+                    seed_conn[retry_key] = driver_features[retry_key]
+        rebuilt = build_connection_config(
+            connection_config=seed_conn,
+            driver_features=driver_features,
+            broker=resolved_broker,
+            overrides=kwargs,
+        )
+        return rebuilt, resolved_broker
     built = build_connection_config(
         connection_config=connection_config,
         driver_features=driver_features,
@@ -295,6 +314,9 @@ def _derive_mssql_adapter(adapter: Any, overrides: Mapping[str, Any]) -> Any:
             "cloudsql_ip_type",
             "cloudsql_auth_type",
             "cloudsql_proxy_addr",
+            "connector_retry_count",
+            "connector_retry_delay",
+            "connector_retry_max_delay",
             "token_provider",
         ):
             if field_key not in merged_conn and field_key not in extra_conn_updates:
@@ -302,6 +324,13 @@ def _derive_mssql_adapter(adapter: Any, overrides: Mapping[str, Any]) -> Any:
                 if base_val is not None:
                     merged_conn[field_key] = base_val
     merged_conn.update(extra_conn_updates)
+    if isinstance(feature_overrides, Mapping):
+        for retry_key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay"):
+            if retry_key in feature_overrides and retry_key not in extra_conn_updates:
+                merged_conn.pop(retry_key, None)
+    for retry_key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay"):
+        if retry_key not in extra_conn_updates and retry_key not in merged_features and retry_key not in merged_conn:
+            merged_conn[retry_key] = getattr(adapter.driver_config, retry_key)
 
     return type(adapter)(
         None,

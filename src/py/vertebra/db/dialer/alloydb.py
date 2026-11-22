@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import socket
 import ssl
 import struct
@@ -10,14 +11,20 @@ import time
 from collections.abc import Callable
 from enum import IntEnum
 from typing import Any, ClassVar, Self
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import anyio
 
 from vertebra.db.dialer._base import (
+    DEFAULT_CONNECTOR_RETRY_COUNT,
+    DEFAULT_CONNECTOR_RETRY_DELAY,
+    DEFAULT_CONNECTOR_RETRY_MAX_DELAY,
     VALID_GCP_IP_TYPES,
     EphemeralCertBundle,
     _BaseGCPDialer,
+    parse_connector_retry_count,
+    parse_connector_retry_delay,
+    validate_connector_retry_config,
 )
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import import_optional
@@ -94,19 +101,42 @@ class AlloyDBConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """AlloyDB Auth Proxy protocol TLS port (default `5433`)."""
     user_agent: str = "vertebra-db/0.1"
     """User-agent string sent during the `MetadataExchangeRequest` protobuf handshake."""
+    connector_retry_count: int = DEFAULT_CONNECTOR_RETRY_COUNT
+    """Maximum retry attempts on transient AlloyDB dialer errors (defaults to `3`; `0` disables retries)."""
+    connector_retry_delay: float = DEFAULT_CONNECTOR_RETRY_DELAY
+    """Initial backoff delay in seconds before jittered exponential dialer retries (defaults to `0.5`)."""
+    connector_retry_max_delay: float = DEFAULT_CONNECTOR_RETRY_MAX_DELAY
+    """Upper bound in seconds on exponential backoff between dialer retry attempts (defaults to `5.0`)."""
 
     def __post_init__(self) -> None:
-        """Validate AlloyDB IP connectivity type."""
+        """Validate AlloyDB IP connectivity type and retry backoff bounds."""
         if self.ip_type not in VALID_GCP_IP_TYPES:
             msg = f"Invalid AlloyDB ip_type {self.ip_type!r}; expected one of 'PUBLIC', 'PRIVATE', 'PSC'"
             raise ValueError(msg)
+        validate_connector_retry_config(
+            self.connector_retry_count,
+            self.connector_retry_delay,
+            self.connector_retry_max_delay,
+        )
 
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct an `AlloyDBConfig` from an `alloydb://` instance URI."""
         parsed = urlparse(url)
         instance_uri = parsed.path if parsed.path.startswith("/projects/") else f"/{parsed.netloc}{parsed.path}"
-        return cls(instance_uri=instance_uri, **overrides)
+        query = parse_qs(parsed.query)
+        kwargs: dict[str, Any] = dict(overrides)
+        if "connector_retry_count" in query and "connector_retry_count" not in kwargs:
+            kwargs["connector_retry_count"] = parse_connector_retry_count(query["connector_retry_count"][0])
+        if "connector_retry_delay" in query and "connector_retry_delay" not in kwargs:
+            kwargs["connector_retry_delay"] = parse_connector_retry_delay(
+                query["connector_retry_delay"][0], field_name="connector_retry_delay"
+            )
+        if "connector_retry_max_delay" in query and "connector_retry_max_delay" not in kwargs:
+            kwargs["connector_retry_max_delay"] = parse_connector_retry_delay(
+                query["connector_retry_max_delay"][0], field_name="connector_retry_max_delay"
+            )
+        return cls(instance_uri=instance_uri, **kwargs)
 
     def pool_key(self) -> tuple[Any, ...]:
         """Return the canonical shared-dialer fingerprint tuple."""
@@ -116,6 +146,7 @@ class AlloyDBConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
 class _BaseAlloyDBDialer(_BaseGCPDialer):
     """Base zero-sidecar AlloyDB mTLS dialer foundation."""
 
+    _connector_name: ClassVar[str] = "alloydb"
     _tls_temp_prefix: ClassVar[str] = "vtb-adb-tls-"
 
     __slots__ = ()
@@ -350,33 +381,37 @@ class SyncAlloyDBDialer(_BaseAlloyDBDialer):
         ssl_context: ssl.SSLContext | None = None,
         timeout: float = 10.0,
     ) -> ssl.SSLSocket:
-        """Establish a synchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange."""
+        """Establish a synchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange with retry backoff."""
         resolved_token = self._resolve_sync_token(
             oauth2_token,
             use_cache=self._config.enable_iam_auth,
         )
         ctx = self._resolve_ssl_context(ssl_context)
-        raw_sock = socket.create_connection((host, self.port), timeout=timeout)
-        try:
-            tls_sock = ctx.wrap_socket(raw_sock)
-            req_frame = self.build_handshake_frame(resolved_token)
-            tls_sock.sendall(req_frame)
-            header = tls_sock.recv(4)
-            if len(header) < 4:
-                msg = "AlloyDB socket closed before metadata exchange response header"
-                raise ConnectionResetError(msg)
-            (body_len,) = struct.unpack(">I", header)
-            body = bytearray()
-            while len(body) < body_len:
-                chunk = tls_sock.recv(body_len - len(body))
-                if not chunk:
-                    break
-                body.extend(chunk)
-            self.decode_metadata_exchange_response(header + bytes(body))
-            return tls_sock
-        except Exception:
-            raw_sock.close()
-            raise
+
+        def _dial() -> ssl.SSLSocket:
+            raw_sock = socket.create_connection((host, self.port), timeout=timeout)
+            try:
+                tls_sock = ctx.wrap_socket(raw_sock)
+                req_frame = self.build_handshake_frame(resolved_token)
+                tls_sock.sendall(req_frame)
+                header = tls_sock.recv(4)
+                if len(header) < 4:
+                    msg = "AlloyDB socket closed before metadata exchange response header"
+                    raise ConnectionResetError(msg)
+                (body_len,) = struct.unpack(">I", header)
+                body = bytearray()
+                while len(body) < body_len:
+                    chunk = tls_sock.recv(body_len - len(body))
+                    if not chunk:
+                        break
+                    body.extend(chunk)
+                self.decode_metadata_exchange_response(header + bytes(body))
+                return tls_sock
+            except BaseException:
+                raw_sock.close()
+                raise
+
+        return self._run_with_retry_sync("connect", _dial)
 
     def close(self) -> None:
         """Clear cached tokens and certificates."""
@@ -429,26 +464,31 @@ class AsyncAlloyDBDialer(_BaseAlloyDBDialer):
         oauth2_token: str | None = None,
         ssl_context: ssl.SSLContext | None = None,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Establish an asynchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange."""
+        """Establish an asynchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange with retry backoff."""
         resolved_token = await self._resolve_async_token(
             oauth2_token,
             use_cache=self._config.enable_iam_auth,
         )
         ctx = self._resolve_ssl_context(ssl_context)
-        reader, writer = await asyncio.open_connection(host, self.port, ssl=ctx)
-        try:
-            req_frame = self.build_handshake_frame(resolved_token)
-            writer.write(req_frame)
-            await writer.drain()
-            header = await reader.readexactly(4)
-            (body_len,) = struct.unpack(">I", header)
-            body = await reader.readexactly(body_len)
-            self.decode_metadata_exchange_response(header + body)
-            return reader, writer
-        except Exception:
-            writer.close()
-            await writer.wait_closed()
-            raise
+
+        async def _dial() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+            reader, writer = await asyncio.open_connection(host, self.port, ssl=ctx)
+            try:
+                req_frame = self.build_handshake_frame(resolved_token)
+                writer.write(req_frame)
+                await writer.drain()
+                header = await reader.readexactly(4)
+                (body_len,) = struct.unpack(">I", header)
+                body = await reader.readexactly(body_len)
+                self.decode_metadata_exchange_response(header + body)
+                return reader, writer
+            except BaseException:
+                writer.close()
+                with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
+                    await writer.wait_closed()
+                raise
+
+        return await self._run_with_retry_async("connect", _dial)
 
     async def close(self) -> None:
         """Clear cached tokens and certificates."""

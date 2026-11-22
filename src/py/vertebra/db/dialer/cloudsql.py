@@ -8,15 +8,21 @@ import ssl
 import time
 from collections.abc import Callable
 from typing import Any, ClassVar, Self
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import anyio
 
 from vertebra.db.dialer._base import (
+    DEFAULT_CONNECTOR_RETRY_COUNT,
+    DEFAULT_CONNECTOR_RETRY_DELAY,
+    DEFAULT_CONNECTOR_RETRY_MAX_DELAY,
     VALID_GCP_IP_TYPES,
     EphemeralCertBundle,
     _BaseGCPDialer,
     generate_ephemeral_keypair,
+    parse_connector_retry_count,
+    parse_connector_retry_delay,
+    validate_connector_retry_config,
 )
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.serializers import decode_json, encode_json_bytes
@@ -81,22 +87,45 @@ class CloudSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Lead time in seconds before certificate expiry at which background renewal triggers."""
     port: int = 3307
     """Cloud SQL Auth Proxy secure mTLS server port (default `3307`)."""
+    connector_retry_count: int = DEFAULT_CONNECTOR_RETRY_COUNT
+    """Maximum retry attempts on transient Cloud SQL dialer errors (defaults to `3`; `0` disables retries)."""
+    connector_retry_delay: float = DEFAULT_CONNECTOR_RETRY_DELAY
+    """Initial backoff delay in seconds before jittered exponential dialer retries (defaults to `0.5`)."""
+    connector_retry_max_delay: float = DEFAULT_CONNECTOR_RETRY_MAX_DELAY
+    """Upper bound in seconds on exponential backoff between dialer retry attempts (defaults to `5.0`)."""
 
     def __post_init__(self) -> None:
-        """Validate Cloud SQL IP connectivity type and certificate refresh lead bounds."""
+        """Validate Cloud SQL IP connectivity type, certificate refresh lead, and retry bounds."""
         if self.ip_type not in VALID_GCP_IP_TYPES:
             msg = f"Invalid Cloud SQL ip_type {self.ip_type!r}; expected one of 'PUBLIC', 'PRIVATE', 'PSC'"
             raise ValueError(msg)
         if self.refresh_lead_seconds < 0:
             msg = f"refresh_lead_seconds must be >= 0, got {self.refresh_lead_seconds}"
             raise ValueError(msg)
+        validate_connector_retry_config(
+            self.connector_retry_count,
+            self.connector_retry_delay,
+            self.connector_retry_max_delay,
+        )
 
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct a `CloudSQLConfig` from a `cloudsql://project:region:instance` URI."""
         parsed = urlparse(url)
         instance_uri = f"{parsed.netloc}{parsed.path}"
-        return cls(instance_connection_name=instance_uri, **overrides)
+        query = parse_qs(parsed.query)
+        kwargs: dict[str, Any] = dict(overrides)
+        if "connector_retry_count" in query and "connector_retry_count" not in kwargs:
+            kwargs["connector_retry_count"] = parse_connector_retry_count(query["connector_retry_count"][0])
+        if "connector_retry_delay" in query and "connector_retry_delay" not in kwargs:
+            kwargs["connector_retry_delay"] = parse_connector_retry_delay(
+                query["connector_retry_delay"][0], field_name="connector_retry_delay"
+            )
+        if "connector_retry_max_delay" in query and "connector_retry_max_delay" not in kwargs:
+            kwargs["connector_retry_max_delay"] = parse_connector_retry_delay(
+                query["connector_retry_max_delay"][0], field_name="connector_retry_max_delay"
+            )
+        return cls(instance_connection_name=instance_uri, **kwargs)
 
     def pool_key(self) -> tuple[Any, ...]:
         """Return the canonical shared-dialer fingerprint tuple."""
@@ -106,6 +135,7 @@ class CloudSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
 class _BaseCloudSQLDialer(_BaseGCPDialer):
     """Base zero-sidecar Cloud SQL TLS 1.3 dialer foundation."""
 
+    _connector_name: ClassVar[str] = "cloud_sql"
     _tls_temp_prefix: ClassVar[str] = "vtb-csql-tls-"
 
     __slots__ = ()
@@ -199,15 +229,19 @@ class SyncCloudSQLDialer(_BaseCloudSQLDialer):
         ssl_context: ssl.SSLContext | None = None,
         timeout: float = 10.0,
     ) -> ssl.SSLSocket:
-        """Establish a synchronous TLS 1.3 mTLS connection to Cloud SQL."""
+        """Establish a synchronous TLS 1.3 mTLS connection to Cloud SQL with transient backoff retries."""
         target_host = host or "127.0.0.1"
         ctx = self._resolve_ssl_context(ssl_context)
-        raw_sock = socket.create_connection((target_host, self.port), timeout=timeout)
-        try:
-            return ctx.wrap_socket(raw_sock, server_hostname=self._uri.expected_server_cn)
-        except Exception:
-            raw_sock.close()
-            raise
+
+        def _dial() -> ssl.SSLSocket:
+            raw_sock = socket.create_connection((target_host, self.port), timeout=timeout)
+            try:
+                return ctx.wrap_socket(raw_sock, server_hostname=self._uri.expected_server_cn)
+            except BaseException:
+                raw_sock.close()
+                raise
+
+        return self._run_with_retry_sync("connect", _dial)
 
     def close(self) -> None:
         """Clear cached tokens and ephemeral certificates."""
@@ -258,15 +292,19 @@ class AsyncCloudSQLDialer(_BaseCloudSQLDialer):
         *,
         ssl_context: ssl.SSLContext | None = None,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Establish an asynchronous TLS 1.3 mTLS connection to Cloud SQL."""
+        """Establish an asynchronous TLS 1.3 mTLS connection to Cloud SQL with transient backoff retries."""
         target_host = host or "127.0.0.1"
         ctx = self._resolve_ssl_context(ssl_context)
-        return await asyncio.open_connection(
-            target_host,
-            self.port,
-            ssl=ctx,
-            server_hostname=self._uri.expected_server_cn,
-        )
+
+        async def _dial() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+            return await asyncio.open_connection(
+                target_host,
+                self.port,
+                ssl=ctx,
+                server_hostname=self._uri.expected_server_cn,
+            )
+
+        return await self._run_with_retry_async("connect", _dial)
 
     async def close(self) -> None:
         """Clear cached tokens and ephemeral certificates."""

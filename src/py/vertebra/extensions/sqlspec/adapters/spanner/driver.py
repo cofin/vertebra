@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from sqlspec.core import SQL, ArrowResult, ParameterStyle, StackResult, StatementConfig, StatementStack
 from sqlspec.driver import ExecutionResult
-from sqlspec.driver._common import cache_hit_hooks_unchanged
 from sqlspec.storage import StorageBridgeJob
 
 from vertebra.db.adapters.spanner import (
@@ -287,10 +286,12 @@ class SpannerSyncDriver(BaseSyncDriver):
         """Return the Spanner synchronous data dictionary."""
         return self._data_dictionary
 
+    def _cache_hit_owner(self) -> type[BaseSyncDriver]:
+        """Return `SpannerSyncDriver` because it overrides `with_cursor` and `resolve_last_inserted_id`."""
+        return SpannerSyncDriver
+
     def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
         """Return the session-aware callables the cache-hit executor calls, or `None` to register no executor."""
-        if not cache_hit_hooks_unchanged(type(self), SpannerSyncDriver):
-            return None
         if not callable(getattr(self.native_driver, "cursor", None)):
             return None
         return self._cached_fetch_rows, self._cached_run_dml
@@ -316,7 +317,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         cursor = self.connection.cursor(**self._cursor_kwargs())
         try:
             cursor.execute(sql, params)
-            return max(cursor.rowcount, 0), None
+            return BaseSyncDriver._normalize_rowcount(cursor.rowcount), None
         finally:
             cursor.close()
 
@@ -353,6 +354,11 @@ class SpannerSyncDriver(BaseSyncDriver):
             msg = f"Cannot execute {action} inside a read-only Spanner snapshot session"
             raise ImproperConfigurationError(msg)
 
+    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
+        """Return `None` so cached `INSERT` paths stay aligned with Spanner `dispatch_execute`."""
+        _ = cursor
+        return None
+
     def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a compiled query, DML, or DDL statement through the native cursor."""
         sql, params_json = compile_spanner_statement(statement, dialect=self.dialect)
@@ -371,7 +377,9 @@ class SpannerSyncDriver(BaseSyncDriver):
                 is_select_result=True,
                 row_format="tuple",
             )
-        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
+        return self.create_execution_result(
+            cursor, rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount)
+        )
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a parameterized batch via the native cursor ``executemany`` path."""
@@ -386,7 +394,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         cursor.executemany(sql, json_sets)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 
@@ -858,10 +866,12 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         """Return the Spanner asynchronous data dictionary."""
         return self._data_dictionary
 
+    def _cache_hit_owner(self) -> type[BaseAsyncDriver]:
+        """Return `SpannerAsyncDriver` because it overrides `with_cursor` and `resolve_last_inserted_id`."""
+        return SpannerAsyncDriver
+
     def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
         """Return the session-aware callables the cache-hit executor calls, or `None` to register no executor."""
-        if not cache_hit_hooks_unchanged(type(self), SpannerAsyncDriver):
-            return None
         if not callable(getattr(self.native_driver, "cursor", None)):
             return None
         return self._cached_fetch_rows, self._cached_run_dml
@@ -887,7 +897,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         cursor = self.connection.cursor(**self._cursor_kwargs())
         try:
             await cursor.execute(sql, params)
-            return max(cursor.rowcount, 0), None
+            return BaseSyncDriver._normalize_rowcount(cursor.rowcount), None
         finally:
             await cursor.close()
 
@@ -933,6 +943,11 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             msg = f"Cannot execute {action} inside a read-only Spanner snapshot session"
             raise ImproperConfigurationError(msg)
 
+    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
+        """Return `None` so async cached `INSERT` paths stay aligned with Spanner `dispatch_execute`."""
+        _ = cursor
+        return None
+
     async def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Asynchronously execute a compiled query, DML, or DDL statement through the native cursor."""
         sql, params_json = compile_spanner_statement(statement, dialect=self.dialect)
@@ -951,7 +966,9 @@ class SpannerAsyncDriver(BaseAsyncDriver):
                 is_select_result=True,
                 row_format="tuple",
             )
-        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
+        return self.create_execution_result(
+            cursor, rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount)
+        )
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Asynchronously execute a parameterized batch via the native cursor ``executemany`` path."""
@@ -966,7 +983,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         await cursor.executemany(sql, json_sets)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 

@@ -96,6 +96,12 @@ class PostgresDriverFeatures(TypedDict):
     """Enable Cloud SQL Dialer transport."""
     enable_alloydb: NotRequired[bool]
     """Enable AlloyDB Dialer transport."""
+    connector_retry_count: NotRequired[int]
+    """Maximum retry attempts on transient Cloud SQL or AlloyDB dialer errors (defaults to ``3``; ``0`` disables retries)."""
+    connector_retry_delay: NotRequired[float]
+    """Initial backoff delay in seconds before jittered exponential dialer retries (defaults to ``0.5``)."""
+    connector_retry_max_delay: NotRequired[float]
+    """Upper bound in seconds on exponential backoff between dialer retry attempts (defaults to ``5.0``)."""
     pooler_mode: NotRequired[Literal["direct", "session", "transaction", "statement", "auto"] | None]
     """PgBouncer or connection pooler multiplexing mode."""
     reset_session_on_release: NotRequired[bool]

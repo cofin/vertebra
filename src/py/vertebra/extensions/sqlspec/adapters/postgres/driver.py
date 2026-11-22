@@ -179,7 +179,7 @@ class PostgresSyncDriver(BaseSyncDriver):
         cursor.executemany(sql, prepared)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 
@@ -344,7 +344,7 @@ class PostgresAsyncDriver(BaseAsyncDriver):
         await cursor.executemany(sql, prepared)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 

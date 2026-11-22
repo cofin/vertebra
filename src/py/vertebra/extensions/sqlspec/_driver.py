@@ -46,16 +46,17 @@ try:
     from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
     from sqlspec.core import SQL, ParameterStyle, ParameterStyleConfig, StatementConfig
     from sqlspec.core.cache import get_cache_config
-    from sqlspec.core.result._base import ArrowResult, DMLResult, create_arrow_result
+    from sqlspec.core.result import ArrowResult, DMLResult, create_arrow_result
     from sqlspec.driver import (
         AsyncDriverAdapterBase,
         AsyncRowStream,
+        BaseAsyncExceptionHandler,
+        BaseSyncExceptionHandler,
         ExecutionResult,
         SyncDriverAdapterBase,
         SyncRowStream,
+        validate_savepoint_name,
     )
-    from sqlspec.driver._common import cache_hit_hooks_unchanged, validate_savepoint_name
-    from sqlspec.driver._exception_handler import BaseAsyncExceptionHandler, BaseSyncExceptionHandler
     from sqlspec.exceptions import (
         CheckViolationError,
         ConnectionTimeoutError,
@@ -85,7 +86,7 @@ if TYPE_CHECKING:
 
     from sqlspec.core import StatementFilter
     from sqlspec.core.cache import CachedQuery
-    from sqlspec.driver._routing import AsyncRoutingSession, SyncRoutingSession
+    from sqlspec.driver import AsyncRoutingSession, SyncRoutingSession
     from sqlspec.storage import StorageBridgeJob, StorageDestination, StorageFormat, StorageTelemetry
     from sqlspec.storage.pipeline import AsyncStoragePipeline, SyncStoragePipeline
     from sqlspec.typing import StatementParameters
@@ -319,8 +320,11 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         self._exception_handler: _DeferredSyncExceptionHandler = _DeferredSyncExceptionHandler(self._map_exception)
         callables = self._cache_hit_callables()
         if callables is not None:
-            self._cache_hit_executor = BaseSyncDriver._run_cached_statement
-            self._cache_hit_state = (callables[0], callables[1], self._map_exception)
+            self.set_cached_statement_executor(
+                BaseSyncDriver._run_cached_statement,
+                state=(callables[0], callables[1], self._map_exception),
+                owner=self._cache_hit_owner(),
+            )
 
     @staticmethod
     def _merge_statement_config(
@@ -557,14 +561,32 @@ class BaseSyncDriver(SyncDriverAdapterBase):
             return None
         return fetch_rows, run_dml
 
+    @staticmethod
+    def _normalize_rowcount(value: Any) -> int:
+        """Return a non-negative integer row count, rejecting `bool` and non-integer sentinels."""
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return value if value > 0 else 0
+
+    @staticmethod
+    def _normalize_last_inserted_id(value: Any) -> int | str | None:
+        """Return a normalized `int` or `str` last inserted identifier, rejecting `bool`."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, str)):
+            return value
+        return None
+
+    def _cache_hit_owner(self) -> type[SyncDriverAdapterBase]:
+        """Return the driver class whose cache-hit hook identities guard executor registration."""
+        return BaseSyncDriver
+
     def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
         """Return the row fetch and statement run the cache-hit executor calls.
 
         Returns:
             The native driver's `execute_with_description` and `execute_dml`, or `None` to register no executor.
         """
-        if not cache_hit_hooks_unchanged(type(self), BaseSyncDriver):
-            return None
         return self._single_call_pair(self.native_driver, "execute_with_description", "execute_dml")
 
     @staticmethod
@@ -619,10 +641,11 @@ class BaseSyncDriver(SyncDriverAdapterBase):
             if mapped is None:
                 raise
             raise mapped from exc
+        affected_rows = BaseSyncDriver._normalize_rowcount(rowcount)
         operation_type = cached.operation_type
-        if operation_type != "INSERT" or rowcount == 0:
-            return DMLResult(operation_type, rowcount, None)
-        return DMLResult(operation_type, rowcount, lastrowid)
+        if operation_type != "INSERT" or affected_rows <= 0:
+            return DMLResult(operation_type, affected_rows, None)
+        return DMLResult(operation_type, affected_rows, BaseSyncDriver._normalize_last_inserted_id(lastrowid))
 
     def handle_database_exceptions(self) -> _DeferredSyncExceptionHandler:
         """Return synchronous deferred exception handler compatible with SQLSpec's dispatcher."""
@@ -652,13 +675,12 @@ class BaseSyncDriver(SyncDriverAdapterBase):
                 data_row_count=len(rows),
                 is_select_result=True,
                 row_format="tuple",
-                last_inserted_id=cursor.lastrowid,
+                last_inserted_id=BaseSyncDriver._normalize_last_inserted_id(cursor.lastrowid),
             )
-        rowcount = cursor.rowcount
         return self.create_execution_result(
             cursor,
-            rowcount_override=rowcount if rowcount > 0 else 0,
-            last_inserted_id=cursor.lastrowid,
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
+            last_inserted_id=BaseSyncDriver._normalize_last_inserted_id(cursor.lastrowid),
         )
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
@@ -668,10 +690,9 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         cursor.executemany(sql, prepared)
-        rowcount = cursor.rowcount
         return self.create_execution_result(
             cursor,
-            rowcount_override=rowcount if rowcount > 0 else 0,
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 
@@ -964,8 +985,7 @@ class BaseSyncDriver(SyncDriverAdapterBase):
 
     def resolve_rowcount(self, cursor: Any) -> int:
         """Resolve affected row count from native driver cursor attributes."""
-        rowcount = cursor.rowcount
-        return int(rowcount) if rowcount > 0 else 0
+        return BaseSyncDriver._normalize_rowcount(cursor.rowcount)
 
     @classmethod
     def _default_statement_config(cls) -> StatementConfig:
@@ -1020,8 +1040,11 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         self._exception_handler: _DeferredAsyncExceptionHandler = _DeferredAsyncExceptionHandler(self._map_exception)
         callables = self._cache_hit_callables()
         if callables is not None:
-            self._cache_hit_executor = BaseAsyncDriver._run_cached_statement
-            self._cache_hit_state = (callables[0], callables[1], self._map_exception)
+            self.set_cached_statement_executor(
+                BaseAsyncDriver._run_cached_statement,
+                state=(callables[0], callables[1], self._map_exception),
+                owner=self._cache_hit_owner(),
+            )
 
     @property
     def data_dictionary(self) -> Any:
@@ -1033,14 +1056,16 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         _ = exc
         return None
 
+    def _cache_hit_owner(self) -> type[AsyncDriverAdapterBase]:
+        """Return the driver class whose cache-hit hook identities guard executor registration."""
+        return BaseAsyncDriver
+
     def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
         """Return the row fetch and statement run the cache-hit executor awaits.
 
         Returns:
             The native driver's `execute_with_description` and `execute_dml`, or `None` to register no executor.
         """
-        if not cache_hit_hooks_unchanged(type(self), BaseAsyncDriver):
-            return None
         return BaseSyncDriver._single_call_pair(self.native_driver, "execute_with_description", "execute_dml")
 
     @staticmethod
@@ -1095,10 +1120,11 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
             if mapped is None:
                 raise
             raise mapped from exc
+        affected_rows = BaseSyncDriver._normalize_rowcount(rowcount)
         operation_type = cached.operation_type
-        if operation_type != "INSERT" or rowcount == 0:
-            return DMLResult(operation_type, rowcount, None)
-        return DMLResult(operation_type, rowcount, lastrowid)
+        if operation_type != "INSERT" or affected_rows <= 0:
+            return DMLResult(operation_type, affected_rows, None)
+        return DMLResult(operation_type, affected_rows, BaseSyncDriver._normalize_last_inserted_id(lastrowid))
 
     def handle_database_exceptions(self) -> _DeferredAsyncExceptionHandler:
         """Return asynchronous deferred exception handler compatible with SQLSpec's dispatcher."""
@@ -1128,13 +1154,12 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
                 data_row_count=len(rows),
                 is_select_result=True,
                 row_format="tuple",
-                last_inserted_id=cursor.lastrowid,
+                last_inserted_id=BaseSyncDriver._normalize_last_inserted_id(cursor.lastrowid),
             )
-        rowcount = cursor.rowcount
         return self.create_execution_result(
             cursor,
-            rowcount_override=rowcount if rowcount > 0 else 0,
-            last_inserted_id=cursor.lastrowid,
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
+            last_inserted_id=BaseSyncDriver._normalize_last_inserted_id(cursor.lastrowid),
         )
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
@@ -1144,10 +1169,9 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         await cursor.executemany(sql, prepared)
-        rowcount = cursor.rowcount
         return self.create_execution_result(
             cursor,
-            rowcount_override=rowcount if rowcount > 0 else 0,
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 
@@ -1448,8 +1472,7 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
 
     def resolve_rowcount(self, cursor: Any) -> int:
         """Resolve affected row count from native driver cursor attributes."""
-        rowcount = cursor.rowcount
-        return int(rowcount) if rowcount > 0 else 0
+        return BaseSyncDriver._normalize_rowcount(cursor.rowcount)
 
     @classmethod
     def _default_statement_config(cls) -> StatementConfig:

@@ -29,7 +29,7 @@ from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from sqlspec.extensions.adk import SessionOrderBy, StoredMemory
-    from sqlspec.extensions.adk.artifact._types import StoredArtifact
+    from sqlspec.extensions.adk.artifact import StoredArtifact
     from sqlspec.extensions.adk.artifact.store import (
         BaseAsyncADKArtifactStore as _BaseAsyncADKArtifactStore,
     )
@@ -49,8 +49,8 @@ else:
     _memory_store_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
     _artifact_store_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="google-adk", extra="adk")
     _converters_mod = ensure_module("sqlspec.extensions.adk.converters", package="google-adk", extra="adk")
-    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact._types", package="google-adk", extra="adk")
-    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory._types", package="google-adk", extra="adk")
+    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact", package="google-adk", extra="adk")
+    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory", package="google-adk", extra="adk")
     _BaseAsyncADKMemoryStore = _memory_store_mod.BaseAsyncADKMemoryStore
     _BaseSyncADKMemoryStore = _memory_store_mod.BaseSyncADKMemoryStore
     _BaseAsyncADKArtifactStore = _artifact_store_mod.BaseAsyncADKArtifactStore

@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
 from sqlspec.core import SQL, ArrowResult, ParameterStyle, StackResult, StatementConfig, StatementStack
 from sqlspec.driver import ExecutionResult
-from sqlspec.driver._common import cache_hit_hooks_unchanged
 from sqlspec.storage import StorageBridgeJob
 
 from vertebra.db.adapters.bigquery import BigQueryCore, ObjectRef, ObjectTableConfig
@@ -238,10 +237,12 @@ class BigQuerySyncDriver(BaseSyncDriver):
             self._data_dictionary = BigQuerySyncDataDictionary()
         return self._data_dictionary
 
+    def _cache_hit_owner(self) -> type[BaseSyncDriver]:
+        """Return `BigQuerySyncDriver` because it overrides `with_cursor` and `resolve_last_inserted_id`."""
+        return BigQuerySyncDriver
+
     def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
         """Return the metadata-recording callables the cache-hit executor calls, or `None` to register no executor."""
-        if not cache_hit_hooks_unchanged(type(self), BigQuerySyncDriver):
-            return None
         if not callable(getattr(self.native_driver, "cursor", None)):
             return None
         return self._cached_fetch_rows, self._cached_run_dml
@@ -265,7 +266,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         try:
             cursor.execute(sql, params)
             _record_cursor_metadata(self.connection, cursor)
-            return max(cursor.rowcount, 0), None
+            return BaseSyncDriver._normalize_rowcount(cursor.rowcount), None
         finally:
             cursor.close()
 
@@ -294,6 +295,11 @@ class BigQuerySyncDriver(BaseSyncDriver):
         finally:
             cursor.close()
 
+    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
+        """Return `None` so cached `INSERT` paths stay aligned with BigQuery `dispatch_execute`."""
+        _ = cursor
+        return None
+
     def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a compiled BigQuery statement through the native cursor."""
         sql, params = compile_bigquery_statement(statement)
@@ -311,7 +317,9 @@ class BigQuerySyncDriver(BaseSyncDriver):
                 is_select_result=True,
                 row_format="tuple",
             )
-        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
+        return self.create_execution_result(
+            cursor, rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount)
+        )
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a parameterized batch against BigQuery through the native cursor."""
@@ -323,7 +331,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         _record_cursor_metadata(self.connection, cursor)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 
@@ -627,10 +635,12 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
             self._data_dictionary = BigQueryAsyncDataDictionary()
         return self._data_dictionary
 
+    def _cache_hit_owner(self) -> type[BaseAsyncDriver]:
+        """Return `BigQueryAsyncDriver` because it overrides `with_cursor` and `resolve_last_inserted_id`."""
+        return BigQueryAsyncDriver
+
     def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
         """Return the metadata-recording callables the cache-hit executor calls, or `None` to register no executor."""
-        if not cache_hit_hooks_unchanged(type(self), BigQueryAsyncDriver):
-            return None
         if not callable(getattr(self.native_driver, "cursor", None)):
             return None
         return self._cached_fetch_rows, self._cached_run_dml
@@ -654,7 +664,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         try:
             await cursor.execute(sql, params)
             _record_cursor_metadata(self.connection, cursor)
-            return max(cursor.rowcount, 0), None
+            return BaseSyncDriver._normalize_rowcount(cursor.rowcount), None
         finally:
             await cursor.close()
 
@@ -683,6 +693,11 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         finally:
             await cursor.close()
 
+    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
+        """Return `None` so async cached `INSERT` paths stay aligned with BigQuery `dispatch_execute`."""
+        _ = cursor
+        return None
+
     async def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a compiled BigQuery statement asynchronously through the native cursor."""
         sql, params = compile_bigquery_statement(statement)
@@ -700,7 +715,9 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
                 is_select_result=True,
                 row_format="tuple",
             )
-        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
+        return self.create_execution_result(
+            cursor, rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount)
+        )
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a parameterized batch asynchronously against BigQuery through the native cursor."""
@@ -712,7 +729,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         _record_cursor_metadata(self.connection, cursor)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 

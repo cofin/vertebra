@@ -15,6 +15,14 @@ from vertebra.db.adapters.postgres.options import (
     parse_postgres_dsn,
     validate_cockroach_cluster,
 )
+from vertebra.db.dialer._base import (
+    DEFAULT_CONNECTOR_RETRY_COUNT,
+    DEFAULT_CONNECTOR_RETRY_DELAY,
+    DEFAULT_CONNECTOR_RETRY_MAX_DELAY,
+    parse_connector_retry_count,
+    parse_connector_retry_delay,
+    validate_connector_retry_config,
+)
 from vertebra.db.dialer.alloydb import AlloyDBConfig
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
 from vertebra.db.driver._cloud_auth import (
@@ -75,6 +83,12 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     """Optional Google Cloud AlloyDB instance URI (`projects/.../instances/...`) for zero-sidecar port 5433 mTLS."""
     alloydb_ip_type: Literal["PUBLIC", "PRIVATE", "PSC"] = "PRIVATE"
     """Preferred Google Cloud AlloyDB IP connectivity mode."""
+    connector_retry_count: int = DEFAULT_CONNECTOR_RETRY_COUNT
+    """Maximum retry attempts on transient Cloud SQL or AlloyDB dialer errors (defaults to `3`; `0` disables retries)."""
+    connector_retry_delay: float = DEFAULT_CONNECTOR_RETRY_DELAY
+    """Initial backoff delay in seconds before jittered exponential dialer retries (defaults to `0.5`)."""
+    connector_retry_max_delay: float = DEFAULT_CONNECTOR_RETRY_MAX_DELAY
+    """Upper bound in seconds on exponential backoff between dialer retry attempts (defaults to `5.0`)."""
     enable_iam_auth: bool = False
     """When True, authenticate using short-lived Google Cloud IAM OAuth2 tokens (on direct :5432 TCP/TLS or :3307/:5433 dialers)."""
     iam_auth_options: Mapping[str, str] = msgspec.field(default_factory=dict)
@@ -108,6 +122,11 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         has_alloy = bool(self.enable_alloydb or self.alloydb_instance_uri)
         if has_csql and has_alloy:
             raise ImproperConfigurationError("Cannot enable both Cloud SQL and AlloyDB on the same PostgreSQLConfig")
+        validate_connector_retry_config(
+            self.connector_retry_count,
+            self.connector_retry_delay,
+            self.connector_retry_max_delay,
+        )
         if self.pgbouncer or self.pgbouncer_mode:
             msgspec.structs.force_setattr(self, "pgbouncer", True)
             msgspec.structs.force_setattr(self, "pgbouncer_mode", True)
@@ -286,12 +305,20 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             return AlloyDBConfig(
                 instance_uri=self.alloydb_instance_uri,
                 enable_iam_auth=self.enable_iam_auth,
+                ip_type=self.alloydb_ip_type,
                 enable_columnar_engine=self.enable_alloydb_columnar_engine or True,
+                connector_retry_count=self.connector_retry_count,
+                connector_retry_delay=self.connector_retry_delay,
+                connector_retry_max_delay=self.connector_retry_max_delay,
             )
         if self.cloud_sql_instance:
             return CloudSQLConfig(
                 instance_connection_name=self.cloud_sql_instance,
                 enable_iam_auth=self.enable_iam_auth,
+                ip_type=self.cloud_sql_ip_type,
+                connector_retry_count=self.connector_retry_count,
+                connector_retry_delay=self.connector_retry_delay,
+                connector_retry_max_delay=self.connector_retry_max_delay,
             )
         return None
 
@@ -338,6 +365,16 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
                 "yes",
                 "on",
             }
+        if "connector_retry_count" in query_params and "connector_retry_count" not in kwargs:
+            kwargs["connector_retry_count"] = parse_connector_retry_count(query_params["connector_retry_count"])
+        if "connector_retry_delay" in query_params and "connector_retry_delay" not in kwargs:
+            kwargs["connector_retry_delay"] = parse_connector_retry_delay(
+                query_params["connector_retry_delay"], field_name="connector_retry_delay"
+            )
+        if "connector_retry_max_delay" in query_params and "connector_retry_max_delay" not in kwargs:
+            kwargs["connector_retry_max_delay"] = parse_connector_retry_delay(
+                query_params["connector_retry_max_delay"], field_name="connector_retry_max_delay"
+            )
         return cls(dsn=normalized_url, **kwargs)
 
     def pool_key(self) -> tuple[Any, ...]:

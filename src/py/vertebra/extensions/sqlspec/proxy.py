@@ -13,9 +13,14 @@ import msgspec
 from sqlspec.core import SQL, ArrowResult, SQLResult, StackResult, TypedParameter
 from sqlspec.core.stack import StatementStack
 from sqlspec.core.statement import StatementConfig
-from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
-from sqlspec.driver._exception_handler import BaseAsyncExceptionHandler, BaseSyncExceptionHandler
-from sqlspec.driver._stream import AsyncRowStream, SyncRowStream
+from sqlspec.driver import (
+    AsyncDriverAdapterBase,
+    AsyncRowStream,
+    BaseAsyncExceptionHandler,
+    BaseSyncExceptionHandler,
+    SyncDriverAdapterBase,
+    SyncRowStream,
+)
 from sqlspec.exceptions import (
     CheckViolationError,
     ConnectionTimeoutError,
@@ -76,7 +81,7 @@ if TYPE_CHECKING:
 
     from sqlspec.builder import QueryBuilder
     from sqlspec.core import Statement, StatementFilter
-    from sqlspec.driver._common import ExecutionResult
+    from sqlspec.driver import ExecutionResult
     from sqlspec.typing import ArrowReturnFormat, StatementParameters
 
 __all__ = (
@@ -488,11 +493,21 @@ class ProxySyncDriver(SyncDriverAdapterBase):
 
     def resolve_rowcount(self, cursor: Any) -> int:
         """Resolve affected row count from a proxy cursor or last RPC response."""
+        raw: Any
         if isinstance(cursor, BrokerRpcResponse):
-            return int(cursor.rowcount)
-        if self.last_response is not None:
-            return int(self.last_response.rowcount)
-        return 0
+            raw = cursor.rowcount
+        elif self.last_response is not None:
+            raw = self.last_response.rowcount
+        else:
+            return 0
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return 0
+        return raw if raw > 0 else 0
+
+    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
+        """Return `None` so cached `INSERT` paths stay aligned with broker `dispatch_execute`."""
+        _ = cursor
+        return None
 
     def execute_stack(
         self,
@@ -1412,11 +1427,21 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
 
     def resolve_rowcount(self, cursor: Any) -> int:
         """Resolve affected row count from an async proxy cursor or last RPC response."""
+        raw: Any
         if isinstance(cursor, BrokerRpcResponse):
-            return int(cursor.rowcount)
-        if self.last_response is not None:
-            return int(self.last_response.rowcount)
-        return 0
+            raw = cursor.rowcount
+        elif self.last_response is not None:
+            raw = self.last_response.rowcount
+        else:
+            return 0
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return 0
+        return raw if raw > 0 else 0
+
+    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
+        """Return `None` so cached `INSERT` paths stay aligned with async broker `dispatch_execute`."""
+        _ = cursor
+        return None
 
     @staticmethod
     def _raise_for_error(response: BrokerRpcResponse) -> None:

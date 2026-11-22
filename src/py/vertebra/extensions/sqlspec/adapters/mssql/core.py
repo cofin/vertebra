@@ -502,15 +502,19 @@ def build_connection_config(
     merged.pop("command_timeout", None)
     merged.pop("timeout", None)
 
-    if "cloud_sql_instance" not in merged and isinstance(driver_features, Mapping):
-        if driver_features.get("cloud_sql_instance"):
-            merged["cloud_sql_instance"] = driver_features["cloud_sql_instance"]
-        if driver_features.get("cloudsql_ip_type") and "cloudsql_ip_type" not in merged:
-            merged["cloudsql_ip_type"] = str(driver_features["cloudsql_ip_type"])
-        if driver_features.get("cloudsql_auth_type") and "cloudsql_auth_type" not in merged:
-            merged["cloudsql_auth_type"] = str(driver_features["cloudsql_auth_type"])
-        if driver_features.get("enable_iam_auth") and "cloudsql_auth_type" not in merged:
-            merged["cloudsql_auth_type"] = "IAM"
+    if isinstance(driver_features, Mapping):
+        if "cloud_sql_instance" not in merged:
+            if driver_features.get("cloud_sql_instance"):
+                merged["cloud_sql_instance"] = driver_features["cloud_sql_instance"]
+            if driver_features.get("cloudsql_ip_type") and "cloudsql_ip_type" not in merged:
+                merged["cloudsql_ip_type"] = str(driver_features["cloudsql_ip_type"])
+            if driver_features.get("cloudsql_auth_type") and "cloudsql_auth_type" not in merged:
+                merged["cloudsql_auth_type"] = str(driver_features["cloudsql_auth_type"])
+            if driver_features.get("enable_iam_auth") and "cloudsql_auth_type" not in merged:
+                merged["cloudsql_auth_type"] = "IAM"
+        for retry_key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay"):
+            if retry_key in driver_features and retry_key not in merged:
+                merged[retry_key] = driver_features[retry_key]
 
     for ignored_key in (
         "pool_recycle_seconds",

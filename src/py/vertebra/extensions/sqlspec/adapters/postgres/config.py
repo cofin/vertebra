@@ -13,6 +13,12 @@ from sqlspec.core.routing import ReplicaSpec
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.options import parse_postgres_dsn
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS
+from vertebra.db.dialer._base import (
+    DEFAULT_CONNECTOR_RETRY_COUNT,
+    DEFAULT_CONNECTOR_RETRY_DELAY,
+    DEFAULT_CONNECTOR_RETRY_MAX_DELAY,
+    validate_connector_retry_config,
+)
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.sqlspec._driver import AsyncAdapterConfig, LazyStoreAttr, SyncAdapterConfig
 from vertebra.extensions.sqlspec.adapters.postgres._typing import (
@@ -211,8 +217,20 @@ def _resolve_pg_init_inputs(
     merged_conn.update(kwargs)
 
     features_dict = dict(driver_features) if driver_features is not None else None
+    retry_feature_keys = ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay")
     if isinstance(config, PostgreSQLConfig):
-        resolved_cfg = _build_pg_connection_config(config, None, dict(kwargs)) if kwargs else config
+        cfg_updates = dict(kwargs)
+        if features_dict is not None:
+            for retry_key in retry_feature_keys:
+                if retry_key in features_dict and retry_key not in cfg_updates:
+                    cfg_updates[retry_key] = features_dict[retry_key]
+            if any(key in features_dict for key in retry_feature_keys):
+                validate_connector_retry_config(
+                    cfg_updates.get("connector_retry_count", config.connector_retry_count),
+                    cfg_updates.get("connector_retry_delay", config.connector_retry_delay),
+                    cfg_updates.get("connector_retry_max_delay", config.connector_retry_max_delay),
+                )
+        resolved_cfg = _build_pg_connection_config(config, None, cfg_updates) if cfg_updates else config
         return resolved_cfg, merged_conn, pool_cfg, features_dict
 
     if broker is not None:
@@ -225,13 +243,31 @@ def _resolve_pg_init_inputs(
     build_kwargs = dict(merged_conn)
     if resolved_broker is not None and "broker" not in build_kwargs:
         build_kwargs["broker"] = resolved_broker
-    if (
-        features_dict is not None
-        and "pooler_mode" in features_dict
-        and features_dict["pooler_mode"] is not None
-        and "pooler_mode" not in build_kwargs
-    ):
-        build_kwargs["pooler_mode"] = features_dict["pooler_mode"]
+    if features_dict is not None:
+        if (
+            "pooler_mode" in features_dict
+            and features_dict["pooler_mode"] is not None
+            and "pooler_mode" not in build_kwargs
+        ):
+            build_kwargs["pooler_mode"] = features_dict["pooler_mode"]
+        for retry_key in retry_feature_keys:
+            if retry_key in features_dict and retry_key not in build_kwargs:
+                build_kwargs[retry_key] = features_dict[retry_key]
+        if any(key in features_dict for key in retry_feature_keys):
+            validate_connector_retry_config(
+                features_dict.get(
+                    "connector_retry_count",
+                    build_kwargs.get("connector_retry_count", DEFAULT_CONNECTOR_RETRY_COUNT),
+                ),
+                features_dict.get(
+                    "connector_retry_delay",
+                    build_kwargs.get("connector_retry_delay", DEFAULT_CONNECTOR_RETRY_DELAY),
+                ),
+                features_dict.get(
+                    "connector_retry_max_delay",
+                    build_kwargs.get("connector_retry_max_delay", DEFAULT_CONNECTOR_RETRY_MAX_DELAY),
+                ),
+            )
     resolved_cfg = _build_pg_connection_config(config if isinstance(config, str) else None, None, build_kwargs)
     return resolved_cfg, merged_conn, pool_cfg, features_dict
 
@@ -314,6 +350,14 @@ def _derive_pg_pool(
     feature_overrides = overrides.get("driver_features_overrides")
     if isinstance(feature_overrides, Mapping):
         merged_features.update(feature_overrides)
+        for retry_key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay"):
+            if retry_key in feature_overrides and retry_key not in explicit_conn:
+                merged_connection.pop(retry_key, None)
+    for retry_key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay"):
+        if retry_key in explicit_conn or retry_key in merged_features:
+            continue
+        if retry_key not in merged_connection:
+            merged_connection[retry_key] = getattr(adapter.driver_config, retry_key)
 
     pool_cfg_override = overrides.get("pool_config")
     resolved_pool_cfg = (

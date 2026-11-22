@@ -159,6 +159,12 @@ class MSSQLDriverFeatures(TypedDict, total=False):
     """Authentication mode for Cloud SQL Dialer connections."""
     enable_iam_auth: NotRequired[bool]
     """Authenticate database connections with cloud IAM tokens."""
+    connector_retry_count: NotRequired[int]
+    """Maximum retry attempts on transient Cloud SQL dialer errors (defaults to ``3``; ``0`` disables retries)."""
+    connector_retry_delay: NotRequired[float]
+    """Initial backoff delay in seconds before jittered exponential dialer retries (defaults to ``0.5``)."""
+    connector_retry_max_delay: NotRequired[float]
+    """Upper bound in seconds on exponential backoff between dialer retry attempts (defaults to ``5.0``)."""
     tenant_strategy: NotRequired[Any]
     """Multi-tenant schema or row isolation strategy."""
 

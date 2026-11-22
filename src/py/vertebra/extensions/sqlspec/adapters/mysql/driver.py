@@ -72,7 +72,9 @@ class MySQLSyncDriver(BaseSyncDriver):
         if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         cursor.executemany(sql, prepared)
-        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0), is_many_result=True)
+        return self.create_execution_result(
+            cursor, rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount), is_many_result=True
+        )
 
 
 class MySQLAsyncDriver(BaseAsyncDriver):
@@ -124,4 +126,6 @@ class MySQLAsyncDriver(BaseAsyncDriver):
         if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         await cursor.executemany(sql, prepared)
-        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0), is_many_result=True)
+        return self.create_execution_result(
+            cursor, rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount), is_many_result=True
+        )

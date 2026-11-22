@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import io
+import logging
+import math
 import socket
 import ssl
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.error
+from http.client import HTTPMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from types import ModuleType, SimpleNamespace
+from typing import Any, cast
 from urllib.parse import parse_qs, quote, urlsplit
 
 import anyio
@@ -24,15 +32,25 @@ from vertebra._vertebra import (
     AwsAuroraDsqlDialer,
     AwsRdsDialer,
     AzureEntraDialer,
+    GoogleCloudAuthError,
     aws_rds_root_ca_pem,
 )
+from vertebra.db.adapters.mssql.config import MSSQLConfig
+from vertebra.db.adapters.mysql.config import MySQLConfig
+from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 from vertebra.db.dialer import (
+    DEFAULT_CONNECTOR_RETRY_COUNT,
+    DEFAULT_CONNECTOR_RETRY_DELAY,
+    DEFAULT_CONNECTOR_RETRY_MAX_DELAY,
     AsyncAwsAuroraDsqlDialer,
     AsyncAwsRdsDialer,
     AsyncAzureEntraDialer,
     SyncAwsAuroraDsqlDialer,
     SyncAwsRdsDialer,
     SyncAzureEntraDialer,
+    calculate_connector_backoff_seconds,
+    is_transient_connector_error,
+    validate_connector_retry_config,
 )
 from vertebra.db.dialer.alloydb import (
     AlloyDBAuthType,
@@ -59,6 +77,7 @@ from vertebra.db.driver import (
     DatabaseTokenProvider,
 )
 from vertebra.db.driver._cloud_auth import _sign_sigv4_presigned_token
+from vertebra.db.registry import DatabaseRegistry
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
@@ -2297,3 +2316,691 @@ def test_aws_rds_dialer_resolves_engine_before_default_username(
     assert dialer.token_provider.username == expected_user
     signed = dialer.token_provider.resolve_sync()
     assert parse_qs(urlsplit(f"https://{signed}").query)["DBUser"] == [expected_user]
+
+
+def _make_http_error(status_code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        url="https://sqladmin.googleapis.com/sql/v1beta4/projects/p/instances/i:generateEphemeralCert",
+        code=status_code,
+        msg=f"HTTP {status_code}",
+        hdrs=HTTPMessage(),
+        fp=io.BytesIO(b""),
+    )
+
+
+def test_connector_retry_default_exports_and_no_eager_optional_imports() -> None:
+    """Verify retry default constants and ensure error classification never eagerly imports optional libraries."""
+    assert DEFAULT_CONNECTOR_RETRY_COUNT == 3
+    assert DEFAULT_CONNECTOR_RETRY_DELAY == 0.5
+    assert DEFAULT_CONNECTOR_RETRY_MAX_DELAY == 5.0
+    assert dialer_pkg.DEFAULT_CONNECTOR_RETRY_COUNT == 3
+    assert dialer_pkg.DEFAULT_CONNECTOR_RETRY_DELAY == 0.5
+    assert dialer_pkg.DEFAULT_CONNECTOR_RETRY_MAX_DELAY == 5.0
+
+    optional_modules = (
+        "google.cloud.sql.connector.exceptions",
+        "google.cloud.alloydb.connector.exceptions",
+        "aiohttp",
+    )
+    previously_loaded = {name: name in sys.modules for name in optional_modules}
+    assert is_transient_connector_error(TimeoutError("probe")) is True
+    assert is_transient_connector_error(ValueError("bad")) is False
+    assert {name: name in sys.modules for name in optional_modules} == previously_loaded
+
+
+@pytest.mark.parametrize(
+    ("attempt", "base_delay", "max_delay", "expected_min", "expected_max"),
+    [
+        pytest.param(0, 0.0, 5.0, 0.0, 0.0, id="zero-base"),
+        pytest.param(0, 0.5, 0.0, 0.0, 0.0, id="zero-max"),
+        pytest.param(-2, 0.5, 5.0, 0.25, 0.5, id="negative-attempt-clamped"),
+        pytest.param(0, 0.5, 5.0, 0.25, 0.5, id="attempt-0"),
+        pytest.param(1, 0.5, 5.0, 0.5, 1.0, id="attempt-1"),
+        pytest.param(2, 0.5, 5.0, 1.0, 2.0, id="attempt-2"),
+        pytest.param(5, 0.5, 5.0, 2.5, 5.0, id="capped-at-max"),
+        pytest.param(100, 0.5, 5.0, 2.5, 5.0, id="overflow-attempt-clamped"),
+    ],
+)
+def test_calculate_connector_backoff_seconds_bounds(
+    attempt: int,
+    base_delay: float,
+    max_delay: float,
+    expected_min: float,
+    expected_max: float,
+) -> None:
+    """Verify jittered exponential backoff lies within [capped / 2, capped] and returns 0.0 when disabled."""
+    delay = calculate_connector_backoff_seconds(attempt, base_delay, max_delay)
+    assert math.isfinite(delay)
+    assert expected_min <= delay <= expected_max
+
+
+@pytest.mark.parametrize(
+    ("retry_count", "retry_delay", "retry_max_delay", "match"),
+    [
+        pytest.param(True, 0.5, 5.0, "non-negative integer", id="bool-count-true"),
+        pytest.param(False, 0.5, 5.0, "non-negative integer", id="bool-count-false"),
+        pytest.param(-1, 0.5, 5.0, "non-negative integer", id="negative-count"),
+        pytest.param(1.5, 0.5, 5.0, "non-negative integer", id="float-count"),
+        pytest.param("3", 0.5, 5.0, "non-negative integer", id="str-count"),
+        pytest.param(3, True, 5.0, "connector_retry_delay", id="bool-delay"),
+        pytest.param(3, -0.1, 5.0, "connector_retry_delay", id="negative-delay"),
+        pytest.param(3, float("nan"), 5.0, "connector_retry_delay", id="nan-delay"),
+        pytest.param(3, float("inf"), 5.0, "connector_retry_delay", id="inf-delay"),
+        pytest.param(3, "0.5", 5.0, "connector_retry_delay", id="str-delay"),
+        pytest.param(3, 0.5, False, "connector_retry_max_delay", id="bool-max-delay"),
+        pytest.param(3, 0.5, -1.0, "connector_retry_max_delay", id="negative-max-delay"),
+        pytest.param(3, 0.5, float("nan"), "connector_retry_max_delay", id="nan-max-delay"),
+        pytest.param(3, 0.5, float("inf"), "connector_retry_max_delay", id="inf-max-delay"),
+        pytest.param(3, 2.0, 1.0, "greater than or equal", id="max-less-than-delay"),
+    ],
+)
+def test_validate_connector_retry_config_rejects_invalid_values(
+    retry_count: Any,
+    retry_delay: Any,
+    retry_max_delay: Any,
+    match: str,
+) -> None:
+    """Verify eager validation rejects bool, negative, non-finite, non-numeric, and inverted retry bounds."""
+    with pytest.raises(ImproperConfigurationError, match=match):
+        validate_connector_retry_config(retry_count, retry_delay, retry_max_delay)
+
+    with pytest.raises(ImproperConfigurationError, match=match):
+        CloudSQLConfig(
+            instance_connection_name="my-proj:us-central1:my-pg",
+            connector_retry_count=retry_count,
+            connector_retry_delay=retry_delay,
+            connector_retry_max_delay=retry_max_delay,
+        )
+
+    with pytest.raises(ImproperConfigurationError, match=match):
+        AlloyDBConfig(
+            instance_uri="projects/my-proj/locations/us-central1/clusters/prod/instances/primary",
+            connector_retry_count=retry_count,
+            connector_retry_delay=retry_delay,
+            connector_retry_max_delay=retry_max_delay,
+        )
+
+    with pytest.raises(ImproperConfigurationError, match=match):
+        PostgreSQLConfig(
+            connector_retry_count=retry_count,
+            connector_retry_delay=retry_delay,
+            connector_retry_max_delay=retry_max_delay,
+        )
+
+    with pytest.raises(ImproperConfigurationError, match=match):
+        MySQLConfig(
+            connector_retry_count=retry_count,
+            connector_retry_delay=retry_delay,
+            connector_retry_max_delay=retry_max_delay,
+        )
+
+    with pytest.raises(ImproperConfigurationError, match=match):
+        MSSQLConfig(
+            connector_retry_count=retry_count,
+            connector_retry_delay=retry_delay,
+            connector_retry_max_delay=retry_max_delay,
+        )
+
+
+@pytest.mark.parametrize(
+    ("error_factory", "expected"),
+    [
+        pytest.param(lambda: TimeoutError("timed out"), True, id="timeout"),
+        pytest.param(lambda: ConnectionResetError("reset"), True, id="conn-reset"),
+        pytest.param(lambda: ConnectionRefusedError("refused"), True, id="conn-refused"),
+        pytest.param(lambda: BrokenPipeError("broken pipe"), True, id="broken-pipe"),
+        pytest.param(lambda: asyncio.IncompleteReadError(b"", 4), True, id="incomplete-read"),
+        pytest.param(lambda: socket.gaierror(socket.EAI_AGAIN, "try again"), True, id="gai-again"),
+        pytest.param(lambda: socket.gaierror(socket.EAI_NONAME, "no host"), False, id="gai-noname"),
+        pytest.param(lambda: _make_http_error(429), True, id="http-429"),
+        pytest.param(lambda: _make_http_error(500), True, id="http-500"),
+        pytest.param(lambda: _make_http_error(502), True, id="http-502"),
+        pytest.param(lambda: _make_http_error(503), True, id="http-503"),
+        pytest.param(lambda: _make_http_error(504), True, id="http-504"),
+        pytest.param(lambda: _make_http_error(400), False, id="http-400"),
+        pytest.param(lambda: _make_http_error(401), False, id="http-401"),
+        pytest.param(lambda: _make_http_error(403), False, id="http-403"),
+        pytest.param(lambda: _make_http_error(404), False, id="http-404"),
+        pytest.param(lambda: _make_http_error(409), False, id="http-409"),
+        pytest.param(lambda: urllib.error.URLError(TimeoutError("connect timeout")), True, id="urlerror-timeout"),
+        pytest.param(
+            lambda: urllib.error.URLError(ConnectionResetError("reset")),
+            True,
+            id="urlerror-conn-reset",
+        ),
+        pytest.param(
+            lambda: urllib.error.URLError(ssl.SSLCertVerificationError(1, "cert mismatch")),
+            False,
+            id="urlerror-ssl-cert",
+        ),
+        pytest.param(lambda: urllib.error.URLError("unknown host"), False, id="urlerror-str"),
+        pytest.param(lambda: ssl.SSLError("tls failure"), False, id="ssl-error"),
+        pytest.param(lambda: ssl.SSLCertVerificationError(1, "cert invalid"), False, id="ssl-cert-error"),
+        pytest.param(lambda: PermissionError("denied"), False, id="permission-error"),
+        pytest.param(lambda: ValueError("bad input"), False, id="value-error"),
+        pytest.param(lambda: TypeError("wrong type"), False, id="type-error"),
+        pytest.param(lambda: KeyError("missing"), False, id="key-error"),
+        pytest.param(lambda: ImproperConfigurationError("bad cfg"), False, id="improper-config"),
+        pytest.param(lambda: MissingDependencyError("pkg"), False, id="missing-dep"),
+        pytest.param(lambda: GoogleCloudAuthError("invalid token"), False, id="native-gcp-auth"),
+        pytest.param(lambda: asyncio.CancelledError(), False, id="cancelled-error"),
+        pytest.param(lambda: KeyboardInterrupt(), False, id="keyboard-interrupt"),
+        pytest.param(lambda: RuntimeError("unknown"), False, id="plain-runtime-error"),
+    ],
+)
+def test_is_transient_connector_error_builtin_matrix(
+    error_factory: Any,
+    expected: bool,
+) -> None:
+    """Classify stdlib, urllib, TLS, native, and BaseException failures accurately."""
+    assert is_transient_connector_error(error_factory()) is expected
+
+
+@pytest.mark.parametrize(
+    ("status_name", "expected"),
+    [
+        ("UNAVAILABLE", True),
+        ("ABORTED", True),
+        ("DEADLINE_EXCEEDED", True),
+        ("RESOURCE_EXHAUSTED", True),
+        ("StatusCode.UNAVAILABLE", True),
+        ("PERMISSION_DENIED", False),
+        ("UNAUTHENTICATED", False),
+        ("NOT_FOUND", False),
+        ("INVALID_ARGUMENT", False),
+        ("CANCELLED", False),
+        ("FAILED_PRECONDITION", False),
+    ],
+)
+def test_is_transient_connector_error_grpc_status_codes(status_name: str, expected: bool) -> None:
+    """Classify gRPC status names extracted from grpc_status_code and callable code()."""
+
+    class _FakeGrpcEnumError(Exception):
+        def __init__(self, name: str) -> None:
+            self.grpc_status_code = SimpleNamespace(name=name.rsplit(".", maxsplit=1)[-1])
+
+    class _FakeGrpcMethodError(Exception):
+        def code(self) -> str:
+            return status_name
+
+    assert is_transient_connector_error(_FakeGrpcEnumError(status_name)) is expected
+    assert is_transient_connector_error(_FakeGrpcMethodError()) is expected
+
+
+def test_is_transient_connector_error_loaded_optional_modules_and_causal_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inspect loaded optional modules via sys.modules and bound cyclic or deep causal chains."""
+    fake_api_core: Any = ModuleType("google.api_core.exceptions")
+    fake_api_core_retry = type("RetryError", (Exception,), {})
+    fake_api_core_unavail = type("ServiceUnavailable", (Exception,), {})
+    fake_api_core_denied = type("PermissionDenied", (Exception,), {})
+    fake_api_core.RetryError = fake_api_core_retry
+    fake_api_core.ServiceUnavailable = fake_api_core_unavail
+    fake_api_core.PermissionDenied = fake_api_core_denied
+    monkeypatch.setitem(sys.modules, "google.api_core.exceptions", fake_api_core)
+
+    fake_auth: Any = ModuleType("google.auth.exceptions")
+    fake_default_creds = type("DefaultCredentialsError", (Exception,), {})
+    fake_transport = type("TransportError", (Exception,), {})
+    fake_refresh = type("RefreshError", (Exception,), {})
+    fake_auth.DefaultCredentialsError = fake_default_creds
+    fake_auth.TransportError = fake_transport
+    fake_auth.RefreshError = fake_refresh
+    monkeypatch.setitem(sys.modules, "google.auth.exceptions", fake_auth)
+
+    fake_csql: Any = ModuleType("google.cloud.sql.connector.exceptions")
+    fake_closed = type("ClosedConnectorError", (Exception,), {})
+    fake_res_exhausted = type("ResourceExhaustedError", (Exception,), {})
+    fake_csql.ClosedConnectorError = fake_closed
+    fake_csql.ResourceExhaustedError = fake_res_exhausted
+    monkeypatch.setitem(sys.modules, "google.cloud.sql.connector.exceptions", fake_csql)
+
+    fake_adb: Any = ModuleType("google.cloud.alloydb.connector.exceptions")
+    fake_ip_missing = type("IPTypeNotFoundError", (Exception,), {})
+    fake_adb.IPTypeNotFoundError = fake_ip_missing
+    monkeypatch.setitem(sys.modules, "google.cloud.alloydb.connector.exceptions", fake_adb)
+
+    fake_aiohttp: Any = ModuleType("aiohttp")
+    fake_client_ssl = type("ClientSSLError", (Exception,), {})
+    fake_client_resp = type("ClientResponseError", (Exception,), {})
+    fake_server_timeout = type("ServerTimeoutError", (Exception,), {})
+    fake_aiohttp.ClientSSLError = fake_client_ssl
+    fake_aiohttp.ClientResponseError = fake_client_resp
+    fake_aiohttp.ServerTimeoutError = fake_server_timeout
+    monkeypatch.setitem(sys.modules, "aiohttp", fake_aiohttp)
+
+    assert is_transient_connector_error(fake_api_core_unavail("503")) is True
+    assert is_transient_connector_error(fake_api_core_denied("403")) is False
+    assert is_transient_connector_error(fake_api_core_retry("bare retry")) is True
+
+    wrapped_denied: Any = fake_api_core_retry("wrapped denied")
+    wrapped_denied.cause = fake_api_core_denied("403")
+    assert is_transient_connector_error(wrapped_denied) is False
+
+    assert is_transient_connector_error(fake_default_creds("no adc")) is False
+    assert is_transient_connector_error(fake_transport("socket err")) is True
+    retryable_refresh: Any = fake_refresh("retryable")
+    retryable_refresh.retryable = True
+    assert is_transient_connector_error(retryable_refresh) is True
+    perm_refresh: Any = fake_refresh("permanent")
+    perm_refresh.retryable = False
+    assert is_transient_connector_error(perm_refresh) is False
+
+    assert is_transient_connector_error(fake_closed("closed")) is False
+    assert is_transient_connector_error(fake_res_exhausted("quota")) is True
+    assert is_transient_connector_error(fake_ip_missing("no psc")) is False
+    assert is_transient_connector_error(fake_client_ssl("ssl")) is False
+    assert is_transient_connector_error(fake_server_timeout("timeout")) is True
+
+    resp_503: Any = fake_client_resp("503")
+    resp_503.status = 503
+    resp_401: Any = fake_client_resp("401")
+    resp_401.status = 401
+    assert is_transient_connector_error(resp_503) is True
+    assert is_transient_connector_error(resp_401) is False
+
+    cyc_a = RuntimeError("a")
+    cyc_b = RuntimeError("b")
+    cyc_a.__cause__ = cyc_b
+    cyc_b.__cause__ = cyc_a
+    assert is_transient_connector_error(cyc_a) is False
+
+    tail: BaseException = TimeoutError("deep transient")
+    for idx in range(10):
+        outer = RuntimeError(f"wrap-{idx}")
+        outer.__cause__ = tail
+        tail = outer
+    assert is_transient_connector_error(tail) is False
+
+
+@pytest.mark.parametrize("dialer_kind", ["cloudsql", "alloydb"])
+def test_sync_dialer_admin_http_retry_recovery_and_log_redaction(
+    dialer_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify sync dialers retry transient Admin API errors with backoff and never log access tokens."""
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(time, "sleep", sleep_calls.append)
+    secret_token = "opaque-bearer-token-redaction-check"
+    attempts = 0
+
+    def flaky_http(url: str, payload: bytes, headers: dict[str, str]) -> bytes:
+        nonlocal attempts
+        _ = (url, payload, headers)
+        attempts += 1
+        if attempts == 1:
+            raise _make_http_error(503)
+        if attempts == 2:
+            raise urllib.error.URLError(TimeoutError("read timed out"))
+        if dialer_kind == "cloudsql":
+            return encode_json_bytes({"ephemeralCert": {"cert": "CERT"}, "serverCaCert": {"cert": "CA"}})
+        return encode_json_bytes({"caCert": "CA", "clientCert": "CERT"})
+
+    with caplog.at_level(logging.WARNING, logger="vertebra.db.dialer"):
+        if dialer_kind == "cloudsql":
+            csql_cfg = CloudSQLConfig(
+                instance_connection_name="my-proj:us-central1:my-pg",
+                connector_retry_count=3,
+                connector_retry_delay=0.25,
+                connector_retry_max_delay=1.0,
+            )
+            bundle = SyncCloudSQLDialer(csql_cfg).refresh_certificate(
+                public_key_pem="PUB",
+                private_key_pem="PRIV",
+                access_token=secret_token,
+                http_transport=flaky_http,
+            )
+        else:
+            adb_cfg = AlloyDBConfig(
+                instance_uri="projects/my-proj/locations/us-central1/clusters/prod/instances/primary",
+                connector_retry_count=3,
+                connector_retry_delay=0.25,
+                connector_retry_max_delay=1.0,
+            )
+            bundle = SyncAlloyDBDialer(adb_cfg).refresh_client_cert(
+                public_key_pem="PUB",
+                private_key_pem="PRIV",
+                access_token=secret_token,
+                http_transport=flaky_http,
+            )
+
+    assert bundle.client_cert_pem == "CERT"
+    assert attempts == 3
+    assert len(sleep_calls) == 2
+    assert 0.125 <= sleep_calls[0] <= 0.25
+    assert 0.25 <= sleep_calls[1] <= 0.5
+    assert len(caplog.records) == 2
+    assert secret_token not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("retry_count", "retry_delay", "exc_factory", "expected_exc", "expected_attempts", "expected_sleeps"),
+    [
+        pytest.param(
+            2, 0.2, lambda: _make_http_error(429), urllib.error.HTTPError, 3, 2, id="exhaust-transient-http-429"
+        ),
+        pytest.param(0, 0.2, lambda: TimeoutError("t/o"), TimeoutError, 1, 0, id="disabled-retries"),
+        pytest.param(2, 0.0, lambda: TimeoutError("t/o"), TimeoutError, 3, 0, id="zero-delay-skips-sleep"),
+        pytest.param(3, 0.2, lambda: _make_http_error(403), urllib.error.HTTPError, 1, 0, id="fail-fast-http-403"),
+        pytest.param(
+            3,
+            0.2,
+            lambda: urllib.error.URLError(ssl.SSLCertVerificationError(1, "bad cert")),
+            urllib.error.URLError,
+            1,
+            0,
+            id="fail-fast-ssl-verify",
+        ),
+    ],
+)
+def test_sync_cloudsql_admin_http_retry_exhaustion_and_fail_fast(
+    monkeypatch: pytest.MonkeyPatch,
+    retry_count: int,
+    retry_delay: float,
+    exc_factory: Any,
+    expected_exc: type[BaseException],
+    expected_attempts: int,
+    expected_sleeps: int,
+) -> None:
+    """Verify retry exhaustion, zero-retry disabling, zero-delay skip, and fail-fast on permanent errors."""
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(time, "sleep", sleep_calls.append)
+    calls = 0
+
+    def failing_http(_url: str, _payload: bytes, _headers: dict[str, str]) -> bytes:
+        nonlocal calls
+        calls += 1
+        raise exc_factory()
+
+    cfg = CloudSQLConfig(
+        instance_connection_name="my-proj:us-central1:my-pg",
+        connector_retry_count=retry_count,
+        connector_retry_delay=retry_delay,
+        connector_retry_max_delay=max(retry_delay, 1.0),
+    )
+    with pytest.raises(expected_exc):
+        SyncCloudSQLDialer(cfg).refresh_certificate(
+            public_key_pem="PUB",
+            private_key_pem="PRIV",
+            access_token="tok",
+            http_transport=failing_http,
+        )
+
+    assert calls == expected_attempts
+    assert len(sleep_calls) == expected_sleeps
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialer_kind", ["cloudsql", "alloydb"])
+async def test_async_dialer_admin_http_retry_recovery_and_cancellation(
+    dialer_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify async dialers retry with anyio.sleep and propagate asyncio.CancelledError without retrying."""
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(anyio, "sleep", fake_sleep)
+    attempts = 0
+
+    async def flaky_http(_url: str, _payload: bytes, _headers: dict[str, str]) -> bytes:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _make_http_error(502)
+        if dialer_kind == "cloudsql":
+            return encode_json_bytes({"ephemeralCert": {"cert": "ASYNC_CERT"}, "serverCaCert": {"cert": "CA"}})
+        return encode_json_bytes({"caCert": "CA", "clientCert": "ASYNC_CERT"})
+
+    if dialer_kind == "cloudsql":
+        csql_cfg = CloudSQLConfig(
+            instance_connection_name="my-proj:us-central1:my-pg",
+            connector_retry_count=2,
+            connector_retry_delay=0.2,
+            connector_retry_max_delay=1.0,
+        )
+        dialer: Any = AsyncCloudSQLDialer(csql_cfg)
+        bundle = await dialer.refresh_certificate(
+            public_key_pem="PUB",
+            private_key_pem="PRIV",
+            access_token="tok",
+            http_transport=flaky_http,
+        )
+    else:
+        adb_cfg = AlloyDBConfig(
+            instance_uri="projects/my-proj/locations/us-central1/clusters/prod/instances/primary",
+            connector_retry_count=2,
+            connector_retry_delay=0.2,
+            connector_retry_max_delay=1.0,
+        )
+        dialer = AsyncAlloyDBDialer(adb_cfg)
+        bundle = await dialer.refresh_client_cert(
+            public_key_pem="PUB",
+            private_key_pem="PRIV",
+            access_token="tok",
+            http_transport=flaky_http,
+        )
+
+    assert bundle.client_cert_pem == "ASYNC_CERT"
+    assert attempts == 2
+    assert len(sleep_calls) == 1
+    assert 0.1 <= sleep_calls[0] <= 0.2
+
+    cancel_attempts = 0
+
+    async def cancelling_http(_url: str, _payload: bytes, _headers: dict[str, str]) -> bytes:
+        nonlocal cancel_attempts
+        cancel_attempts += 1
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        if dialer_kind == "cloudsql":
+            await dialer.refresh_certificate(
+                public_key_pem="PUB",
+                private_key_pem="PRIV",
+                access_token="tok",
+                http_transport=cancelling_http,
+            )
+        else:
+            await dialer.refresh_client_cert(
+                public_key_pem="PUB",
+                private_key_pem="PRIV",
+                access_token="tok",
+                http_transport=cancelling_http,
+            )
+
+    assert cancel_attempts == 1
+
+
+@pytest.mark.anyio
+async def test_dialer_connect_retries_and_closes_leaked_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify sync/async Cloud SQL and AlloyDB connect() retry transient disconnects and close sockets cleanly."""
+    monkeypatch.setattr(time, "sleep", lambda _d: None)
+
+    async def fake_async_sleep(_d: float) -> None:
+        return None
+
+    monkeypatch.setattr(anyio, "sleep", fake_async_sleep)
+    closed_sockets: list[int] = []
+    attempt_num = 0
+
+    class _MockSock:
+        def __init__(self, idx: int) -> None:
+            self.idx = idx
+
+        def close(self) -> None:
+            closed_sockets.append(self.idx)
+
+    class _MockTlsCtx:
+        def wrap_socket(self, raw_sock: _MockSock, *, server_hostname: str | None = None) -> _MockSock:
+            _ = server_hostname
+            if raw_sock.idx == 1:
+                raise ConnectionResetError("transient reset during tls")
+            return raw_sock
+
+    def fake_create_conn(_addr: tuple[str, int], timeout: float = 10.0) -> _MockSock:
+        nonlocal attempt_num
+        _ = timeout
+        attempt_num += 1
+        return _MockSock(attempt_num)
+
+    monkeypatch.setattr(socket, "create_connection", fake_create_conn)
+    csql_sync = SyncCloudSQLDialer(
+        CloudSQLConfig(
+            instance_connection_name="my-proj:us-central1:my-pg",
+            connector_retry_count=2,
+            connector_retry_delay=0.0,
+            connector_retry_max_delay=0.0,
+        )
+    )
+    sock = csql_sync.connect("127.0.0.1", ssl_context=cast("Any", _MockTlsCtx()))
+    assert getattr(sock, "idx", None) == 2
+    assert closed_sockets == [1]
+
+    class _FailSslCtx:
+        def wrap_socket(self, _raw_sock: _MockSock, *, server_hostname: str | None = None) -> _MockSock:
+            _ = server_hostname
+            raise ssl.SSLCertVerificationError(1, "verify failed")
+
+    attempt_num = 0
+    closed_sockets.clear()
+    with pytest.raises(ssl.SSLCertVerificationError):
+        csql_sync.connect("127.0.0.1", ssl_context=cast("Any", _FailSslCtx()))
+    assert attempt_num == 1
+    assert closed_sockets == [1]
+
+    writer_closes = 0
+    open_calls = 0
+
+    class _FakeWriter:
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            nonlocal writer_closes
+            writer_closes += 1
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _FakeReader:
+        def __init__(self, fail: bool) -> None:
+            self._fail = fail
+
+        async def readexactly(self, n: int) -> bytes:
+            if self._fail:
+                raise asyncio.IncompleteReadError(b"", 4)
+            resp = AsyncAlloyDBDialer.encode_metadata_exchange_response(1)
+            return resp[:4] if n == 4 else resp[4:]
+
+    async def fake_open_connection(_host: str, _port: int, *, ssl: Any = None) -> tuple[_FakeReader, _FakeWriter]:
+        nonlocal open_calls
+        _ = ssl
+        open_calls += 1
+        return _FakeReader(fail=(open_calls == 1)), _FakeWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    adb_async = AsyncAlloyDBDialer(
+        AlloyDBConfig(
+            instance_uri="projects/my-proj/locations/us-central1/clusters/prod/instances/primary",
+            connector_retry_count=2,
+            connector_retry_delay=0.0,
+            connector_retry_max_delay=0.0,
+        )
+    )
+    _reader, _writer = await adb_async.connect(
+        "127.0.0.1",
+        oauth2_token="tok",
+        ssl_context=ssl.create_default_context(),
+    )
+    assert open_calls == 2
+    assert writer_closes == 1
+
+
+def test_config_from_url_to_cloud_dialer_and_registry_cache_isolation() -> None:
+    """Verify connector_retry_* and ip_type forward from DB configs, URLs, and isolate registry dialer cache."""
+    csql_url = CloudSQLConfig.from_url(
+        "cloudsql://p:us-central1:inst?connector_retry_count=5&connector_retry_delay=0.2&connector_retry_max_delay=2.5"
+    )
+    assert csql_url.connector_retry_count == 5
+    assert csql_url.connector_retry_delay == 0.2
+    assert csql_url.connector_retry_max_delay == 2.5
+
+    adb_url = AlloyDBConfig.from_url(
+        "alloydb:///projects/p/locations/l/clusters/c/instances/i"
+        "?connector_retry_count=4&connector_retry_delay=0.1&connector_retry_max_delay=1.5"
+    )
+    assert adb_url.connector_retry_count == 4
+    assert adb_url.connector_retry_delay == 0.1
+    assert adb_url.connector_retry_max_delay == 1.5
+
+    pg_csql = PostgreSQLConfig.from_url(
+        "postgresql://user@localhost/db?cloud_sql_instance=p:r:i"
+        "&connector_retry_count=6&connector_retry_delay=0.25&connector_retry_max_delay=3.0",
+        cloud_sql_ip_type="PSC",
+    )
+    pg_dialer = pg_csql.to_cloud_dialer_config()
+    assert isinstance(pg_dialer, CloudSQLConfig)
+    assert pg_dialer.ip_type == "PSC"
+    assert pg_dialer.connector_retry_count == 6
+    assert pg_dialer.connector_retry_delay == 0.25
+    assert pg_dialer.connector_retry_max_delay == 3.0
+
+    pg_adb = PostgreSQLConfig(
+        alloydb_instance_uri="projects/p/locations/l/clusters/c/instances/i",
+        alloydb_ip_type="PUBLIC",
+        connector_retry_count=2,
+        connector_retry_delay=0.1,
+        connector_retry_max_delay=0.8,
+    )
+    adb_dialer = pg_adb.to_cloud_dialer_config()
+    assert isinstance(adb_dialer, AlloyDBConfig)
+    assert adb_dialer.ip_type == "PUBLIC"
+    assert adb_dialer.connector_retry_count == 2
+    assert adb_dialer.connector_retry_delay == 0.1
+    assert adb_dialer.connector_retry_max_delay == 0.8
+
+    mysql_cfg = MySQLConfig.from_url(
+        "mysql://root@localhost:3306/app?cloud_sql_instance=p:r:i"
+        "&connector_retry_count=4&connector_retry_delay=0.3&connector_retry_max_delay=2.0",
+        cloud_sql_ip_type="PRIVATE",
+    )
+    mysql_dialer = mysql_cfg.to_cloud_dialer_config()
+    assert isinstance(mysql_dialer, CloudSQLConfig)
+    assert mysql_dialer.ip_type == "PRIVATE"
+    assert mysql_dialer.connector_retry_count == 4
+    assert mysql_dialer.connector_retry_delay == 0.3
+    assert mysql_dialer.connector_retry_max_delay == 2.0
+
+    mssql_cfg = MSSQLConfig.from_url(
+        "mssql://sa@127.0.0.1:1433/master?cloud_sql_instance=p:r:i"
+        "&connector_retry_count=1&connector_retry_delay=0.0&connector_retry_max_delay=0.5"
+    )
+    mssql_dialer = mssql_cfg.to_cloud_dialer_config()
+    assert isinstance(mssql_dialer, CloudSQLConfig)
+    assert mssql_dialer.connector_retry_count == 1
+    assert mssql_dialer.connector_retry_delay == 0.0
+    assert mssql_dialer.connector_retry_max_delay == 0.5
+
+    registry = DatabaseRegistry()
+    d_default = registry.get_dialer(CloudSQLConfig(instance_connection_name="p:r:i"), sync=True)
+    d_same = registry.get_dialer(CloudSQLConfig(instance_connection_name="p:r:i"), sync=True)
+    d_zero = registry.get_dialer(
+        CloudSQLConfig(instance_connection_name="p:r:i", connector_retry_count=0),
+        sync=True,
+    )
+    assert d_default is d_same
+    assert d_default is not d_zero
+    assert d_zero.config.connector_retry_count == 0
+
+    with pytest.raises(ImproperConfigurationError, match="non-negative integer"):
+        CloudSQLConfig.from_url("cloudsql://p:r:i?connector_retry_count=abc")
+    with pytest.raises(ImproperConfigurationError, match="connector_retry_delay"):
+        PostgreSQLConfig.from_url("postgresql://localhost/db?connector_retry_delay=nan")

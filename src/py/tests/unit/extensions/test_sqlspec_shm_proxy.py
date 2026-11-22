@@ -1532,3 +1532,33 @@ def test_proxy_config_deep_merges_extension_config_and_exposes_replica_hooks() -
     assert async_replica.is_replica is True
     assert async_primary.supports_read_routing is True
     assert async_primary.provide_routing_session() is not None
+
+
+@pytest.mark.parametrize(
+    ("raw_rowcount", "expected"),
+    [
+        pytest.param(3, 3, id="positive"),
+        pytest.param(0, 0, id="zero"),
+        pytest.param(-1, 0, id="negative"),
+        pytest.param(True, 0, id="bool-true"),
+        pytest.param(False, 0, id="bool-false"),
+    ],
+)
+def test_proxy_drivers_resolve_rowcount_and_last_inserted_id(raw_rowcount: Any, expected: int) -> None:
+    """ProxySyncDriver and ProxyAsyncDriver reject bool/negative rowcounts and return None for last_inserted_id."""
+    response = BrokerRpcResponse(rowcount=raw_rowcount)
+
+    def _sync_transport(_req: BrokerRpcRequest) -> BrokerRpcResponse:
+        return response
+
+    async def _async_transport(_req: BrokerRpcRequest) -> BrokerRpcResponse:
+        return response
+
+    sync_driver = ProxySyncDriver(_sync_transport)
+    async_driver = ProxyAsyncDriver(_async_transport)
+    cursor_with_id = SimpleNamespace(lastrowid=42)
+
+    assert sync_driver.resolve_rowcount(response) == expected
+    assert async_driver.resolve_rowcount(response) == expected
+    assert sync_driver.resolve_last_inserted_id(cursor_with_id) is None
+    assert async_driver.resolve_last_inserted_id(cursor_with_id) is None

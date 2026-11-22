@@ -14,7 +14,7 @@ from typing import Any, cast
 import pyarrow as pa
 import pytest
 from sqlspec.core import SQL, ArrowResult, StackResult, StatementStack, TypedParameter
-from sqlspec.data_dictionary._types import MetadataCapabilityProfile
+from sqlspec.data_dictionary import MetadataCapabilityProfile
 from sqlspec.exceptions import (
     DatabaseConnectionError,
     DataError,
@@ -1533,7 +1533,9 @@ def _instrument_spanner_cache_hit_state(adapter: Any, *, asynchronous: bool) -> 
             counts["dml"] += 1
             return await orig_dml(*args, **kwargs)
 
-        adapter._cache_hit_state = (_wrapped_async_fetch, _wrapped_async_dml, orig_mapper)
+        adapter.set_cached_statement_executor(
+            BaseAsyncDriver._run_cached_statement, state=(_wrapped_async_fetch, _wrapped_async_dml, orig_mapper)
+        )
     else:
 
         def _wrapped_sync_fetch(*args: Any, **kwargs: Any) -> Any:
@@ -1544,7 +1546,9 @@ def _instrument_spanner_cache_hit_state(adapter: Any, *, asynchronous: bool) -> 
             counts["dml"] += 1
             return orig_dml(*args, **kwargs)
 
-        adapter._cache_hit_state = (_wrapped_sync_fetch, _wrapped_sync_dml, orig_mapper)
+        adapter.set_cached_statement_executor(
+            BaseSyncDriver._run_cached_statement, state=(_wrapped_sync_fetch, _wrapped_sync_dml, orig_mapper)
+        )
     return counts
 
 
@@ -1688,7 +1692,7 @@ def test_spanner_cache_hit_result_matches_method_path(
     if mode == "sync":
         fast_adapter: Any = SpannerSyncDriver(fast_conn)
         method_adapter: Any = SpannerSyncDriver(method_conn)
-        method_adapter._cache_hit_executor = None
+        method_adapter.set_cached_statement_executor(None)
         fast_adapter.execute(sql)
         method_adapter.execute(sql)
         fast_res = fast_adapter.execute(sql)
@@ -1696,7 +1700,7 @@ def test_spanner_cache_hit_result_matches_method_path(
     else:
         fast_adapter = SpannerAsyncDriver(fast_conn)
         method_adapter = SpannerAsyncDriver(method_conn)
-        method_adapter._cache_hit_executor = None
+        method_adapter.set_cached_statement_executor(None)
 
         async def _run() -> tuple[Any, Any]:
             await fast_adapter.execute(sql)
@@ -1708,6 +1712,8 @@ def test_spanner_cache_hit_result_matches_method_path(
     assert fast_res.all() == method_res.all()
     assert fast_res.column_names == method_res.column_names
     assert fast_res.rows_affected == method_res.rows_affected
+    assert fast_res.last_inserted_id == method_res.last_inserted_id
+    assert fast_res.last_inserted_id is None
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
@@ -1805,7 +1811,7 @@ def test_spanner_cache_hit_errors_match_method_path(mode: str) -> None:
     if mode == "sync":
         fast_adapter: Any = SpannerSyncDriver(fast_conn)
         method_adapter: Any = SpannerSyncDriver(method_conn)
-        method_adapter._cache_hit_executor = None
+        method_adapter.set_cached_statement_executor(None)
         fast_adapter.execute(sql)
         method_adapter.execute(sql)
         fast_conn._error = native_error
@@ -1817,7 +1823,7 @@ def test_spanner_cache_hit_errors_match_method_path(mode: str) -> None:
     else:
         fast_adapter = SpannerAsyncDriver(fast_conn)
         method_adapter = SpannerAsyncDriver(method_conn)
-        method_adapter._cache_hit_executor = None
+        method_adapter.set_cached_statement_executor(None)
 
         async def _run() -> tuple[BaseException, BaseException]:
             await fast_adapter.execute(sql)
@@ -1839,3 +1845,15 @@ def test_spanner_cache_hit_errors_match_method_path(mode: str) -> None:
     assert type(fast_exc.value) is type(method_exc.value)
     assert fast_exc.value.__cause__ is native_error
     assert fast_conn.cursors[-1].close_calls == 1
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_spanner_resolve_last_inserted_id_returns_none(mode: str) -> None:
+    """Spanner drivers override resolve_last_inserted_id to return None matching dispatch_execute."""
+
+    class _FakeCursorWithRowId:
+        lastrowid = 99
+
+    conn = _CountingSpannerConnection(asynchronous=(mode == "async"))
+    adapter: Any = SpannerSyncDriver(conn) if mode == "sync" else SpannerAsyncDriver(conn)
+    assert adapter.resolve_last_inserted_id(_FakeCursorWithRowId()) is None
