@@ -12,6 +12,14 @@ from vertebra.db.adapters.mssql.core import (
     MSSQL_DIALECT_TAG,
     MSSQLCore,
 )
+from vertebra.db.dialer._base import (
+    DEFAULT_CONNECTOR_RETRY_COUNT,
+    DEFAULT_CONNECTOR_RETRY_DELAY,
+    DEFAULT_CONNECTOR_RETRY_MAX_DELAY,
+    parse_connector_retry_count,
+    parse_connector_retry_delay,
+    validate_connector_retry_config,
+)
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
 from vertebra.db.driver._cloud_auth import AZURE_MSSQL_SCOPE, AzureEntraTokenProvider, is_loopback_host
 from vertebra.db.driver._common import BaseDatabaseConfig
@@ -111,6 +119,12 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Cloud SQL authentication mode (`PASSWORD` or `IAM`)."""
     cloudsql_proxy_addr: str | None = None
     """Optional local address override for Cloud SQL Admin API mTLS `:3307` proxy testing."""
+    connector_retry_count: int = DEFAULT_CONNECTOR_RETRY_COUNT
+    """Maximum retry attempts on transient Cloud SQL dialer errors (defaults to `3`; `0` disables retries)."""
+    connector_retry_delay: float = DEFAULT_CONNECTOR_RETRY_DELAY
+    """Initial backoff delay in seconds before jittered exponential dialer retries (defaults to `0.5`)."""
+    connector_retry_max_delay: float = DEFAULT_CONNECTOR_RETRY_MAX_DELAY
+    """Upper bound in seconds on exponential backoff between dialer retry attempts (defaults to `5.0`)."""
     token_provider: Any = None
     """Optional cloud database token provider (`AzureEntraTokenProvider`) for TDS `FEDAUTH` authentication."""
     pool_min_size: int = 1
@@ -146,6 +160,11 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         self._validate_pem_bytes(self.ca_pem, "ca_pem")
         self._validate_pem_bytes(self.client_cert_pem, "client_cert_pem")
         self._validate_pem_bytes(self.client_key_pem, "client_key_pem")
+        validate_connector_retry_config(
+            self.connector_retry_count,
+            self.connector_retry_delay,
+            self.connector_retry_max_delay,
+        )
         if isinstance(self.token_provider, AzureEntraTokenProvider):
             self._validate_entra_transport_security()
             msgspec.structs.force_setattr(
@@ -179,6 +198,9 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
                 instance_connection_name=self.cloud_sql_instance,
                 enable_iam_auth=(self.cloudsql_auth_type.strip().upper() == "IAM"),
                 ip_type=ip_type,
+                connector_retry_count=self.connector_retry_count,
+                connector_retry_delay=self.connector_retry_delay,
+                connector_retry_max_delay=self.connector_retry_max_delay,
             )
         return None
 
@@ -223,6 +245,16 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             kwargs["cloudsql_auth_type"] = query_params["cloudsql_auth_type"]
         if "cloudsql_proxy_addr" in query_params:
             kwargs["cloudsql_proxy_addr"] = query_params["cloudsql_proxy_addr"]
+        if "connector_retry_count" in query_params:
+            kwargs["connector_retry_count"] = parse_connector_retry_count(query_params["connector_retry_count"])
+        if "connector_retry_delay" in query_params:
+            kwargs["connector_retry_delay"] = parse_connector_retry_delay(
+                query_params["connector_retry_delay"], field_name="connector_retry_delay"
+            )
+        if "connector_retry_max_delay" in query_params:
+            kwargs["connector_retry_max_delay"] = parse_connector_retry_delay(
+                query_params["connector_retry_max_delay"], field_name="connector_retry_max_delay"
+            )
         kwargs.update(overrides)
         return cls(**kwargs)
 

@@ -15,6 +15,8 @@ from typing import Any, cast, get_args, get_origin
 import click
 import msgspec
 import pytest
+import sqlalchemy
+import sqlalchemy.ext.asyncio
 from advanced_alchemy._listeners import (
     AsyncCacheListener,
     AsyncFileObjectListener,
@@ -24,9 +26,17 @@ from advanced_alchemy._listeners import (
 )
 from advanced_alchemy.base import BigIntAuditBase
 from advanced_alchemy.config import RoutingConfig
-from advanced_alchemy.exceptions import DuplicateKeyError, ForeignKeyError, wrap_sqlalchemy_exception
+from advanced_alchemy.exceptions import (
+    DuplicateKeyError,
+    ForeignKeyError,
+    InvalidCursorError,
+    wrap_sqlalchemy_exception,
+)
 from advanced_alchemy.extensions.litestar import SQLAlchemyPlugin
 from advanced_alchemy.extensions.litestar.store import SQLAlchemyStore, StoreModelMixin
+from advanced_alchemy.filters import (
+    CursorFilter,
+)
 from advanced_alchemy.filters import (
     FilterSet as UpstreamFilterSet,
 )
@@ -35,6 +45,8 @@ from advanced_alchemy.filters import (
 )
 from advanced_alchemy.repository import SQLAlchemySyncRepository
 from advanced_alchemy.routing import RoutingAsyncSessionMaker, RoutingSyncSessionMaker
+from advanced_alchemy.routing.selectors import RoundRobinSelector
+from advanced_alchemy.routing.session import RoutingAsyncSession
 from advanced_alchemy.service import (
     SchemaDumpConfig as UpstreamSchemaDumpConfig,
 )
@@ -47,6 +59,7 @@ from advanced_alchemy.service import (
 )
 from advanced_alchemy.types.file_object import FileObject
 from advanced_alchemy.types.file_object.registry import storages
+from advanced_alchemy.utils.dependencies import CursorDefaults, resolve_cursor_settings
 from litestar import Litestar, get
 from litestar.config.app import AppConfig
 from litestar.di import NamedDependency
@@ -54,7 +67,7 @@ from litestar.exceptions import LitestarDeprecationWarning
 from litestar.params import SkipValidation
 from litestar.plugins import InitPluginProtocol
 from litestar.testing import TestClient
-from sqlalchemy import ForeignKey, String, create_engine, event, select
+from sqlalchemy import Boolean, ForeignKey, Integer, String, create_engine, event, select
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import IntegrityError as SQLAlchemyIntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
@@ -1638,3 +1651,120 @@ def test_sqlspec_mysql_cloud_iam_ssl_mode_across_derive_pool_and_replicas(
     expected_ca = aws_rds_root_ca_pem() if provider_kind == "rds_iam" else None
     assert derived.driver_config.ssl_ca == expected_ca
     assert build_mysql_client_kwargs(derived.driver_config)["ssl_ca"] == expected_ca
+
+
+def test_advanced_alchemy_1130b3_late_bound_engine_factories(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify late-bound engine lookup in 1.13.0b3 picks up post-import sqlalchemy factory patches."""
+    real_create_engine = sqlalchemy.create_engine
+    real_create_async_engine = sqlalchemy.ext.asyncio.create_async_engine
+    sync_urls: list[str] = []
+    async_urls: list[str] = []
+
+    def patched_create_engine(url: Any, **kwargs: Any) -> Any:
+        sync_urls.append(str(url))
+        return real_create_engine(url, **kwargs)
+
+    def patched_create_async_engine(url: Any, **kwargs: Any) -> Any:
+        async_urls.append(str(url))
+        return real_create_async_engine(url, **kwargs)
+
+    monkeypatch.setattr(sqlalchemy, "create_engine", patched_create_engine)
+    monkeypatch.setattr(sqlalchemy.ext.asyncio, "create_async_engine", patched_create_async_engine)
+
+    sync_cfg = create_sync_alchemy_config("sqlite:///:memory:")
+    sync_engine = sync_cfg.get_engine()
+    sync_engine.dispose()
+    assert sync_urls == ["sqlite+vtb:///:memory:"]
+
+    sync_routing_cfg = create_sync_alchemy_config(
+        routing_config=RoutingConfig(primary_connection_string="sqlite:///:memory:"),
+    )
+    sync_maker = sync_routing_cfg.create_session_maker()
+    assert len(sync_urls) == 2
+    assert isinstance(sync_maker, RoutingSyncSessionMaker)
+
+    async_cfg = create_async_alchemy_config("sqlite+vtb_async:///:memory:")
+    _ = async_cfg.get_engine()
+    assert async_urls == ["sqlite+vtb_async:///:memory:"]
+
+    async_routing_cfg = create_async_alchemy_config(
+        routing_config=RoutingConfig(primary_connection_string="sqlite+vtb_async:///:memory:"),
+    )
+    async_maker = async_routing_cfg.create_session_maker()
+    assert len(async_urls) == 2
+    assert isinstance(async_maker, RoutingAsyncSessionMaker)
+
+    direct_engine = real_create_async_engine("sqlite+vtb_async:///:memory:")
+    routing_session = RoutingAsyncSession(
+        routing_config=RoutingConfig(primary_connection_string="sqlite+vtb_async:///:memory:"),
+        selectors={"default": RoundRobinSelector([direct_engine])},
+        default_engine=direct_engine,
+    )
+    assert routing_session.bind is None
+
+
+class _CursorItem(BigIntAuditBase):
+    __tablename__ = "r209_cursor_item"
+
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+def test_advanced_alchemy_1130b3_cursor_filter_encryption_and_validation() -> None:
+    """Verify AES-256-GCM cursor encryption, derived signing-key parity, and bool column checks."""
+    secret = "test-cursor-secret-v1"
+    direct_signed = CursorFilter([("id", "asc")], limit=2, secret=secret)
+    cursor_settings = resolve_cursor_settings(
+        {"sort_fields": {"id"}, "pagination_cursor_secret": secret},
+    )
+    provider_secret, provider_ttl, provider_enc = cursor_settings.token_options(CursorDefaults())
+    assert provider_ttl is None
+    assert provider_enc is False
+    assert provider_secret == secret.encode("utf-8")
+
+    rows = [
+        _CursorItem(id=10, score=5, active=False),
+        _CursorItem(id=20, score=10, active=True),
+        _CursorItem(id=30, score=15, active=True),
+    ]
+    direct_page = direct_signed.build_page(rows, model=_CursorItem)
+    assert direct_page.next_cursor is not None
+    decoded = CursorFilter([("id", "asc")], cursor=direct_page.next_cursor, limit=2, secret=provider_secret)
+    assert [item.id for item in decoded.paginate_items(rows, _CursorItem)] == [30]
+
+    encrypted_filter = CursorFilter([("score", "asc")], limit=2, secret=secret, encrypted=True)
+    sealed_page = encrypted_filter.build_page(rows, model=_CursorItem)
+    assert sealed_page.next_cursor is not None
+    assert sealed_page.next_cursor.startswith("e1.")
+    reopened = CursorFilter([("score", "asc")], cursor=sealed_page.next_cursor, limit=2, secret=secret, encrypted=True)
+    assert [item.score for item in reopened.paginate_items(rows, _CursorItem)] == [15]
+
+    bool_rows = [
+        SimpleNamespace(id=1, score=False),
+        SimpleNamespace(id=2, score=True),
+        SimpleNamespace(id=3, score=True),
+    ]
+    bad_bool_page = CursorFilter([("score", "asc")], limit=2).build_page(bool_rows, model=_CursorItem)
+    assert bad_bool_page.next_cursor is not None
+    with pytest.raises(InvalidCursorError):
+        CursorFilter([("score", "asc")], cursor=bad_bool_page.next_cursor, limit=2).append_to_statement(
+            select(_CursorItem), _CursorItem
+        )
+
+    items = [
+        _CursorItem(id=1, score=1, active=False),
+        _CursorItem(id=2, score=2, active=True),
+        _CursorItem(id=3, score=3, active=True),
+    ]
+    bool_filter = CursorFilter([("active", "asc"), ("id", "asc")], limit=2)
+    stmt = bool_filter.append_to_statement(select(_CursorItem), _CursorItem)
+    assert stmt is not None
+    first_page = bool_filter.build_page(bool_filter.paginate_items(items, _CursorItem), model=_CursorItem)
+    assert [row.id for row in first_page.items] == [1, 2]
+    assert first_page.next_cursor is not None
+    second_stmt = CursorFilter(
+        [("active", "asc"), ("id", "asc")],
+        cursor=first_page.next_cursor,
+        limit=2,
+    ).append_to_statement(select(_CursorItem), _CursorItem)
+    assert second_stmt is not None

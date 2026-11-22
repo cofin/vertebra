@@ -10,6 +10,14 @@ import msgspec
 
 from vertebra.db.adapters.mysql.core import MySQLCore
 from vertebra.db.dialer import CloudSQLConfig, CloudSQLInstanceURI, aws_rds_root_ca_pem
+from vertebra.db.dialer._base import (
+    DEFAULT_CONNECTOR_RETRY_COUNT,
+    DEFAULT_CONNECTOR_RETRY_DELAY,
+    DEFAULT_CONNECTOR_RETRY_MAX_DELAY,
+    parse_connector_retry_count,
+    parse_connector_retry_delay,
+    validate_connector_retry_config,
+)
 from vertebra.db.driver._cloud_auth import (
     AZURE_MYSQL_SCOPE,
     AwsRdsIamTokenProvider,
@@ -159,6 +167,9 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     statement_cache_size: int = 128
     cloud_sql_instance: str | None = None
     cloud_sql_ip_type: str = "PUBLIC"
+    connector_retry_count: int = DEFAULT_CONNECTOR_RETRY_COUNT
+    connector_retry_delay: float = DEFAULT_CONNECTOR_RETRY_DELAY
+    connector_retry_max_delay: float = DEFAULT_CONNECTOR_RETRY_MAX_DELAY
     enable_iam_auth: bool = False
     iam_auth_options: Mapping[str, str] = msgspec.field(default_factory=dict)
     credentials_path: str | None = None
@@ -239,6 +250,12 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         if ip_upper not in {"PUBLIC", "PRIVATE", "PSC"}:
             msg = f"Unsupported MySQL cloud_sql_ip_type '{self.cloud_sql_ip_type}'"
             raise ImproperConfigurationError(msg)
+
+        validate_connector_retry_config(
+            self.connector_retry_count,
+            self.connector_retry_delay,
+            self.connector_retry_max_delay,
+        )
 
         if self.cloud_sql_instance is not None:
             stripped_instance = self.cloud_sql_instance.strip()
@@ -481,6 +498,16 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
                 "yes",
                 "on",
             }
+        if "connector_retry_count" in query and "connector_retry_count" not in kwargs:
+            kwargs["connector_retry_count"] = parse_connector_retry_count(query["connector_retry_count"][0])
+        if "connector_retry_delay" in query and "connector_retry_delay" not in kwargs:
+            kwargs["connector_retry_delay"] = parse_connector_retry_delay(
+                query["connector_retry_delay"][0], field_name="connector_retry_delay"
+            )
+        if "connector_retry_max_delay" in query and "connector_retry_max_delay" not in kwargs:
+            kwargs["connector_retry_max_delay"] = parse_connector_retry_delay(
+                query["connector_retry_max_delay"][0], field_name="connector_retry_max_delay"
+            )
         return cls(dsn=url, **kwargs)
 
     def pool_key(self) -> tuple[Any, ...]:
@@ -585,6 +612,10 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         return CloudSQLConfig(
             instance_connection_name=self.cloud_sql_instance,
             enable_iam_auth=self.enable_iam_auth,
+            ip_type=self.cloud_sql_ip_type.strip().upper(),
+            connector_retry_count=self.connector_retry_count,
+            connector_retry_delay=self.connector_retry_delay,
+            connector_retry_max_delay=self.connector_retry_max_delay,
         )
 
     def resolve_iam_password_sync(self, *, force_refresh: bool = False) -> str | None:

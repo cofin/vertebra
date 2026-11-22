@@ -377,7 +377,9 @@ class SpannerSyncDriver(BaseSyncDriver):
                 is_select_result=True,
                 row_format="tuple",
             )
-        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
+        return self.create_execution_result(
+            cursor, rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount)
+        )
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a parameterized batch via the native cursor ``executemany`` path."""
@@ -392,7 +394,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         cursor.executemany(sql, json_sets)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 
@@ -964,7 +966,9 @@ class SpannerAsyncDriver(BaseAsyncDriver):
                 is_select_result=True,
                 row_format="tuple",
             )
-        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
+        return self.create_execution_result(
+            cursor, rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount)
+        )
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Asynchronously execute a parameterized batch via the native cursor ``executemany`` path."""
@@ -979,7 +983,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         await cursor.executemany(sql, json_sets)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 

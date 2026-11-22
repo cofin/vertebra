@@ -456,6 +456,9 @@ def build_connection_config(
             merged["cloud_sql_instance"] = driver_features["cloud_sql_instance"]
         if "enable_iam_auth" in driver_features and "enable_iam_auth" not in merged:
             merged["enable_iam_auth"] = bool(driver_features["enable_iam_auth"])
+        for retry_key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay"):
+            if retry_key in driver_features and retry_key not in merged:
+                merged[retry_key] = driver_features[retry_key]
 
     if "connect_timeout" not in merged and "timeout" in merged:
         merged["connect_timeout"] = merged.pop("timeout")

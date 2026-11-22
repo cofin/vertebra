@@ -287,7 +287,12 @@ class DatabaseRegistry:
         sync: bool = False,
     ) -> SyncCloudSQLDialer | AsyncCloudSQLDialer | SyncAlloyDBDialer | AsyncAlloyDBDialer:
         """Return a cached Cloud SQL or AlloyDB dialer for `config` and `sync` mode."""
-        key = (*config.pool_key(), bool(sync))
+        retry_tuple = (
+            config.connector_retry_count,
+            float(config.connector_retry_delay),
+            float(config.connector_retry_max_delay),
+        )
+        key: tuple[Any, ...] = (*config.pool_key(), bool(sync), retry_tuple)
 
         def _build() -> SyncCloudSQLDialer | AsyncCloudSQLDialer | SyncAlloyDBDialer | AsyncAlloyDBDialer:
             if isinstance(config, CloudSQLConfig):

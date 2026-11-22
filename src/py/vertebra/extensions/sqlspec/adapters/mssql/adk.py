@@ -38,11 +38,11 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from sqlspec.extensions.adk import SessionOrderBy
-    from sqlspec.extensions.adk.artifact._types import StoredArtifact
+    from sqlspec.extensions.adk.artifact import StoredArtifact
     from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore as _BaseAsyncADKArtifactStore
     from sqlspec.extensions.adk.artifact.store import BaseSyncADKArtifactStore as _BaseSyncADKArtifactStore
     from sqlspec.extensions.adk.converters import merge_scoped_state
-    from sqlspec.extensions.adk.memory._types import StoredMemory
+    from sqlspec.extensions.adk.memory import StoredMemory
     from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore as _BaseAsyncADKMemoryStore
     from sqlspec.extensions.adk.memory.store import BaseSyncADKMemoryStore as _BaseSyncADKMemoryStore
 
@@ -51,8 +51,8 @@ else:
     _memory_store_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
     _artifact_store_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="google-adk", extra="adk")
     _converters_mod = ensure_module("sqlspec.extensions.adk.converters", package="google-adk", extra="adk")
-    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact._types", package="google-adk", extra="adk")
-    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory._types", package="google-adk", extra="adk")
+    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact", package="google-adk", extra="adk")
+    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory", package="google-adk", extra="adk")
     _BaseAsyncADKMemoryStore = _memory_store_mod.BaseAsyncADKMemoryStore
     _BaseSyncADKMemoryStore = _memory_store_mod.BaseSyncADKMemoryStore
     _BaseAsyncADKArtifactStore = _artifact_store_mod.BaseAsyncADKArtifactStore

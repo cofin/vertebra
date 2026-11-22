@@ -690,10 +690,9 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         cursor.executemany(sql, prepared)
-        rowcount = cursor.rowcount
         return self.create_execution_result(
             cursor,
-            rowcount_override=rowcount if rowcount > 0 else 0,
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 
@@ -1170,10 +1169,9 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         await cursor.executemany(sql, prepared)
-        rowcount = cursor.rowcount
         return self.create_execution_result(
             cursor,
-            rowcount_override=rowcount if rowcount > 0 else 0,
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 

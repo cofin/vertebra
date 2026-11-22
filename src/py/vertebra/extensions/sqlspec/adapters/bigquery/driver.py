@@ -317,7 +317,9 @@ class BigQuerySyncDriver(BaseSyncDriver):
                 is_select_result=True,
                 row_format="tuple",
             )
-        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
+        return self.create_execution_result(
+            cursor, rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount)
+        )
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a parameterized batch against BigQuery through the native cursor."""
@@ -329,7 +331,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         _record_cursor_metadata(self.connection, cursor)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 
@@ -713,7 +715,9 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
                 is_select_result=True,
                 row_format="tuple",
             )
-        return self.create_execution_result(cursor, rowcount_override=max(cursor.rowcount, 0))
+        return self.create_execution_result(
+            cursor, rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount)
+        )
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a parameterized batch asynchronously against BigQuery through the native cursor."""
@@ -725,7 +729,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         _record_cursor_metadata(self.connection, cursor)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 

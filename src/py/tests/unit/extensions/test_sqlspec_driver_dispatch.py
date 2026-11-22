@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, ClassVar, cast
 
 import pytest
-from sqlspec.core import ParameterStyle, ParameterStyleConfig, StatementConfig
+from sqlspec.core import SQL, ParameterStyle, ParameterStyleConfig, StatementConfig
 from sqlspec.data_dictionary import get_dialect_config
 from sqlspec.data_dictionary.dialects.mysql.dictionary import (
     MySQLAsyncDataDictionary as UpstreamMySQLAsyncDataDictionary,
@@ -69,6 +69,9 @@ from vertebra._vertebra import InterfaceError as NativeInterfaceError
 from vertebra._vertebra import OperationalError as NativeOperationalError
 from vertebra.db import dbapi
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
+from vertebra.db.adapters.mssql.config import MSSQLConfig
+from vertebra.db.adapters.mysql.config import MySQLConfig
+from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
 from vertebra.db.adapters.sqlite.config import SQLiteConfig
 from vertebra.db.driver import AsyncDatabaseDriver, SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDriver
@@ -82,7 +85,9 @@ from vertebra.extensions.sqlspec._driver import (
 )
 from vertebra.extensions.sqlspec.adapters.bigquery.driver import BigQueryAsyncDriver, BigQuerySyncDriver
 from vertebra.extensions.sqlspec.adapters.duckdb.driver import DuckDBAsyncDriver, DuckDBSyncDriver
+from vertebra.extensions.sqlspec.adapters.mssql import MSSQLAsyncConfig, MSSQLSyncConfig
 from vertebra.extensions.sqlspec.adapters.mssql.driver import MSSQLAsyncDriver, MSSQLSyncDriver
+from vertebra.extensions.sqlspec.adapters.mysql import MySQLAsyncConfig, MySQLSyncConfig
 from vertebra.extensions.sqlspec.adapters.mysql.driver import MySQLAsyncDriver, MySQLSyncDriver
 from vertebra.extensions.sqlspec.adapters.oracle import OracleAsyncConfig, OracleSyncConfig
 from vertebra.extensions.sqlspec.adapters.oracle.driver import OracleAsyncDriver, OracleSyncDriver
@@ -91,6 +96,7 @@ from vertebra.extensions.sqlspec.adapters.postgres.driver import PostgresAsyncDr
 from vertebra.extensions.sqlspec.adapters.spanner.driver import SpannerAsyncDriver, SpannerSyncDriver
 from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteAsyncDriver, SQLiteSyncDriver
 from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
+from vertebra.typing import ImproperConfigurationError
 
 
 class _RecordingSyncCursor:
@@ -3407,11 +3413,32 @@ def test_sqlspec_package_uses_public_driver_and_result_seams(module_path: Path) 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             mod = node.module or ""
-            if mod.startswith(("sqlspec.driver._", "sqlspec.core.result._")):
+            if mod.startswith(
+                (
+                    "sqlspec.driver._",
+                    "sqlspec.core.result._",
+                    "sqlspec.extensions.adk.artifact._types",
+                    "sqlspec.extensions.adk.memory._types",
+                )
+            ):
                 violations.append(f"private import: from {mod}")
             for alias in node.names:
                 if alias.name == "cache_hit_hooks_unchanged":
                     violations.append("private helper import: cache_hit_hooks_unchanged")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ensure_module"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and node.args[0].value
+            in {
+                "sqlspec.extensions.adk.artifact._types",
+                "sqlspec.extensions.adk.memory._types",
+            }
+        ):
+            violations.append(f"private ensure_module: {node.args[0].value}")
         elif isinstance(node, ast.Attribute) and node.attr in {"_cache_hit_executor", "_cache_hit_state"}:
             violations.append(f"private attribute access: .{node.attr}")
     assert violations == [], f"{module_path} uses private sqlspec internals: {violations}"
@@ -3603,3 +3630,248 @@ async def test_async_cache_hit_normalizes_rowcount_and_lastrowid(
     assert method_res.rows_affected == expected_rc
     assert exec_res.last_inserted_id == expected_id
     assert method_res.last_inserted_id == expected_id
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "base_url", "replica_url", "native_cls"),
+    [
+        pytest.param(
+            PostgresSyncConfig,
+            "postgresql://user@primary.internal:5432/app",
+            "postgresql://user@replica.internal:5432/app",
+            PostgreSQLConfig,
+            id="postgres-sync",
+        ),
+        pytest.param(
+            PostgresAsyncConfig,
+            "postgresql://user@primary.internal:5432/app",
+            "postgresql://user@replica.internal:5432/app",
+            PostgreSQLConfig,
+            id="postgres-async",
+        ),
+        pytest.param(
+            MySQLSyncConfig,
+            "mysql://root@primary.internal:3306/app",
+            "mysql://root@replica.internal:3306/app",
+            MySQLConfig,
+            id="mysql-sync",
+        ),
+        pytest.param(
+            MySQLAsyncConfig,
+            "mysql://root@primary.internal:3306/app",
+            "mysql://root@replica.internal:3306/app",
+            MySQLConfig,
+            id="mysql-async",
+        ),
+        pytest.param(
+            MSSQLSyncConfig,
+            "mssql://sa@primary.internal:1433/app",
+            "mssql://sa@replica.internal:1433/app",
+            MSSQLConfig,
+            id="mssql-sync",
+        ),
+        pytest.param(
+            MSSQLAsyncConfig,
+            "mssql://sa@primary.internal:1433/app",
+            "mssql://sa@replica.internal:1433/app",
+            MSSQLConfig,
+            id="mssql-async",
+        ),
+    ],
+)
+def test_sqlspec_adapter_configs_forward_and_preserve_connector_retry_features(
+    config_cls: type[Any],
+    base_url: str,
+    replica_url: str,
+    native_cls: type[Any],
+) -> None:
+    """Verify connector_retry_* driver_features forward to driver_config, validate eagerly, and survive derive_pool."""
+    cfg = config_cls(
+        base_url,
+        share_pool=False,
+        cloud_sql_instance="my-proj:us-central1:my-db",
+        driver_features={
+            "connector_retry_count": 5,
+            "connector_retry_delay": 0.25,
+            "connector_retry_max_delay": 3.0,
+        },
+    )
+    assert cfg.driver_config.connector_retry_count == 5
+    assert cfg.driver_config.connector_retry_delay == 0.25
+    assert cfg.driver_config.connector_retry_max_delay == 3.0
+    dialer_cfg = cfg.driver_config.to_cloud_dialer_config()
+    assert dialer_cfg is not None
+    assert dialer_cfg.connector_retry_count == 5
+    assert dialer_cfg.connector_retry_delay == 0.25
+    assert dialer_cfg.connector_retry_max_delay == 3.0
+
+    derived_same = cfg.derive_pool(url=replica_url)
+    assert derived_same.driver_config.connector_retry_count == 5
+    assert derived_same.driver_config.connector_retry_delay == 0.25
+    assert derived_same.driver_config.connector_retry_max_delay == 3.0
+
+    derived_override = cfg.derive_pool(
+        url=replica_url,
+        driver_features_overrides={"connector_retry_count": 1, "connector_retry_delay": 0.1},
+    )
+    assert derived_override.driver_config.connector_retry_count == 1
+    assert derived_override.driver_config.connector_retry_delay == 0.1
+    assert derived_override.driver_config.connector_retry_max_delay == 3.0
+
+    seed_native = native_cls(
+        dsn=base_url,
+        connector_retry_count=2,
+        connector_retry_delay=0.2,
+        connector_retry_max_delay=20.0,
+    )
+    wrapped = config_cls(
+        seed_native,
+        share_pool=False,
+        driver_features={"connector_retry_delay": 10.0},
+    )
+    assert wrapped.driver_config.connector_retry_count == 2
+    assert wrapped.driver_config.connector_retry_delay == 10.0
+    assert wrapped.driver_config.connector_retry_max_delay == 20.0
+
+    conn_seeded = config_cls(
+        connection_config={"dsn": base_url, "connector_retry_count": 2},
+        share_pool=False,
+    )
+    overridden = conn_seeded.derive_pool(
+        url=replica_url,
+        driver_features_overrides={"connector_retry_count": 7},
+    )
+    assert overridden.driver_config.connector_retry_count == 7
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "base_url"),
+    [
+        (PostgresSyncConfig, "postgresql://user@localhost:5432/app"),
+        (PostgresAsyncConfig, "postgresql://user@localhost:5432/app"),
+        (MySQLSyncConfig, "mysql://root@localhost:3306/app"),
+        (MySQLAsyncConfig, "mysql://root@localhost:3306/app"),
+        (MSSQLSyncConfig, "mssql://sa@127.0.0.1:1433/app"),
+        (MSSQLAsyncConfig, "mssql://sa@127.0.0.1:1433/app"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("bad_features", "match"),
+    [
+        ({"connector_retry_count": True}, "non-negative integer"),
+        ({"connector_retry_count": -1}, "non-negative integer"),
+        ({"connector_retry_delay": float("nan")}, "connector_retry_delay"),
+        ({"connector_retry_max_delay": float("inf")}, "connector_retry_max_delay"),
+        ({"connector_retry_delay": 2.0, "connector_retry_max_delay": 1.0}, "greater than or equal"),
+    ],
+)
+def test_sqlspec_adapter_configs_reject_invalid_connector_retry_features(
+    config_cls: type[Any],
+    base_url: str,
+    bad_features: dict[str, Any],
+    match: str,
+) -> None:
+    """Verify invalid connector_retry_* driver_features raise ImproperConfigurationError eagerly."""
+    with pytest.raises(ImproperConfigurationError, match=match):
+        config_cls(base_url, share_pool=False, driver_features=bad_features)
+
+
+@pytest.mark.parametrize(
+    "driver_cls",
+    [
+        PostgresSyncDriver,
+        MySQLSyncDriver,
+        MSSQLSyncDriver,
+        OracleSyncDriver,
+        BigQuerySyncDriver,
+        SpannerSyncDriver,
+    ],
+)
+@pytest.mark.parametrize(
+    ("raw_rowcount", "expected_rowcount"),
+    [
+        (True, 0),
+        (False, 0),
+        (-1, 0),
+        (None, 0),
+        (3, 3),
+    ],
+)
+def test_sync_dispatch_execute_many_normalizes_bool_and_negative_rowcount(
+    driver_cls: type[Any],
+    raw_rowcount: Any,
+    expected_rowcount: int,
+) -> None:
+    """Verify sync dispatch_execute_many normalizes bool, None, and negative rowcounts to 0."""
+
+    class _DummyCursor:
+        def __init__(self, count: Any) -> None:
+            self.rowcount = count
+            self.description = None
+            self.lastrowid = None
+
+        def executemany(self, _sql: str, _params: Any) -> None:
+            return None
+
+    class _DummyConn:
+        in_transaction = False
+
+        def dialect(self) -> str:
+            return "sqlite"
+
+    adapter = driver_cls(_DummyConn())
+    cursor = _DummyCursor(raw_rowcount)
+    stmt = SQL("INSERT INTO items (x) VALUES (?)", [[1], [2]], is_many=True)
+    result = adapter.dispatch_execute_many(cursor, stmt)
+    assert result.rowcount_override == expected_rowcount
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "driver_cls",
+    [
+        PostgresAsyncDriver,
+        MySQLAsyncDriver,
+        MSSQLAsyncDriver,
+        OracleAsyncDriver,
+        BigQueryAsyncDriver,
+        SpannerAsyncDriver,
+    ],
+)
+@pytest.mark.parametrize(
+    ("raw_rowcount", "expected_rowcount"),
+    [
+        (True, 0),
+        (False, 0),
+        (-1, 0),
+        (None, 0),
+        (4, 4),
+    ],
+)
+async def test_async_dispatch_execute_many_normalizes_bool_and_negative_rowcount(
+    driver_cls: type[Any],
+    raw_rowcount: Any,
+    expected_rowcount: int,
+) -> None:
+    """Verify async dispatch_execute_many normalizes bool, None, and negative rowcounts to 0."""
+
+    class _DummyAsyncCursor:
+        def __init__(self, count: Any) -> None:
+            self.rowcount = count
+            self.description = None
+            self.lastrowid = None
+
+        async def executemany(self, _sql: str, _params: Any) -> None:
+            return None
+
+    class _DummyAsyncConn:
+        in_transaction = False
+
+        def dialect(self) -> str:
+            return "sqlite"
+
+    adapter = driver_cls(_DummyAsyncConn())
+    cursor = _DummyAsyncCursor(raw_rowcount)
+    stmt = SQL("INSERT INTO items (x) VALUES (?)", [[1], [2]], is_many=True)
+    result = await adapter.dispatch_execute_many(cursor, stmt)
+    assert result.rowcount_override == expected_rowcount

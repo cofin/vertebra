@@ -81,11 +81,19 @@ def _resolve_mysql_config(
     else:
         resolved_broker = None
     if config is not None:
-        if not connection_config and not kwargs:
+        has_retry_features = isinstance(driver_features, Mapping) and any(
+            key in driver_features
+            for key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay")
+        )
+        if not connection_config and not kwargs and not has_retry_features:
             return config, resolved_broker
         seed_conn: dict[str, Any] = {f: getattr(config, f) for f in MySQLConfig.__struct_fields__ if f != "dsn"}
         if config.dsn != "mysql://localhost:3306/vertebra":
             seed_conn["url"] = config.dsn
+        if has_retry_features and isinstance(driver_features, Mapping):
+            for retry_key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay"):
+                if retry_key in driver_features:
+                    seed_conn[retry_key] = driver_features[retry_key]
         if isinstance(connection_config, Mapping):
             seed_conn.update(connection_config)
         rebuilt = build_connection_config(
@@ -298,6 +306,13 @@ def _derive_mysql_adapter(adapter: Any, overrides: Mapping[str, Any]) -> Any:
         if "token_provider" not in explicit_conn and adapter.driver_config.token_provider is not None:
             merged_conn["token_provider"] = adapter.driver_config.token_provider
     merged_conn.update(explicit_conn)
+    if isinstance(feature_overrides, Mapping):
+        for retry_key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay"):
+            if retry_key in feature_overrides and retry_key not in explicit_conn:
+                merged_conn.pop(retry_key, None)
+    for retry_key in ("connector_retry_count", "connector_retry_delay", "connector_retry_max_delay"):
+        if retry_key not in explicit_conn and retry_key not in merged_features and retry_key not in merged_conn:
+            merged_conn[retry_key] = getattr(adapter.driver_config, retry_key)
 
     return type(adapter)(
         None,

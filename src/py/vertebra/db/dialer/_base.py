@@ -2,32 +2,273 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import logging
+import math
 import os
+import secrets
+import socket
 import ssl
+import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, ClassVar, Final
 
 import anyio
 
-from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
+from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import ensure_module, import_optional
 
+logger = logging.getLogger("vertebra.db.dialer")
+
 VALID_GCP_IP_TYPES: Final[frozenset[str]] = frozenset({"PUBLIC", "PRIVATE", "PSC"})
+DEFAULT_CONNECTOR_RETRY_COUNT: Final[int] = 3
+DEFAULT_CONNECTOR_RETRY_DELAY: Final[float] = 0.5
+DEFAULT_CONNECTOR_RETRY_MAX_DELAY: Final[float] = 5.0
+
+_SYSTEM_RANDOM: Final[secrets.SystemRandom] = secrets.SystemRandom()
+_MAX_CONNECTOR_ERROR_DEPTH: Final[int] = 8
+_TRANSIENT_HTTP_STATUS_CODES: Final[frozenset[int]] = frozenset({429, 500, 502, 503, 504})
+_TRANSIENT_GAI_ERRNOS: Final[frozenset[int]] = frozenset(
+    code for name in ("EAI_AGAIN",) if isinstance((code := getattr(socket, name, None)), int)
+)
+_TRANSIENT_GRPC_STATUS_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "ABORTED",
+        "DEADLINE_EXCEEDED",
+        "RESOURCE_EXHAUSTED",
+        "UNAVAILABLE",
+    }
+)
+_PERMANENT_GRPC_STATUS_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "ALREADY_EXISTS",
+        "CANCELLED",
+        "DATA_LOSS",
+        "FAILED_PRECONDITION",
+        "INVALID_ARGUMENT",
+        "NOT_FOUND",
+        "OUT_OF_RANGE",
+        "PERMISSION_DENIED",
+        "UNAUTHENTICATED",
+        "UNIMPLEMENTED",
+    }
+)
+_PERMANENT_API_CORE_ERROR_NAMES: Final[tuple[str, ...]] = (
+    "AlreadyExists",
+    "BadRequest",
+    "Cancelled",
+    "Conflict",
+    "DataLoss",
+    "DuplicateCredentialArgs",
+    "FailedPrecondition",
+    "Forbidden",
+    "InvalidArgument",
+    "MethodNotAllowed",
+    "MethodNotImplemented",
+    "NotFound",
+    "OutOfRange",
+    "PermissionDenied",
+    "PreconditionFailed",
+    "Unauthenticated",
+    "Unauthorized",
+)
+_TRANSIENT_API_CORE_ERROR_NAMES: Final[tuple[str, ...]] = (
+    "Aborted",
+    "BadGateway",
+    "DeadlineExceeded",
+    "GatewayTimeout",
+    "InternalServerError",
+    "ResourceExhausted",
+    "ServiceUnavailable",
+    "TooManyRequests",
+)
+_PERMANENT_CLOUD_SQL_ERROR_NAMES: Final[tuple[str, ...]] = (
+    "AutoIAMAuthNotSupported",
+    "CacheClosedError",
+    "ClosedConnectorError",
+    "CloudSQLIPTypeError",
+    "ConnectorLoopError",
+    "DnsLoopError",
+    "IncompatibleDriverError",
+    "PlatformNotSupportedError",
+    "TLSVersionError",
+)
+_PERMANENT_ALLOYDB_ERROR_NAMES: Final[tuple[str, ...]] = (
+    "ClosedConnectorError",
+    "IPTypeNotFoundError",
+)
+_PERMANENT_NATIVE_ERROR_NAMES: Final[tuple[str, ...]] = (
+    "DataError",
+    "GoogleCloudAuthError",
+    "IntegrityError",
+    "InterfaceError",
+    "InternalError",
+    "NotFoundError",
+    "NotSupportedError",
+    "ProgrammingError",
+)
 
 __all__ = (
+    "DEFAULT_CONNECTOR_RETRY_COUNT",
+    "DEFAULT_CONNECTOR_RETRY_DELAY",
+    "DEFAULT_CONNECTOR_RETRY_MAX_DELAY",
     "VALID_GCP_IP_TYPES",
     "EphemeralCertBundle",
     "build_verify_full_tls_context",
+    "calculate_connector_backoff_seconds",
     "format_dialer_url_host",
     "generate_ephemeral_keypair",
+    "is_transient_connector_error",
+    "parse_connector_retry_count",
+    "parse_connector_retry_delay",
+    "validate_connector_retry_config",
     "validate_dialer_non_empty",
     "validate_dialer_port",
 )
+
+
+def validate_connector_retry_config(
+    retry_count: Any = DEFAULT_CONNECTOR_RETRY_COUNT,
+    retry_delay: Any = DEFAULT_CONNECTOR_RETRY_DELAY,
+    retry_max_delay: Any = DEFAULT_CONNECTOR_RETRY_MAX_DELAY,
+) -> tuple[int, float, float]:
+    """Validate and normalize zero-sidecar connector retry settings.
+
+    Args:
+        retry_count: Maximum retry attempts on transient errors (``0`` disables retries).
+        retry_delay: Initial backoff delay in seconds before jittered exponential retries.
+        retry_max_delay: Upper bound in seconds for any single retry backoff delay.
+
+    Returns:
+        Normalized ``(retry_count, retry_delay, retry_max_delay)`` tuple.
+
+    Raises:
+        ImproperConfigurationError: If any setting is invalid, boolean, negative, or non-finite,
+            or if ``retry_max_delay < retry_delay``.
+    """
+    if isinstance(retry_count, bool) or not isinstance(retry_count, int) or retry_count < 0:
+        msg = "connector_retry_count must be a non-negative integer"
+        raise ImproperConfigurationError(msg)
+
+    delays: list[float] = []
+    for key, raw_value in (
+        ("connector_retry_delay", retry_delay),
+        ("connector_retry_max_delay", retry_max_delay),
+    ):
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            msg = f"{key} must be a finite non-negative number"
+            raise ImproperConfigurationError(msg)
+        value = float(raw_value)
+        if not math.isfinite(value) or value < 0.0:
+            msg = f"{key} must be a finite non-negative number"
+            raise ImproperConfigurationError(msg)
+        delays.append(value)
+
+    if delays[1] < delays[0]:
+        msg = "connector_retry_max_delay must be greater than or equal to connector_retry_delay"
+        raise ImproperConfigurationError(msg)
+
+    return retry_count, delays[0], delays[1]
+
+
+def parse_connector_retry_count(raw_value: str) -> int:
+    """Parse a DSN query parameter value for ``connector_retry_count``."""
+    stripped = raw_value.strip()
+    if not stripped or not stripped.isascii():
+        msg = "connector_retry_count must be a non-negative integer"
+        raise ImproperConfigurationError(msg)
+    try:
+        parsed = int(stripped, 10)
+    except ValueError as exc:
+        msg = "connector_retry_count must be a non-negative integer"
+        raise ImproperConfigurationError(msg) from exc
+    if parsed < 0:
+        msg = "connector_retry_count must be a non-negative integer"
+        raise ImproperConfigurationError(msg)
+    return parsed
+
+
+def parse_connector_retry_delay(raw_value: str, *, field_name: str) -> float:
+    """Parse a DSN query parameter value for ``connector_retry_delay`` or ``connector_retry_max_delay``."""
+    stripped = raw_value.strip()
+    try:
+        parsed = float(stripped)
+    except ValueError as exc:
+        msg = f"{field_name} must be a finite non-negative number"
+        raise ImproperConfigurationError(msg) from exc
+    if not math.isfinite(parsed) or parsed < 0.0:
+        msg = f"{field_name} must be a finite non-negative number"
+        raise ImproperConfigurationError(msg)
+    return parsed
+
+
+def calculate_connector_backoff_seconds(
+    attempt: int,
+    base_delay_seconds: float,
+    max_delay_seconds: float,
+) -> float:
+    """Calculate jittered exponential backoff delay in seconds for connector retries.
+
+    Caps the exponential term before applying half-jitter so retries spread across
+    ``[capped / 2, capped]`` when competing callers start concurrently.
+
+    Args:
+        attempt: Zero-based retry attempt index (``0`` before the first retry).
+        base_delay_seconds: Initial delay in seconds before capping and jitter.
+        max_delay_seconds: Upper bound in seconds for any single retry delay.
+
+    Returns:
+        Non-negative delay in seconds.
+    """
+    if base_delay_seconds <= 0.0 or max_delay_seconds <= 0.0:
+        return 0.0
+    exponent = min(max(attempt, 0), 30)
+    capped = min(base_delay_seconds * (2**exponent), max_delay_seconds)
+    return _SYSTEM_RANDOM.uniform(capped / 2.0, capped)
+
+
+def is_transient_connector_error(error: BaseException) -> bool:
+    """Return whether a Cloud SQL or AlloyDB dialer error is transient and retryable.
+
+    Inspects loaded optional connector, HTTP, and RPC modules via ``sys.modules`` to avoid
+    eager imports when those packages are unused. Walks bounded causal chains
+    (``cause``, ``raw_error``, ``urllib.error.URLError.reason``, ``__cause__``, and
+    unsuppressed ``__context__``) and fails fast on cancellation, TLS/SSL verification,
+    authentication, permission, not-found, configuration, and closed-connector errors.
+
+    Args:
+        error: Exception raised while refreshing dialer credentials or opening a connection.
+
+    Returns:
+        ``True`` if the failure is transient and safe to retry, otherwise ``False``.
+    """
+    stack: list[BaseException] = [error]
+    seen: set[int] = set()
+    depth = 0
+    default_verdict = False
+    while stack and depth < _MAX_CONNECTOR_ERROR_DEPTH:
+        current = stack.pop()
+        obj_id = id(current)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        depth += 1
+
+        verdict = _classify_connector_error(current)
+        if verdict is not None:
+            return verdict
+        if _is_retryable_connector_wrapper(current):
+            default_verdict = True
+
+        next_candidates = _next_connector_error_causes(current)
+        stack.extend(candidate for candidate in reversed(next_candidates) if id(candidate) not in seen)
+    return default_verdict
 
 
 def validate_dialer_port(port: int) -> int:
@@ -125,6 +366,7 @@ def generate_ephemeral_keypair(bits: int = 2048) -> tuple[str, str]:
 class _BaseGCPDialer:
     """Shared TLS 1.3 context construction, IAM token caching, and Admin HTTP helpers."""
 
+    _connector_name: ClassVar[str] = "gcp"
     _tls_temp_prefix: ClassVar[str] = "vtb-gcp-tls-"
 
     __slots__ = (
@@ -281,6 +523,63 @@ class _BaseGCPDialer:
             self._cached_token = resolved
         return resolved
 
+    def _connector_retry_settings(self) -> tuple[int, float, float]:
+        return validate_connector_retry_config(
+            getattr(self._config, "connector_retry_count", DEFAULT_CONNECTOR_RETRY_COUNT),
+            getattr(self._config, "connector_retry_delay", DEFAULT_CONNECTOR_RETRY_DELAY),
+            getattr(self._config, "connector_retry_max_delay", DEFAULT_CONNECTOR_RETRY_MAX_DELAY),
+        )
+
+    def _run_with_retry_sync[T](self, operation: str, fn: Callable[[], T]) -> T:
+        max_retries, base_delay, max_delay = self._connector_retry_settings()
+        attempt = 0
+        while True:
+            try:
+                return fn()
+            except Exception as exc:
+                if attempt >= max_retries or not is_transient_connector_error(exc):
+                    raise
+                retry_delay = calculate_connector_backoff_seconds(attempt, base_delay, max_delay)
+                logger.warning(
+                    "connector.retry",
+                    extra={
+                        "connector": self._connector_name,
+                        "operation": operation,
+                        "attempt": attempt + 1,
+                        "max_retries": max_retries,
+                        "delay_seconds": round(retry_delay, 3),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            if retry_delay > 0.0:
+                time.sleep(retry_delay)
+            attempt += 1
+
+    async def _run_with_retry_async[T](self, operation: str, fn: Callable[[], Awaitable[T]]) -> T:
+        max_retries, base_delay, max_delay = self._connector_retry_settings()
+        attempt = 0
+        while True:
+            try:
+                return await fn()
+            except Exception as exc:
+                if attempt >= max_retries or not is_transient_connector_error(exc):
+                    raise
+                retry_delay = calculate_connector_backoff_seconds(attempt, base_delay, max_delay)
+                logger.warning(
+                    "connector.retry",
+                    extra={
+                        "connector": self._connector_name,
+                        "operation": operation,
+                        "attempt": attempt + 1,
+                        "max_retries": max_retries,
+                        "delay_seconds": round(retry_delay, 3),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            if retry_delay > 0.0:
+                await anyio.sleep(retry_delay)
+            attempt += 1
+
     def _execute_http_sync(
         self,
         url: str,
@@ -288,9 +587,12 @@ class _BaseGCPDialer:
         headers: dict[str, str],
         http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
     ) -> bytes:
-        if http_transport is not None:
-            return http_transport(url, payload, headers)
-        return self._post_urllib(url, payload, headers)
+        def _send() -> bytes:
+            if http_transport is not None:
+                return http_transport(url, payload, headers)
+            return self._post_urllib(url, payload, headers)
+
+        return self._run_with_retry_sync("admin_api", _send)
 
     async def _execute_http_async(
         self,
@@ -299,13 +601,16 @@ class _BaseGCPDialer:
         headers: dict[str, str],
         http_transport: Callable[[str, bytes, dict[str, str]], Any] | None = None,
     ) -> bytes:
-        if http_transport is None:
-            return await anyio.to_thread.run_sync(self._post_urllib, url, payload, headers)
-        if inspect.iscoroutinefunction(http_transport):
-            return bytes(await http_transport(url, payload, headers))
-        res = await anyio.to_thread.run_sync(http_transport, url, payload, headers)
-        awaited = await res if inspect.isawaitable(res) else res
-        return bytes(awaited)
+        async def _send() -> bytes:
+            if http_transport is None:
+                return await anyio.to_thread.run_sync(self._post_urllib, url, payload, headers)
+            if inspect.iscoroutinefunction(http_transport):
+                return bytes(await http_transport(url, payload, headers))
+            res = await anyio.to_thread.run_sync(http_transport, url, payload, headers)
+            awaited = await res if inspect.isawaitable(res) else res
+            return bytes(awaited)
+
+        return await self._run_with_retry_async("admin_api", _send)
 
     def _refresh_bundle_sync(
         self,
@@ -352,3 +657,165 @@ class _BaseGCPDialer:
         bundle = parse_response(resp_bytes, resolved_priv)
         self._cached_cert_bundle = bundle
         return bundle
+
+
+def _instance_of_module_attrs(error: BaseException, module: Any, names: tuple[str, ...]) -> bool:
+    for name in names:
+        candidate = getattr(module, name, None)
+        if isinstance(candidate, type) and isinstance(error, candidate):
+            return True
+    return False
+
+
+def _extract_grpc_status_name(error: BaseException) -> str | None:
+    raw_status: Any = getattr(error, "grpc_status_code", None)
+    if raw_status is None:
+        code_attr = getattr(error, "code", None)
+        if callable(code_attr):
+            try:
+                raw_status = code_attr()
+            except TypeError:
+                raw_status = None
+    if raw_status is None:
+        return None
+    status_name = getattr(raw_status, "name", None)
+    if isinstance(status_name, str) and status_name:
+        return status_name.strip().upper()
+    if isinstance(raw_status, str) and raw_status:
+        normalized = raw_status.strip().upper()
+        if "." in normalized:
+            normalized = normalized.rsplit(".", maxsplit=1)[-1]
+        return normalized
+    return None
+
+
+def _classify_connector_error(error: BaseException) -> bool | None:
+    if not isinstance(error, Exception):
+        return False
+    if isinstance(
+        error,
+        (
+            ImproperConfigurationError,
+            MissingDependencyError,
+            ValueError,
+            TypeError,
+            KeyError,
+            PermissionError,
+            ssl.SSLError,
+        ),
+    ):
+        return False
+    if isinstance(error, urllib.error.HTTPError):
+        status = error.code
+        return isinstance(status, int) and not isinstance(status, bool) and status in _TRANSIENT_HTTP_STATUS_CODES
+    if isinstance(error, (TimeoutError, ConnectionError, asyncio.IncompleteReadError)):
+        return True
+    if isinstance(error, socket.gaierror):
+        return error.errno in _TRANSIENT_GAI_ERRNOS
+    if isinstance(error, urllib.error.URLError):
+        return None
+
+    native_mod = sys.modules.get("vertebra._vertebra")
+    if native_mod is not None and _instance_of_module_attrs(error, native_mod, _PERMANENT_NATIVE_ERROR_NAMES):
+        return False
+
+    cloud_sql_exc_mod = sys.modules.get("google.cloud.sql.connector.exceptions")
+    if cloud_sql_exc_mod is not None:
+        if _instance_of_module_attrs(error, cloud_sql_exc_mod, _PERMANENT_CLOUD_SQL_ERROR_NAMES):
+            return False
+        if _instance_of_module_attrs(error, cloud_sql_exc_mod, ("ResourceExhaustedError",)):
+            return None
+
+    alloydb_exc_mod = sys.modules.get("google.cloud.alloydb.connector.exceptions")
+    if alloydb_exc_mod is not None:
+        if _instance_of_module_attrs(error, alloydb_exc_mod, _PERMANENT_ALLOYDB_ERROR_NAMES):
+            return False
+        if _instance_of_module_attrs(error, alloydb_exc_mod, ("ResourceExhaustedError",)):
+            return None
+
+    api_core_exc_mod = sys.modules.get("google.api_core.exceptions")
+    if api_core_exc_mod is not None:
+        if _instance_of_module_attrs(error, api_core_exc_mod, ("RetryError",)):
+            return None
+        if _instance_of_module_attrs(error, api_core_exc_mod, _TRANSIENT_API_CORE_ERROR_NAMES):
+            return True
+        if _instance_of_module_attrs(error, api_core_exc_mod, _PERMANENT_API_CORE_ERROR_NAMES):
+            return False
+
+    auth_exc_mod = sys.modules.get("google.auth.exceptions")
+    if auth_exc_mod is not None:
+        if _instance_of_module_attrs(error, auth_exc_mod, ("DefaultCredentialsError", "OAuthError")):
+            return False
+        if _instance_of_module_attrs(error, auth_exc_mod, ("TransportError",)):
+            return True
+        if (
+            _instance_of_module_attrs(error, auth_exc_mod, ("RefreshError",))
+            and getattr(error, "retryable", False) is True
+        ):
+            return True
+
+    aiohttp_mod = sys.modules.get("aiohttp")
+    if aiohttp_mod is not None:
+        if _instance_of_module_attrs(
+            error,
+            aiohttp_mod,
+            (
+                "ClientSSLError",
+                "ClientConnectorCertificateError",
+                "ClientConnectorSSLError",
+                "ServerFingerprintMismatch",
+            ),
+        ):
+            return False
+        if _instance_of_module_attrs(error, aiohttp_mod, ("ClientResponseError",)):
+            response_status = getattr(error, "status", None)
+            return (
+                isinstance(response_status, int)
+                and not isinstance(response_status, bool)
+                and response_status in _TRANSIENT_HTTP_STATUS_CODES
+            )
+        if _instance_of_module_attrs(
+            error,
+            aiohttp_mod,
+            ("ServerTimeoutError", "ClientConnectionError", "ServerDisconnectedError", "ClientConnectorError"),
+        ):
+            return True
+
+    grpc_status_name = _extract_grpc_status_name(error)
+    if grpc_status_name is not None:
+        if grpc_status_name in _PERMANENT_GRPC_STATUS_NAMES:
+            return False
+        if grpc_status_name in _TRANSIENT_GRPC_STATUS_NAMES:
+            return True
+
+    return None
+
+
+def _is_retryable_connector_wrapper(error: BaseException) -> bool:
+    cloud_sql_exc_mod = sys.modules.get("google.cloud.sql.connector.exceptions")
+    if cloud_sql_exc_mod is not None and _instance_of_module_attrs(
+        error, cloud_sql_exc_mod, ("ResourceExhaustedError",)
+    ):
+        return True
+    alloydb_exc_mod = sys.modules.get("google.cloud.alloydb.connector.exceptions")
+    if alloydb_exc_mod is not None and _instance_of_module_attrs(error, alloydb_exc_mod, ("ResourceExhaustedError",)):
+        return True
+    api_core_exc_mod = sys.modules.get("google.api_core.exceptions")
+    return api_core_exc_mod is not None and _instance_of_module_attrs(error, api_core_exc_mod, ("RetryError",))
+
+
+def _next_connector_error_causes(error: BaseException) -> list[BaseException]:
+    causes: list[BaseException] = []
+    if isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException):
+        causes.append(error.reason)
+    retry_cause = getattr(error, "cause", None)
+    if isinstance(retry_cause, BaseException):
+        causes.append(retry_cause)
+    raw_error = getattr(error, "raw_error", None)
+    if isinstance(raw_error, BaseException):
+        causes.append(raw_error)
+    if error.__cause__ is not None:
+        causes.append(error.__cause__)
+    if error.__context__ is not None and not error.__suppress_context__:
+        causes.append(error.__context__)
+    return causes

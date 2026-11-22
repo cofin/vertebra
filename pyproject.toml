@@ -65,7 +65,7 @@ adk = [
     "google-adk>=2.14.1",
 ]
 alchemy = [
-    "advanced-alchemy>=1.13.0b2",
+    "advanced-alchemy>=1.13.0b3",
     "sqlalchemy>=2.1.0",
     "alembic>=1.18.0",
 ]
@@ -241,7 +241,7 @@ test = [
     "anyio",
     "sqlspec>=0.73.0",
     "google-adk>=2.14.1",
-    "advanced-alchemy>=1.13.0b2",
+    "advanced-alchemy>=1.13.0b3",
     "sqlalchemy>=2.1.0",
     "alembic>=1.18.0",
     "duckdb-engine; python_version < '3.14'",

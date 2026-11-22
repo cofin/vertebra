@@ -286,7 +286,7 @@ class OracleSyncDriver(BaseSyncDriver):
                 if params is not None
                 else cursor.execute(sql, suspend_on_success=True)
             )
-            rowcount = len(raw) if isinstance(raw, list) else (int(raw) if raw is not None else 0)
+            rowcount = len(raw) if isinstance(raw, list) else BaseSyncDriver._normalize_rowcount(raw)
             return self.create_execution_result(cursor, rowcount_override=rowcount)
         sql, params = self._compiled_sql(statement, effective_config)
         out_binds = exec_args.get("out_binds")
@@ -447,7 +447,7 @@ class OracleSyncDriver(BaseSyncDriver):
         cursor.executemany(sql, prepared)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 
@@ -681,7 +681,7 @@ class OracleAsyncDriver(BaseAsyncDriver):
                 if params is not None
                 else await cursor.execute(sql, suspend_on_success=True)
             )
-            rowcount = len(raw) if isinstance(raw, list) else (int(raw) if raw is not None else 0)
+            rowcount = len(raw) if isinstance(raw, list) else BaseSyncDriver._normalize_rowcount(raw)
             return self.create_execution_result(cursor, rowcount_override=rowcount)
         sql, params = self._compiled_sql(statement, effective_config)
         out_binds = exec_args.get("out_binds")
@@ -842,7 +842,7 @@ class OracleAsyncDriver(BaseAsyncDriver):
         await cursor.executemany(sql, prepared)
         return self.create_execution_result(
             cursor,
-            rowcount_override=max(cursor.rowcount, 0),
+            rowcount_override=BaseSyncDriver._normalize_rowcount(cursor.rowcount),
             is_many_result=True,
         )
 
