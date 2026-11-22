@@ -21,7 +21,7 @@ arrow-buffer = { version = "59", default-features = false }
 arrow-ipc = { version = "59", default-features = false }
 arrow-schema = { version = "59", default-features = false }
 chrono = { workspace = true }
-oracledb = { version = "=26.0.0-beta.5", features = ["arrow"] }
+oracledb = { version = "=26.0.0-beta.6", features = ["arrow"] }
 pyo3 = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }

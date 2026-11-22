@@ -20,7 +20,7 @@ arrow-array = { version = "=60.1.0", default-features = false }
 arrow-buffer = { version = "=60.1.0", default-features = false }
 arrow-ipc = { version = "=60.1.0", default-features = false }
 arrow-schema = { version = "=60.1.0", default-features = false }
-duckdb = { version = "=1.20000.1", default-features = false, features = ["bundled", "appender-arrow"] }
+duckdb = { version = "=1.20000.2", default-features = false, features = ["bundled", "appender-arrow"] }
 pyo3 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
