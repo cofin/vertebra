@@ -239,6 +239,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Prebuilt companion sdist (*.tar.gz) to verify (single-package mode only).",
     )
+    parser.add_argument(
+        "--wheel-dir",
+        type=Path,
+        default=None,
+        help="Directory containing prebuilt companion vertebra_<pkg>-*.whl archives.",
+    )
+    parser.add_argument(
+        "--sdist-dir",
+        type=Path,
+        default=None,
+        help="Directory containing prebuilt companion vertebra_<pkg>-*.tar.gz archives.",
+    )
     args = parser.parse_args(argv)
 
     packages: tuple[CompanionPackage, ...] = valid_packages if args.all else (args.package,)
@@ -252,18 +264,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         core_wheel = args.core_wheel or build_dist(repo_root, repo_root, out_dir / "core", kind="wheel")
         for pkg in packages:
             spec = COMPANION_SPECS[pkg]
-            companion_wheel = args.companion_wheel or build_dist(
-                repo_root,
-                repo_root / spec.crate_dir,
-                out_dir / f"{pkg}-whl",
-                kind="wheel",
-            )
-            companion_sdist = args.companion_sdist or build_dist(
-                repo_root,
-                repo_root / spec.crate_dir,
-                out_dir / f"{pkg}-sdist",
-                kind="sdist",
-            )
+            companion_wheel = args.companion_wheel or _find_prebuilt_archive(args.wheel_dir, f"vertebra_{pkg}-*.whl")
+            if companion_wheel is None:
+                companion_wheel = build_dist(
+                    repo_root,
+                    repo_root / spec.crate_dir,
+                    out_dir / f"{pkg}-whl",
+                    kind="wheel",
+                )
+            companion_sdist = args.companion_sdist or _find_prebuilt_archive(args.sdist_dir, f"vertebra_{pkg}-*.tar.gz")
+            if companion_sdist is None:
+                companion_sdist = build_dist(
+                    repo_root,
+                    repo_root / spec.crate_dir,
+                    out_dir / f"{pkg}-sdist",
+                    kind="sdist",
+                )
             verify_core_wheel_excludes_companion(core_wheel, package=pkg)
             verify_companion_wheel_contents(companion_wheel, package=pkg)
             verify_companion_sdist_contents(companion_sdist, package=pkg)
@@ -271,6 +287,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(f"Verified vertebra-core and vertebra-{pkg} wheel isolation and fail-loud contract.\n")
 
     return 0
+
+
+def _find_prebuilt_archive(directory: Path | None, pattern: str) -> Path | None:
+    if directory is None:
+        return None
+    matches = sorted(directory.glob(pattern))
+    if not matches:
+        msg = f"No prebuilt archive matching {pattern!r} found in {directory}"
+        raise FileNotFoundError(msg)
+    return matches[-1]
 
 
 if __name__ == "__main__":

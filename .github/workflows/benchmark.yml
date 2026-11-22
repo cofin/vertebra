@@ -28,6 +28,9 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_SECRET_ACCESS_KEY }}
 
     steps:
       - name: Checkout
@@ -37,15 +40,30 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: ./.github/actions/setup-python-env
         with:
-          enable-cache: true
+          python-version: "3.12"
+          save-cache: true
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust and cache
+        uses: ./.github/actions/setup-rust-build
+        with:
+          shared-key: "vertebra-bench-release"
+          save-cache: "true"
+          sccache-backend: ${{ vars.SCCACHE_BACKEND }}
+          sccache-bucket: ${{ vars.SCCACHE_BUCKET }}
+          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          sccache-region: ${{ vars.SCCACHE_REGION || 'auto' }}
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('src/ts/vertebra-client/bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
 
       - name: Install oha
         uses: taiki-e/install-action@v2
@@ -56,11 +74,11 @@ jobs:
         run: |
           uv python pin 3.12
           uv venv --clear
-          uv sync --all-extras --dev
-          make ts-install
+          uv sync --frozen --no-install-local --all-extras --dev --group bench
+          cd src/ts/vertebra-client && bun install --frozen-lockfile
 
       - name: Build Optimized
-        run: make build
+        run: UV_NO_SYNC=1 make build
 
       - name: Run Benchmarks
         id: benchmark
@@ -68,9 +86,9 @@ jobs:
           FULL_BENCHMARK: ${{ inputs.full_benchmark }}
         run: |
           if [ "$FULL_BENCHMARK" = "true" ]; then
-            make bench-all
+            make bench-all-run
           else
-            make bench
+            make bench-run
           fi
 
       - name: Upload Results
@@ -79,4 +97,4 @@ jobs:
           name: benchmark-results-${{ github.sha }}
           path: |
             tools/benchmarks/results/
-          retention-days: 90
+          retention-days: 30

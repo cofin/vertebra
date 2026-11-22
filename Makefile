@@ -238,9 +238,26 @@ rs-test:                                            ## Run Rust tests (all featu
 
 .PHONY: py-test
 py-test: dev                                        ## Run Python tests
-	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres vertebra._sqlite vertebra._redis vertebra._valkey
-	@uv run pytest src/py/tests -v
+	@uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres vertebra._sqlite vertebra._redis vertebra._valkey
+	@uv run --no-sync pytest $(PYTEST_ARGS) src/py/tests -v
 	@echo "${OK} Python tests passed"
+
+.PHONY: stubtest
+stubtest:                                           ## Check native extension .pyi stubs against already-built extensions
+	@uv run --no-sync python -c 'import importlib.util, sys; missing = [m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite", "vertebra._redis", "vertebra._valkey") if importlib.util.find_spec(m) is None]; sys.exit(f"Missing native extensions: {missing}") if missing else None'
+	@uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres vertebra._sqlite vertebra._redis vertebra._valkey
+
+.PHONY: dev-ext
+dev-ext:                                            ## Build one native extension in debug mode (EXT=<bundler|storage|mysql|...>)
+ifeq ($(strip $(EXT)),)
+	@echo "EXT is required: core, bundler, storage, mysql, bigquery, mssql, spanner, duckdb, oracle, postgres, sqlite, redis, valkey" >&2; exit 2
+else ifeq ($(strip $(EXT)),core)
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@uv run --no-sync maturin develop --uv
+else
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@uv run --no-sync maturin develop --uv -m src/rs/vertebra-$(strip $(EXT))/Cargo.toml
+endif
 
 .PHONY: db-conformance
 db-conformance:                                     ## Run live zero-skip conformance lane (ENGINE=duckdb|mysql|mariadb|mssql|oracle|redis|sqlite|valkey [VERSION=<v>])
@@ -280,7 +297,7 @@ duckdb-test:                                        ## Run vertebra-duckdb Rust 
 .PHONY: duckdb-wheel-check
 duckdb-wheel-check:                                 ## Build vertebra-duckdb wheel and verify payload isolation
 	@mkdir -p /tmp/vtb-wheels-duckdb && rm -f /tmp/vtb-wheels-duckdb/*.whl
-	@uv run maturin build --manifest-path src/rs/vertebra-duckdb/Cargo.toml --out /tmp/vtb-wheels-duckdb
+	@uv run --no-sync maturin build --manifest-path src/rs/vertebra-duckdb/Cargo.toml --out /tmp/vtb-wheels-duckdb
 	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/_wheel_verify.py --wheel-dir /tmp/vtb-wheels-duckdb --wheel-glob "vertebra_duckdb-*.whl" --extension-prefix "vertebra/_duckdb"
 	@echo "${OK} vertebra-duckdb wheel isolation verified"
 
@@ -295,7 +312,7 @@ mysql-test:                                         ## Run MySQL Rust crate test
 .PHONY: mysql-wheel-check
 mysql-wheel-check:                                  ## Build vertebra-mysql wheel and verify PEP 420 namespace isolation
 	@rm -rf /tmp/vtb-wheels-mysql && mkdir -p /tmp/vtb-wheels-mysql
-	@uv run maturin build --manifest-path src/rs/vertebra-mysql/Cargo.toml --out /tmp/vtb-wheels-mysql
+	@uv run --no-sync maturin build --manifest-path src/rs/vertebra-mysql/Cargo.toml --out /tmp/vtb-wheels-mysql
 	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/_wheel_verify.py --wheel-dir /tmp/vtb-wheels-mysql --wheel-glob "vertebra_mysql-*.whl" --extension-prefix "vertebra/_mysql" --forbid-python-files
 	@echo "${OK} vertebra-mysql wheel isolation verified"
 
@@ -311,7 +328,7 @@ mssql-test:                                         ## Run Rust and Python SQL S
 mssql-wheel-check:                                  ## Build vertebra-mssql wheel and verify isolated archive layout
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@rm -rf /tmp/vtb-wheels-mssql && mkdir -p /tmp/vtb-wheels-mssql
-	@uv run maturin build --manifest-path src/rs/vertebra-mssql/Cargo.toml --out /tmp/vtb-wheels-mssql
+	@uv run --no-sync maturin build --manifest-path src/rs/vertebra-mssql/Cargo.toml --out /tmp/vtb-wheels-mssql
 	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/_wheel_verify.py --wheel-dir /tmp/vtb-wheels-mssql --wheel-glob "vertebra_mssql-*.whl" --extension-prefix "vertebra/_mssql" --forbid-python-files
 	@echo "${OK} vertebra-mssql wheel layout verified"
 
@@ -354,7 +371,7 @@ redis-test:                                         ## Run vertebra-redis Rust u
 redis-wheel-check:                                  ## Build vertebra-redis wheel and verify isolated archive layout
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@rm -rf /tmp/vtb-wheels-redis && mkdir -p /tmp/vtb-wheels-redis
-	@uv run maturin build --manifest-path src/rs/vertebra-redis/Cargo.toml --out /tmp/vtb-wheels-redis
+	@uv run --no-sync maturin build --manifest-path src/rs/vertebra-redis/Cargo.toml --out /tmp/vtb-wheels-redis
 	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/_wheel_verify.py --wheel-dir /tmp/vtb-wheels-redis --wheel-glob "vertebra_redis-*.whl" --extension-prefix "vertebra/_redis" --forbid-python-files
 	@echo "${OK} vertebra-redis wheel layout verified"
 
@@ -370,7 +387,7 @@ valkey-test:                                         ## Run vertebra-valkey Rust
 valkey-wheel-check:                                  ## Build vertebra-valkey wheel and verify isolated archive layout
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@rm -rf /tmp/vtb-wheels-valkey && mkdir -p /tmp/vtb-wheels-valkey
-	@uv run maturin build --manifest-path src/rs/vertebra-valkey/Cargo.toml --out /tmp/vtb-wheels-valkey
+	@uv run --no-sync maturin build --manifest-path src/rs/vertebra-valkey/Cargo.toml --out /tmp/vtb-wheels-valkey
 	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/_wheel_verify.py --wheel-dir /tmp/vtb-wheels-valkey --wheel-glob "vertebra_valkey-*.whl" --extension-prefix "vertebra/_valkey" --forbid-python-files
 	@echo "${OK} vertebra-valkey wheel layout verified"
 
@@ -415,9 +432,9 @@ test: rs-test py-test ts-test                       ## Run all tests (Rust, Pyth
 
 .PHONY: coverage
 coverage:                                           ## Run tests with coverage report
-	@uv run pytest src/py/tests --cov --quiet
-	@uv run coverage xml -i >/dev/null 2>&1
-	@uv run coverage html -i >/dev/null 2>&1
+	@uv run --no-sync pytest $(PYTEST_ARGS) src/py/tests --cov --quiet
+	@uv run --no-sync coverage xml -i >/dev/null 2>&1
+	@uv run --no-sync coverage html -i >/dev/null 2>&1
 	@echo "${OK} Coverage report: htmlcov/index.html"
 
 
@@ -444,6 +461,28 @@ lint: ts-lint                                       ## Format and lint everythin
 	@uv run --no-sync python -c 'import importlib.util, sys; missing = [m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite", "vertebra._redis", "vertebra._valkey") if importlib.util.find_spec(m) is None]; sys.exit(f"Missing native extensions: {missing}") if missing else None'
 	@uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres vertebra._sqlite vertebra._redis vertebra._valkey
 	@echo "${OK} Lint complete"
+
+.PHONY: lint-ts
+lint-ts:                                            ## Check TypeScript formatting, lint, and types (Biome & tsc)
+	@echo "${INFO} Checking TS package (Biome & tsc)..."
+	@(cd src/ts/vertebra-client && bunx biome check .)
+	@(cd src/ts/vertebra-client && bunx tsc --noEmit)
+
+.PHONY: lint-py
+lint-py:                                            ## Check Python lint, format, types, and optional extras without mutating files
+	@echo "${INFO} Checking Python (Ruff, Mypy, Pyright & extras)..."
+	@uv run --no-sync ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
+	@uv run --no-sync ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
+	@uv run --no-sync mypy src/py/vertebra src/py/tests/unit src/py/tests/integration tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
+	@uv run --no-sync pyright src/py/vertebra
+	@uv run --no-sync python tools/scripts/check_extras.py
+
+.PHONY: lint-rs
+lint-rs:                                            ## Check Rust formatting and Clippy warnings without mutating files
+	@echo "${INFO} Checking Rust (Fmt & Clippy)..."
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@(cd src/rs && cargo fmt --all -- --check)
+	@(cd src/rs && cargo clippy --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings)
 
 .PHONY: lint-all
 lint-all:                                           ## Check formatting, linting, and types without mutating files (CI)
@@ -593,23 +632,29 @@ bench-tools:                                        ## Check and install missing
 		echo "${WARN} Some benchmark load drivers require manual package installation or Docker fallback"; \
 	fi
 
-.PHONY: bench
-bench: build                                        ## Run benchmarks (use TARGETS= and SCENARIOS= to customize)
+.PHONY: bench-run
+bench-run:                                          ## Run benchmarks without rebuilding release artifacts
 	@echo "${INFO} Running benchmarks..."
-	@uv run --group bench python -m tools.benchmarks run \
+	@uv run --no-sync --group bench python -m tools.benchmarks run \
 		-t $${TARGETS:-vtb} \
 		-s $${SCENARIOS:-default} \
 		$${BENCH_ARGS:-}
 	@echo "${OK} Benchmarks complete"
 
-.PHONY: bench-all
-bench-all: build                                    ## Run ALL benchmarks (all targets, all scenarios)
+.PHONY: bench-all-run
+bench-all-run:                                      ## Run ALL benchmarks without rebuilding release artifacts
 	@echo "${INFO} Running full benchmark suite..."
-	@uv run --group bench python -m tools.benchmarks run \
+	@uv run --no-sync --group bench python -m tools.benchmarks run \
 		-t all \
 		-s full \
 		$${BENCH_ARGS:-}
 	@echo "${OK} Full benchmarks complete"
+
+.PHONY: bench
+bench: build bench-run                              ## Run benchmarks (use TARGETS= and SCENARIOS= to customize)
+
+.PHONY: bench-all
+bench-all: build bench-all-run                      ## Run ALL benchmarks (all targets, all scenarios)
 
 .PHONY: bench-ft
 bench-ft:                                           ## Benchmark with free-threaded Python (FT_PYTHON=3.15t fallback 3.14t)

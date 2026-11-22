@@ -47,6 +47,7 @@ from tools.pgo.rust_pgo import (
     run_pgo_pipeline,
     validate_profdata,
 )
+from tools.scripts import build_ci_wheels as build_ci_wheels_mod
 from tools.scripts import build_server_binary as build_server_binary_mod
 from tools.scripts import check_extras as check_extras_mod
 from tools.scripts import smoke_vtb_run as smoke_vtb_run_mod
@@ -1476,10 +1477,13 @@ def test_makefile_and_ci_release_workflows_wire_core_wheel_smoke_and_arm64() -> 
     assert "/tmp/vtb-core-smoke-venv" in makefile_text
 
     ci_doc = yaml.safe_load((repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
-    ci_smoke = ci_doc["jobs"]["core-wheel-smoke"]
-    assert ci_smoke["runs-on"] == "ubuntu-latest"
-    ci_run_cmds = "\n".join(str(step.get("run", "")) for step in ci_smoke["steps"])
-    assert "make core-wheel-check" in ci_run_cmds
+    ci_verify = ci_doc["jobs"]["verify-wheels"]
+    assert ci_verify["runs-on"] == "ubuntu-latest"
+    ci_run_cmds = "\n".join(str(step.get("run", "")) for step in ci_verify["steps"])
+    assert "build_ci_wheels.py verify" in ci_run_cmds
+    build_native_cmds = "\n".join(str(step.get("run", "")) for step in ci_doc["jobs"]["build-native"]["steps"])
+    assert "build_ci_wheels.py build" in build_native_cmds
+    assert "--with-server" in build_native_cmds
 
     rel_doc = yaml.safe_load((repo_root / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8"))
     build_steps = rel_doc["jobs"]["build_wheels"]["steps"]
@@ -1648,6 +1652,51 @@ def test_onefile_builder_compression_defaults_zstd_and_backtick_escaping(
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "`backticks`"
+
+
+def test_build_ci_wheels_parsing_staging_and_server_profiles(tmp_path: Path) -> None:
+    """Verify CI wheel helper package filtering, maturin command flags, and binary staging."""
+    assert build_ci_wheels_mod.parse_packages(None) == build_ci_wheels_mod.ALL_PACKAGES
+    assert build_ci_wheels_mod.parse_packages("all") == build_ci_wheels_mod.ALL_PACKAGES
+    assert build_ci_wheels_mod.parse_packages("core, postgres, core") == ("core", "postgres")
+    with pytest.raises(ValueError, match="Unknown package"):
+        build_ci_wheels_mod.parse_packages("core,nonexistent")
+
+    cmd = build_ci_wheels_mod._maturin_build_command(
+        maturin_bin="maturin",
+        repo_root=tmp_path,
+        package="postgres",
+        wheel_dir=tmp_path / "wheels",
+        interpreter=tmp_path / "venv" / "bin" / "python",
+        profile="dev",
+        strip=True,
+        skip_auditwheel=True,
+    )
+    assert "--profile" in cmd and "dev" in cmd
+    assert "--strip" in cmd
+    assert "--manifest-path" in cmd
+    assert str(tmp_path / "src" / "rs" / "vertebra-postgres" / "Cargo.toml") in cmd
+
+    fake_wheel = tmp_path / "vertebra_core-0.3.0-cp312-cp312-linux_x86_64.whl"
+    with zipfile.ZipFile(fake_wheel, "w") as archive:
+        archive.writestr("vertebra/_vertebra.cpython-312-x86_64-linux-gnu.so", b"FAKE_SO")
+        archive.writestr("vertebra/bin/vertebra-server", b"FAKE_BIN")
+        archive.writestr("vertebra/__init__.py", b"__version__ = '0.3.0'\n")
+    stage_dir = tmp_path / "pkg"
+    staged = build_ci_wheels_mod.stage_wheel_binaries([fake_wheel], stage_dir)
+    assert sorted(p.relative_to(stage_dir).as_posix() for p in staged) == [
+        "_vertebra.cpython-312-x86_64-linux-gnu.so",
+        "bin/vertebra-server",
+    ]
+    assert not (stage_dir / "__init__.py").exists()
+
+    target = ServerBinaryTarget.from_host()
+    builder = ServerBinaryBuilder(repo_root=tmp_path, target=target)
+    rel_cmd = builder.cargo_command(profile="release", target_triple=target.rust_target)
+    assert "--release" in rel_cmd and "--target" in rel_cmd
+    ci_cmd = builder.cargo_command(profile="ci", target_triple="")
+    assert "--profile" in ci_cmd and "ci" in ci_cmd
+    assert "--target" not in ci_cmd
 
 
 def _raise_missing_zstd(

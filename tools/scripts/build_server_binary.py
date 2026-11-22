@@ -298,7 +298,13 @@ class ServerBinaryBuilder:
             raise SystemExit(msg)
         return found_path
 
-    def cargo_command(self, *, cargo_bin: str = "cargo", target_triple: str | None = None) -> list[str]:
+    def cargo_command(
+        self,
+        *,
+        cargo_bin: str = "cargo",
+        target_triple: str | None = None,
+        profile: str = "release",
+    ) -> list[str]:
         """Construct the ``cargo build`` command for ``vertebra-server``."""
         cmd = [
             cargo_bin,
@@ -307,10 +313,12 @@ class ServerBinaryBuilder:
             str(self.cargo_manifest_path),
             "--bin",
             "vertebra-server",
-            "--release",
-            "--features",
-            _SERVER_FEATURES,
         ]
+        if profile == "release":
+            cmd.append("--release")
+        else:
+            cmd.extend(["--profile", profile])
+        cmd.extend(["--features", _SERVER_FEATURES])
         resolved_target = target_triple if target_triple is not None else self.target.rust_target
         if resolved_target:
             cmd.extend(["--target", resolved_target])
@@ -395,6 +403,7 @@ class ServerBinaryBuilder:
         cargo_bin: str = "cargo",
         target_triple: str | None = None,
         extra_env: Mapping[str, str] | None = None,
+        profile: str = "release",
     ) -> Path:
         """Compile ``vertebra-server`` against a shared CPython build and stage it under ``src/py/vertebra/bin/``."""
         selected_python = self.select_build_python(build_python)
@@ -405,14 +414,15 @@ class ServerBinaryBuilder:
         env["PYTHONNOUSERSITE"] = "1"
 
         resolved_target = target_triple if target_triple is not None else self.target.rust_target
-        cmd = self.cargo_command(cargo_bin=cargo_bin, target_triple=resolved_target)
+        cmd = self.cargo_command(cargo_bin=cargo_bin, target_triple=resolved_target, profile=profile)
         subprocess.run(cmd, cwd=self.repo_root, env=env, check=True)
 
+        profile_dir = "debug" if profile == "dev" else profile
         target_root = self._resolve_cargo_target_dir(env)
-        built_candidates = [
-            target_root / resolved_target / "release" / self.target.binary_name,
-            target_root / "release" / self.target.binary_name,
-        ]
+        built_candidates: list[Path] = []
+        if resolved_target:
+            built_candidates.append(target_root / resolved_target / profile_dir / self.target.binary_name)
+        built_candidates.append(target_root / profile_dir / self.target.binary_name)
         built_binary = next((path for path in built_candidates if path.is_file()), None)
         if built_binary is None:
             checked = ", ".join(str(p) for p in built_candidates)
@@ -443,6 +453,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     build_parser.add_argument("--platform", default=None)
     build_parser.add_argument("--rust-target", default=None)
     build_parser.add_argument("--build-python", type=Path, default=None)
+    build_parser.add_argument("--profile", default="release", help="Cargo profile to build (default: release).")
+    build_parser.add_argument(
+        "--no-target-triple",
+        action="store_true",
+        help="Omit --target from cargo build so host target cache directories are shared.",
+    )
 
     repair_parser = subparsers.add_parser("repair", help="Repair a built core wheel excluding libpython")
     repair_parser.add_argument("wheel", type=Path)
@@ -475,7 +491,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     builder = ServerBinaryBuilder(repo_root=args.repo_root, target=target)
 
     if args.command == "build":
-        staged = builder.build(build_python=args.build_python, target_triple=target.rust_target)
+        resolved_triple = "" if args.no_target_triple else target.rust_target
+        staged = builder.build(
+            build_python=args.build_python,
+            target_triple=resolved_triple,
+            profile=args.profile,
+        )
         sys.stdout.write(f"Staged vertebra-server binary at {staged}\n")
         return 0
 

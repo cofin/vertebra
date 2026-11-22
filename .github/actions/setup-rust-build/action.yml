@@ -1,0 +1,180 @@
+name: Setup Rust Build Environment
+description: Configure Rust toolchain, optional fast Linux linker (mold/lld), optional remote sccache backend, and bounded rust-cache.
+
+inputs:
+  components:
+    description: Comma-separated rustup components to install (for example clippy, rustfmt)
+    required: false
+    default: ""
+  targets:
+    description: Comma-separated rustup compilation targets to install
+    required: false
+    default: ""
+  shared-key:
+    description: Shared Swatinem/rust-cache key override replacing the default job identifier
+    required: false
+    default: "vertebra"
+  cache-key:
+    description: Optional extra key suffix added to the Swatinem/rust-cache key
+    required: false
+    default: ""
+  cache-targets:
+    description: Whether Swatinem/rust-cache archives workspace target/ build artifacts
+    required: false
+    default: "true"
+  save-cache:
+    description: Whether Swatinem/rust-cache writes updated cache entries after the job finishes
+    required: false
+    default: "false"
+  cache-on-failure:
+    description: Whether to persist Swatinem/rust-cache entries on failing runs (main-branch warming only)
+    required: false
+    default: "false"
+  enable-fast-linker:
+    description: Enable mold (or lld fallback) linker on Linux runners for faster cdylib/binary linking
+    required: false
+    default: "true"
+  enable-cache:
+    description: Whether to restore/save via Swatinem/rust-cache
+    required: false
+    default: "true"
+  sccache-backend:
+    description: Optional remote sccache backend (r2, s3, gcs). Leave empty to keep sccache disabled.
+    required: false
+    default: ""
+  sccache-bucket:
+    description: Optional object storage bucket for sccache (when sccache-backend is set)
+    required: false
+    default: ""
+  sccache-endpoint:
+    description: Optional S3-compatible endpoint URL for Cloudflare R2 or custom S3 backend
+    required: false
+    default: ""
+  sccache-region:
+    description: Optional S3 region for sccache (defaults to auto for Cloudflare R2)
+    required: false
+    default: "auto"
+  sccache-prefix:
+    description: Optional key prefix inside the remote sccache bucket
+    required: false
+    default: "vertebra/"
+  cargo-debug:
+    description: Value exported to CARGO_PROFILE_DEV_DEBUG (0 eliminates DWARF bloat and shrinks caches)
+    required: false
+    default: "0"
+
+runs:
+  using: composite
+  steps:
+    - name: Configure Cargo CI environment
+      shell: bash
+      env:
+        INPUT_CARGO_DEBUG: ${{ inputs.cargo-debug }}
+        RUNNER_OS_NAME: ${{ runner.os }}
+      run: |
+        {
+          echo "CARGO_PROFILE_DEV_DEBUG=${INPUT_CARGO_DEBUG}"
+          echo "CARGO_INCREMENTAL=0"
+          echo "CARGO_NET_RETRY=10"
+          echo "CARGO_TERM_COLOR=always"
+          echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse"
+        } >> "$GITHUB_ENV"
+        if [ "$RUNNER_OS_NAME" = "macOS" ]; then
+          echo "CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked" >> "$GITHUB_ENV"
+        fi
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    - name: Enable fast Linux linker (mold or lld)
+      if: runner.os == 'Linux' && inputs.enable-fast-linker == 'true'
+      shell: bash
+      run: |
+        selected_flag=""
+        if ! command -v ld.mold >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mold >/dev/null 2>&1 || true
+        fi
+        probe_linker() {
+          local flag="$1"
+          local tmp_bin
+          tmp_bin="$(mktemp)"
+          if printf 'int main(void) { return 0; }\n' | cc -x c - "$flag" -o "$tmp_bin" >/dev/null 2>&1; then
+            rm -f "$tmp_bin"
+            return 0
+          fi
+          rm -f "$tmp_bin"
+          return 1
+        }
+        if command -v ld.mold >/dev/null 2>&1 && probe_linker "-fuse-ld=mold"; then
+          selected_flag="-C link-arg=-fuse-ld=mold"
+        elif command -v ld.lld >/dev/null 2>&1 && probe_linker "-fuse-ld=lld"; then
+          selected_flag="-C link-arg=-fuse-ld=lld"
+        fi
+        if [ -n "$selected_flag" ]; then
+          arch="$(uname -m)"
+          if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
+            existing="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:-}"
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=${existing:+${existing} }${selected_flag}" >> "$GITHUB_ENV"
+          else
+            existing="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:-}"
+            echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=${existing:+${existing} }${selected_flag}" >> "$GITHUB_ENV"
+          fi
+          echo "Using fast Linux linker flags: ${selected_flag}"
+        else
+          echo "Fast linker probe skipped; retaining system default linker."
+        fi
+
+    - name: Install optional remote sccache
+      if: inputs.sccache-backend != '' && inputs.sccache-bucket != ''
+      uses: mozilla-actions/sccache-action@v0.0.11
+
+    - name: Configure optional remote sccache backend
+      if: inputs.sccache-backend != '' && inputs.sccache-bucket != ''
+      shell: bash
+      env:
+        BACKEND: ${{ inputs.sccache-backend }}
+        BUCKET: ${{ inputs.sccache-bucket }}
+        ENDPOINT: ${{ inputs.sccache-endpoint }}
+        REGION: ${{ inputs.sccache-region }}
+        KEY_PREFIX: ${{ inputs.sccache-prefix }}
+      run: |
+        backend_lc="$(printf '%s' "$BACKEND" | tr '[:upper:]' '[:lower:]')"
+        case "$backend_lc" in
+          r2|s3)
+            {
+              echo "RUSTC_WRAPPER=sccache"
+              echo "SCCACHE_BUCKET=${BUCKET}"
+              echo "SCCACHE_REGION=${REGION}"
+              echo "SCCACHE_S3_KEY_PREFIX=${KEY_PREFIX}"
+              if [ -n "$ENDPOINT" ]; then
+                echo "SCCACHE_ENDPOINT=${ENDPOINT}"
+              fi
+            } >> "$GITHUB_ENV"
+            ;;
+          gcs)
+            {
+              echo "RUSTC_WRAPPER=sccache"
+              echo "SCCACHE_GCS_BUCKET=${BUCKET}"
+              echo "SCCACHE_GCS_KEY_PREFIX=${KEY_PREFIX}"
+              echo "SCCACHE_GCS_RW_MODE=READ_WRITE"
+            } >> "$GITHUB_ENV"
+            ;;
+          *)
+            echo "::warning::Ignoring unrecognized sccache backend '${BACKEND}'; expected r2, s3, or gcs."
+            ;;
+        esac
+
+    - name: Restore Rust cache
+      if: inputs.enable-cache == 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: "src/rs"
+        shared-key: ${{ inputs.shared-key }}
+        key: ${{ inputs.cache-key }}
+        cache-targets: ${{ inputs.cache-targets }}
+        cache-bin: false
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+        save-if: ${{ inputs.save-cache }}

@@ -4,6 +4,15 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'docs/**'
+      - 'zensical.toml'
+      - 'tools/docs/**'
+      - 'src/py/vertebra/**'
+      - 'src/ts/vertebra-client/src/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/docs.yml'
     paths-ignore:
       - '.agents/**'
   workflow_dispatch:
@@ -17,21 +26,26 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v7
+      - uses: ./.github/actions/setup-python-env
         with:
-          enable-cache: true
-          cache-dependency-glob: uv.lock
           python-version: "3.12"
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - name: Install documentation dependencies
         run: uv sync --frozen --no-install-project --only-group doc
       - name: Build and verify documentation
-        run: make docs
+        run: |
+          rm -rf site .cache
+          PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts --stage-inventory-cache /tmp/vertebra-mkdocs-cache src/py/vertebra
+          PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.generate_cli_docs --check
+          XDG_CACHE_HOME="/tmp/vertebra-mkdocs-cache" PYTHONPATH="src/py:." uv run --no-sync zensical build --clean
+          PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.postbuild --site-dir site --docs-dir docs --zensical-config zensical.toml --rust-doc-dir "src/rs/target/doc"
+          PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.verify_docs_artifacts --site-dir site
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
@@ -45,7 +59,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
