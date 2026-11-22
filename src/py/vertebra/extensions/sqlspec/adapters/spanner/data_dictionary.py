@@ -12,13 +12,18 @@ from sqlspec.data_dictionary import (
     MetadataCapability,
     MetadataCapabilityProfile,
     MetadataFidelity,
+    MetadataResult,
     MetadataRisk,
     MetadataSource,
     MetadataSupport,
     TableMetadata,
-    VersionInfo,
 )
-from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
+from sqlspec.data_dictionary.dialects.spanner.dictionary import (
+    SpannerAsyncDataDictionary as _UpstreamSpannerAsyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.spanner.dictionary import (
+    SpannerSyncDataDictionary as _UpstreamSpannerSyncDataDictionary,
+)
 
 from vertebra.extensions.sqlspec.adapters.spanner.core import (
     normalize_spanner_dialect,
@@ -317,36 +322,34 @@ class _SpannerDataDictionaryMixin:
         return self.get_dialect_config().get_optimal_type(type_category)
 
 
-class SpannerSyncDataDictionary(_SpannerDataDictionaryMixin, SyncDataDictionaryBase):
+class SpannerSyncDataDictionary(_SpannerDataDictionaryMixin, _UpstreamSpannerSyncDataDictionary):
     """Synchronous SQLSpec data dictionary for Cloud Spanner (GoogleSQL and Spangres)."""
 
     __slots__ = ("_configured_dialect",)
 
     def __init__(self, *, dialect: str | None = None) -> None:
-        super().__init__()
+        initial_mode = "postgresql" if dialect and normalize_spanner_dialect(dialect) == "spangres" else "googlesql"
+        super().__init__(mode=initial_mode)
         self._configured_dialect: str | None = dialect
 
-    def get_version(self, driver: SyncDriverAdapterBase) -> VersionInfo | None:
-        """Return None because Cloud Spanner is a versionless managed cloud database."""
-        _ = driver
-        return None
-
-    def get_feature_flag(self, driver: SyncDriverAdapterBase, feature: str) -> bool:
+    def get_feature_flag(self, driver: SyncDriverAdapterBase | None = None, feature: str = "") -> bool:
         """Return whether ``feature`` is supported by the active Spanner dialect."""
         return self._feature_flag_for_mode(_resolve_driver_mode(driver, self._configured_dialect), feature)
 
-    def get_optimal_type(self, driver: SyncDriverAdapterBase, type_category: str) -> str:
+    def get_optimal_type(self, driver: SyncDriverAdapterBase | None = None, type_category: str = "") -> str:
         """Return the canonical Spanner GoogleSQL or Spangres SQL type name for ``type_category``."""
         return self._optimal_type_for_mode(_resolve_driver_mode(driver, self._configured_dialect), type_category)
 
     def get_metadata_capabilities(
         self,
-        driver: SyncDriverAdapterBase,
+        driver: Any,
         domains: Sequence[str] | None = None,
+        *,
+        mode: str | None = None,
     ) -> MetadataCapabilityProfile:
         """Describe supported Cloud Spanner catalog metadata domains for the active dialect."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        return _spanner_capabilities(domains, mode, type(self).__name__)
+        resolved_mode = _resolve_driver_mode(driver, mode if mode is not None else self._configured_dialect)
+        return _spanner_capabilities(domains, resolved_mode, type(self).__name__)
 
     def get_tables(
         self,
@@ -434,19 +437,26 @@ class SpannerSyncDataDictionary(_SpannerDataDictionaryMixin, SyncDataDictionaryB
     def get_change_streams(
         self,
         driver: SyncDriverAdapterBase,
-        change_stream_name: str | None = None,
         schema: str | None = None,
-    ) -> list[dict[str, Any]]:
+        stream_name: str | None = None,
+    ) -> MetadataResult:
         """List Cloud Spanner change streams registered in ``INFORMATION_SCHEMA``."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         sql = self._resolve_catalog_sql("change_streams", "list", mode)
-        return [
+        rows = [
             dict(row)
             for row in driver.select(
                 sql,
-                {"schema_name": schema, "change_stream_name": change_stream_name},
+                {"schema_name": schema, "change_stream_name": stream_name},
             )
         ]
+        capability = MetadataCapability(
+            domain="change_streams",
+            support=MetadataSupport.SUPPORTED,
+            fidelity=MetadataFidelity.NATIVE,
+            source=MetadataSource.INFORMATION_SCHEMA,
+        )
+        return MetadataResult("change_streams", capability=capability, items=tuple(rows))
 
     def get_property_graphs(
         self,
@@ -468,36 +478,34 @@ class SpannerSyncDataDictionary(_SpannerDataDictionaryMixin, SyncDataDictionaryB
         ]
 
 
-class SpannerAsyncDataDictionary(_SpannerDataDictionaryMixin, AsyncDataDictionaryBase):
+class SpannerAsyncDataDictionary(_SpannerDataDictionaryMixin, _UpstreamSpannerAsyncDataDictionary):
     """Asynchronous SQLSpec data dictionary for Cloud Spanner (GoogleSQL and Spangres)."""
 
     __slots__ = ("_configured_dialect",)
 
     def __init__(self, *, dialect: str | None = None) -> None:
-        super().__init__()
+        initial_mode = "postgresql" if dialect and normalize_spanner_dialect(dialect) == "spangres" else "googlesql"
+        super().__init__(mode=initial_mode)
         self._configured_dialect: str | None = dialect
 
-    async def get_version(self, driver: AsyncDriverAdapterBase) -> VersionInfo | None:
-        """Return None because Cloud Spanner is a versionless managed cloud database."""
-        _ = driver
-        return None
-
-    async def get_feature_flag(self, driver: AsyncDriverAdapterBase, feature: str) -> bool:
+    async def get_feature_flag(self, driver: AsyncDriverAdapterBase | None = None, feature: str = "") -> bool:
         """Return whether ``feature`` is supported by the active Spanner dialect."""
         return self._feature_flag_for_mode(_resolve_driver_mode(driver, self._configured_dialect), feature)
 
-    async def get_optimal_type(self, driver: AsyncDriverAdapterBase, type_category: str) -> str:
+    async def get_optimal_type(self, driver: AsyncDriverAdapterBase | None = None, type_category: str = "") -> str:
         """Return the canonical Spanner GoogleSQL or Spangres SQL type name for ``type_category``."""
         return self._optimal_type_for_mode(_resolve_driver_mode(driver, self._configured_dialect), type_category)
 
     async def get_metadata_capabilities(
         self,
-        driver: AsyncDriverAdapterBase,
+        driver: Any,
         domains: Sequence[str] | None = None,
+        *,
+        mode: str | None = None,
     ) -> MetadataCapabilityProfile:
         """Describe supported Cloud Spanner catalog metadata domains for the active dialect."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        return _spanner_capabilities(domains, mode, type(self).__name__)
+        resolved_mode = _resolve_driver_mode(driver, mode if mode is not None else self._configured_dialect)
+        return _spanner_capabilities(domains, resolved_mode, type(self).__name__)
 
     async def get_tables(
         self,
@@ -585,19 +593,26 @@ class SpannerAsyncDataDictionary(_SpannerDataDictionaryMixin, AsyncDataDictionar
     async def get_change_streams(
         self,
         driver: AsyncDriverAdapterBase,
-        change_stream_name: str | None = None,
         schema: str | None = None,
-    ) -> list[dict[str, Any]]:
+        stream_name: str | None = None,
+    ) -> MetadataResult:
         """Asynchronously list Cloud Spanner change streams registered in ``INFORMATION_SCHEMA``."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         sql = self._resolve_catalog_sql("change_streams", "list", mode)
-        return [
+        rows = [
             dict(row)
             for row in await driver.select(
                 sql,
-                {"schema_name": schema, "change_stream_name": change_stream_name},
+                {"schema_name": schema, "change_stream_name": stream_name},
             )
         ]
+        capability = MetadataCapability(
+            domain="change_streams",
+            support=MetadataSupport.SUPPORTED,
+            fidelity=MetadataFidelity.NATIVE,
+            source=MetadataSource.INFORMATION_SCHEMA,
+        )
+        return MetadataResult("change_streams", capability=capability, items=tuple(rows))
 
     async def get_property_graphs(
         self,

@@ -19,7 +19,8 @@ permissions:
 jobs:
   zizmor:
     name: GitHub Actions Security Analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
     permissions:
       security-events: write
       contents: read

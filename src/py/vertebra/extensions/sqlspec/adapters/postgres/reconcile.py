@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlspec.exceptions import ImproperConfigurationError, MigrationError, SQLSpecError
-from sqlspec.extensions.events._channel import _resolve_backend_name
+from sqlspec.extensions.events import resolve_backend_name
 from sqlspec.migrations.schema import (
     DropStatement,
     SchemaTarget,
@@ -235,7 +235,7 @@ def _resolve_events_store(config: Any, settings: dict[str, Any]) -> tuple[BaseEv
     effective_settings = dict(store.settings)
     effective_settings.update(settings)
     try:
-        backend_name = _resolve_backend_name(config, effective_settings, resolve_adapter_name(config))
+        backend_name = resolve_backend_name(config, effective_settings, resolve_adapter_name(config))
     except ImproperConfigurationError as exc:
         raise MigrationError(str(exc)) from exc
     return store, backend_name, backend_name != "notify"
@@ -258,10 +258,10 @@ def _resolve_adk_stores(
     if not (enable_sessions or enable_memory or has_artifacts):
         return [], True, True
 
-    from sqlspec.extensions.adk._config_utils import _adk_config_from_extension
+    from sqlspec.extensions.adk import resolve_adk_config
 
     try:
-        validated = _adk_config_from_extension(config)
+        validated = resolve_adk_config(config)
         adk_config = {**validated, **settings}
     except MigrationError:
         raise

@@ -1,0 +1,42 @@
+name: Setup Python uv Environment
+description: Provision Python and uv with lockfile-scoped caching without compiling the local Rust project.
+
+inputs:
+  python-version:
+    description: Target Python version (for example 3.12, 3.14t, 3.15t)
+    required: false
+    default: "3.12"
+  enable-cache:
+    description: Whether to restore the uv cache via actions/cache
+    required: false
+    default: "true"
+  save-cache:
+    description: Save mode passed to astral-sh/setup-uv (true, false)
+    required: false
+    default: "false"
+  prune-cache:
+    description: Whether setup-uv runs `uv cache prune --ci` before saving
+    required: false
+    default: "true"
+  cache-python:
+    description: Whether to cache downloaded uv-managed Python toolchains (helpful for 3.14t/3.15t)
+    required: false
+    default: "false"
+  cache-suffix:
+    description: Optional suffix distinguishing pruned/unpruned caches
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv and Python
+      uses: astral-sh/setup-uv@v7
+      with:
+        python-version: ${{ inputs.python-version }}
+        enable-cache: ${{ inputs.enable-cache }}
+        cache-dependency-glob: "uv.lock"
+        save-cache: ${{ inputs.save-cache }}
+        prune-cache: ${{ inputs.prune-cache }}
+        cache-python: ${{ inputs.cache-python }}
+        cache-suffix: ${{ inputs.cache-suffix }}

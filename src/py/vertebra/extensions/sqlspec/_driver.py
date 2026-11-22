@@ -570,10 +570,12 @@ class BaseSyncDriver(SyncDriverAdapterBase):
 
     @staticmethod
     def _normalize_last_inserted_id(value: Any) -> int | str | None:
-        """Return a normalized `int` or `str` last inserted identifier, rejecting `bool`."""
+        """Return a normalized `int` or non-empty `str` last inserted identifier, rejecting `bool`."""
         if isinstance(value, bool):
             return None
-        if isinstance(value, (int, str)):
+        if isinstance(value, str):
+            return value or None
+        if isinstance(value, int):
             return value
         return None
 

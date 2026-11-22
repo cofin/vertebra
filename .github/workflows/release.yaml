@@ -11,15 +11,17 @@ permissions:
 jobs:
   validate_release_manifest:
     name: Validate release manifest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v7
+      - uses: $/.github/actions/setup-python-env
         with:
-          enable-cache: true
           python-version: "3.12"
+          enable-cache: false
+          save-cache: false
       - name: Reject upstream git pins in pyproject.toml
         run: |
           uv run --no-project --python 3.12 python - <<'PY'
@@ -40,9 +42,40 @@ jobs:
               sys.exit(1)
           PY
 
+  build_ts:
+    name: Build TypeScript client bundle
+    needs: validate_release_manifest
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('src/ts/vertebra-client/bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+      - name: Build TypeScript client bundle once
+        working-directory: src/ts/vertebra-client
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-ts-bundle
+          path: |
+            src/py/vertebra/server/_js/bundle/
+            src/ts/vertebra-client/dist/
+          retention-days: 1
+          compression-level: 6
+          if-no-files-found: error
+
   build_wheels:
     name: Build ${{ matrix.package.name }} on ${{ matrix.platform.os }} (${{ matrix.platform.arch }})
-    needs: validate_release_manifest
+    needs: [validate_release_manifest, build_ts]
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
@@ -109,32 +142,56 @@ jobs:
             path: src/rs/vertebra-valkey
             module: vertebra._valkey
             exports: SyncValkeyClient AsyncValkeyClient SyncValkeyPipeline AsyncValkeyPipeline SyncValkeyListener AsyncValkeyListener
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_SECRET_ACCESS_KEY }}
 
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust and registry cache
+        uses: $/.github/actions/setup-rust-build
         with:
           targets: ${{ runner.os == 'macOS' && 'x86_64-apple-darwin,aarch64-apple-darwin' || '' }}
+          shared-key: "vertebra-release-registry"
+          cache-targets: "false"
+          save-cache: ${{ matrix.package.name == 'core' }}
+          enable-fast-linker: "false"
+          sccache-backend: ${{ vars.SCCACHE_BACKEND }}
+          sccache-bucket: ${{ vars.SCCACHE_BUCKET }}
+          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          sccache-region: ${{ vars.SCCACHE_REGION || 'auto' }}
 
-      - name: Install Bun
+      - name: Download prebuilt TypeScript client bundle
         if: matrix.package.name == 'core'
-        uses: oven-sh/setup-bun@v2
+        uses: actions/download-artifact@v8
+        with:
+          name: release-ts-bundle
+          path: src
 
-      - name: Build TypeScript client bundle
-        if: matrix.package.name == 'core'
-        run: |
-          cd src/ts/vertebra-client
-          bun install
-          bun run build
+      - name: Cache Cargo registry across cibuildwheel containers (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ runner.temp }}/cibw-cargo/registry/cache
+            ${{ runner.temp }}/cibw-cargo/registry/index
+            ${{ runner.temp }}/cibw-cargo/git/db
+          key: cibw-cargo-${{ matrix.platform.arch }}-${{ hashFiles('src/rs/Cargo.lock') }}
+          restore-keys: |
+            cibw-cargo-${{ matrix.platform.arch }}-
+
+      - name: Prepare Linux container cargo cache directory
+        if: runner.os == 'Linux'
+        run: mkdir -p "${{ runner.temp }}/cibw-cargo" "${{ runner.temp }}/cibw-target"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: $/.github/actions/setup-python-env
         with:
-          enable-cache: true
+          python-version: "3.12"
+          save-cache: false
 
       - name: Check Windows MSVC targets for postgres
         if: runner.os == 'Windows' && matrix.package.name == 'postgres'
@@ -150,8 +207,9 @@ jobs:
           CIBW_ARCHS_MACOS: ${{ matrix.platform.arch }}
           CIBW_ARCHS_LINUX: ${{ matrix.platform.arch }}
           CIBW_ARCHS_WINDOWS: ${{ matrix.platform.arch }}
-          CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- -y"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
+          CIBW_CONTAINER_ENGINE: "docker;create_args=-v ${{ runner.temp }}/cibw-cargo:/cargo-cache -v ${{ runner.temp }}/cibw-target:/target-cache"
+          CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable"
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" CARGO_HOME="/cargo-cache" CARGO_TARGET_DIR="/target-cache" CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse" CARGO_INCREMENTAL="0"'
           CIBW_BEFORE_BUILD: "python {package}/tools/scripts/build_server_binary.py build --repo-root {package}"
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "python {package}/tools/scripts/build_server_binary.py repair --repo-root {package} -w {dest_dir} {wheel}"
           CIBW_REPAIR_WHEEL_COMMAND_MACOS: "python {package}/tools/scripts/build_server_binary.py repair --repo-root {package} -w {dest_dir} {wheel}"
@@ -170,8 +228,9 @@ jobs:
           CIBW_ARCHS_MACOS: ${{ matrix.platform.arch }}
           CIBW_ARCHS_LINUX: ${{ matrix.platform.arch }}
           CIBW_ARCHS_WINDOWS: ${{ matrix.platform.arch }}
-          CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- -y"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
+          CIBW_CONTAINER_ENGINE: "docker;create_args=-v ${{ runner.temp }}/cibw-cargo:/cargo-cache -v ${{ runner.temp }}/cibw-target:/target-cache"
+          CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable"
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" CARGO_HOME="/cargo-cache" CARGO_TARGET_DIR="/target-cache" CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse" CARGO_INCREMENTAL="0"'
           CIBW_TEST_COMMAND: >-
             python -I -c "import importlib; module = importlib.import_module('${{ matrix.package.module }}');
             assert all(hasattr(module, name) for name in '${{ matrix.package.exports }}'.split());
@@ -181,23 +240,27 @@ jobs:
         with:
           name: cibw-wheels-${{ matrix.platform.os }}-${{ matrix.package.name }}-${{ strategy.job-index }}
           path: ./wheelhouse/*.whl
+          retention-days: 7
           if-no-files-found: error
 
   build_sdist:
     name: Build source distribution
-    needs: validate_release_manifest
-    runs-on: ubuntu-latest
+    needs: [validate_release_manifest, build_ts]
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
-      - name: Build TypeScript client bundle
-        run: |
-          cd src/ts/vertebra-client
-          bun install
-          bun run build
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-ts-bundle
+          path: src
+      - uses: $/.github/actions/setup-python-env
+        with:
+          python-version: "3.12"
+          enable-cache: false
+          save-cache: false
       - name: Build source distributions
         run: |
           uv build --sdist --out-dir dist
@@ -208,6 +271,7 @@ jobs:
         with:
           name: cibw-sdist
           path: dist/*.tar.gz
+          retention-days: 7
           if-no-files-found: error
 
   test_wheels:
@@ -231,7 +295,10 @@ jobs:
           pattern: cibw-wheels-${{ matrix.os }}-*
           path: dist
           merge-multiple: true
-      - uses: astral-sh/setup-uv@v7
+      - uses: $/.github/actions/setup-python-env
+        with:
+          python-version: "3.12"
+          save-cache: false
       - name: Install core and optional wheels
         shell: bash
         run: |
@@ -344,7 +411,7 @@ jobs:
     name: Upload wheels and sdist to GitHub Release
     needs: [build_wheels, build_sdist, test_wheels]
     if: github.event_name == 'release'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     permissions:
       contents: write
     steps:

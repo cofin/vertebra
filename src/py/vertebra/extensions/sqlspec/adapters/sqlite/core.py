@@ -7,7 +7,7 @@ import math
 import re
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from sqlspec.core import (
     DriverParameterProfile,
@@ -17,7 +17,6 @@ from sqlspec.core import (
     build_statement_config_from_profile,
 )
 from sqlspec.core.cache import get_cache_config
-from sqlspec.data_dictionary import IndexMetadata
 from sqlspec.data_dictionary.dialects.sqlite import list_sqlite_available_features, resolve_sqlite_json_type
 from sqlspec.data_dictionary.dialects.sqlite.config import (
     format_sqlite_schema_prefix,
@@ -74,7 +73,6 @@ __all__ = (
     "sqlite_check_constraints",
     "sqlite_constraint_metadata",
     "sqlite_generated_expressions",
-    "sqlite_index_rows_to_metadata",
     "sqlite_object_ddl_result",
     "sqlite_schema_ddl_results",
     "unpack_embedding",
@@ -83,7 +81,6 @@ __all__ = (
 
 JULIAN_EPOCH = 2440587.5
 SECONDS_PER_DAY = 86400.0
-SQLITE_INDEX_EXPRESSION_COLUMN_ID = -2
 SQLITE_TABLE_NOT_FOUND_TEXT = "no such table"
 
 _PRAGMA_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -457,50 +454,3 @@ def map_sqlite_exception(exc: BaseException) -> Exception | None:
     if "deadlock" in lower:
         return DeadlockError(msg)
     return None
-
-
-def sqlite_index_rows_to_metadata(rows: list[dict[str, Any]], schema_name: str | None) -> list[IndexMetadata]:
-    """Group SQLite `pragma_index_xinfo` rows into structured `IndexMetadata` dictionaries."""
-    if not rows:
-        return []
-    if "columns" in rows[0]:
-        return cast("list[IndexMetadata]", rows)
-
-    grouped: dict[tuple[str | None, str, str], dict[str, Any]] = {}
-    for row in rows:
-        table_name_val = row.get("table_name")
-        index_name_val = row.get("index_name")
-        if table_name_val is None or index_name_val is None:
-            continue
-        row_schema = cast("str | None", row.get("schema_name", schema_name))
-        table_name = str(table_name_val)
-        index_name = str(index_name_val)
-        key = (row_schema, table_name, index_name)
-        meta = grouped.get(key)
-        if meta is None:
-            meta = {
-                "index_name": index_name,
-                "table_name": table_name,
-                "columns": [],
-                "is_primary": bool(row.get("is_primary")),
-            }
-            if row_schema is not None:
-                meta["schema_name"] = row_schema
-            if row.get("is_unique") is not None:
-                meta["is_unique"] = row.get("is_unique")
-            if row.get("is_partial") is not None:
-                meta["is_partial"] = row.get("is_partial")
-            if row.get("index_sql") is not None:
-                meta["native_sql"] = row.get("index_sql")
-            grouped[key] = meta
-
-        if row.get("is_key_column") in (0, False):
-            continue
-        cols = cast("list[str]", meta["columns"])
-        col_name = row.get("column_name")
-        if col_name is not None:
-            cols.append(str(col_name))
-        elif row.get("column_id") == SQLITE_INDEX_EXPRESSION_COLUMN_ID:
-            cols.append("<expression>")
-
-    return [cast("IndexMetadata", item) for item in grouped.values()]

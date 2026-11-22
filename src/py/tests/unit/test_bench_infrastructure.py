@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import textwrap
@@ -354,64 +355,98 @@ def test_makefile_lint_targets_enforce_no_sync_type_gates_and_fail_loud_stubtest
 
 
 def test_ci_workflow_defines_db_conformance_matrix_and_oracle_job() -> None:
-    """Verify ``.github/workflows/ci.yml`` defines ``test-db-conformance`` and blocking ``conformance-oracle``."""
+    """Verify ``.github/workflows/ci.yml`` defines full/PR DB conformance matrix and blocking ``conformance-oracle``."""
     ci_data = yaml.safe_load((_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
     jobs = ci_data["jobs"]
 
-    db_job = jobs["test-db-conformance"]
-    assert db_job["needs"] == ["changes", "lint"]
-    assert db_job["timeout-minutes"] == 45
-    assert db_job["strategy"]["fail-fast"] is False
-    matrix_rows = db_job["strategy"]["matrix"]["include"]
-    assert matrix_rows == [
-        {"engine": "duckdb", "version": "", "python-version": "3.12"},
-        {"engine": "duckdb", "version": "", "python-version": "3.14t"},
-        {"engine": "sqlite", "version": "", "python-version": "3.12"},
-        {"engine": "sqlite", "version": "", "python-version": "3.14t"},
-        {"engine": "mysql", "version": "8.0", "python-version": "3.12"},
-        {"engine": "mysql", "version": "8.4", "python-version": "3.12"},
-        {"engine": "mysql", "version": "9.7", "python-version": "3.12"},
-        {"engine": "mysql", "version": "8.4", "python-version": "3.14t"},
-        {"engine": "mariadb", "version": "11.4", "python-version": "3.12"},
-        {"engine": "mariadb", "version": "11.8", "python-version": "3.12"},
-        {"engine": "mssql", "version": "2022", "python-version": "3.12"},
-        {"engine": "mssql", "version": "2025", "python-version": "3.12"},
-        {"engine": "redis", "version": "", "python-version": "3.12"},
-        {"engine": "redis", "version": "", "python-version": "3.14t"},
-        {"engine": "valkey", "version": "", "python-version": "3.12"},
-        {"engine": "valkey", "version": "", "python-version": "3.14t"},
-    ]
-    assert any(
-        step.get("run") == "make db-conformance ENGINE=${{ matrix.engine }} VERSION=${{ matrix.version }}"
-        for step in db_job["steps"]
+    tier_step = next(step for step in jobs["changes"]["steps"] if step.get("id") == "tier")
+    tier_run = str(tier_step["run"])
+    full_matrix_line = next(
+        line.strip() for line in tier_run.splitlines() if line.strip().startswith("db_matrix='[") and "9.7" in line
     )
+    pr_matrix_line = next(
+        line.strip() for line in tier_run.splitlines() if line.strip().startswith("db_matrix='[") and "9.7" not in line
+    )
+    full_rows = json.loads(full_matrix_line.removeprefix("db_matrix='").removesuffix("'"))
+    pr_rows = json.loads(pr_matrix_line.removeprefix("db_matrix='").removesuffix("'"))
+    assert full_rows == [
+        {"engine": "duckdb", "package": "duckdb", "version": "", "python-version": "3.12"},
+        {"engine": "duckdb", "package": "duckdb", "version": "", "python-version": "3.14t"},
+        {"engine": "sqlite", "package": "sqlite", "version": "", "python-version": "3.12"},
+        {"engine": "sqlite", "package": "sqlite", "version": "", "python-version": "3.14t"},
+        {"engine": "mysql", "package": "mysql", "version": "8.0", "python-version": "3.12"},
+        {"engine": "mysql", "package": "mysql", "version": "8.4", "python-version": "3.12"},
+        {"engine": "mysql", "package": "mysql", "version": "9.7", "python-version": "3.12"},
+        {"engine": "mysql", "package": "mysql", "version": "8.4", "python-version": "3.14t"},
+        {"engine": "mariadb", "package": "mysql", "version": "11.4", "python-version": "3.12"},
+        {"engine": "mariadb", "package": "mysql", "version": "11.8", "python-version": "3.12"},
+        {"engine": "mssql", "package": "mssql", "version": "2022", "python-version": "3.12"},
+        {"engine": "mssql", "package": "mssql", "version": "2025", "python-version": "3.12"},
+        {"engine": "redis", "package": "redis", "version": "", "python-version": "3.12"},
+        {"engine": "redis", "package": "redis", "version": "", "python-version": "3.14t"},
+        {"engine": "valkey", "package": "valkey", "version": "", "python-version": "3.12"},
+        {"engine": "valkey", "package": "valkey", "version": "", "python-version": "3.14t"},
+    ]
+    assert {row["engine"] for row in pr_rows} == {
+        "duckdb",
+        "sqlite",
+        "mysql",
+        "mariadb",
+        "mssql",
+        "redis",
+        "valkey",
+    }
+
+    db_job = jobs["test-db-conformance"]
+    assert db_job["needs"] == ["changes", "build-native"]
+    assert db_job["timeout-minutes"] == 30
+    assert db_job["strategy"]["fail-fast"] is False
+    db_runs = "\n".join(str(step.get("run", "")) for step in db_job["steps"])
+    assert "--no-install-local" in db_runs
+    assert "build_ci_wheels.py install" in db_runs
+    assert 'make db-conformance ENGINE="$TARGET_ENGINE" VERSION="$TARGET_VERSION"' in db_runs
 
     oracle_job = jobs["conformance-oracle"]
-    assert oracle_job["needs"] == ["changes", "lint"]
-    assert oracle_job["timeout-minutes"] == 45
+    assert oracle_job["needs"] == ["changes", "build-native"]
+    assert oracle_job["timeout-minutes"] == 30
     assert "continue-on-error" not in oracle_job
-    assert any(step.get("run") == "make db-conformance ENGINE=oracle VERSION=23ai" for step in oracle_job["steps"])
+    oracle_runs = "\n".join(str(step.get("run", "")) for step in oracle_job["steps"])
+    assert "--no-install-local" in oracle_runs
+    assert "make db-conformance ENGINE=oracle VERSION=23ai" in oracle_runs
 
 
 def test_ci_workflow_lint_macos_and_thirteen_wheel_checks() -> None:
-    """Verify CI lint installs all extras, macOS Rust runs on PRs without macos-ulock, and all 13 wheel checks run."""
+    """Verify split lint jobs, build-once native artifact flow, macOS Rust test flags, and cache hygiene."""
     ci_data = yaml.safe_load((_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
     jobs = ci_data["jobs"]
 
     changes_job = jobs["changes"]
     assert "rust_macos" in changes_job["outputs"]
     assert "packaging" in changes_job["outputs"]
+    assert "db_matrix" in changes_job["outputs"]
     filter_step = next(step for step in changes_job["steps"] if step.get("id") == "filter")
     filters_cfg = yaml.safe_load(filter_step["with"]["filters"])
     assert "src/rs/**" in filters_cfg["rust_macos"]
     assert "src/rs/vertebra-*/**" in filters_cfg["packaging"]
 
-    lint_runs = "\n".join(str(step.get("run", "")) for step in jobs["lint"]["steps"])
-    assert "uv sync --frozen --all-extras --group test --group lint --group build" in lint_runs
-    assert "make ts-install && make ts-build" in lint_runs
-    assert "make dev" in lint_runs
-    assert "make lint-all" in lint_runs
-    assert lint_runs.index("make dev") < lint_runs.index("make lint-all")
+    lint_py_runs = "\n".join(str(step.get("run", "")) for step in jobs["lint-python"]["steps"])
+    assert "uv sync --frozen --no-install-local --all-extras --group test --group lint --group build" in lint_py_runs
+    assert "tools/scripts/check_extras.py" in lint_py_runs
+    assert "pyright src/py/vertebra" in lint_py_runs
+    assert jobs["lint-python"]["runs-on"] == "ubuntu-slim"
+    assert jobs["lint-ts"]["runs-on"] == "ubuntu-slim"
+    assert jobs["build-ts"]["runs-on"] == "ubuntu-slim"
+
+    build_native_runs = "\n".join(str(step.get("run", "")) for step in jobs["build-native"]["steps"])
+    assert "build_ci_wheels.py build" in build_native_runs
+    assert "mypy.stubtest" in build_native_runs
+    assert "uv sync --frozen --no-install-local" in build_native_runs
+    assert "Missing native extensions:" in build_native_runs
+
+    test_py_runs = "\n".join(str(step.get("run", "")) for step in jobs["test-python"]["steps"])
+    assert "uv sync --frozen --no-install-local --group test" in test_py_runs
+    assert "build_ci_wheels.py install" in test_py_runs
+    assert "-n auto --dist loadscope" in test_py_runs
 
     macos_job = jobs["test-rust-macos"]
     assert "needs.changes.outputs.rust_macos == 'true'" in macos_job["if"]
@@ -419,30 +454,17 @@ def test_ci_workflow_lint_macos_and_thirteen_wheel_checks() -> None:
     assert "cargo test --workspace --features tls,http3,compression,gcp" in macos_runs
     assert "macos-ulock" not in macos_runs
 
-    ci_text = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    for fixed_target in (
-        "make core-wheel-check",
-        "make sqlite-wheel-check",
-        "make postgres-wheel-check",
-        "make redis-wheel-check",
-        "make valkey-wheel-check",
-    ):
-        assert fixed_target in ci_text
+    verify_wheels = jobs["verify-wheels"]
+    assert verify_wheels["needs"] == ["changes", "build-native"]
+    assert "needs.changes.outputs.packaging == 'true'" in verify_wheels["if"]
+    verify_runs = "\n".join(str(step.get("run", "")) for step in verify_wheels["steps"])
+    assert "build_ci_wheels.py verify --wheel-dir dist/wheels --sdist-dir dist/sdist" in verify_runs
+    assert "cleanup-artifacts" in jobs
 
-    opt_wheels = jobs["optional-wheel-checks"]
-    assert opt_wheels["needs"] == ["changes", "lint"]
-    assert "needs.changes.outputs.packaging == 'true'" in opt_wheels["if"]
-    assert opt_wheels["strategy"]["matrix"]["package"] == [
-        "duckdb",
-        "mysql",
-        "mssql",
-        "oracle",
-        "storage",
-        "bigquery",
-        "spanner",
-        "bundler",
-    ]
-    assert any("make ${{ matrix.package }}-wheel-check" in str(step.get("run", "")) for step in opt_wheels["steps"])
+    cache_cleanup = _REPO_ROOT / ".github" / "workflows" / "cache-cleanup.yml"
+    assert cache_cleanup.is_file()
+    assert (_REPO_ROOT / ".github" / "actions" / "setup-rust-build" / "action.yml").is_file()
+    assert (_REPO_ROOT / ".github" / "actions" / "setup-python-env" / "action.yml").is_file()
 
 
 def _extract_release_manifest_script() -> str:

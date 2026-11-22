@@ -2640,3 +2640,43 @@ async def test_sqlspec_arrow_overwrite_none_uses_default_overwrite(surface: str)
     await _run_arrow_format_surface(backend, surface, "data.parquet", replacement, overwrite=None)
 
     assert backend.read_arrow_sync("data.parquet").equals(replacement)
+
+
+def test_sqlspec_storage_registry_custom_backend_and_live_instance_alias(tmp_path: Path) -> None:
+    """Custom `"vertebra"` backend registration and live instance aliases preserve state and signing config."""
+    signed_store = SyncObjectStore(
+        tmp_path.as_uri(),
+        signing=SigningConfig(
+            provider="hmac",
+            hmac_secret="sqlspec-alias-secret",
+            endpoint="https://aliases.example.com",
+        ),
+    )
+    mem_store = SyncObjectStore("memory://")
+    mem_store.put("seed/hello.txt", b"live-state")
+
+    stock_registry = SQLSpecStorageRegistry()
+    register_storage_alias("native_disk", tmp_path.as_uri(), registry=stock_registry, backend="vertebra")
+    assert stock_registry.is_backend_registered("vertebra") is True
+    assert isinstance(stock_registry.get("native_disk"), SQLSpecObjectStoreBackend)
+
+    register_storage_alias("signed_disk", signed_store, registry=stock_registry, base_path="warehouse")
+    stock_registry.clear_cache()
+    resolved_signed = stock_registry.get("signed_disk")
+    assert isinstance(resolved_signed, SQLSpecObjectStoreBackend)
+    assert resolved_signed.supports_signing is True
+    assert "X-Vtb-Signature=" in resolved_signed.sign_sync("reports/out.parquet", expires_in=120)
+
+    register_storage_alias("live_mem", mem_store, registry=stock_registry, base_path="seed")
+    resolved_mem = stock_registry.get("live_mem")
+    assert isinstance(resolved_mem, SQLSpecObjectStoreBackend)
+    assert resolved_mem.read_bytes_sync("hello.txt") == b"live-state"
+
+    preconfigured = SQLSpecObjectStoreBackend(store=mem_store, base_path="seed")
+    register_storage_alias("direct_backend", preconfigured, registry=stock_registry)
+    assert stock_registry.get("direct_backend") is preconfigured
+
+    vtb_registry = ObjectStoreRegistry()
+    assert vtb_registry.is_backend_registered("vertebra") is True
+    vtb_registry.clear()
+    assert vtb_registry.is_backend_registered("vertebra") is True

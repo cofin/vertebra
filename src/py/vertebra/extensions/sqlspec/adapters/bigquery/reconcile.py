@@ -158,7 +158,7 @@ def _resolve_litestar_store(config: Any) -> BaseSQLSpecStore[Any]:
 
 def _resolve_events_store(config: Any) -> tuple[BaseEventQueueStore[Any], str, bool]:
     """Resolve and instantiate the BigQuery event queue store and backend metadata."""
-    from sqlspec.extensions.events._channel import _resolve_backend_name
+    from sqlspec.extensions.events import resolve_backend_name
 
     try:
         store_cls = resolve_extension_store_class(
@@ -176,7 +176,7 @@ def _resolve_events_store(config: Any) -> tuple[BaseEventQueueStore[Any], str, b
         store_cls = BigQueryEventQueueStore
     try:
         store = cast("BaseEventQueueStore[Any]", store_cls(config))
-        backend_name = _resolve_backend_name(config, store.settings, resolve_adapter_name(config))
+        backend_name = resolve_backend_name(config, store.settings, resolve_adapter_name(config))
     except (ImproperConfigurationError, ValueError) as exc:
         raise MigrationError(str(exc)) from exc
     return store, backend_name, backend_name != "notify"
@@ -184,19 +184,20 @@ def _resolve_events_store(config: Any) -> tuple[BaseEventQueueStore[Any], str, b
 
 def _resolve_adk_stores(config: Any, *, is_async: bool) -> list[Any]:
     """Lazily import and resolve enabled BigQuery ADK stores in canonical dependency order."""
-    from sqlspec.extensions.adk._config_utils import (
-        _adk_adapter_store_class,
-        _adk_config_from_extension,
-        _adk_memory_migration_enabled,
-        _adk_memory_migration_store_class,
-        _adk_sessions_migration_enabled,
+    from sqlspec.extensions.adk import (
+        adk_memory_migration_enabled,
+        adk_sessions_migration_enabled,
+        resolve_adk_artifact_store_class,
+        resolve_adk_config,
+        resolve_adk_memory_store_class,
+        resolve_adk_store_class,
     )
     from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore, BaseSyncADKArtifactStore
     from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore, BaseSyncADKMemoryStore
     from sqlspec.extensions.adk.store import BaseAsyncADKStore, BaseSyncADKStore
 
     try:
-        adk_config = _adk_config_from_extension(config)
+        adk_config = resolve_adk_config(config)
     except MigrationError:
         raise
     except SQLSpecError as exc:
@@ -204,22 +205,17 @@ def _resolve_adk_stores(config: Any, *, is_async: bool) -> list[Any]:
 
     stores: list[Any] = []
     try:
-        if _adk_sessions_migration_enabled(config):
-            session_store_cls = _adk_adapter_store_class(config, "ADKStore")
+        if adk_sessions_migration_enabled(config):
+            session_store_cls = resolve_adk_store_class(config, "ADKStore")
             stores.append(session_store_cls(config=config))
-        if _adk_memory_migration_enabled(config):
-            memory_store_cls = _adk_memory_migration_store_class(config)
+        if adk_memory_migration_enabled(config):
+            memory_store_cls = resolve_adk_memory_store_class(config)
             if memory_store_cls is None:
                 msg = "ADK memory reconciliation is enabled, but no ADKMemoryStore class could be resolved."
                 raise MigrationError(msg)
             stores.append(memory_store_cls(config=config))
         if adk_config.get("artifact_table"):
-            artifact_store_cls = resolve_extension_store_class(
-                config,
-                extension="adk",
-                store_attr="adk_artifact_store_class",
-                store_suffix="ADKArtifactStore",
-            )
+            artifact_store_cls = resolve_adk_artifact_store_class(config)
             if artifact_store_cls is not None:
                 stores.append(artifact_store_cls(config=config))
     except MigrationError:
