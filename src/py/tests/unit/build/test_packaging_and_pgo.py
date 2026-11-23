@@ -1179,8 +1179,48 @@ def test_server_binary_builder_targets_python_fallback_macos_and_repair(
         "-v",
         "--exclude",
         "libpython",
+        "--ignore-missing-dependencies",
         str(tmp_path / "vertebra.whl"),
     ]
+
+    valid_server_otool = (
+        "vertebra/bin/vertebra-server:\n"
+        "\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0)\n"
+        "\t@rpath/libpython3.14t.dylib (compatibility version 3.14.0)\n"
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+    )
+    assert mac_builder.verify_macos_otool_dependencies("vertebra/bin/vertebra-server", valid_server_otool) == []
+
+    valid_ext_otool = (
+        "vertebra/_vertebra.cpython-314t-darwin.so:\n"
+        "\t@rpath/lib_vertebra.dylib (compatibility version 0.0.0)\n"
+        "\t@loader_path/.dylibs/libfoo.dylib (compatibility version 1.0.0)\n"
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+    )
+    valid_ext_id = "vertebra/_vertebra.cpython-314t-darwin.so:\n\t@rpath/lib_vertebra.dylib\n"
+    assert (
+        mac_builder.verify_macos_otool_dependencies(
+            "vertebra/_vertebra.cpython-314t-darwin.so",
+            valid_ext_otool,
+            id_output=valid_ext_id,
+        )
+        == []
+    )
+
+    bad_homebrew_otool = (
+        "vertebra/bin/vertebra-server:\n"
+        "\t@rpath/libpython3.14t.dylib (compatibility version 3.14.0)\n"
+        "\t/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib (compatibility version 3.0.0)\n"
+    )
+    with pytest.raises(RuntimeError, match=r"libssl\.3\.dylib"):
+        mac_builder.verify_macos_otool_dependencies("vertebra/bin/vertebra-server", bad_homebrew_otool)
+
+    stale_framework_otool = (
+        "vertebra/bin/vertebra-server:\n"
+        "\t/Library/Frameworks/PythonT.framework/Versions/3.14/PythonT (compatibility version 3.14.0)\n"
+    )
+    with pytest.raises(RuntimeError, match="PythonT"):
+        mac_builder.verify_macos_otool_dependencies("vertebra/bin/vertebra-server", stale_framework_otool)
 
     otool_sample = (
         f"{tmp_path / 'vertebra-server'}:\n"

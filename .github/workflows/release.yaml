@@ -215,6 +215,8 @@ jobs:
             && uv python install 3.12 3.13 3.14 3.14t 3.15 3.15t
           CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse" CARGO_INCREMENTAL="0"'
           CIBW_BEFORE_BUILD: "python {package}/tools/scripts/build_server_binary.py build --repo-root {package}"
+          CIBW_BEFORE_BUILD_LINUX: "python {package}/tools/scripts/build_server_binary.py build --repo-root {package} --no-target-triple"
+          CIBW_BEFORE_BUILD_WINDOWS: "python {package}/tools/scripts/build_server_binary.py build --repo-root {package} --no-target-triple"
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "python {package}/tools/scripts/build_server_binary.py repair --repo-root {package} -w {dest_dir} {wheel}"
           CIBW_REPAIR_WHEEL_COMMAND_MACOS: "python {package}/tools/scripts/build_server_binary.py repair --repo-root {package} -w {dest_dir} {wheel}"
           CIBW_TEST_COMMAND: >-
@@ -309,7 +311,7 @@ jobs:
         shell: bash
         run: |
           version=$(uv run --no-project --python 3.12 python -c "from pathlib import Path; print(next(Path('dist').glob('vertebra_core-*.whl')).name.split('-')[1])")
-          uv venv --python 3.12 "$RUNNER_TEMP/wheel-smoke"
+          uv venv --managed-python --python 3.12 "$RUNNER_TEMP/wheel-smoke"
           py_bin="$RUNNER_TEMP/wheel-smoke/${{ runner.os == 'Windows' && 'Scripts/python.exe' || 'bin/python' }}"
           uv pip install --python "$py_bin" --no-index --no-deps --find-links "$GITHUB_WORKSPACE/dist" vertebra-core vertebra-bigquery vertebra-bundler vertebra-duckdb vertebra-mssql vertebra-mysql vertebra-oracle vertebra-postgres vertebra-redis vertebra-spanner vertebra-sqlite vertebra-storage vertebra-valkey
           uv pip install --python "$py_bin" --only-binary :all: --find-links "$GITHUB_WORKSPACE/dist" "vertebra-core[bigquery,bundler,duckdb,mssql,mysql,oracle,postgres,redis,spanner,sqlite,storage,valkey]==$version"
