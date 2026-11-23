@@ -7,7 +7,7 @@ import inspect
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, Self, cast
 
 import msgspec
 from anyio import CancelScope
@@ -38,7 +38,7 @@ from vertebra.db.driver.capabilities import AsyncPipelineCapable, SyncPipelineCa
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.db.rls import TenantPredicate
 from vertebra.typing import MissingDependencyError
-from vertebra.utils.module_loader import ensure_module, import_optional
+from vertebra.utils.module_loader import ensure_module, import_optional, import_optional_attr
 from vertebra.utils.serializers import ZeroCopyCodecRegistry
 
 try:
@@ -103,18 +103,47 @@ type ExceptionMapper = Callable[[BaseException], Exception | None]
 type _CacheHitState = tuple[Callable[..., Any], Callable[..., Any], ExceptionMapper]
 
 
+class _FallbackCompanionIndex(NamedTuple):
+    """Fallback companion index descriptor when ``sqlspec.extensions.litestar`` is unavailable."""
+
+    name: str
+    table: str
+    schema: str | None
+    ddl: str
+
+
+def _build_companion_index(*, name: str, table: str, schema: str | None, ddl: str) -> Any:
+    """Create a ``CompanionIndex`` descriptor without requiring ``litestar`` at import time."""
+    companion_cls = import_optional_attr("sqlspec.extensions.litestar.store", "CompanionIndex")
+    if companion_cls is not None:
+        return companion_cls(name=name, table=table, schema=schema, ddl=ddl)
+    return _FallbackCompanionIndex(name=name, table=table, schema=schema, ddl=ddl)
+
+
 class LazyStoreAttr:
     """Descriptor lazily resolving adapter store classes on attribute access without eager imports."""
 
-    __slots__ = ("_attr", "_module")
+    __slots__ = ("_attr", "_extra", "_module", "_package")
 
-    def __init__(self, module: str, attr: str) -> None:
+    def __init__(
+        self,
+        module: str,
+        attr: str,
+        *,
+        package: str | None = None,
+        extra: str | None = None,
+    ) -> None:
         self._module = module
         self._attr = attr
+        self._package = package
+        self._extra = extra
 
     def __get__(self, instance: Any, owner: type[Any] | None = None) -> type[Any]:
         _ = (instance, owner)
-        return cast("type[Any]", getattr(ensure_module(self._module), self._attr))
+        return cast(
+            "type[Any]",
+            getattr(ensure_module(self._module, package=self._package, extra=self._extra), self._attr),
+        )
 
 
 class _DeferredSyncExceptionHandler(BaseSyncExceptionHandler):

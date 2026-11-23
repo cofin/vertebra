@@ -1199,23 +1199,47 @@ def test_server_binary_builder_targets_python_fallback_macos_and_repair(
         ["codesign", "--force", "--sign", "-", str(tmp_path / "vertebra-server")],
     ]
 
+    framework_otool_sample = (
+        f"{tmp_path / 'vertebra-server'}:\n"
+        "\t/Library/Frameworks/PythonT.framework/Versions/3.14/PythonT (compatibility version 3.14.0)\n"
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+    )
+    framework_cmds = mac_builder.macos_install_name_changes(
+        tmp_path / "vertebra-server",
+        otool_output=framework_otool_sample,
+    )
+    assert framework_cmds == [
+        [
+            "install_name_tool",
+            "-change",
+            "/Library/Frameworks/PythonT.framework/Versions/3.14/PythonT",
+            "@rpath/libpython3.14t.dylib",
+            str(tmp_path / "vertebra-server"),
+        ],
+        ["codesign", "--force", "--sign", "-", str(tmp_path / "vertebra-server")],
+    ]
+
     static_py = tmp_path / "static-python"
     shared_py = tmp_path / "uv-shared-python"
+    recorded_uv_cmds: list[list[str]] = []
     monkeypatch.setattr("tools.scripts.build_server_binary.shutil.which", lambda _name: "/usr/bin/uv")
     monkeypatch.setattr(
         build_server_binary_mod,
         "_probe_python_shared_info",
         lambda exe: (Path(exe) == shared_py, "/opt/py/lib", "libpython3.12.so.1.0"),
     )
-    monkeypatch.setattr(
-        "tools.scripts.build_server_binary.subprocess.run",
-        lambda cmd, **_kwargs: SimpleNamespace(
+
+    def _fake_uv_find(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        recorded_uv_cmds.append(list(cmd))
+        return SimpleNamespace(
             returncode=0,
-            stdout=f"{shared_py}\n" if cmd[:3] == ["/usr/bin/uv", "python", "find"] else "",
+            stdout=f"{shared_py}\n" if "--managed-python" in cmd else "",
             stderr="",
-        ),
-    )
+        )
+
+    monkeypatch.setattr("tools.scripts.build_server_binary.subprocess.run", _fake_uv_find)
     assert builder.select_build_python(static_py) == shared_py
+    assert recorded_uv_cmds == [["/usr/bin/uv", "python", "find", "--managed-python", "cpython-3.12"]]
 
     monkeypatch.setattr("tools.scripts.build_server_binary.shutil.which", lambda _name: None)
     with pytest.raises(SystemExit, match="statically linked"):
@@ -1243,13 +1267,16 @@ def test_server_binary_builder_targets_python_fallback_macos_and_repair(
 
 
 @pytest.mark.parametrize(
-    ("enable_shared", "create_lib", "ldlibrary", "expected_shared"),
+    ("enable_shared", "create_lib", "ldlibrary", "pythonframework", "platform_name", "expected_shared"),
     [
-        (1, False, "libpython3.12.so", True),
-        (None, True, "libpython3.12.so", True),
-        (None, False, "libpython3.12.so", False),
-        (0, True, "libpython3.12.so", False),
-        (1, True, "libpython3.12.a", False),
+        (1, False, "libpython3.12.so", None, "linux", True),
+        (None, True, "libpython3.12.so", None, "linux", True),
+        (None, False, "libpython3.12.so", None, "linux", False),
+        (0, True, "libpython3.12.so", None, "linux", False),
+        (1, True, "libpython3.12.a", None, "linux", False),
+        (0, False, "Python.framework/Versions/3.12/Python", "Python", "darwin", True),
+        (0, False, "PythonT.framework/Versions/3.14/PythonT", "PythonT", "darwin", True),
+        (0, False, "libpython3.12.a", "Python", "darwin", False),
     ],
 )
 def test_probe_python_shared_info_handles_standalone_and_static_builds(
@@ -1258,14 +1285,22 @@ def test_probe_python_shared_info_handles_standalone_and_static_builds(
     enable_shared: int | None,
     create_lib: bool,
     ldlibrary: str,
+    pythonframework: str | None,
+    platform_name: str,
     expected_shared: bool,
 ) -> None:
-    """Verify _probe_python_shared_info detects python-build-standalone shared libs when ENABLE_SHARED is None."""
+    """Verify _probe_python_shared_info detects standalone, framework, and static Python builds."""
     libdir = tmp_path / "lib"
     libdir.mkdir(parents=True)
     if create_lib:
         (libdir / ldlibrary).write_bytes(b"ELF")
-    payload = {"enable_shared": enable_shared, "libdir": str(libdir), "ldlibrary": ldlibrary}
+    payload = {
+        "enable_shared": enable_shared,
+        "libdir": str(libdir),
+        "ldlibrary": ldlibrary,
+        "pythonframework": pythonframework,
+        "platform": platform_name,
+    }
     monkeypatch.setattr(
         "tools.scripts.build_server_binary.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
@@ -1493,8 +1528,19 @@ def test_makefile_and_ci_release_workflows_wire_core_wheel_smoke_and_arm64() -> 
     assert "build_server_binary.py build" in core_step["env"]["CIBW_BEFORE_BUILD"]
     assert "build_server_binary.py repair" in core_step["env"]["CIBW_REPAIR_WHEEL_COMMAND_LINUX"]
     assert "build_server_binary.py repair" in core_step["env"]["CIBW_REPAIR_WHEEL_COMMAND_MACOS"]
+    assert "CIBW_CONTAINER_ENGINE" not in core_step["env"]
+    assert core_step["env"]["CIBW_CONTAINER_ENGINE_LINUX"].startswith("docker; create_args:")
+    assert "create_args=" not in core_step["env"]["CIBW_CONTAINER_ENGINE_LINUX"]
+    assert "CARGO_HOME" not in core_step["env"]["CIBW_ENVIRONMENT_LINUX"]
+    assert "uv python install" in core_step["env"]["CIBW_BEFORE_ALL_LINUX"]
+    assert core_step["env"]["CIBW_SKIP"] == "*-musllinux_*"
     assert "matrix.package.name != 'core'" in companion_step["if"]
     assert "CIBW_BEFORE_BUILD" not in companion_step.get("env", {})
+    assert "CIBW_CONTAINER_ENGINE" not in companion_step["env"]
+    assert companion_step["env"]["CIBW_CONTAINER_ENGINE_LINUX"].startswith("docker; create_args:")
+    assert "create_args=" not in companion_step["env"]["CIBW_CONTAINER_ENGINE_LINUX"]
+    assert companion_step["env"]["CIBW_TEST_ENVIRONMENT"] == "PIP_NO_DEPS=1"
+    assert companion_step["env"]["CIBW_SKIP"] == "*-musllinux_*"
 
     test_wheels = rel_doc["jobs"]["test_wheels"]
     assert test_wheels["strategy"]["matrix"]["os"] == [
@@ -1513,6 +1559,7 @@ def test_makefile_and_ci_release_workflows_wire_core_wheel_smoke_and_arm64() -> 
     assert "linux-arm64" in targets
     assert targets["linux-arm64"]["os"] == "ubuntu-24.04-arm"
     assert targets["linux-arm64"]["bin_name"] == "vertebra-server-linux-arm64"
+    assert targets["darwin-arm64"]["os"] == "macos-latest"
 
 
 def test_check_extras_bidirectional_parity_on_repo() -> None:

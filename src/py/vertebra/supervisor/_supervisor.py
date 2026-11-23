@@ -61,6 +61,7 @@ class EmbeddedPythonRuntime(msgspec.Struct, frozen=True, gc=False):
         libdir_raw = sysconfig.get_config_var("LIBDIR")
         ldlibrary_raw = sysconfig.get_config_var("LDLIBRARY")
         enable_shared_raw = sysconfig.get_config_var("ENABLE_SHARED")
+        framework_raw = sysconfig.get_config_var("PYTHONFRAMEWORK")
         plat = sys.platform
 
         library_dir = Path(libdir_raw) if isinstance(libdir_raw, str) and libdir_raw else None
@@ -77,6 +78,7 @@ class EmbeddedPythonRuntime(msgspec.Struct, frozen=True, gc=False):
             )
 
         is_static_archive = library_name is not None and library_name.endswith(".a")
+        is_macos_framework = plat == "darwin" and isinstance(framework_raw, str) and bool(framework_raw.strip())
         is_explicit_shared = (
             enable_shared_raw is True
             or enable_shared_raw == 1
@@ -88,7 +90,9 @@ class EmbeddedPythonRuntime(msgspec.Struct, frozen=True, gc=False):
             or str(enable_shared_raw).strip().lower() in {"0", "false"}
         )
         has_shared_path = (not is_static_archive) and library_dir is not None and library_name is not None
-        if is_explicit_static or not has_shared_path:
+        if is_macos_framework and has_shared_path:
+            is_shared = True
+        elif is_explicit_static or not has_shared_path:
             is_shared = False
         elif is_explicit_shared:
             is_shared = True

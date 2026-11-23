@@ -2768,9 +2768,12 @@ async def test_async_single_call_cancellation() -> None:
             await task
 
         assert await asyncio.to_thread(cancel_received.wait, 5.0)
+        deadline = time.monotonic() + 5.0
+        while not client.closed and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert client.closed
         with pytest.raises(InterfaceError, match="session is not connected"):
             await client.fetch_rows("SELECT 1")
-        assert client.closed
     finally:
         await client.close()
         thread.join(timeout=5.0)

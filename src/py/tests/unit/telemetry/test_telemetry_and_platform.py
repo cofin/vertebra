@@ -1430,6 +1430,7 @@ def _live_embedded_zpages_server(
     env["VERTEBRA_APP"] = f"{module_name}:app"
     env["VERTEBRA_TOPOLOGY"] = "embedded"
     env["VERTEBRA_WORKERS"] = "1"
+    env["VERTEBRA_THREADS"] = "1"
     env["VERTEBRA_HOST"] = "127.0.0.1"
     env["VERTEBRA_PORT"] = str(port)
     EmbeddedPythonRuntime.detect().apply(env)

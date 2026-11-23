@@ -390,14 +390,20 @@ class DuckDBSyncConfig(SyncAdapterConfig[DuckDBConfig, SyncDuckDBDriver, SyncDuc
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.duckdb.adk",
         "DuckDBSyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.duckdb.adk",
         "DuckDBSyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.duckdb.adk",
         "DuckDBSyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.duckdb.events",
@@ -406,6 +412,8 @@ class DuckDBSyncConfig(SyncAdapterConfig[DuckDBConfig, SyncDuckDBDriver, SyncDuc
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.duckdb.litestar",
         "DuckDBLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(
@@ -532,14 +540,20 @@ class DuckDBAsyncConfig(AsyncAdapterConfig[DuckDBConfig, AsyncDuckDBDriver, Asyn
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.duckdb.adk",
         "DuckDBAsyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.duckdb.adk",
         "DuckDBAsyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.duckdb.adk",
         "DuckDBAsyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.duckdb.events",
@@ -548,6 +562,8 @@ class DuckDBAsyncConfig(AsyncAdapterConfig[DuckDBConfig, AsyncDuckDBDriver, Asyn
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.duckdb.litestar",
         "DuckDBLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(

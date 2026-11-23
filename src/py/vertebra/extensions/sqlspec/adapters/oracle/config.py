@@ -37,7 +37,6 @@ from vertebra.extensions.sqlspec.adapters.oracle.events import (
     OracleEventQueueStore,
     OracleSyncEventsBackend,
 )
-from vertebra.extensions.sqlspec.adapters.oracle.litestar import OracleLitestarStore
 
 if TYPE_CHECKING:
     from sqlspec.core import StatementConfig
@@ -199,18 +198,29 @@ class OracleSyncConfig(
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.oracle.adk",
         "OracleSyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.oracle.adk",
         "OracleSyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.oracle.adk",
         "OracleSyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[type[Any] | None] = OracleEventQueueStore
     events_backend_class: ClassVar[type[OracleSyncEventsBackend]] = OracleSyncEventsBackend
-    litestar_store_class: ClassVar[type[Any] | None] = OracleLitestarStore
+    litestar_store_class: ClassVar[Any] = LazyStoreAttr(
+        "vertebra.extensions.sqlspec.adapters.oracle.litestar",
+        "OracleLitestarStore",
+        package="litestar",
+        extra="litestar",
+    )
 
     def __init__(
         self,
@@ -291,18 +301,29 @@ class OracleAsyncConfig(
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.oracle.adk",
         "OracleAsyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.oracle.adk",
         "OracleAsyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.oracle.adk",
         "OracleAsyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[type[Any] | None] = OracleEventQueueStore
     events_backend_class: ClassVar[type[OracleAsyncEventsBackend]] = OracleAsyncEventsBackend
-    litestar_store_class: ClassVar[type[Any] | None] = OracleLitestarStore
+    litestar_store_class: ClassVar[Any] = LazyStoreAttr(
+        "vertebra.extensions.sqlspec.adapters.oracle.litestar",
+        "OracleLitestarStore",
+        package="litestar",
+        extra="litestar",
+    )
 
     def __init__(
         self,

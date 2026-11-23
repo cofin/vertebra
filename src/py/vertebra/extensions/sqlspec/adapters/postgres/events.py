@@ -23,10 +23,10 @@ from sqlspec.extensions.events import (
     fits_notify_payload,
     normalize_event_channel_name,
 )
-from sqlspec.extensions.litestar.store import CompanionIndex
 from sqlspec.migrations.schema import DropStatement, SchemaTarget, metadata_has_index
 
 from vertebra.db.adapters.postgres.notify import AsyncPostgresNotificationSource, SyncPostgresNotificationSource
+from vertebra.extensions.sqlspec._driver import _build_companion_index
 from vertebra.extensions.sqlspec.adapters.postgres.core import (
     pg_ensure_utc,
     pg_index_name,
@@ -40,6 +40,8 @@ from vertebra.extensions.sqlspec.adapters.postgres.core import (
 from vertebra.utils.serializers import decode_json, encode_json
 
 if TYPE_CHECKING:
+    from sqlspec.extensions.litestar.store import CompanionIndex
+
     from vertebra.extensions.sqlspec.adapters.postgres.config import PostgresAsyncConfig, PostgresSyncConfig
 
 __all__ = (
@@ -173,7 +175,7 @@ class PostgresEventQueueStore(BaseEventQueueStore["PostgresSyncConfig | Postgres
         """Return companion partial index descriptors for the PostgreSQL event queue table."""
         schema_name, bare_table = self._split_table_name()
         return [
-            CompanionIndex(
+            _build_companion_index(
                 name=self._index_name(),
                 table=bare_table,
                 schema=schema_name,

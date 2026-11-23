@@ -371,14 +371,20 @@ class MSSQLSyncConfig(SyncAdapterConfig[MSSQLConfig, SyncMSSQLDriver, SyncMSSQLD
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mssql.adk",
         "MSSQLSyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mssql.adk",
         "MSSQLSyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mssql.adk",
         "MSSQLSyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mssql.events",
@@ -387,6 +393,8 @@ class MSSQLSyncConfig(SyncAdapterConfig[MSSQLConfig, SyncMSSQLDriver, SyncMSSQLD
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mssql.litestar",
         "MSSQLLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(
@@ -508,14 +516,20 @@ class MSSQLAsyncConfig(AsyncAdapterConfig[MSSQLConfig, AsyncMSSQLDriver, AsyncMS
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mssql.adk",
         "MSSQLAsyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mssql.adk",
         "MSSQLAsyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mssql.adk",
         "MSSQLAsyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mssql.events",
@@ -524,6 +538,8 @@ class MSSQLAsyncConfig(AsyncAdapterConfig[MSSQLConfig, AsyncMSSQLDriver, AsyncMS
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mssql.litestar",
         "MSSQLLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(

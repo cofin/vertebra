@@ -36,7 +36,6 @@ from vertebra.extensions.sqlspec.adapters.postgres.events import (
     PostgresEventQueueStore,
     PostgresSyncEventsBackend,
 )
-from vertebra.extensions.sqlspec.adapters.postgres.litestar import PostgresLitestarStore
 
 if TYPE_CHECKING:
     from sqlspec.core import StatementConfig
@@ -416,18 +415,29 @@ class PostgresSyncConfig(
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.postgres.adk",
         "PostgresSyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.postgres.adk",
         "PostgresSyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.postgres.adk",
         "PostgresSyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[type[Any] | None] = PostgresEventQueueStore
     events_backend_class: ClassVar[type[PostgresSyncEventsBackend]] = PostgresSyncEventsBackend
-    litestar_store_class: ClassVar[type[Any] | None] = PostgresLitestarStore
+    litestar_store_class: ClassVar[Any] = LazyStoreAttr(
+        "vertebra.extensions.sqlspec.adapters.postgres.litestar",
+        "PostgresLitestarStore",
+        package="litestar",
+        extra="litestar",
+    )
 
     def __init__(
         self,
@@ -541,18 +551,29 @@ class PostgresAsyncConfig(
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.postgres.adk",
         "PostgresAsyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.postgres.adk",
         "PostgresAsyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.postgres.adk",
         "PostgresAsyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[type[Any] | None] = PostgresEventQueueStore
     events_backend_class: ClassVar[type[PostgresAsyncEventsBackend]] = PostgresAsyncEventsBackend
-    litestar_store_class: ClassVar[type[Any] | None] = PostgresLitestarStore
+    litestar_store_class: ClassVar[Any] = LazyStoreAttr(
+        "vertebra.extensions.sqlspec.adapters.postgres.litestar",
+        "PostgresLitestarStore",
+        package="litestar",
+        extra="litestar",
+    )
 
     def __init__(
         self,

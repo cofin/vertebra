@@ -31,7 +31,7 @@ notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 
 # QuickJS for SSR
-rquickjs = { version = "0.14", features = ["bindgen", "classes", "properties", "parallel"] }
+rquickjs = { version = "0.14", features = ["classes", "properties", "parallel"] }
 
 # Async runtime / channels
 crossbeam-channel = { workspace = true }

@@ -19,7 +19,7 @@ from sqlspec.migrations.schema import (
 from sqlspec.migrations.utils import resolve_extension_migration_mode
 from sqlspec.utils.adapters import resolve_adapter_name, resolve_extension_store_class
 
-from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.module_loader import ensure_module, import_optional
 
 if TYPE_CHECKING:
     from sqlspec.extensions.events import BaseEventQueueStore
@@ -312,7 +312,7 @@ def _resolve_litestar_store(spec: AdapterReconcilerSpec, config: Any) -> BaseSQL
         msg = f"Failed to import {spec.label} Litestar store: {exc}"
         raise MigrationError(msg) from exc
     if store_cls is None:
-        mod = ensure_module(spec.litestar_module, package="vertebra-core[sqlspec]")
+        mod = ensure_module(spec.litestar_module, package="litestar", extra="litestar")
         store_cls = getattr(mod, spec.litestar_class)
     try:
         return cast("BaseSQLSpecStore[Any]", store_cls(config))
@@ -337,7 +337,7 @@ def _resolve_events_store(
         msg = f"Failed to import {spec.label} events store: {exc}"
         raise MigrationError(msg) from exc
     if store_cls is None:
-        mod = ensure_module(spec.events_module, package="vertebra-core[sqlspec]")
+        mod = ensure_module(spec.events_module, package="sqlspec", extra="sqlspec")
         store_cls = getattr(mod, spec.events_class)
     try:
         store = cast("BaseEventQueueStore[Any]", store_cls(config))
@@ -356,10 +356,8 @@ def _resolve_adk_stores(
     *,
     is_async: bool,
 ) -> tuple[list[Any], bool, bool]:
-    adk_mod = ensure_module("sqlspec.extensions.adk", package="sqlspec")
-    art_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="sqlspec")
-    mem_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="sqlspec")
-    sess_mod = ensure_module("sqlspec.extensions.adk.store", package="sqlspec")
+    adk_mod = ensure_module("sqlspec.extensions.adk", package="sqlspec", extra="sqlspec")
+    sess_mod = ensure_module("sqlspec.extensions.adk.store", package="sqlspec", extra="sqlspec")
 
     try:
         validated = adk_mod.resolve_adk_config(config)
@@ -384,17 +382,21 @@ def _resolve_adk_stores(
         return [], True, True
 
     stores: list[Any] = []
+    mem_mod: Any | None = None
+    art_mod: Any | None = None
     try:
         if enable_sessions:
             session_store_cls = adk_mod.resolve_adk_store_class(config, "ADKStore")
             stores.append(session_store_cls(config=config))
         if enable_memory:
+            mem_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
             memory_store_cls = adk_mod.resolve_adk_memory_store_class(config)
             if memory_store_cls is None:
                 msg = "ADK memory reconciliation is enabled, but no ADKMemoryStore class could be resolved."
                 raise MigrationError(msg)
             stores.append(memory_store_cls(config=config))
         if has_artifacts:
+            art_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="google-adk", extra="adk")
             artifact_store_cls = adk_mod.resolve_adk_artifact_store_class(config)
             if artifact_store_cls is not None:
                 stores.append(artifact_store_cls(config=config))
@@ -404,8 +406,16 @@ def _resolve_adk_stores(
         msg = f"Failed to resolve {spec.label} ADK store for schema reconciliation: {exc}"
         raise MigrationError(msg) from exc
 
-    async_bases = (sess_mod.BaseAsyncADKStore, mem_mod.BaseAsyncADKMemoryStore, art_mod.BaseAsyncADKArtifactStore)
-    sync_bases = (sess_mod.BaseSyncADKStore, mem_mod.BaseSyncADKMemoryStore, art_mod.BaseSyncADKArtifactStore)
+    async_bases_list: list[type[Any]] = [sess_mod.BaseAsyncADKStore]
+    sync_bases_list: list[type[Any]] = [sess_mod.BaseSyncADKStore]
+    if mem_mod is not None:
+        async_bases_list.append(mem_mod.BaseAsyncADKMemoryStore)
+        sync_bases_list.append(mem_mod.BaseSyncADKMemoryStore)
+    if art_mod is not None:
+        async_bases_list.append(art_mod.BaseAsyncADKArtifactStore)
+        sync_bases_list.append(art_mod.BaseSyncADKArtifactStore)
+    async_bases = tuple(async_bases_list)
+    sync_bases = tuple(sync_bases_list)
     for store in stores:
         if is_async and not isinstance(store, async_bases):
             msg = f"ADK store '{type(store).__name__}' is synchronous, but MigrationContext supplied an async driver."
@@ -424,8 +434,8 @@ def _resolve_adk_stores(
 
 
 def _default_adk_store_drops(store: Any) -> list[DropStatement]:
-    art_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="sqlspec")
-    if isinstance(store, (art_mod.BaseSyncADKArtifactStore, art_mod.BaseAsyncADKArtifactStore)):
+    art_mod = import_optional("sqlspec.extensions.adk.artifact.store")
+    if art_mod is not None and isinstance(store, (art_mod.BaseSyncADKArtifactStore, art_mod.BaseAsyncADKArtifactStore)):
         build_drop = getattr(store, "_build_drop_artifact_table_sql", None)
         if callable(build_drop):
             return [DropStatement(statement) for statement in cast("list[str]", build_drop())]

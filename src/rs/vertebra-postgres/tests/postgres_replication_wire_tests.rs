@@ -2893,7 +2893,7 @@ async fn session_connection_with_payload(
     (connection, peer.await.unwrap())
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn session_writer_preserves_fence_ticks_and_closes_once() {
     let initial = 0x200000100;
     let (connection, mut peer) = session_writer_connection(Some(initial)).await;
@@ -2915,7 +2915,9 @@ async fn session_writer_preserves_fence_ticks_and_closes_once() {
         std::io::ErrorKind::WouldBlock
     );
     for _ in 0..3 {
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::time::resume();
         let FrontendExchange::Other(b'd', payload) = read_frontend_exchange(&mut peer).await else {
             panic!("status")
         };
@@ -3174,7 +3176,7 @@ async fn session_reader_copydone_drains_queued_records_before_none() {
     session.cancel();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn session_reader_full_fifo_does_not_starve_periodic_writer() {
     let payload = session_wal_frame(&session_transaction_payload());
     let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
@@ -3183,7 +3185,9 @@ async fn session_reader_full_fifo_does_not_starve_periodic_writer() {
         .unwrap();
     let begin = session.next().await.unwrap().unwrap();
     for _ in 0..3 {
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::time::resume();
         let FrontendExchange::Other(b'd', status) = read_frontend_exchange(&mut peer).await else {
             panic!("periodic status")
         };
@@ -3569,7 +3573,7 @@ async fn session_shutdown_rejects_late_xlog_data_after_copydone_and_premature_re
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn session_shutdown_unresponsive_peer_expires_once_and_closes_socket() {
     use std::future::Future;
     let (connection, mut peer) = session_writer_connection(Some(0x200000100)).await;
@@ -3590,7 +3594,6 @@ async fn session_shutdown_unresponsive_peer_expires_once_and_closes_socket() {
         read_frontend_exchange(&mut peer).await,
         FrontendExchange::CopyDone
     );
-    tokio::time::advance(Duration::from_millis(100)).await;
     assert!(matches!(closing.await, Err(PostgresError::Operational(_))));
     let (first, second) = tokio::join!(session.wait_closed(), session.wait_closed());
     assert!(matches!(first, Err(PostgresError::Operational(_))));
@@ -3665,7 +3668,7 @@ async fn session_shutdown_cancelled_close_waiter_keeps_transport_owned() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn session_shutdown_cancel_fences_backpressured_lease_and_wakes_all_waiters() {
     let payload = session_wal_frame(&session_transaction_payload());
     let (connection, mut peer) = session_connection_with_payload(Some(0x200000100), payload).await;
@@ -3673,7 +3676,9 @@ async fn session_shutdown_cancel_fences_backpressured_lease_and_wakes_all_waiter
         .into_stream(1, Duration::from_secs(10), Duration::from_secs(2))
         .unwrap();
     let delivery = session.next().await.unwrap().unwrap();
+    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::resume();
     assert!(matches!(
         read_frontend_exchange(&mut peer).await,
         FrontendExchange::Other(b'd', _)
@@ -4605,7 +4610,7 @@ async fn connect_logical_verified_enforces_identity_timeline_wal_bounds_and_conf
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn supervisor_reconnect_fences_stale_generation_retries_55006_and_active_slot_and_advances_confirmed_floor()
  {
     use _postgres::replication::pgoutput::ReplicationRecord;
@@ -4776,7 +4781,14 @@ async fn supervisor_reconnect_fences_stale_generation_retries_55006_and_active_s
         0x2_0000_0300
     );
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while supervisor.resume().generation < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for generation 2 reconnect"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     assert!(matches!(
         held_unacked_gen1_commit.publish(),
@@ -4848,7 +4860,7 @@ async fn supervisor_reconnect_fences_stale_generation_retries_55006_and_active_s
     supervisor.cancel();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn supervisor_permanent_errors_and_disabled_reconnect_fail_immediately_and_exhaustion_caps_at_eight()
  {
     #[derive(Clone, Copy, Debug)]

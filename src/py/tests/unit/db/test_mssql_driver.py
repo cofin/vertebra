@@ -577,6 +577,43 @@ def test_mssql_native_module_metadata_and_placeholder_rewriter() -> None:
     assert MSSQLCore.rewrite_placeholders(sql) == (rewritten, 2)
 
 
+@pytest.mark.parametrize(
+    ("sql", "expected_sql", "expected_count"),
+    [
+        (
+            "INSERT INTO t (a, b, c, d) VALUES (@P1, @p2, @P1, ?)",
+            "INSERT INTO t (a, b, c, d) VALUES (@P1, @P2, @P1, @P3)",
+            3,
+        ),
+        (
+            "SELECT '@P9', \"@P8\", [@P7], @@P6, @P1a, @P0, @P1_col, @P1@x FROM t WHERE a = @P2 AND b = @P1",
+            "SELECT '@P9', \"@P8\", [@P7], @@P6, @P1a, @P0, @P1_col, @P1@x FROM t WHERE a = @P2 AND b = @P1",
+            2,
+        ),
+        (
+            "SELECT a@P1 FROM t -- @P3\n/* @P4 */",
+            "SELECT a@P1 FROM t -- @P3\n/* @P4 */",
+            0,
+        ),
+    ],
+)
+@pytest.mark.parametrize("use_native", [True, False], ids=["native", "python-fallback"])
+def test_mssql_placeholder_rewriter_counts_existing_at_p_placeholders(
+    monkeypatch: pytest.MonkeyPatch,
+    sql: str,
+    expected_sql: str,
+    expected_count: int,
+    use_native: bool,
+) -> None:
+    """Verify native and fallback MSSQL placeholder rewriters count `@P<n>` placeholders and honor boundaries."""
+    if not use_native:
+        monkeypatch.setattr(
+            "vertebra.db.adapters.mssql.core.import_optional",
+            lambda _name: None,
+        )
+    assert MSSQLCore.rewrite_placeholders(sql) == (expected_sql, expected_count)
+
+
 def test_mssql_config_url_parsing_and_dialer_forwarding() -> None:
     """Verify `MSSQLConfig.from_url` parses query flags and forwards sync and async Cloud SQL dialers."""
     cfg = MSSQLConfig.from_url(

@@ -857,6 +857,17 @@ pub(crate) struct StatementFacts {
     pub touches_session_context: bool,
 }
 
+fn is_plsql_block(sql: &str) -> bool {
+    let trimmed = strip_leading_sql_comments(sql);
+    let end = trimmed
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(trimmed.len());
+    let head = &trimmed[..end];
+    head.eq_ignore_ascii_case("BEGIN")
+        || head.eq_ignore_ascii_case("DECLARE")
+        || head.eq_ignore_ascii_case("CALL")
+}
+
 fn starts_with_ascii_ci(s: &str, prefix: &str) -> bool {
     s.get(..prefix.len())
         .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
@@ -1544,7 +1555,11 @@ impl WorkerSession {
         };
         break_handle.check_cancelled()?;
 
-        let rowcount = exec_res.rows_affected() as usize;
+        let rowcount = if is_plsql_block(sql) {
+            0
+        } else {
+            exec_res.rows_affected() as usize
+        };
         let mut columns = Vec::new();
         let mut rows = Vec::new();
         let mut out_payload = OutBindsPayload::None;
@@ -3818,5 +3833,38 @@ mod tests {
         });
 
         worker.close_sync().expect("close worker");
+    }
+
+    #[test]
+    fn is_plsql_block_classifies_blocks_and_comments() {
+        for sql in [
+            "BEGIN :out := 99; END;",
+            "  begin null; end;",
+            "DECLARE v NUMBER := 1; BEGIN :out := v; END;",
+            "CALL my_proc(:1)",
+            "/* leading comment */\n-- another\nBEGIN NULL; END;",
+            "-- single line\nDECLARE x INT; BEGIN NULL; END;",
+        ] {
+            assert!(
+                super::is_plsql_block(sql),
+                "expected PL/SQL block for: {sql}"
+            );
+        }
+        for sql in [
+            "",
+            "SELECT 1 FROM dual",
+            "INSERT INTO t VALUES (:1)",
+            "UPDATE t SET a = :1",
+            "DELETE FROM t WHERE id = :1",
+            "MERGE INTO t USING dual ON (1=1) WHEN MATCHED THEN UPDATE SET a = 1",
+            "CREATE PROCEDURE p AS BEGIN NULL; END;",
+            "BEGIN_COL",
+            "CALL1()",
+        ] {
+            assert!(
+                !super::is_plsql_block(sql),
+                "unexpected PL/SQL block for: {sql}"
+            );
+        }
     }
 }

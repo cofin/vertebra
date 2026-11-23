@@ -8,7 +8,7 @@ from sqlspec.migrations.schema import DropStatement, SchemaTarget
 
 from vertebra.extensions.sqlspec._reconcile import AdapterReconcilerSpec, make_adapter_reconciler
 from vertebra.extensions.sqlspec.adapters.bigquery.core import qualify_store_table
-from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.module_loader import import_optional
 
 __all__ = ("down", "downgrade", "reconcile")
 
@@ -34,8 +34,8 @@ async def _adk_targets_async(driver: Any, config: Any, store: Any) -> list[Schem
 
 
 def _adk_store_drops(config: Any, store: Any) -> list[DropStatement]:
-    art_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="sqlspec")
-    if isinstance(store, (art_mod.BaseSyncADKArtifactStore, art_mod.BaseAsyncADKArtifactStore)):
+    art_mod = import_optional("sqlspec.extensions.adk.artifact.store")
+    if art_mod is not None and isinstance(store, (art_mod.BaseSyncADKArtifactStore, art_mod.BaseAsyncADKArtifactStore)):
         build_drop = getattr(store, "_build_drop_artifact_table_sql", None)
         if callable(build_drop):
             return [DropStatement(statement) for statement in cast("list[str]", build_drop())]

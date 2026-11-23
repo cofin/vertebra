@@ -549,6 +549,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Free runner disk space for Rust workspace test build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
       - uses: $/.github/actions/setup-rust-build
         with:
           targets: "x86_64-pc-windows-msvc"
@@ -639,7 +643,7 @@ jobs:
       - name: Install test dependencies and prebuilt postgres wheel
         run: |
           uv sync --frozen --no-install-local --group test
-          PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/build_ci_wheels.py install --wheel-dir dist/wheels --packages core,postgres
+          PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/build_ci_wheels.py install --wheel-dir dist/wheels --packages core,postgres,duckdb
       - name: Run zero-skip PostgreSQL ${{ matrix.pg_version }} conformance
         env:
           VERTEBRA_CONFORMANCE_DOCKER: "1"

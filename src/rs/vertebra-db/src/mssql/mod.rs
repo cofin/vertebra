@@ -1,8 +1,9 @@
 //! SQL Server single-pass `@P1` placeholder rewriter.
 
-/// Single-pass state machine rewriting `?` and `$1`/`$2` placeholders to T-SQL `@P1, @P2, ...`
-/// while preserving placeholders inside single-quoted literals (`'...'`), double-quoted identifiers (`"..."`),
-/// bracketed identifiers (`[...]`), `--` line comments, and `/* ... */` block comments.
+/// Single-pass state machine rewriting `?`, `$1`/`$2`, and existing `@P1`/`@p1` placeholders
+/// to T-SQL `@P1, @P2, ...` while preserving placeholders inside single-quoted literals (`'...'`),
+/// double-quoted identifiers (`"..."`), bracketed identifiers (`[...]`), `--` line comments, and
+/// `/* ... */` block comments.
 pub fn rewrite_mssql_placeholders(sql: &str) -> (String, usize) {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum LexState {
@@ -58,13 +59,48 @@ pub fn rewrite_mssql_placeholders(sql: &str) -> (String, usize) {
                     let mut j = i + 1;
                     let mut num = 0usize;
                     while j < bytes.len() && bytes[j].is_ascii_digit() {
-                        num = num * 10 + ((bytes[j] - b'0') as usize);
+                        num = num
+                            .saturating_mul(10)
+                            .saturating_add((bytes[j] - b'0') as usize);
                         j += 1;
                     }
                     seq_index = seq_index.max(num);
                     max_param = max_param.max(num);
                     out.push_str(&format!("@P{num}"));
                     i = j;
+                } else if b == b'@'
+                    && (i == 0
+                        || !(bytes[i - 1].is_ascii_alphanumeric()
+                            || bytes[i - 1] == b'_'
+                            || bytes[i - 1] == b'@'))
+                    && i + 2 < bytes.len()
+                    && matches!(bytes[i + 1], b'P' | b'p')
+                    && bytes[i + 2].is_ascii_digit()
+                    && bytes[i + 2] != b'0'
+                {
+                    let mut j = i + 2;
+                    let mut num = 0usize;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        num = num
+                            .saturating_mul(10)
+                            .saturating_add((bytes[j] - b'0') as usize);
+                        j += 1;
+                    }
+                    let at_boundary = j == bytes.len()
+                        || !(bytes[j].is_ascii_alphanumeric()
+                            || bytes[j] == b'_'
+                            || bytes[j] == b'$'
+                            || bytes[j] == b'#'
+                            || bytes[j] == b'@');
+                    if at_boundary {
+                        seq_index = seq_index.max(num);
+                        max_param = max_param.max(num);
+                        out.push_str(&format!("@P{num}"));
+                        i = j;
+                    } else {
+                        out.push('@');
+                        i += 1;
+                    }
                 } else {
                     let ch = sql[i..].chars().next().unwrap();
                     out.push(ch);
@@ -157,5 +193,24 @@ mod tests {
             "SELECT 'a?b''$1', \"col?name\", [col$2?], * FROM t WHERE a = @P1 AND b = @P2 -- ? $3 comment\n AND /* ? $4 */ c = @P3"
         );
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_rewrite_mssql_placeholders_counts_existing_at_p_and_respects_boundaries() {
+        let sql = "INSERT INTO t (a, b, c, d) VALUES (@P1, @p2, @P1, ?)";
+        let (rewritten, count) = rewrite_mssql_placeholders(sql);
+        assert_eq!(
+            rewritten,
+            "INSERT INTO t (a, b, c, d) VALUES (@P1, @P2, @P1, @P3)"
+        );
+        assert_eq!(count, 3);
+
+        let non_placeholders = "SELECT '@P9', \"@P8\", [@P7], @@P6, 'user@p5.com', @P1a, @P0, @P1_col, @P1@x -- @P4\n/* @P3 */ FROM t WHERE x = @P2 AND y = @P1";
+        let (rewritten_np, count_np) = rewrite_mssql_placeholders(non_placeholders);
+        assert_eq!(rewritten_np, non_placeholders);
+        assert_eq!(count_np, 2);
+
+        let email = "SELECT a@P1 FROM t";
+        assert_eq!(rewrite_mssql_placeholders(email), (email.to_owned(), 0));
     }
 }

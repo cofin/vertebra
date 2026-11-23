@@ -185,7 +185,7 @@ jobs:
 
       - name: Prepare Linux container cargo cache directory
         if: runner.os == 'Linux'
-        run: mkdir -p "${{ runner.temp }}/cibw-cargo" "${{ runner.temp }}/cibw-target"
+        run: mkdir -p "${{ runner.temp }}/cibw-cargo/registry" "${{ runner.temp }}/cibw-cargo/git"
 
       - name: Install uv
         uses: $/.github/actions/setup-python-env
@@ -204,12 +204,16 @@ jobs:
           package-dir: ${{ matrix.package.path }}
         env:
           CIBW_BUILD: "cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
+          CIBW_SKIP: "*-musllinux_*"
           CIBW_ARCHS_MACOS: ${{ matrix.platform.arch }}
           CIBW_ARCHS_LINUX: ${{ matrix.platform.arch }}
           CIBW_ARCHS_WINDOWS: ${{ matrix.platform.arch }}
-          CIBW_CONTAINER_ENGINE: "docker;create_args=-v ${{ runner.temp }}/cibw-cargo:/cargo-cache -v ${{ runner.temp }}/cibw-target:/target-cache"
-          CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" CARGO_HOME="/cargo-cache" CARGO_TARGET_DIR="/target-cache" CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse" CARGO_INCREMENTAL="0"'
+          CIBW_CONTAINER_ENGINE_LINUX: "docker; create_args: -v ${{ runner.temp }}/cibw-cargo/registry:/root/.cargo/registry -v ${{ runner.temp }}/cibw-cargo/git:/root/.cargo/git"
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+            && (command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh)
+            && uv python install 3.12 3.13 3.14 3.14t 3.15 3.15t
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse" CARGO_INCREMENTAL="0"'
           CIBW_BEFORE_BUILD: "python {package}/tools/scripts/build_server_binary.py build --repo-root {package}"
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "python {package}/tools/scripts/build_server_binary.py repair --repo-root {package} -w {dest_dir} {wheel}"
           CIBW_REPAIR_WHEEL_COMMAND_MACOS: "python {package}/tools/scripts/build_server_binary.py repair --repo-root {package} -w {dest_dir} {wheel}"
@@ -225,12 +229,14 @@ jobs:
           package-dir: ${{ matrix.package.path }}
         env:
           CIBW_BUILD: "cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
+          CIBW_SKIP: "*-musllinux_*"
           CIBW_ARCHS_MACOS: ${{ matrix.platform.arch }}
           CIBW_ARCHS_LINUX: ${{ matrix.platform.arch }}
           CIBW_ARCHS_WINDOWS: ${{ matrix.platform.arch }}
-          CIBW_CONTAINER_ENGINE: "docker;create_args=-v ${{ runner.temp }}/cibw-cargo:/cargo-cache -v ${{ runner.temp }}/cibw-target:/target-cache"
+          CIBW_CONTAINER_ENGINE_LINUX: "docker; create_args: -v ${{ runner.temp }}/cibw-cargo/registry:/root/.cargo/registry -v ${{ runner.temp }}/cibw-cargo/git:/root/.cargo/git"
           CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" CARGO_HOME="/cargo-cache" CARGO_TARGET_DIR="/target-cache" CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse" CARGO_INCREMENTAL="0"'
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse" CARGO_INCREMENTAL="0"'
+          CIBW_TEST_ENVIRONMENT: "PIP_NO_DEPS=1"
           CIBW_TEST_COMMAND: >-
             python -I -c "import importlib; module = importlib.import_module('${{ matrix.package.module }}');
             assert all(hasattr(module, name) for name in '${{ matrix.package.exports }}'.split());

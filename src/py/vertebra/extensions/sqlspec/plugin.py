@@ -7,7 +7,7 @@ import copy
 import logging
 from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from vertebra.extensions.broker import (
     AsyncSHMBrokerTransport,
@@ -29,12 +29,15 @@ from vertebra.extensions.sqlspec.proxy import (
 from vertebra.extensions.sqlspec.storage import register_storage_alias
 from vertebra.storage import AsyncObjectStore, SyncObjectStore
 from vertebra.typing import MissingDependencyError
+from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from sqlspec.extensions.litestar import SQLSpecPlugin
 
 try:
     from sqlspec import SQLSpec
     from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
     from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
-    from sqlspec.extensions.litestar import SQLSpecPlugin
 except ImportError as exc:
     raise MissingDependencyError("sqlspec", install_package="sqlspec", extra="sqlspec") from exc
 
@@ -594,4 +597,22 @@ def create_sqlspec_plugin(
             all_configs.append(config)
     for cfg in all_configs:
         sqlspec_instance.add_config(cfg)
-    return SQLSpecPlugin(sqlspec_instance, loader=loader)
+    plugin_cls = _load_litestar_sqlspec_plugin()
+    return cast("SQLSpecPlugin", plugin_cls(sqlspec_instance, loader=loader))
+
+
+def _load_litestar_sqlspec_plugin() -> type[Any]:
+    """Lazily resolve ``sqlspec.extensions.litestar.SQLSpecPlugin`` requiring the ``litestar`` extra."""
+    mod = ensure_module("sqlspec.extensions.litestar", package="litestar", extra="litestar")
+    return cast("type[Any]", mod.SQLSpecPlugin)
+
+
+def __getattr__(name: str) -> Any:
+    if name == "SQLSpecPlugin":
+        return _load_litestar_sqlspec_plugin()
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(__all__) | set(globals()))
