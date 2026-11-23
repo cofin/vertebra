@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 import uuid
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
 
@@ -21,7 +20,14 @@ from vertebra.db.adapters.oracle.queue import (
     AsyncOracleQueueStore,
     SyncOracleQueueStore,
 )
-from vertebra.db.driver.capabilities import QueueEntry
+from vertebra.framework.queues._sql import (
+    _SqlQueueBackendBase,
+    decode_envelope_bytes,
+    error_type_and_message,
+    rows_to_dlq_entries,
+    rows_to_envelopes,
+    unpack_queue_settings,
+)
 from vertebra.framework.queues.base import (
     CronLease,
     DeadLetterEntry,
@@ -32,12 +38,10 @@ from vertebra.framework.queues.base import (
 )
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module
-from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.serializers import encode_json_bytes
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Sequence
-
-    from vertebra.db.driver.capabilities import AsyncQueueStore
+    from collections.abc import Sequence
 
 __all__ = (
     "CLAIM_ORACLE_JOBS_SQL",
@@ -99,25 +103,6 @@ FOR UPDATE SKIP LOCKED
 
 
 @runtime_checkable
-class _DeadLetterPopCapable(Protocol):
-    """Optional capability protocol for queue stores supporting atomic dead-letter pop."""
-
-    def pop_dead_letter(self, job_id: str) -> QueueEntry | Awaitable[QueueEntry | None] | None:
-        """Atomically remove and return a dead-lettered queue entry."""
-        ...
-
-
-async def _pop_dead_letter_entry(store: AsyncQueueStore, dlq_id: str) -> QueueEntry | None:
-    """Pop a dead-letter entry via ``pop_dead_letter`` when supported or fall back to ``get_entry``."""
-    if isinstance(store, _DeadLetterPopCapable):
-        result = store.pop_dead_letter(dlq_id)
-        if inspect.isawaitable(result):
-            return await result
-        return result
-    return await store.get_entry(dlq_id)
-
-
-@runtime_checkable
 class OracleQueueExecutor(Protocol):
     """Transactional cursor executor contract for OracleQueueBackend."""
 
@@ -142,10 +127,12 @@ class OracleQueueExecutor(Protocol):
         ...
 
 
-class OracleQueueBackend:
+class OracleQueueBackend(_SqlQueueBackendBase):
     """Oracle Database queue backend using FOR UPDATE SKIP LOCKED over native stores or an executor."""
 
     __slots__ = ("_config", "_executor", "_oracle_config", "_store", "_sync_store")
+
+    _sync_store_label = "SyncOracleQueueStore"
 
     def __init__(
         self,
@@ -158,31 +145,8 @@ class OracleQueueBackend:
         store: AsyncOracleQueueStore | None = None,
         sync_store: SyncOracleQueueStore | None = None,
     ) -> None:
-        """Initialize the Oracle Database queue backend.
-
-        Args:
-            config: Optional queue configuration settings or QueueBackendSettings.
-            oracle_config: Optional Oracle connection configuration.
-            driver: Optional pre-constructed AsyncOracleDriver.
-            sync_driver: Optional pre-constructed SyncOracleDriver.
-            executor: Optional OracleQueueExecutor binding a transactional cursor executor.
-            store: Optional pre-constructed AsyncOracleQueueStore.
-            sync_store: Optional pre-constructed SyncOracleQueueStore.
-
-        Raises:
-            MissingDependencyError: When neither executor, store, nor driver is passed and ``vertebra._oracle`` is not installed.
-            ImproperConfigurationError: When neither executor, store, nor driver is passed and no valid Oracle DSN is configured.
-        """
-        if isinstance(config, QueueBackendSettings):
-            if store is None and config.store is not None:
-                store = cast("AsyncOracleQueueStore", config.store)
-            if sync_store is None and config.sync_store is not None:
-                sync_store = cast("SyncOracleQueueStore", config.sync_store)
-            if driver is None and config.driver is not None:
-                driver = cast("AsyncOracleDriver", config.driver)
-            if sync_driver is None and config.sync_driver is not None:
-                sync_driver = cast("SyncOracleDriver", config.sync_driver)
-
+        """Initialize the Oracle Database queue backend."""
+        store, sync_store, driver, sync_driver = unpack_queue_settings(config, store, sync_store, driver, sync_driver)
         self._config = config or QueueConfig()
         self._oracle_config = oracle_config
         if executor is not None:
@@ -195,18 +159,12 @@ class OracleQueueBackend:
             self._executor = None
         elif driver is not None or sync_driver is not None:
             self._store = (
-                AsyncOracleQueueStore(
-                    driver,
-                    notification_source=AsyncOracleNotificationSource(driver),
-                )
+                AsyncOracleQueueStore(driver, notification_source=AsyncOracleNotificationSource(driver))
                 if driver is not None
                 else None
             )
             self._sync_store = (
-                SyncOracleQueueStore(
-                    sync_driver,
-                    notification_source=SyncOracleNotificationSource(sync_driver),
-                )
+                SyncOracleQueueStore(sync_driver, notification_source=SyncOracleNotificationSource(sync_driver))
                 if sync_driver is not None
                 else None
             )
@@ -215,18 +173,15 @@ class OracleQueueBackend:
             ensure_module("vertebra._oracle", package="vertebra-core[oracle]", extra="oracle")
             dsn = self._config.backend_url
             if not dsn or dsn in ("oracle://",):
-                msg = "OracleQueueBackend requires a configured Oracle DSN, store, or executor"
-                raise ImproperConfigurationError(msg)
+                raise ImproperConfigurationError(
+                    "OracleQueueBackend requires a configured Oracle DSN, store, or executor"
+                )
             resolved_ora_cfg = self._oracle_config or OracleConfig(dsn=dsn)
             async_drv = AsyncOracleDriver(resolved_ora_cfg)
             sync_drv = SyncOracleDriver(resolved_ora_cfg)
-            self._store = AsyncOracleQueueStore(
-                async_drv,
-                notification_source=AsyncOracleNotificationSource(async_drv),
-            )
+            self._store = AsyncOracleQueueStore(async_drv, notification_source=AsyncOracleNotificationSource(async_drv))
             self._sync_store = SyncOracleQueueStore(
-                sync_drv,
-                notification_source=SyncOracleNotificationSource(sync_drv),
+                sync_drv, notification_source=SyncOracleNotificationSource(sync_drv)
             )
             self._executor = None
 
@@ -240,64 +195,20 @@ class OracleQueueBackend:
         """Return the active synchronous native queue store, if configured."""
         return self._sync_store
 
-    def enqueue_sync(self, envelope: TaskEnvelope) -> TaskEnvelope:
-        """Enqueue task envelope synchronously via SyncQueueStore."""
-        if self._sync_store is None:
-            msg = "Synchronous enqueue requires a configured SyncOracleQueueStore"
-            raise ImproperConfigurationError(msg)
-        payload_bytes = encode_json_bytes(envelope)
-        sched_ms = int(envelope.scheduled_at * 1000) if envelope.scheduled_at is not None else None
-        headers: dict[str, str] = {}
-        if envelope.idempotency_key:
-            headers["idempotency_key"] = envelope.idempotency_key
-        if envelope.traceparent:
-            headers["traceparent"] = envelope.traceparent
-        entry = QueueEntry(
-            job_id=envelope.task_id,
-            queue=envelope.lane,
-            task_name=envelope.task_name,
-            payload=payload_bytes,
-            attempt=envelope.attempt,
-            max_attempts=envelope.max_retries,
-            scheduled_at_ms=sched_ms,
-            headers=headers,
-        )
-        self._sync_store.enqueue(entry)
-        return envelope
-
     async def enqueue(self, envelope: TaskEnvelope) -> TaskEnvelope:
         """Insert task into vertebra_queue_jobs."""
         if self._store is not None:
-            payload_bytes = encode_json_bytes(envelope)
-            sched_ms = int(envelope.scheduled_at * 1000) if envelope.scheduled_at is not None else None
-            headers: dict[str, str] = {}
-            if envelope.idempotency_key:
-                headers["idempotency_key"] = envelope.idempotency_key
-            if envelope.traceparent:
-                headers["traceparent"] = envelope.traceparent
-            entry = QueueEntry(
-                job_id=envelope.task_id,
-                queue=envelope.lane,
-                task_name=envelope.task_name,
-                payload=payload_bytes,
-                attempt=envelope.attempt,
-                max_attempts=envelope.max_retries,
-                scheduled_at_ms=sched_ms,
-                headers=headers,
-            )
-            await self._store.enqueue(entry)
-            return envelope
+            return await self._store_enqueue(envelope)
         assert self._executor is not None
         payload_str = encode_json_bytes(envelope).decode("utf-8")
-        insert_sql = """
-        INSERT INTO vertebra_queue_jobs (
-            task_id, task_name, lane, payload, attempt, max_retries,
-            status, enqueued_at, scheduled_at, locked_until, consumer_name,
-            receipt_handle, idempotency_key, traceparent
-        ) VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14)
-        """
         await self._executor.execute(
-            insert_sql,
+            """
+            INSERT INTO vertebra_queue_jobs (
+                task_id, task_name, lane, payload, attempt, max_retries,
+                status, enqueued_at, scheduled_at, locked_until, consumer_name,
+                receipt_handle, idempotency_key, traceparent
+            ) VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14)
+            """,
             envelope.task_id,
             envelope.task_name,
             envelope.lane,
@@ -317,71 +228,17 @@ class OracleQueueBackend:
         return envelope
 
     async def dequeue(
-        self,
-        lanes: Sequence[TaskLane],
-        *,
-        batch_size: int = 1,
-        timeout_seconds: float = 0.0,
+        self, lanes: Sequence[TaskLane], *, batch_size: int = 1, timeout_seconds: float = 0.0
     ) -> list[TaskEnvelope]:
         """Claim tasks with FOR UPDATE SKIP LOCKED."""
         if self._store is not None:
-            entries = await self._store.claim(
-                [str(lane) for lane in lanes],
-                limit=batch_size,
-                worker_id=self._config.consumer_name,
-                lease_seconds=self._config.visibility_timeout_seconds,
-            )
-            if not entries and timeout_seconds > 0:
-                await asyncio.sleep(min(timeout_seconds, self._config.poll_interval_seconds))
-                entries = await self._store.claim(
-                    [str(lane) for lane in lanes],
-                    limit=batch_size,
-                    worker_id=self._config.consumer_name,
-                    lease_seconds=self._config.visibility_timeout_seconds,
-                )
-            envelopes: list[TaskEnvelope] = []
-            for entry in entries:
-                try:
-                    env = msgspec.convert(decode_json(entry.payload), type=TaskEnvelope)
-                    env = msgspec.structs.replace(
-                        env,
-                        attempt=entry.attempt,
-                        receipt_handle=f"{entry.job_id}:{entry.attempt}",
-                    )
-                except Exception:
-                    env = TaskEnvelope(
-                        task_id=entry.job_id,
-                        task_name=entry.task_name,
-                        lane=cast("TaskLane", entry.queue),
-                        args=(),
-                        kwargs={},
-                        attempt=entry.attempt,
-                        max_retries=entry.max_attempts,
-                        receipt_handle=f"{entry.job_id}:{entry.attempt}",
-                    )
-                envelopes.append(env)
-            return envelopes
+            return await self._store_dequeue(lanes, batch_size=batch_size, timeout_seconds=timeout_seconds)
         assert self._executor is not None
         rows = await self._claim_via_executor(lanes, batch_size=batch_size)
         if not rows and timeout_seconds > 0:
-            poll_sleep = min(timeout_seconds, self._config.poll_interval_seconds)
-            await asyncio.sleep(poll_sleep)
+            await asyncio.sleep(min(timeout_seconds, self._config.poll_interval_seconds))
             rows = await self._claim_via_executor(lanes, batch_size=batch_size)
-
-        envelopes_ex: list[TaskEnvelope] = []
-        for r in rows:
-            payload_data = r["payload"]
-            if isinstance(payload_data, str):
-                payload_data = payload_data.encode("utf-8")
-            env = msgspec.convert(decode_json(payload_data), type=TaskEnvelope)
-            if r.get("receipt_handle"):
-                env = msgspec.structs.replace(
-                    env,
-                    receipt_handle=r["receipt_handle"],
-                    attempt=r.get("attempt", env.attempt),
-                )
-            envelopes_ex.append(env)
-        return envelopes_ex
+        return rows_to_envelopes(rows)
 
     async def ack(self, envelope: TaskEnvelope) -> None:
         """Delete acknowledged task and commit transaction."""
@@ -389,10 +246,7 @@ class OracleQueueBackend:
             await self._store.ack(envelope.task_id, attempt=envelope.attempt)
             return
         assert self._executor is not None
-        await self._executor.execute(
-            "DELETE FROM vertebra_queue_jobs WHERE task_id = :1",
-            envelope.task_id,
-        )
+        await self._executor.execute("DELETE FROM vertebra_queue_jobs WHERE task_id = :1", envelope.task_id)
         await self._executor.commit()
 
     async def nack(
@@ -405,38 +259,13 @@ class OracleQueueBackend:
     ) -> DeadLetterEntry | None:
         """Route to DLQ or reschedule with backoff."""
         if self._store is not None:
-            err_type = type(error).__name__ if isinstance(error, Exception) else "TaskExecutionError"
-            err_msg = str(error)
-            now = time.time()
-            if send_to_dlq or envelope.attempt >= envelope.max_retries:
-                await self._store.nack(
-                    envelope.task_id,
-                    attempt=envelope.attempt,
-                    error=f"{err_type}: {err_msg}",
-                    retry_delay_s=None,
-                )
-                return DeadLetterEntry(
-                    dlq_id=envelope.task_id,
-                    envelope=envelope,
-                    error_type=err_type,
-                    error_message=err_msg,
-                    failed_at=now,
-                )
-            await self._store.nack(
-                envelope.task_id,
-                attempt=envelope.attempt,
-                error=f"{err_type}: {err_msg}",
-                retry_delay_s=delay_seconds or 1.0,
-            )
-            return None
+            return await self._store_nack(envelope, error=error, delay_seconds=delay_seconds, send_to_dlq=send_to_dlq)
         assert self._executor is not None
-        err_type = type(error).__name__ if isinstance(error, Exception) else "TaskExecutionError"
-        err_msg = str(error)
-
+        err_type, err_msg = error_type_and_message(error)
+        now = time.time()
         if send_to_dlq or envelope.attempt >= envelope.max_retries:
             dlq_id = uuid.uuid4().hex
             payload_str = encode_json_bytes(envelope).decode("utf-8")
-            now = time.time()
             await self._executor.execute(
                 """
                 INSERT INTO vertebra_queue_dlq (
@@ -452,27 +281,15 @@ class OracleQueueBackend:
                 err_msg,
                 now,
             )
-            await self._executor.execute(
-                "DELETE FROM vertebra_queue_jobs WHERE task_id = :1",
-                envelope.task_id,
-            )
+            await self._executor.execute("DELETE FROM vertebra_queue_jobs WHERE task_id = :1", envelope.task_id)
             await self._executor.commit()
             return DeadLetterEntry(
-                dlq_id=dlq_id,
-                envelope=envelope,
-                error_type=err_type,
-                error_message=err_msg,
-                failed_at=now,
+                dlq_id=dlq_id, envelope=envelope, error_type=err_type, error_message=err_msg, failed_at=now
             )
-
-        now = time.time()
         sched_at = now + (delay_seconds if delay_seconds is not None else 1.0)
         await self._executor.execute(
-            """
-            UPDATE vertebra_queue_jobs
-            SET status = :1, attempt = :2, scheduled_at = :3, locked_until = :4, receipt_handle = :5
-            WHERE task_id = :6
-            """,
+            "UPDATE vertebra_queue_jobs SET status = :1, attempt = :2, scheduled_at = :3, "
+            "locked_until = :4, receipt_handle = :5 WHERE task_id = :6",
             "pending",
             envelope.attempt + 1,
             sched_at,
@@ -488,143 +305,45 @@ class OracleQueueBackend:
         if self._store is not None:
             return await self._store.promote_scheduled(limit=batch_size)
         assert self._executor is not None
-        current_time = now if now is not None else time.time()
-        sql = """
-        UPDATE vertebra_queue_jobs
-        SET scheduled_at = NULL
-        WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at <= :1
-        """
-        res = await self._executor.execute(sql, current_time)
+        res = await self._executor.execute(
+            "UPDATE vertebra_queue_jobs SET scheduled_at = NULL "
+            "WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at <= :1",
+            now if now is not None else time.time(),
+        )
         await self._executor.commit()
         return res
 
     async def list_dlq(self, *, limit: int = 100) -> list[DeadLetterEntry]:
         """Fetch dead-letter entries from the DLQ table."""
         if self._store is not None:
-            default_lane = str(getattr(self._config, "default_lane", "io"))
-            lanes_to_scan = tuple(dict.fromkeys(("cpu", "io", "agent", default_lane)))
-            dead_entries: list[QueueEntry] = []
-            for lane_name in lanes_to_scan:
-                remaining = limit - len(dead_entries)
-                if remaining <= 0:
-                    break
-                dead_entries.extend(
-                    await self._store.list_entries(
-                        lane_name,
-                        status="dead_letter",
-                        limit=remaining,
-                    )
-                )
-            dlq_list: list[DeadLetterEntry] = []
-            for de in dead_entries:
-                try:
-                    env = msgspec.convert(decode_json(de.payload), type=TaskEnvelope)
-                except Exception:
-                    env = TaskEnvelope(
-                        task_id=de.job_id,
-                        task_name=de.task_name,
-                        lane=cast("TaskLane", de.queue),
-                        attempt=de.attempt,
-                        max_retries=de.max_attempts,
-                    )
-                dlq_list.append(
-                    DeadLetterEntry(
-                        dlq_id=de.job_id,
-                        envelope=env,
-                        error_type="DeadLetterError",
-                        error_message="Job exceeded max retries",
-                        failed_at=time.time(),
-                    )
-                )
-            return dlq_list
+            return await self._store_list_dlq(limit)
         assert self._executor is not None
         rows = await self._executor.fetch_all(
-            "SELECT * FROM vertebra_queue_dlq ORDER BY failed_at DESC FETCH FIRST :1 ROWS ONLY",
-            limit,
+            "SELECT * FROM vertebra_queue_dlq ORDER BY failed_at DESC FETCH FIRST :1 ROWS ONLY", limit
         )
-        entries: list[DeadLetterEntry] = []
-        for r in rows:
-            payload_data = r["payload"]
-            if isinstance(payload_data, str):
-                payload_data = payload_data.encode("utf-8")
-            env = msgspec.convert(decode_json(payload_data), type=TaskEnvelope)
-            entries.append(
-                DeadLetterEntry(
-                    dlq_id=r["dlq_id"],
-                    envelope=env,
-                    error_type=r["error_type"],
-                    error_message=r["error_message"],
-                    failed_at=r["failed_at"],
-                )
-            )
-        return entries
+        return rows_to_dlq_entries(rows)
 
     async def replay_dlq(self, dlq_id: str) -> TaskEnvelope | None:
         """Re-enqueue task from dead-letter queue and commit."""
         if self._store is not None:
-            entry = await _pop_dead_letter_entry(self._store, dlq_id)
-            if entry is None:
-                return None
-            try:
-                env = msgspec.convert(decode_json(entry.payload), type=TaskEnvelope)
-            except Exception:
-                env = TaskEnvelope(
-                    task_id=entry.job_id,
-                    task_name=entry.task_name,
-                    lane=cast("TaskLane", entry.queue),
-                    attempt=1,
-                    max_retries=entry.max_attempts,
-                )
-            idem_key = env.idempotency_key or entry.headers.get("idempotency_key")
-            if idem_key:
-                await self._store.release_unique_key(idem_key)
-            replayed = msgspec.structs.replace(
-                env,
-                attempt=1,
-                scheduled_at=None,
-                receipt_handle=None,
-            )
-            return await self.enqueue(replayed)
+            return await self._store_replay_dlq(dlq_id)
         assert self._executor is not None
-        row = await self._executor.fetch_one(
-            "SELECT * FROM vertebra_queue_dlq WHERE dlq_id = :1",
-            dlq_id,
-        )
+        row = await self._executor.fetch_one("SELECT * FROM vertebra_queue_dlq WHERE dlq_id = :1", dlq_id)
         if not row:
             return None
-        payload_data = row["payload"]
-        if isinstance(payload_data, str):
-            payload_data = payload_data.encode("utf-8")
-        env = msgspec.convert(decode_json(payload_data), type=TaskEnvelope)
         replayed = msgspec.structs.replace(
-            env,
-            attempt=1,
-            scheduled_at=None,
-            receipt_handle=None,
+            decode_envelope_bytes(row["payload"]), attempt=1, scheduled_at=None, receipt_handle=None
         )
         await self._executor.execute("DELETE FROM vertebra_queue_dlq WHERE dlq_id = :1", dlq_id)
         await self._executor.commit()
         return await self.enqueue(replayed)
 
     async def acquire_lease(
-        self,
-        lease_key: str,
-        owner_id: str,
-        ttl_seconds: float,
-        *,
-        slot: str | None = None,
+        self, lease_key: str, owner_id: str, ttl_seconds: float, *, slot: str | None = None
     ) -> CronLease | None:
         """Acquire lease via MERGE INTO vertebra_queue_leases."""
         if self._store is not None:
-            ok = await self._store.acquire_lease(lease_key, owner_id=owner_id, ttl_seconds=ttl_seconds)
-            if ok:
-                return CronLease(
-                    lease_key=lease_key,
-                    owner_id=owner_id,
-                    expires_at=time.time() + ttl_seconds,
-                    last_slot=slot,
-                )
-            return None
+            return await self._store_acquire_lease(lease_key, owner_id, ttl_seconds, slot=slot)
         assert self._executor is not None
         now = time.time()
         expires_at = now + ttl_seconds
@@ -639,14 +358,7 @@ class OracleQueueBackend:
           INSERT (lease_key, owner_id, expires_at, last_slot)
           VALUES (src.lease_key, src.owner_id, src.expires_at, src.last_slot)
         """
-        affected = await self._executor.execute(
-            sql,
-            lease_key,
-            owner_id,
-            expires_at,
-            slot,
-            now,
-        )
+        affected = await self._executor.execute(sql, lease_key, owner_id, expires_at, slot, now)
         if affected <= 0:
             await self._executor.commit()
             return None
@@ -656,12 +368,7 @@ class OracleQueueBackend:
         )
         await self._executor.commit()
         if row is None:
-            return CronLease(
-                lease_key=lease_key,
-                owner_id=owner_id,
-                expires_at=expires_at,
-                last_slot=slot,
-            )
+            return CronLease(lease_key=lease_key, owner_id=owner_id, expires_at=expires_at, last_slot=slot)
         lowered = {k.lower(): v for k, v in row.items()}
         if str(lowered.get("owner_id", "")) != owner_id:
             return None
@@ -672,32 +379,7 @@ class OracleQueueBackend:
             last_slot=lowered.get("last_slot"),
         )
 
-    async def renew_lease(
-        self,
-        lease_key: str,
-        owner_id: str,
-        ttl_seconds: float,
-        *,
-        slot: str | None = None,
-    ) -> CronLease | None:
-        """Renew lease matching active owner."""
-        return await self.acquire_lease(lease_key, owner_id, ttl_seconds, slot=slot)
-
-    async def close(self) -> None:
-        """Release underlying executor and stores."""
-        if self._store is not None:
-            await self._store.aclose()
-        if self._sync_store is not None:
-            self._sync_store.close()
-        if self._executor is not None:
-            await self._executor.close()
-
-    async def _claim_via_executor(
-        self,
-        lanes: Sequence[TaskLane],
-        *,
-        batch_size: int,
-    ) -> list[dict[str, Any]]:
+    async def _claim_via_executor(self, lanes: Sequence[TaskLane], *, batch_size: int) -> list[dict[str, Any]]:
         """Select ready rows via dynamic positional binds, mark running, and commit."""
         assert self._executor is not None
         if not lanes or batch_size <= 0:
@@ -705,12 +387,8 @@ class OracleQueueBackend:
         lane_vals = [str(lane) for lane in lanes]
         now = time.time()
         lock_until = now + self._config.visibility_timeout_seconds
-        select_sql = _build_oracle_claim_sql(len(lane_vals))
         candidates = await self._executor.fetch_all(
-            select_sql,
-            *lane_vals,
-            now,
-            batch_size,
+            _build_oracle_claim_sql(len(lane_vals)), *lane_vals, now, batch_size
         )
         if not candidates:
             await self._executor.commit()
@@ -719,20 +397,12 @@ class OracleQueueBackend:
         for cand in candidates:
             lowered = {k.lower(): v for k, v in cand.items()}
             task_id = str(lowered["task_id"])
-            prev_status = str(lowered.get("status", "pending"))
             curr_attempt = int(lowered.get("attempt", 1))
-            next_attempt = curr_attempt + 1 if prev_status == "running" else curr_attempt
+            next_attempt = curr_attempt + 1 if str(lowered.get("status", "pending")) == "running" else curr_attempt
             row_handle = uuid.uuid4().hex
             await self._executor.execute(
-                """
-                UPDATE vertebra_queue_jobs
-                SET status = :1,
-                    attempt = :2,
-                    locked_until = :3,
-                    consumer_name = :4,
-                    receipt_handle = :5
-                WHERE task_id = :6
-                """,
+                "UPDATE vertebra_queue_jobs SET status = :1, attempt = :2, locked_until = :3, "
+                "consumer_name = :4, receipt_handle = :5 WHERE task_id = :6",
                 "running",
                 next_attempt,
                 lock_until,
@@ -740,11 +410,13 @@ class OracleQueueBackend:
                 row_handle,
                 task_id,
             )
-            lowered["status"] = "running"
-            lowered["attempt"] = next_attempt
-            lowered["locked_until"] = lock_until
-            lowered["consumer_name"] = self._config.consumer_name
-            lowered["receipt_handle"] = row_handle
+            lowered.update(
+                status="running",
+                attempt=next_attempt,
+                locked_until=lock_until,
+                consumer_name=self._config.consumer_name,
+                receipt_handle=row_handle,
+            )
             claimed_rows.append(lowered)
         await self._executor.commit()
         return claimed_rows

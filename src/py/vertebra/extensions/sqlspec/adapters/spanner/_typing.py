@@ -6,10 +6,11 @@ import contextlib
 import inspect
 from collections.abc import Callable, Mapping, Sequence
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, TypedDict, cast
 
 from anyio import CancelScope
 
+from vertebra.extensions.sqlspec._driver import _AdapterAsyncConnectionContext, _AdapterSyncConnectionContext
 from vertebra.extensions.sqlspec.adapters.spanner.core import SpannerConnectionShim
 
 if TYPE_CHECKING:
@@ -241,141 +242,57 @@ async def _reset_session_async(conn: Any) -> None:
         conn._in_transaction = False
 
 
-class SpannerSyncConnectionContext:
+class SpannerSyncConnectionContext(_AdapterSyncConnectionContext):
     """Synchronous connection context manager acquiring native Spanner drivers or tenant leases."""
 
-    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_kwargs", "_tenant_lease")
+    __slots__ = ()
+    _engine_label: ClassVar[str] = "Spanner"
 
     def __init__(self, config: SpannerSyncConfig, *args: Any, **kwargs: Any) -> None:
-        self._config = config
-        self._args = args
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._connection: SyncSpannerDriver | None = None
-        self._tenant_lease: Any = None
+        super().__init__(config, *args, **kwargs)
+
+    def _unwrap_connection(self, raw_conn: Any) -> Any:
+        return _unwrap_sync_connection(raw_conn)
+
+    def _on_acquire(self, conn: Any) -> Any:
+        _ensure_connected_sync(conn)
+        return super()._on_acquire(conn)
+
+    def _rollback_conn(self, conn: Any) -> None:
+        _rollback_connection_sync(conn)
+
+    def _reset_conn(self, conn: Any) -> None:
+        _reset_session_sync(conn)
 
     def __enter__(self) -> SyncSpannerDriver:
-        """Acquire a native Spanner driver or tenant lease, connect if needed, and run hooks."""
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            raw_conn = self._tenant_lease.acquire()
-        else:
-            pool = self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            if callable(get_conn):
-                self._conn_ctx = get_conn()
-                raw_conn = self._conn_ctx.__enter__()
-            else:
-                raw_conn = pool
-        self._connection = _unwrap_sync_connection(raw_conn)
-        try:
-            _ensure_connected_sync(self._connection)
-            initialized_ids: set[int] | None = getattr(self._config, "_initialized_conn_ids", None)
-            conn_id = id(self._connection)
-            if initialized_ids is None or conn_id not in initialized_ids:
-                hook = self._config.driver_features.get("on_connection_create")
-                if callable(hook):
-                    hook(self._connection)
-                if initialized_ids is not None:
-                    initialized_ids.add(conn_id)
-            return cast("SyncSpannerDriver", self._connection)
-        except BaseException as exc:
-            self.__exit__(type(exc), exc, exc.__traceback__)
-            raise
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Roll back on error, optionally reset session state, and release the lease."""
-        conn = self._connection
-        reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-        try:
-            if conn is not None and (exc_type is not None or reset_on_release):
-                _rollback_connection_sync(conn)
-                if reset_on_release:
-                    _reset_session_sync(conn)
-            if self._tenant_lease is not None:
-                self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-            elif self._conn_ctx is not None:
-                return cast("bool | None", self._conn_ctx.__exit__(exc_type, exc_val, exc_tb))
-        finally:
-            self._connection = None
-            self._conn_ctx = None
-            self._tenant_lease = None
-        return None
+        return cast("SyncSpannerDriver", super().__enter__())
 
 
-class SpannerAsyncConnectionContext:
+class SpannerAsyncConnectionContext(_AdapterAsyncConnectionContext):
     """Asynchronous connection context manager acquiring native Spanner drivers or tenant leases."""
 
-    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_kwargs", "_tenant_lease")
+    __slots__ = ()
+    _engine_label: ClassVar[str] = "Spanner"
 
     def __init__(self, config: SpannerAsyncConfig, *args: Any, **kwargs: Any) -> None:
-        self._config = config
-        self._args = args
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._connection: AsyncSpannerDriver | None = None
-        self._tenant_lease: Any = None
+        super().__init__(config, *args, **kwargs)
+
+    def _unwrap_connection(self, raw_conn: Any) -> Any:
+        adapt_fn = getattr(self._config, "_adapt_async_connection", None)
+        return adapt_fn(raw_conn) if callable(adapt_fn) else raw_conn
+
+    async def _on_acquire(self, conn: Any) -> Any:
+        await _ensure_connected_async(conn)
+        return await super()._on_acquire(conn)
+
+    async def _rollback_conn(self, conn: Any) -> None:
+        await _rollback_connection_async(conn)
+
+    async def _reset_conn(self, conn: Any) -> None:
+        await _reset_session_async(conn)
 
     async def __aenter__(self) -> AsyncSpannerDriver:
-        """Asynchronously acquire a native Spanner driver or lease, connect if needed, and run hooks."""
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            raw_conn = await self._tenant_lease.acquire()
-        else:
-            pool = await self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            if callable(get_conn):
-                self._conn_ctx = get_conn()
-                raw_conn = await self._conn_ctx.__aenter__()
-            else:
-                raw_conn = pool
-        adapt_fn = getattr(self._config, "_adapt_async_connection", None)
-        self._connection = cast("AsyncSpannerDriver", adapt_fn(raw_conn) if callable(adapt_fn) else raw_conn)
-        try:
-            await _ensure_connected_async(self._connection)
-            initialized_ids: set[int] | None = getattr(self._config, "_initialized_conn_ids", None)
-            conn_id = id(self._connection)
-            if initialized_ids is None or conn_id not in initialized_ids:
-                hook = self._config.driver_features.get("on_connection_create")
-                if callable(hook):
-                    hook_res = hook(self._connection)
-                    if inspect.isawaitable(hook_res):
-                        await hook_res
-                if initialized_ids is not None:
-                    initialized_ids.add(conn_id)
-            return self._connection
-        except BaseException as exc:
-            await self.__aexit__(type(exc), exc, exc.__traceback__)
-            raise
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Roll back on error, optionally reset session state, and release the lease."""
-        conn = self._connection
-        reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-        try:
-            if conn is not None and (exc_type is not None or reset_on_release):
-                await _rollback_connection_async(conn)
-                if reset_on_release:
-                    await _reset_session_async(conn)
-            if self._tenant_lease is not None:
-                await self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-            elif self._conn_ctx is not None:
-                return cast("bool | None", await self._conn_ctx.__aexit__(exc_type, exc_val, exc_tb))
-        finally:
-            self._connection = None
-            self._conn_ctx = None
-            self._tenant_lease = None
-        return None
+        return cast("AsyncSpannerDriver", await super().__aenter__())
 
 
 class SpannerSyncSessionContext:

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-import socket
 import ssl
 from collections.abc import Callable
 from typing import Any, Final
@@ -12,6 +10,9 @@ from urllib.parse import quote
 
 from vertebra._vertebra import AwsAuroraDsqlDialer, AwsRdsDialer, aws_rds_root_ca_pem
 from vertebra.db.dialer._base import (
+    _AsyncTokenDialerMixin,
+    _BaseTokenDialerMixin,
+    _SyncTokenDialerMixin,
     build_verify_full_tls_context,
     format_dialer_url_host,
     validate_dialer_non_empty,
@@ -42,7 +43,7 @@ def _ambient_aws_region() -> str | None:
     return raw or None
 
 
-class _BaseAwsRdsDialer:
+class _BaseAwsRdsDialer(_BaseTokenDialerMixin):
     """Shared metadata, RDS Root CA `verify-full` TLS context, and SigV4 IAM token provider wrapper."""
 
     __slots__ = (
@@ -53,6 +54,10 @@ class _BaseAwsRdsDialer:
         "_ssl_context",
         "_token_provider",
     )
+
+    _native: AwsRdsDialer
+    _ca_pem: str | None
+    _token_provider: DatabaseTokenProvider
 
     def __init__(
         self,
@@ -193,16 +198,6 @@ class _BaseAwsRdsDialer:
         return self._native
 
     @property
-    def endpoint_host(self) -> str:
-        """Return the normalized RDS instance, cluster, or RDS Proxy hostname."""
-        return self._native.endpoint_host
-
-    @property
-    def port(self) -> int:
-        """Return the RDS TCP server port."""
-        return self._native.port
-
-    @property
     def region(self) -> str:
         """Return the resolved AWS signing region."""
         return self._native.region
@@ -218,11 +213,6 @@ class _BaseAwsRdsDialer:
         return self._engine
 
     @property
-    def database(self) -> str:
-        """Return the default database name used by `connection_kwargs()`."""
-        return self._database
-
-    @property
     def is_cluster_endpoint(self) -> bool:
         """Return True when the endpoint is an Aurora cluster writer or reader endpoint."""
         return self._native.is_cluster_endpoint
@@ -235,25 +225,13 @@ class _BaseAwsRdsDialer:
     @property
     def ca_pem(self) -> str:
         """Return the active Root CA PEM bundle (`aws_rds_root_ca_pem()` by default)."""
+        assert self._ca_pem is not None
         return self._ca_pem
-
-    @property
-    def ssl_context(self) -> ssl.SSLContext:
-        """Return the cached `verify-full` client `ssl.SSLContext`."""
-        return self._ssl_context
 
     @property
     def token_provider(self) -> DatabaseTokenProvider:
         """Return the `DatabaseTokenProvider` minting short-lived RDS IAM tokens."""
         return self._token_provider
-
-    def build_tls_context(self, *, ca_pem: str | None = None) -> ssl.SSLContext:
-        """Construct a fresh `verify-full` `ssl.SSLContext` seeded with `ca_pem` or the dialer's CA bundle."""
-        return build_verify_full_tls_context(self._ca_pem if ca_pem is None else ca_pem)
-
-    def invalidate_token(self) -> None:
-        """Clear any cached RDS IAM token snapshot."""
-        self._token_provider.invalidate()
 
     def connection_kwargs(self, *, database: str | None = None, **overrides: Any) -> dict[str, Any]:
         """Return driver-ready `PostgreSQLConfig` or `MySQLConfig` keyword arguments."""
@@ -310,104 +288,19 @@ class _BaseAwsRdsDialer:
         return int(raw_port) if raw_port.isascii() and raw_port.isdigit() else None
 
 
-class SyncAwsRdsDialer(_BaseAwsRdsDialer):
+class SyncAwsRdsDialer(_SyncTokenDialerMixin, _BaseAwsRdsDialer):
     """Synchronous AWS RDS, Aurora, and RDS Proxy `verify-full` TLS and SigV4 IAM dialer."""
 
     __slots__ = ()
 
-    def resolve_token(self, *, force_refresh: bool = False) -> str:
-        """Synchronously return a cached or freshly signed RDS IAM authentication token."""
-        return self._token_provider.resolve_sync(force_refresh=force_refresh)
 
-    def connect(
-        self,
-        host: str | None = None,
-        *,
-        port: int | None = None,
-        server_hostname: str | None = None,
-        ssl_context: ssl.SSLContext | None = None,
-        timeout: float = 10.0,
-    ) -> ssl.SSLSocket:
-        """Establish a synchronous `verify-full` TLS socket to the RDS endpoint."""
-        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
-        target_port = self.port if port is None else validate_dialer_port(port)
-        tls_hostname = (
-            self.endpoint_host
-            if server_hostname is None
-            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
-        )
-        ctx = self._ssl_context if ssl_context is None else ssl_context
-        raw_sock = socket.create_connection((target_host, target_port), timeout=timeout)
-        try:
-            return ctx.wrap_socket(raw_sock, server_hostname=tls_hostname)
-        except BaseException:
-            raw_sock.close()
-            raise
-
-    def close(self) -> None:
-        """Clear cached IAM token state."""
-        self.invalidate_token()
-
-    def __call__(
-        self,
-        host: str | None = None,
-        *,
-        port: int | None = None,
-        server_hostname: str | None = None,
-        ssl_context: ssl.SSLContext | None = None,
-        timeout: float = 10.0,
-    ) -> ssl.SSLSocket:
-        """Callable dialer entrypoint returning a verified synchronous TLS socket."""
-        return self.connect(
-            host,
-            port=port,
-            server_hostname=server_hostname,
-            ssl_context=ssl_context,
-            timeout=timeout,
-        )
-
-
-class AsyncAwsRdsDialer(_BaseAwsRdsDialer):
+class AsyncAwsRdsDialer(_AsyncTokenDialerMixin, _BaseAwsRdsDialer):
     """Asynchronous AWS RDS, Aurora, and RDS Proxy `verify-full` TLS and SigV4 IAM dialer."""
 
     __slots__ = ()
 
-    async def resolve_token(self, *, force_refresh: bool = False) -> str:
-        """Asynchronously return a cached or freshly signed RDS IAM token without blocking the event loop."""
-        return await self._token_provider.resolve_async(force_refresh=force_refresh)
 
-    async def connect(
-        self,
-        host: str | None = None,
-        *,
-        port: int | None = None,
-        server_hostname: str | None = None,
-        ssl_context: ssl.SSLContext | None = None,
-        timeout: float = 10.0,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Establish an asynchronous `verify-full` TLS stream pair to the RDS endpoint."""
-        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
-        target_port = self.port if port is None else validate_dialer_port(port)
-        tls_hostname = (
-            self.endpoint_host
-            if server_hostname is None
-            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
-        )
-        ctx = self._ssl_context if ssl_context is None else ssl_context
-        async with asyncio.timeout(timeout):
-            return await asyncio.open_connection(
-                target_host,
-                target_port,
-                ssl=ctx,
-                server_hostname=tls_hostname,
-            )
-
-    async def close(self) -> None:
-        """Clear cached IAM token state."""
-        self.invalidate_token()
-
-
-class _BaseAwsAuroraDsqlDialer:
+class _BaseAwsAuroraDsqlDialer(_BaseTokenDialerMixin):
     """Shared metadata, WebPKI `verify-full` TLS context, and SigV4 `dsql` token provider wrapper."""
 
     __slots__ = (
@@ -418,6 +311,9 @@ class _BaseAwsAuroraDsqlDialer:
         "_token_provider",
         "_username",
     )
+
+    _native: AwsAuroraDsqlDialer
+    _token_provider: DatabaseTokenProvider
 
     def __init__(
         self,
@@ -526,19 +422,9 @@ class _BaseAwsAuroraDsqlDialer:
         return self._native
 
     @property
-    def endpoint_host(self) -> str:
-        """Return the normalized Aurora DSQL cluster endpoint hostname."""
-        return self._native.endpoint_host
-
-    @property
     def hostname(self) -> str:
         """Alias for `endpoint_host` matching `AwsAuroraDsqlIamTokenProvider`."""
         return self._native.hostname
-
-    @property
-    def port(self) -> int:
-        """Return the Aurora DSQL TCP server port (default `5432`)."""
-        return self._native.port
 
     @property
     def region(self) -> str:
@@ -633,98 +519,13 @@ class _BaseAwsAuroraDsqlDialer:
         return next(iter(declared.values()), False)
 
 
-class SyncAwsAuroraDsqlDialer(_BaseAwsAuroraDsqlDialer):
+class SyncAwsAuroraDsqlDialer(_SyncTokenDialerMixin, _BaseAwsAuroraDsqlDialer):
     """Synchronous AWS Aurora DSQL `verify-full` TLS and SigV4 IAM dialer."""
 
     __slots__ = ()
 
-    def resolve_token(self, *, force_refresh: bool = False) -> str:
-        """Synchronously return a cached or freshly signed Aurora DSQL IAM token."""
-        return self._token_provider.resolve_sync(force_refresh=force_refresh)
 
-    def connect(
-        self,
-        host: str | None = None,
-        *,
-        port: int | None = None,
-        server_hostname: str | None = None,
-        ssl_context: ssl.SSLContext | None = None,
-        timeout: float = 10.0,
-    ) -> ssl.SSLSocket:
-        """Establish a synchronous `verify-full` TLS socket to the Aurora DSQL endpoint."""
-        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
-        target_port = self.port if port is None else validate_dialer_port(port)
-        tls_hostname = (
-            self.endpoint_host
-            if server_hostname is None
-            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
-        )
-        ctx = self._ssl_context if ssl_context is None else ssl_context
-        raw_sock = socket.create_connection((target_host, target_port), timeout=timeout)
-        try:
-            return ctx.wrap_socket(raw_sock, server_hostname=tls_hostname)
-        except BaseException:
-            raw_sock.close()
-            raise
-
-    def close(self) -> None:
-        """Clear cached IAM token state."""
-        self.invalidate_token()
-
-    def __call__(
-        self,
-        host: str | None = None,
-        *,
-        port: int | None = None,
-        server_hostname: str | None = None,
-        ssl_context: ssl.SSLContext | None = None,
-        timeout: float = 10.0,
-    ) -> ssl.SSLSocket:
-        """Callable dialer entrypoint returning a verified synchronous TLS socket."""
-        return self.connect(
-            host,
-            port=port,
-            server_hostname=server_hostname,
-            ssl_context=ssl_context,
-            timeout=timeout,
-        )
-
-
-class AsyncAwsAuroraDsqlDialer(_BaseAwsAuroraDsqlDialer):
+class AsyncAwsAuroraDsqlDialer(_AsyncTokenDialerMixin, _BaseAwsAuroraDsqlDialer):
     """Asynchronous AWS Aurora DSQL `verify-full` TLS and SigV4 IAM dialer."""
 
     __slots__ = ()
-
-    async def resolve_token(self, *, force_refresh: bool = False) -> str:
-        """Asynchronously return a cached or freshly signed Aurora DSQL IAM token without blocking the loop."""
-        return await self._token_provider.resolve_async(force_refresh=force_refresh)
-
-    async def connect(
-        self,
-        host: str | None = None,
-        *,
-        port: int | None = None,
-        server_hostname: str | None = None,
-        ssl_context: ssl.SSLContext | None = None,
-        timeout: float = 10.0,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Establish an asynchronous `verify-full` TLS stream pair to the Aurora DSQL endpoint."""
-        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
-        target_port = self.port if port is None else validate_dialer_port(port)
-        tls_hostname = (
-            self.endpoint_host
-            if server_hostname is None
-            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
-        )
-        ctx = self._ssl_context if ssl_context is None else ssl_context
-        async with asyncio.timeout(timeout):
-            return await asyncio.open_connection(
-                target_host,
-                target_port,
-                ssl=ctx,
-                server_hostname=tls_hostname,
-            )
-
-    async def close(self) -> None:
-        """Clear cached IAM token state."""
-        self.invalidate_token()

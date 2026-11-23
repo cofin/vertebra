@@ -571,29 +571,12 @@ class LedgerValidator:
 
     def _load_checklist_ids(self) -> set[str]:
         """Collect existing checklist IDs from checklist.md if present."""
-        chk = self._repo_root / ".agents/skills/review-core/references/checklist.md"
-        if not chk.exists():
-            return set()
-        ids: set[str] = set()
-        chk_re = re.compile(r"^-\s+(?:\*\*|~~\*\*)(?P<id>[A-Z]+-\d{2})(?:\*\*|~~\*\*)")
-        for line in chk.read_text(encoding="utf-8").splitlines():
-            m = chk_re.match(line)
-            if m:
-                ids.add(m.group("id"))
-        return ids
+        active, retired = _load_checklist_ids_and_retired(self._repo_root)
+        return active | retired
 
     def _load_fp_ids(self) -> set[str]:
         """Collect existing suppression IDs from false-positive-suppressions.md."""
-        fp_path = self._repo_root / ".agents/skills/review-core/references/false-positive-suppressions.md"
-        if not fp_path.exists():
-            return set()
-        fps: set[str] = set()
-        fp_re = re.compile(r"^###\s+(?P<id>FP-[A-Z]+-\d{2}):")
-        for line in fp_path.read_text(encoding="utf-8").splitlines():
-            m = fp_re.match(line)
-            if m:
-                fps.add(m.group("id"))
-        return fps
+        return _load_suppression_ids(self._repo_root)
 
 
 class ReviewSetupValidator:
@@ -1048,79 +1031,23 @@ class ReviewSetupValidator:
         all_cids = active_cids | retired_cids
 
         for area_name, area in manifest.areas.items():
-            skill_dir = skills_root / f"review-{area_name}"
-            skill_file = skill_dir / "SKILL.md"
+            skill_file = skills_root / f"review-{area_name}" / "SKILL.md"
             rel_file = str(skill_file.relative_to(self.repo_root))
-
-            if not skill_file.exists():
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_file,
-                        1,
-                        f"missing skill file for area '{area_name}'",
-                    )
-                )
+            doc = self._validate_skill_doc(
+                issues,
+                skill_file,
+                rel_file,
+                expected_name=f"review-{area_name}",
+                missing_message=f"missing skill file for area '{area_name}'",
+                max_lines=max_lines,
+                max_truth=max_truth,
+            )
+            if doc is None:
                 continue
-
-            doc = MarkdownDocument.parse(skill_file)
-
-            if doc.frontmatter.get("name") != f"review-{area_name}":
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_file,
-                        1,
-                        f"frontmatter name must be 'review-{area_name}'",
-                    )
-                )
-
-            desc = doc.frontmatter.get("description")
-            if not desc or not str(desc).strip():
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_file,
-                        1,
-                        "frontmatter description must not be empty",
-                    )
-                )
-
-            if doc.total_lines > max_lines:
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_file,
-                        doc.total_lines,
-                        f"skill line count {doc.total_lines} exceeds budget {max_lines}",
-                    )
-                )
-
-            if not doc.truth_lines or doc.truth_span is None:
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_file,
-                        1,
-                        "missing <!-- truth: start --> .. <!-- truth: end --> block",
-                    )
-                )
-            else:
-                truth_count = len(doc.truth_lines)
-                if truth_count > max_truth:
-                    issues.append(
-                        ReviewIssue(
-                            "skills",
-                            rel_file,
-                            doc.truth_span[0],
-                            f"truth block line count {truth_count} exceeds budget {max_truth}",
-                        )
-                    )
 
             skill_fp_indexed: set[str] = set()
             in_suppressions_index = False
-            skill_text = skill_file.read_text(encoding="utf-8")
-            for line_no, line in enumerate(skill_text.splitlines(), start=1):
+            for line_no, line in enumerate(skill_file.read_text(encoding="utf-8").splitlines(), start=1):
                 if line.startswith("## Suppressions Index"):
                     in_suppressions_index = True
                     continue
@@ -1130,66 +1057,27 @@ class ReviewSetupValidator:
                     m = re.search(r"\b(FP-[A-Z]+-\d{2})\b", line)
                     if m:
                         skill_fp_indexed.add(m.group(1))
-
                 for match in re.finditer(r"\b([A-Z]{2,5}-\d{2})\b", line):
                     start = match.start()
                     if start >= 3 and line[start - 3 : start] == "FP-":
                         continue
                     cid = match.group(1)
                     if all_cids and cid not in all_cids:
-                        issues.append(
-                            ReviewIssue(
-                                "skills",
-                                rel_file,
-                                line_no,
-                                f"unknown checklist ID {cid}",
-                            )
-                        )
+                        issues.append(ReviewIssue("skills", rel_file, line_no, f"unknown checklist ID {cid}"))
 
             area_fps = {fpid for fpid in existing_fp_ids if fpid.startswith(f"FP-{area.prefix}-")}
-            for fp in area_fps:
-                if fp not in skill_fp_indexed:
-                    issues.append(
-                        ReviewIssue(
-                            "skills",
-                            rel_file,
-                            1,
-                            f"suppression '{fp}' missing from skill Suppressions Index",
-                        )
-                    )
-            for fp in skill_fp_indexed:
-                if fp not in existing_fp_ids:
-                    issues.append(
-                        ReviewIssue(
-                            "skills",
-                            rel_file,
-                            1,
-                            f"skill indexes unknown suppression '{fp}'",
-                        )
-                    )
-
-            for target, line_no in doc.links:
-                target_clean = target.split("#")[0]
-                if target_clean:
-                    resolved = (skill_file.parent / target_clean).resolve()
-                    if not resolved.exists():
-                        issues.append(
-                            ReviewIssue(
-                                "skills",
-                                rel_file,
-                                line_no,
-                                f"relative link '{target}' does not resolve",
-                            )
-                        )
+            for fp in area_fps - skill_fp_indexed:
+                issues.append(
+                    ReviewIssue("skills", rel_file, 1, f"suppression '{fp}' missing from skill Suppressions Index")
+                )
+            for fp in skill_fp_indexed - existing_fp_ids:
+                issues.append(ReviewIssue("skills", rel_file, 1, f"skill indexes unknown suppression '{fp}'"))
 
         for child in skills_root.iterdir():
             if not child.is_dir():
                 continue
             if child.name.startswith("review-"):
-                if child.name == "review-core":
-                    continue
-                area_stem = child.name[len("review-") :]
-                if area_stem not in manifest.areas:
+                if child.name != "review-core" and child.name[len("review-") :] not in manifest.areas:
                     issues.append(
                         ReviewIssue(
                             "skills",
@@ -1201,80 +1089,65 @@ class ReviewSetupValidator:
                 continue
 
             domain_skill_file = child / "SKILL.md"
-            rel_domain_file = str(domain_skill_file.relative_to(self.repo_root))
-            if not domain_skill_file.exists():
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_domain_file,
-                        1,
-                        f"missing SKILL.md in skill directory '{child.name}'",
-                    )
-                )
-                continue
-
-            domain_doc = MarkdownDocument.parse(domain_skill_file)
-            if domain_doc.frontmatter.get("name") != child.name:
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_domain_file,
-                        1,
-                        f"frontmatter name must be '{child.name}'",
-                    )
-                )
-            domain_desc = domain_doc.frontmatter.get("description")
-            if not domain_desc or not str(domain_desc).strip():
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_domain_file,
-                        1,
-                        "frontmatter description must not be empty",
-                    )
-                )
-            if domain_doc.total_lines > max_lines:
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_domain_file,
-                        domain_doc.total_lines,
-                        f"skill line count {domain_doc.total_lines} exceeds budget {max_lines}",
-                    )
-                )
-            if not domain_doc.truth_lines or domain_doc.truth_span is None:
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_domain_file,
-                        1,
-                        "missing <!-- truth: start --> .. <!-- truth: end --> block",
-                    )
-                )
-            elif len(domain_doc.truth_lines) > max_truth:
-                issues.append(
-                    ReviewIssue(
-                        "skills",
-                        rel_domain_file,
-                        domain_doc.truth_span[0],
-                        f"truth block line count {len(domain_doc.truth_lines)} exceeds budget {max_truth}",
-                    )
-                )
-            for target, line_no in domain_doc.links:
-                target_clean = target.split("#")[0]
-                if target_clean:
-                    resolved = (domain_skill_file.parent / target_clean).resolve()
-                    if not resolved.exists():
-                        issues.append(
-                            ReviewIssue(
-                                "skills",
-                                rel_domain_file,
-                                line_no,
-                                f"relative link '{target}' does not resolve",
-                            )
-                        )
+            self._validate_skill_doc(
+                issues,
+                domain_skill_file,
+                str(domain_skill_file.relative_to(self.repo_root)),
+                expected_name=child.name,
+                missing_message=f"missing SKILL.md in skill directory '{child.name}'",
+                max_lines=max_lines,
+                max_truth=max_truth,
+            )
 
         return issues
+
+    def _validate_skill_doc(
+        self,
+        issues: list[ReviewIssue],
+        skill_file: Path,
+        rel_file: str,
+        *,
+        expected_name: str,
+        missing_message: str,
+        max_lines: int,
+        max_truth: int,
+    ) -> MarkdownDocument | None:
+        if not skill_file.exists():
+            issues.append(ReviewIssue("skills", rel_file, 1, missing_message))
+            return None
+        doc = MarkdownDocument.parse(skill_file)
+        if doc.frontmatter.get("name") != expected_name:
+            issues.append(ReviewIssue("skills", rel_file, 1, f"frontmatter name must be '{expected_name}'"))
+        desc = doc.frontmatter.get("description")
+        if not desc or not str(desc).strip():
+            issues.append(ReviewIssue("skills", rel_file, 1, "frontmatter description must not be empty"))
+        if doc.total_lines > max_lines:
+            issues.append(
+                ReviewIssue(
+                    "skills",
+                    rel_file,
+                    doc.total_lines,
+                    f"skill line count {doc.total_lines} exceeds budget {max_lines}",
+                )
+            )
+        if not doc.truth_lines or doc.truth_span is None:
+            issues.append(
+                ReviewIssue("skills", rel_file, 1, "missing <!-- truth: start --> .. <!-- truth: end --> block")
+            )
+        elif len(doc.truth_lines) > max_truth:
+            issues.append(
+                ReviewIssue(
+                    "skills",
+                    rel_file,
+                    doc.truth_span[0],
+                    f"truth block line count {len(doc.truth_lines)} exceeds budget {max_truth}",
+                )
+            )
+        for target, line_no in doc.links:
+            target_clean = target.split("#")[0]
+            if target_clean and not (skill_file.parent / target_clean).resolve().exists():
+                issues.append(ReviewIssue("skills", rel_file, line_no, f"relative link '{target}' does not resolve"))
+        return doc
 
     def _check_agents(self) -> list[ReviewIssue]:
         """Validate custom agent definitions, tools, commands, and preloads."""
@@ -2122,38 +1995,35 @@ class ReviewSetupValidator:
 
     def _get_checklist_ids_and_retired(self) -> tuple[set[str], set[str]]:
         """Extract checklist IDs and retired IDs from checklist.md."""
-        chk_path = self.repo_root / ".agents/skills/review-core/references/checklist.md"
-        if not chk_path.exists():
-            return set(), set()
-        active_ids: set[str] = set()
-        retired_ids: set[str] = set()
-
-        item_re = re.compile(r"^-\s+\*\*(?P<id>[A-Z]{2,5}-\d{2})\*\*:")
-        retired_re = re.compile(r"^-\s+~~\*\*(?P<id>[A-Z]{2,5}-\d{2})\*\*~~:")
-
-        for line in chk_path.read_text(encoding="utf-8").splitlines():
-            m_act = item_re.match(line)
-            if m_act:
-                active_ids.add(m_act.group("id"))
-                continue
-            m_ret = retired_re.match(line)
-            if m_ret:
-                retired_ids.add(m_ret.group("id"))
-
-        return active_ids, retired_ids
+        return _load_checklist_ids_and_retired(self.repo_root)
 
     def _get_suppression_ids(self) -> set[str]:
         """Extract suppression IDs from false-positive-suppressions.md."""
-        fp_path = self.repo_root / ".agents/skills/review-core/references/false-positive-suppressions.md"
-        if not fp_path.exists():
-            return set()
-        fps: set[str] = set()
-        fp_re = re.compile(r"^###\s+(?P<id>FP-[A-Z]{2,5}-\d{2}):")
-        for line in fp_path.read_text(encoding="utf-8").splitlines():
-            m = fp_re.match(line)
-            if m:
-                fps.add(m.group("id"))
-        return fps
+        return _load_suppression_ids(self.repo_root)
+
+
+def _load_checklist_ids_and_retired(repo_root: Path) -> tuple[set[str], set[str]]:
+    chk_path = repo_root / ".agents/skills/review-core/references/checklist.md"
+    if not chk_path.exists():
+        return set(), set()
+    active_ids: set[str] = set()
+    retired_ids: set[str] = set()
+    item_re = re.compile(r"^-\s+\*\*(?P<id>[A-Z]{2,5}-\d{2})\*\*")
+    retired_re = re.compile(r"^-\s+~~\*\*(?P<id>[A-Z]{2,5}-\d{2})\*\*")
+    for line in chk_path.read_text(encoding="utf-8").splitlines():
+        if m_act := item_re.match(line):
+            active_ids.add(m_act.group("id"))
+        elif m_ret := retired_re.match(line):
+            retired_ids.add(m_ret.group("id"))
+    return active_ids, retired_ids
+
+
+def _load_suppression_ids(repo_root: Path) -> set[str]:
+    fp_path = repo_root / ".agents/skills/review-core/references/false-positive-suppressions.md"
+    if not fp_path.exists():
+        return set()
+    fp_re = re.compile(r"^###\s+(?P<id>FP-[A-Z]+-\d{2}):")
+    return {m.group("id") for line in fp_path.read_text(encoding="utf-8").splitlines() if (m := fp_re.match(line))}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

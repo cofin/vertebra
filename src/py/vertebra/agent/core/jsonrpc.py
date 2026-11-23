@@ -14,13 +14,6 @@ import msgspec
 
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
-try:
-    from vertebra import _vertebra
-
-    _HAS_NATIVE: bool = hasattr(_vertebra, "classify_jsonrpc_frame")
-except ImportError:
-    _HAS_NATIVE = False
-
 logger = logging.getLogger(__name__)
 
 PARSE_ERROR: int = -32700

@@ -34,7 +34,7 @@ const CODE_NAMES: [&str; 17] = [
     "UNAUTHENTICATED",
 ];
 
-pub use crate::connection::install_rustls_ring_provider;
+pub use crate::install_rustls_ring_provider;
 
 /// Return the canonical uppercase gRPC status name for `code` (`0..=16`), or `"UNKNOWN"`.
 pub fn code_name(code: i32) -> &'static str {

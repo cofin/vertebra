@@ -370,6 +370,37 @@ class _BaseSQLSpecProvider:
                 return f"{msg} (caused by {detail})" if msg else detail
         return msg
 
+    @staticmethod
+    def _ok_response(
+        request: BrokerRpcRequest,
+        *,
+        slot_idx: int | None = None,
+        generation: int | None = None,
+        in_tx: bool = False,
+        **extra: Any,
+    ) -> BrokerRpcResponse:
+        return BrokerRpcResponse(
+            request_id=request.request_id,
+            ok=True,
+            slot_idx=request.slot_idx if slot_idx is None else slot_idx,
+            generation=request.generation if generation is None else generation,
+            in_tx=in_tx,
+            **extra,
+        )
+
+    def _error_response(self, request: BrokerRpcRequest, key: tuple[int, int], exc: Exception) -> BrokerRpcResponse:
+        with self._lock:
+            in_tx = self._tx_states.get(key, request.in_tx)
+        return BrokerRpcResponse(
+            request_id=request.request_id,
+            ok=False,
+            slot_idx=request.slot_idx,
+            generation=request.generation,
+            in_tx=in_tx,
+            error_type=type(exc).__name__,
+            error_message=self._format_error_message(exc),
+        )
+
     def _handle_request_sync(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
         """Execute a synchronous BrokerRpcRequest and return a BrokerRpcResponse."""
         op = request.op
@@ -380,13 +411,7 @@ class _BaseSQLSpecProvider:
                     self._release_arrow_buffer(request.arrow_shm_name, key=key)
                 with self._lock:
                     in_tx = self._tx_states.get(key, request.in_tx)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=in_tx,
-                )
+                return self._ok_response(request, in_tx=in_tx)
 
             if op == "acquire":
                 slot_idx, generation = self._acquire_slot_sync(request)
@@ -399,36 +424,18 @@ class _BaseSQLSpecProvider:
                     if lease is not None:
                         self._release_broker_lease(lease, lease_key, in_tx=False)
                     raise
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=slot_idx,
-                    generation=generation,
-                    in_tx=False,
-                )
+                return self._ok_response(request, slot_idx=slot_idx, generation=generation, in_tx=False)
 
             if op == "release":
                 self._release_session_sync(key, request.in_tx)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=False,
-                )
+                return self._ok_response(request, in_tx=False)
 
             if op == "commit":
                 session = self.get_leased_session(key[0], key[1])
                 if session is None:
                     raise RuntimeError(f"Cannot commit without an active leased session for slot {key}")
                 self._exec_commit_sync(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=False,
-                )
+                return self._ok_response(request, in_tx=False)
 
             if op == "rollback":
                 self._close_lease_streams_sync(key)
@@ -436,45 +443,24 @@ class _BaseSQLSpecProvider:
                 if session is None:
                     with self._lock:
                         self._tx_states[key] = False
-                    return BrokerRpcResponse(
-                        request_id=request.request_id,
-                        ok=True,
-                        slot_idx=request.slot_idx,
-                        generation=request.generation,
-                        in_tx=False,
-                    )
+                    return self._ok_response(request, in_tx=False)
                 self._exec_rollback_sync(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=False,
-                )
+                return self._ok_response(request, in_tx=False)
 
             if op == "stream_close":
                 self._close_stream_by_id_sync(key, request.stream_id)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=self._tx_state_for(key, request.in_tx),
-                    stream_id=request.stream_id,
-                    has_more=False,
+                return self._ok_response(
+                    request, in_tx=self._tx_state_for(key, request.in_tx), stream_id=request.stream_id, has_more=False
                 )
 
             if op == "stream_fetch":
                 rows, columns, has_more = self._exec_stream_fetch_sync(key, request.stream_id, request.chunk_rows)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
+                return self._ok_response(
+                    request,
+                    in_tx=self._tx_state_for(key, request.in_tx),
                     rows=rows,
                     columns=columns,
                     rowcount=len(rows),
-                    in_tx=self._tx_state_for(key, request.in_tx),
                     stream_id=request.stream_id,
                     has_more=has_more,
                 )
@@ -487,38 +473,18 @@ class _BaseSQLSpecProvider:
 
             if op == "begin":
                 self._exec_begin_sync(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=True,
-                )
+                return self._ok_response(request, in_tx=True)
 
             if op == "execute":
                 raw_res = self._invoke_sync(session, ("execute",), request.sql, request.params)
                 rows, columns, rowcount = self._extract_result_sync(raw_res)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    rows=rows,
-                    columns=columns,
-                    rowcount=rowcount,
-                    in_tx=self._tx_state_for(key, request.in_tx),
+                return self._ok_response(
+                    request, in_tx=self._tx_state_for(key, request.in_tx), rows=rows, columns=columns, rowcount=rowcount
                 )
 
             if op == "execute_many":
                 rowcount = self._exec_many_sync(session, request.sql, request.many_params)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    rowcount=rowcount,
-                    in_tx=self._tx_state_for(key, request.in_tx),
-                )
+                return self._ok_response(request, in_tx=self._tx_state_for(key, request.in_tx), rowcount=rowcount)
 
             if op == "select":
                 raw_res = self._invoke_sync(session, ("select", "fetch", "execute"), request.sql, request.params)
@@ -527,41 +493,32 @@ class _BaseSQLSpecProvider:
 
             if op == "select_one":
                 row, columns = self._exec_select_one_sync(session, request.sql, request.params, allow_none=False)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
+                return self._ok_response(
+                    request,
+                    in_tx=self._tx_state_for(key, request.in_tx),
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_one_or_none":
                 row, columns = self._exec_select_one_sync(session, request.sql, request.params, allow_none=True)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
+                return self._ok_response(
+                    request,
+                    in_tx=self._tx_state_for(key, request.in_tx),
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op in {"select_value", "select_value_or_none"}:
                 allow_none = op == "select_value_or_none"
                 scalar = self._exec_select_value_sync(session, request.sql, request.params, allow_none=allow_none)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
+                return self._ok_response(
+                    request,
+                    in_tx=self._tx_state_for(key, request.in_tx),
                     scalar=scalar,
                     rowcount=1 if scalar is not None else 0,
-                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_to_arrow":
@@ -571,15 +528,12 @@ class _BaseSQLSpecProvider:
                 stream_id, rows, columns, has_more = self._exec_stream_open_sync(
                     session, key, request.sql, request.params, request.chunk_rows
                 )
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
+                return self._ok_response(
+                    request,
+                    in_tx=self._tx_state_for(key, request.in_tx),
                     rows=rows,
                     columns=columns,
                     rowcount=len(rows),
-                    in_tx=self._tx_state_for(key, request.in_tx),
                     stream_id=stream_id,
                     has_more=has_more,
                 )
@@ -587,17 +541,7 @@ class _BaseSQLSpecProvider:
             msg = f"Unsupported BrokerRpcRequest operation: {op!r}"
             raise VertebraError(msg)
         except Exception as exc:
-            with self._lock:
-                in_tx = self._tx_states.get(key, request.in_tx)
-            return BrokerRpcResponse(
-                request_id=request.request_id,
-                ok=False,
-                slot_idx=request.slot_idx,
-                generation=request.generation,
-                in_tx=in_tx,
-                error_type=type(exc).__name__,
-                error_message=self._format_error_message(exc),
-            )
+            return self._error_response(request, key, exc)
 
     async def _handle_request_async(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
         """Execute an asynchronous BrokerRpcRequest and return a BrokerRpcResponse."""
@@ -609,13 +553,7 @@ class _BaseSQLSpecProvider:
                     await SyncPool.default().submit_async(self._release_arrow_buffer, request.arrow_shm_name, key)
                 with self._lock:
                     in_tx = self._tx_states.get(key, request.in_tx)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=in_tx,
-                )
+                return self._ok_response(request, in_tx=in_tx)
 
             if op == "acquire":
                 slot_idx, generation = await self._acquire_slot_async(request)
@@ -628,36 +566,18 @@ class _BaseSQLSpecProvider:
                     if lease is not None:
                         await self._release_broker_lease_async(lease, lease_key, in_tx=False)
                     raise
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=slot_idx,
-                    generation=generation,
-                    in_tx=False,
-                )
+                return self._ok_response(request, slot_idx=slot_idx, generation=generation, in_tx=False)
 
             if op == "release":
                 await self._release_session_async(key, request.in_tx)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=False,
-                )
+                return self._ok_response(request, in_tx=False)
 
             if op == "commit":
                 session = self.get_leased_session(key[0], key[1])
                 if session is None:
                     raise RuntimeError(f"Cannot commit without an active leased session for slot {key}")
                 await self._exec_commit_async(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=False,
-                )
+                return self._ok_response(request, in_tx=False)
 
             if op == "rollback":
                 await self._close_lease_streams_async(key)
@@ -665,47 +585,26 @@ class _BaseSQLSpecProvider:
                 if session is None:
                     with self._lock:
                         self._tx_states[key] = False
-                    return BrokerRpcResponse(
-                        request_id=request.request_id,
-                        ok=True,
-                        slot_idx=request.slot_idx,
-                        generation=request.generation,
-                        in_tx=False,
-                    )
+                    return self._ok_response(request, in_tx=False)
                 await self._exec_rollback_async(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=False,
-                )
+                return self._ok_response(request, in_tx=False)
 
             if op == "stream_close":
                 await self._close_stream_by_id_async(key, request.stream_id)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=self._tx_state_for(key, request.in_tx),
-                    stream_id=request.stream_id,
-                    has_more=False,
+                return self._ok_response(
+                    request, in_tx=self._tx_state_for(key, request.in_tx), stream_id=request.stream_id, has_more=False
                 )
 
             if op == "stream_fetch":
                 rows, columns, has_more = await self._exec_stream_fetch_async(
                     key, request.stream_id, request.chunk_rows
                 )
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
+                return self._ok_response(
+                    request,
+                    in_tx=self._tx_state_for(key, request.in_tx),
                     rows=rows,
                     columns=columns,
                     rowcount=len(rows),
-                    in_tx=self._tx_state_for(key, request.in_tx),
                     stream_id=request.stream_id,
                     has_more=has_more,
                 )
@@ -718,38 +617,18 @@ class _BaseSQLSpecProvider:
 
             if op == "begin":
                 await self._exec_begin_async(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=True,
-                )
+                return self._ok_response(request, in_tx=True)
 
             if op == "execute":
                 raw_res = await self._invoke_async(session, ("execute",), request.sql, request.params)
                 rows, columns, rowcount = await self._extract_result_async(raw_res)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    rows=rows,
-                    columns=columns,
-                    rowcount=rowcount,
-                    in_tx=self._tx_state_for(key, request.in_tx),
+                return self._ok_response(
+                    request, in_tx=self._tx_state_for(key, request.in_tx), rows=rows, columns=columns, rowcount=rowcount
                 )
 
             if op == "execute_many":
                 rowcount = await self._exec_many_async(session, request.sql, request.many_params)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    rowcount=rowcount,
-                    in_tx=self._tx_state_for(key, request.in_tx),
-                )
+                return self._ok_response(request, in_tx=self._tx_state_for(key, request.in_tx), rowcount=rowcount)
 
             if op == "select":
                 raw_res = await self._invoke_async(session, ("select", "fetch", "execute"), request.sql, request.params)
@@ -758,28 +637,22 @@ class _BaseSQLSpecProvider:
 
             if op == "select_one":
                 row, columns = await self._exec_select_one_async(session, request.sql, request.params, allow_none=False)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
+                return self._ok_response(
+                    request,
+                    in_tx=self._tx_state_for(key, request.in_tx),
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_one_or_none":
                 row, columns = await self._exec_select_one_async(session, request.sql, request.params, allow_none=True)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
+                return self._ok_response(
+                    request,
+                    in_tx=self._tx_state_for(key, request.in_tx),
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op in {"select_value", "select_value_or_none"}:
@@ -787,14 +660,11 @@ class _BaseSQLSpecProvider:
                 scalar = await self._exec_select_value_async(
                     session, request.sql, request.params, allow_none=allow_none
                 )
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
+                return self._ok_response(
+                    request,
+                    in_tx=self._tx_state_for(key, request.in_tx),
                     scalar=scalar,
                     rowcount=1 if scalar is not None else 0,
-                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_to_arrow":
@@ -804,15 +674,12 @@ class _BaseSQLSpecProvider:
                 stream_id, rows, columns, has_more = await self._exec_stream_open_async(
                     session, key, request.sql, request.params, request.chunk_rows
                 )
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
+                return self._ok_response(
+                    request,
+                    in_tx=self._tx_state_for(key, request.in_tx),
                     rows=rows,
                     columns=columns,
                     rowcount=len(rows),
-                    in_tx=self._tx_state_for(key, request.in_tx),
                     stream_id=stream_id,
                     has_more=has_more,
                 )
@@ -820,17 +687,7 @@ class _BaseSQLSpecProvider:
             msg = f"Unsupported BrokerRpcRequest operation: {op!r}"
             raise VertebraError(msg)
         except Exception as exc:
-            with self._lock:
-                in_tx = self._tx_states.get(key, request.in_tx)
-            return BrokerRpcResponse(
-                request_id=request.request_id,
-                ok=False,
-                slot_idx=request.slot_idx,
-                generation=request.generation,
-                in_tx=in_tx,
-                error_type=type(exc).__name__,
-                error_message=self._format_error_message(exc),
-            )
+            return self._error_response(request, key, exc)
 
     def _handle_raw_frame_sync(self, payload: bytes | bytearray | memoryview) -> bytes:
         """Decode a serialized RPC request frame (MessagePack or JSON), execute it, and encode the response."""
@@ -1522,14 +1379,11 @@ class _BaseSQLSpecProvider:
             shm_name, byte_len, tracked_cols, rowcount = self._track_arrow_cursor(cursor, key=key)
             if not columns:
                 columns = tracked_cols
-        return BrokerRpcResponse(
-            request_id=request.request_id,
-            ok=True,
-            slot_idx=request.slot_idx,
-            generation=request.generation,
+        return self._ok_response(
+            request,
+            in_tx=self._tx_state_for(key, request.in_tx),
             columns=columns,
             rowcount=rowcount,
-            in_tx=self._tx_state_for(key, request.in_tx),
             is_arrow_shm=True,
             arrow_shm_name=shm_name,
             arrow_byte_len=byte_len,
@@ -1557,14 +1411,11 @@ class _BaseSQLSpecProvider:
             shm_name, byte_len, tracked_cols, rowcount = self._track_arrow_cursor(cursor, key=key)
             if not columns:
                 columns = tracked_cols
-        return BrokerRpcResponse(
-            request_id=request.request_id,
-            ok=True,
-            slot_idx=request.slot_idx,
-            generation=request.generation,
+        return self._ok_response(
+            request,
+            in_tx=self._tx_state_for(key, request.in_tx),
             columns=columns,
             rowcount=rowcount,
-            in_tx=self._tx_state_for(key, request.in_tx),
             is_arrow_shm=True,
             arrow_shm_name=shm_name,
             arrow_byte_len=byte_len,
@@ -1615,14 +1466,11 @@ class _BaseSQLSpecProvider:
         """Record an active VTBARROW SHM cursor and return its Arrow SHM BrokerRpcResponse."""
         shm_name, byte_len, tracked_cols, _ = self._track_arrow_cursor(cursor, key=key)
         resolved_cols = list(columns) if columns else tracked_cols
-        return BrokerRpcResponse(
-            request_id=request.request_id,
-            ok=True,
-            slot_idx=request.slot_idx,
-            generation=request.generation,
+        return self._ok_response(
+            request,
+            in_tx=in_tx,
             columns=resolved_cols,
             rowcount=row_count,
-            in_tx=in_tx,
             is_arrow_shm=True,
             arrow_shm_name=shm_name,
             arrow_byte_len=byte_len,
@@ -1641,16 +1489,7 @@ class _BaseSQLSpecProvider:
         if rows and self._should_spill_select(rows):
             cursor = _write_vtbarrow_cursor(rows, columns=columns)
             return self._build_spilled_select_response(request, in_tx, columns, row_count, cursor, key=key)
-        return BrokerRpcResponse(
-            request_id=request.request_id,
-            ok=True,
-            slot_idx=request.slot_idx,
-            generation=request.generation,
-            rows=rows,
-            columns=columns,
-            rowcount=row_count,
-            in_tx=in_tx,
-        )
+        return self._ok_response(request, in_tx=in_tx, rows=rows, columns=columns, rowcount=row_count)
 
     async def _build_select_response_async(
         self,
@@ -1665,16 +1504,7 @@ class _BaseSQLSpecProvider:
         if rows and self._should_spill_select(rows):
             cursor = await SyncPool.default().submit_async(_write_vtbarrow_cursor, rows, columns=columns)
             return self._build_spilled_select_response(request, in_tx, columns, row_count, cursor, key=key)
-        return BrokerRpcResponse(
-            request_id=request.request_id,
-            ok=True,
-            slot_idx=request.slot_idx,
-            generation=request.generation,
-            rows=rows,
-            columns=columns,
-            rowcount=row_count,
-            in_tx=in_tx,
-        )
+        return self._ok_response(request, in_tx=in_tx, rows=rows, columns=columns, rowcount=row_count)
 
     def _invoke_sync(self, session: Any, method_names: tuple[str, ...], sql: str, params: Any) -> Any:
         """Invoke the first available method in method_names on session synchronously."""

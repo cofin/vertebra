@@ -2,110 +2,8 @@
 //! into `vertebra._vertebra` exception types with canonical SQLSTATE and transience metadata.
 
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyTuple, PyType};
 use thiserror::Error;
-
-/// Cached Python exception types resolved from `vertebra._vertebra`.
-pub struct SqliteExceptionTypes {
-    pub database: Py<PyType>,
-    pub interface: Py<PyType>,
-    pub operational: Py<PyType>,
-    pub integrity: Py<PyType>,
-    pub programming: Py<PyType>,
-    pub data: Py<PyType>,
-    pub not_found: Py<PyType>,
-    pub query_cancelled: Py<PyType>,
-}
-
-static SQLITE_EXCEPTION_TYPES: PyOnceLock<SqliteExceptionTypes> = PyOnceLock::new();
-
-fn new_stand_in_class<'py>(
-    py: Python<'py>,
-    name: &str,
-    bases: &Bound<'py, PyTuple>,
-) -> PyResult<Py<PyType>> {
-    let dict = PyDict::new(py);
-    dict.set_item("__module__", "vertebra._vertebra")?;
-    let ty = py
-        .get_type::<PyType>()
-        .call1((name, bases, dict))?
-        .cast_into::<PyType>()?;
-    Ok(ty.unbind())
-}
-
-fn stand_in_exception_types(py: Python<'_>) -> PyResult<SqliteExceptionTypes> {
-    let root = match py
-        .import("vertebra.typing")
-        .and_then(|m| m.getattr("VertebraError"))
-        .and_then(|v| v.cast_into::<PyType>().map_err(Into::into))
-    {
-        Ok(ty) => ty,
-        Err(_) => py.get_type::<pyo3::exceptions::PyException>(),
-    };
-    let database = new_stand_in_class(py, "DatabaseError", &PyTuple::new(py, [&root])?)?;
-    let db_base = PyTuple::new(py, [database.bind(py)])?;
-    let interface = new_stand_in_class(py, "InterfaceError", &db_base)?;
-    let operational = new_stand_in_class(py, "OperationalError", &db_base)?;
-    let op_base = PyTuple::new(py, [operational.bind(py)])?;
-    let integrity = new_stand_in_class(py, "IntegrityError", &db_base)?;
-    let programming = new_stand_in_class(py, "ProgrammingError", &db_base)?;
-    let data = new_stand_in_class(py, "DataError", &db_base)?;
-    let data_base = PyTuple::new(py, [data.bind(py)])?;
-    let not_found = new_stand_in_class(py, "NotFoundError", &data_base)?;
-    let query_cancelled = new_stand_in_class(py, "QueryCancelledError", &op_base)?;
-
-    Ok(SqliteExceptionTypes {
-        database,
-        interface,
-        operational,
-        integrity,
-        programming,
-        data,
-        not_found,
-        query_cancelled,
-    })
-}
-
-fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static SqliteExceptionTypes> {
-    SQLITE_EXCEPTION_TYPES.get_or_try_init(py, || match py.import("vertebra._vertebra") {
-        Ok(core_mod) => Ok(SqliteExceptionTypes {
-            database: core_mod
-                .getattr("DatabaseError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            interface: core_mod
-                .getattr("InterfaceError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            operational: core_mod
-                .getattr("OperationalError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            integrity: core_mod
-                .getattr("IntegrityError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            programming: core_mod
-                .getattr("ProgrammingError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            data: core_mod
-                .getattr("DataError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            not_found: core_mod
-                .getattr("NotFoundError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            query_cancelled: core_mod
-                .getattr("QueryCancelledError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-        }),
-        Err(_) => stand_in_exception_types(py),
-    })
-}
+use vertebra_db::py_errors::{instantiate_db_exc, resolve_db_exceptions};
 
 /// Classified error emitted by the SQLite client.
 #[derive(Debug, Error)]
@@ -345,10 +243,10 @@ impl SqliteClientError {
     pub fn into_py_err(self, py: Python<'_>) -> PyErr {
         let msg = self.to_string();
         let sqlstate = self.sqlstate();
-        let vendor_code = self.vendor_code();
+        let vendor_code = self.vendor_code().map(i64::from);
         let is_transient = self.is_transient();
 
-        let Ok(types) = resolve_exception_types(py) else {
+        let Ok(types) = resolve_db_exceptions(py) else {
             return pyo3::exceptions::PyRuntimeError::new_err(msg);
         };
 
@@ -362,12 +260,7 @@ impl SqliteClientError {
             Self::Cancelled(_) => &types.query_cancelled,
         };
 
-        let py_err = PyErr::from_type(ty.bind(py).clone(), (msg,));
-        let inst = py_err.value(py);
-        let _ = inst.setattr("sqlstate", sqlstate);
-        let _ = inst.setattr("vendor_code", vendor_code);
-        let _ = inst.setattr("is_transient", is_transient);
-        py_err
+        instantiate_db_exc(py, ty, &msg, sqlstate, vendor_code, is_transient)
     }
 }
 

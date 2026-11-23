@@ -1,4 +1,4 @@
-import { computeBackoffDelay } from "../client/retry";
+import { ReconnectScheduler } from "../internal/reconnect";
 
 /**
  * Vertebra HMR Client
@@ -93,8 +93,7 @@ function hideErrorOverlay(): void {
 
 class HotReloadClient {
   private ws: WebSocket | null = null;
-  private reconnectAttempts = 0;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly reconnect = new ReconnectScheduler(RECONNECT_MAX_ATTEMPTS, RECONNECT_BASE_MS, RECONNECT_MAX_MS);
   private pingTimer: ReturnType<typeof setTimeout> | null = null;
   private _connected = false;
   private hmrPath: string;
@@ -132,22 +131,18 @@ class HotReloadClient {
 
   /** Close the WebSocket connection and stop reconnection. */
   destroy(): void {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    this.reconnect.cancel();
     this.clearPingTimer();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
-    this.reconnectAttempts = 0;
     this._connected = false;
   }
 
   private onOpen(): void {
     console.log("[vertebra] HMR connected");
-    this.reconnectAttempts = 0;
+    this.reconnect.reset();
     this._connected = true;
     this.resetPingTimer();
   }
@@ -275,18 +270,9 @@ class HotReloadClient {
   }
 
   private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+    if (!this.reconnect.schedule(() => this.connect())) {
       console.error("[vertebra] HMR max reconnect attempts reached");
-      return;
     }
-
-    const delay = computeBackoffDelay(this.reconnectAttempts, RECONNECT_BASE_MS, RECONNECT_MAX_MS);
-
-    this.reconnectAttempts++;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connect();
-    }, delay);
   }
 }
 

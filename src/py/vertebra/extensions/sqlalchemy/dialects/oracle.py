@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from sqlalchemy import exc
 from sqlalchemy.dialects.oracle.base import OracleDialect as BaseOracleDialect
@@ -18,9 +18,6 @@ if TYPE_CHECKING:
 
 from vertebra.extensions.sqlalchemy.dialects._base import (
     _AsyncDialectMixin,
-    _extract_sqlstate,
-    _extract_vendor_code,
-    _is_disconnect_common,
     _SyncDialectMixin,
 )
 from vertebra.extensions.sqlalchemy.types import MsgspecJSON, OracleVector
@@ -242,35 +239,12 @@ class _OracleDialectMixin:
             )
         return parsed
 
-    def is_disconnect(self, e: Exception, connection: Any = None, cursor: Any = None) -> bool:
-        """Return True when the exception matches an Oracle disconnect code or SQLSTATE 08*."""
-        try:
-            sqlstate = _extract_sqlstate(e)
-            if sqlstate is not None:
-                if sqlstate in _ORACLE_NON_DISCONNECT_SQLSTATES:
-                    return False
-                if sqlstate.startswith("08"):
-                    return True
-
-            vendor_code = _extract_vendor_code(e)
-            if vendor_code == 1:
-                return False
-            if vendor_code in _ORACLE_DISCONNECT_VENDOR_CODES:
-                return True
-
-            for candidate in (e, getattr(e, "orig", None), getattr(e, "__cause__", None)):
-                if candidate is None:
-                    continue
-                msg = str(candidate).lower()
-                if "ora-00001" in msg:
-                    return False
-                if any(phrase in msg for phrase in _ORACLE_DISCONNECT_PHRASES) or _ORACLE_DISCONNECT_RE.search(msg):
-                    return True
-
-            parent_fn = getattr(super(), "is_disconnect", None)
-            return _is_disconnect_common(e, connection, cursor, parent_fn)
-        except Exception:
-            return False
+    _non_disconnect_sqlstates = _ORACLE_NON_DISCONNECT_SQLSTATES
+    _disconnect_codes = _ORACLE_DISCONNECT_VENDOR_CODES
+    _non_disconnect_codes = frozenset({1})
+    _extra_disconnect_phrases = _ORACLE_DISCONNECT_PHRASES
+    _non_disconnect_phrases: ClassVar[tuple[str, ...]] = ("ora-00001",)
+    _disconnect_regex: ClassVar[re.Pattern[str] | None] = _ORACLE_DISCONNECT_RE
 
 
 class SyncOracleDialect(_OracleDialectMixin, _SyncDialectMixin, BaseOracleDialect):

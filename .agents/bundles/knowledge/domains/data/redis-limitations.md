@@ -25,8 +25,8 @@ sources:
     resource: src/py/vertebra/db/driver/_resp.py::ClusterRedirect
     title: Shared RESP3 cluster redirect, CRC16-XMODEM slot, and Resp3Error primitives
   - id: redis-client-core-rs
-    resource: src/rs/vertebra-redis/src/client_core.rs::RedisClientCore
-    title: Pure-Rust RESP3 client core and EVALSHA-to-EVAL script fallback
+    resource: src/rs/vertebra-resp/src/client.rs::RespEngine
+    title: Pure-Rust RESP3 client engine and EVALSHA-to-EVAL script fallback
   - id: redis-pubsub-rs
     resource: src/rs/vertebra-redis/src/pubsub.rs::AsyncRedisListener
     title: Dedicated socket pub/sub listener and multiplexed push streaming
@@ -53,12 +53,12 @@ sources:
 ## Operational Boundaries
 
 - **Pub/Sub Channel Isolation**: [`SyncRedisListener`](../../../../../src/rs/vertebra-redis/src/pubsub.rs)[^redis-pubsub-rs] and `AsyncRedisListener` maintain a separate persistent stream connection dedicated to SUBSCRIBE, PSUBSCRIBE, and SSUBSCRIBE frames; applications should not share notification listeners with high-frequency request/response pools.
-- **Cluster Shard Redirection**: [`RedisClientCore`](../../../../../src/rs/vertebra-redis/src/client_core.rs)[^redis-client-core-rs] automatically follows `MOVED` and `ASK` redirects up to the configured retry budget and updates the slot map surfaced through `slot_map()`; permanent node re-sharding requires updating the cluster slot map via topology refresh.
+- **Cluster Shard Redirection**: [`RespEngine`](../../../../../src/rs/vertebra-resp/src/client.rs)[^redis-client-core-rs] automatically follows `MOVED` and `ASK` redirects up to the configured retry budget and updates the slot map surfaced through `slot_map()`; permanent node re-sharding requires updating the cluster slot map via topology refresh.
 - **Script Caching Discipline**: Lua scripts execute via `EVALSHA` and fall back to `EVAL` upon encountering `NOSCRIPT`; ephemeral servers or flushed script caches incur a one-round-trip script upload penalty.
 
 [^redis-config-py]: `src/py/vertebra/db/adapters/redis/config.py::RedisConfig` — Redis URL validation, memory rejection, Azure Entra scope, and cluster/sentinel topologies.
 [^redis-sync-py]: `src/py/vertebra/db/adapters/redis/_sync.py::SyncRedisDriver` — Sync/async Redis driver layout, `slot_map`, and Sentinel rediscovery.
 [^resp-py]: `src/py/vertebra/db/driver/_resp.py::ClusterRedirect` — Shared RESP3 cluster redirect, CRC16-XMODEM slot, and `Resp3Error` primitives.
-[^redis-client-core-rs]: `src/rs/vertebra-redis/src/client_core.rs::RedisClientCore` — Pure-Rust RESP3 client core and EVALSHA-to-EVAL script fallback.
+[^redis-client-core-rs]: `src/rs/vertebra-resp/src/client.rs::RespEngine` — Pure-Rust RESP3 client engine and EVALSHA-to-EVAL script fallback.
 [^redis-pubsub-rs]: `src/rs/vertebra-redis/src/pubsub.rs::AsyncRedisListener` — Dedicated socket pub/sub listener and multiplexed push streaming.
 [^redis-queue-py]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend` — Redis Streams consumer groups and sorted-set delayed task scheduling.

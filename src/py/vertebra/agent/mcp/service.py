@@ -22,6 +22,7 @@ from typing import Any, NoReturn, cast
 import anyio
 import msgspec
 
+from vertebra._vertebra import classify_jsonrpc_frame as _classify_jsonrpc_frame
 from vertebra.agent.core.context import (
     AgentContext,
     ProgressReporter,
@@ -2489,28 +2490,3 @@ class _ListenStreamWrapper(AsyncIterator[bytes]):
     def _cleanup(self) -> None:
         self._core._listen_registrations.pop(self._subscription_id, None)
         self._core.stream_broker.close_session(self._stream_id)
-
-
-_native_classify_jsonrpc_frame: Callable[[bytes], tuple[int, str | None, str | None]] | None = None
-try:
-    from vertebra._vertebra import classify_jsonrpc_frame as _native_classify_jsonrpc_frame
-except ImportError:
-    _native_classify_jsonrpc_frame = None
-
-
-def _classify_jsonrpc_frame(payload: bytes) -> tuple[int, str | None, str | None]:
-    if _native_classify_jsonrpc_frame is not None:
-        return _native_classify_jsonrpc_frame(payload)
-    data = decode_json(payload)
-    if isinstance(data, list):
-        return 2, None, None
-    if not isinstance(data, dict):
-        raise ValueError("Expected object or list")
-    method = data.get("method")
-    req_id = data.get("id")
-    id_str = str(req_id) if req_id is not None else None
-    if method is not None:
-        if req_id is not None:
-            return 1, method, id_str
-        return 0, method, None
-    return 3, None, id_str

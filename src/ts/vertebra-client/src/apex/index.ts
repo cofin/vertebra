@@ -63,6 +63,16 @@ export class ApexOfflineOutbox {
     return this.lastWallMs * 65536 + this.logicalCounter;
   }
 
+  private pushEntry(entry: ApexOfflineMutationEntry, replaceIdx = -1): ApexOfflineMutationEntry {
+    if (replaceIdx >= 0) {
+      this.queue.splice(replaceIdx, 1);
+    } else if (this.queue.length >= this.maxCapacity) {
+      this.queue.shift();
+    }
+    this.queue.push(entry);
+    return entry;
+  }
+
   enqueueItemMutation(
     regionId: string,
     itemName: string,
@@ -73,22 +83,18 @@ export class ApexOfflineOutbox {
     const existingIdx = this.queue.findIndex(
       (entry) => entry.operation === "set_item" && entry.regionId === regionId && entry.itemName === itemName,
     );
-    const entry: ApexOfflineMutationEntry = {
-      mutationId: options?.mutationId ?? `${regionId}:${itemName}:${hlcTimestamp}`,
-      regionId,
-      operation: "set_item",
-      hlcTimestamp,
-      itemName,
-      value,
-      ...(options?.etag !== undefined ? { etag: options.etag } : {}),
-    };
-    if (existingIdx >= 0) {
-      this.queue.splice(existingIdx, 1);
-    } else if (this.queue.length >= this.maxCapacity) {
-      this.queue.shift();
-    }
-    this.queue.push(entry);
-    return entry;
+    return this.pushEntry(
+      {
+        mutationId: options?.mutationId ?? `${regionId}:${itemName}:${hlcTimestamp}`,
+        regionId,
+        operation: "set_item",
+        hlcTimestamp,
+        itemName,
+        value,
+        ...(options?.etag !== undefined ? { etag: options.etag } : {}),
+      },
+      existingIdx,
+    );
   }
 
   enqueueRowMutation(
@@ -98,19 +104,14 @@ export class ApexOfflineOutbox {
     options?: { mutationId?: string; etag?: string; nowMs?: number },
   ): ApexOfflineMutationEntry {
     const hlcTimestamp = this.nextHlc(options?.nowMs);
-    const entry: ApexOfflineMutationEntry = {
+    return this.pushEntry({
       mutationId: options?.mutationId ?? `${regionId}:${operation}:${hlcTimestamp}`,
       regionId,
       operation,
       hlcTimestamp,
       value,
       ...(options?.etag !== undefined ? { etag: options.etag } : {}),
-    };
-    if (this.queue.length >= this.maxCapacity) {
-      this.queue.shift();
-    }
-    this.queue.push(entry);
-    return entry;
+    });
   }
 
   drain(): ApexOfflineMutationEntry[] {

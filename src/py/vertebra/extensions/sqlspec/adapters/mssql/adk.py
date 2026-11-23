@@ -9,14 +9,23 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, NotRequired, ca
 
 from sqlspec.config import ADKConfig
 from sqlspec.extensions.adk import (
-    BaseAsyncADKStore,
-    BaseSyncADKStore,
     StoredEvent,
     StoredSession,
     normalize_session_list_options,
 )
 from sqlspec.utils.serializers import from_json, to_json
 
+from vertebra.extensions.sqlspec._adk import (
+    AdapterAsyncADKArtifactStore,
+    AdapterAsyncADKMemoryStore,
+    AdapterAsyncADKStore,
+    AdapterSyncADKArtifactStore,
+    AdapterSyncADKMemoryStore,
+    AdapterSyncADKStore,
+    StoredArtifact,
+    StoredMemory,
+    merge_scoped_state,
+)
 from vertebra.extensions.sqlspec.adapters.mssql.core import (
     build_mssql_scope_where,
     escape_mssql_like,
@@ -39,27 +48,12 @@ if TYPE_CHECKING:
 
     from sqlspec.extensions.adk import SessionOrderBy
     from sqlspec.extensions.adk.artifact import StoredArtifact
-    from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore as _BaseAsyncADKArtifactStore
-    from sqlspec.extensions.adk.artifact.store import BaseSyncADKArtifactStore as _BaseSyncADKArtifactStore
     from sqlspec.extensions.adk.converters import merge_scoped_state
     from sqlspec.extensions.adk.memory import StoredMemory
-    from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore as _BaseAsyncADKMemoryStore
-    from sqlspec.extensions.adk.memory.store import BaseSyncADKMemoryStore as _BaseSyncADKMemoryStore
 
     from vertebra.extensions.sqlspec.adapters.mssql.config import MSSQLAsyncConfig, MSSQLSyncConfig
 else:
-    _memory_store_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
-    _artifact_store_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="google-adk", extra="adk")
-    _converters_mod = ensure_module("sqlspec.extensions.adk.converters", package="google-adk", extra="adk")
-    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact", package="google-adk", extra="adk")
-    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory", package="google-adk", extra="adk")
-    _BaseAsyncADKMemoryStore = _memory_store_mod.BaseAsyncADKMemoryStore
-    _BaseSyncADKMemoryStore = _memory_store_mod.BaseSyncADKMemoryStore
-    _BaseAsyncADKArtifactStore = _artifact_store_mod.BaseAsyncADKArtifactStore
-    _BaseSyncADKArtifactStore = _artifact_store_mod.BaseSyncADKArtifactStore
-    merge_scoped_state = _converters_mod.merge_scoped_state
-    StoredArtifact = _artifact_types_mod.StoredArtifact
-    StoredMemory = _memory_types_mod.StoredMemory
+    ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
 
 __all__ = (
     "MSSQLADKConfig",
@@ -696,11 +690,58 @@ class _MSSQLADKSessionSQLMixin:
             )
             raise ValueError(msg)
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_mssql_table_missing(exc)
 
-class MSSQLSyncADKStore(_MSSQLADKSessionSQLMixin, BaseSyncADKStore["MSSQLSyncConfig"]):
+    def _decode_session_row(
+        self,
+        row: Any,
+        *,
+        app_state: dict[str, Any] | None = None,
+        user_state: dict[str, Any] | None = None,
+        merge_scopes: bool = False,
+    ) -> StoredSession:
+        rec = _row_to_session(row, deserializer=self._json_deserializer)
+        if merge_scopes:
+            rec["state"] = merge_scoped_state(rec["state"], app_state, user_state)
+        return rec
+
+    def _decode_event_row(self, row: Any) -> StoredEvent:
+        return _row_to_event(row, deserializer=self._json_deserializer)
+
+    def _update_session_state_sql_and_params(
+        self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]
+    ) -> tuple[str, tuple[Any, ...]]:
+        return self._update_session_state_sql(), (self._json_serializer(state), app_name, user_id, session_id)
+
+    def _delete_session_sqls_and_params(
+        self, app_name: str, user_id: str, session_id: str
+    ) -> tuple[tuple[str, tuple[str, str, str]]]:
+        return ((self._delete_session_sql(), (app_name, user_id, session_id)),)
+
+    def _upsert_app_state_sql_and_params(self, app_name: str, state: dict[str, Any]) -> tuple[str, tuple[Any, ...]]:
+        sql = self._upsert_state_sql(self._app_state_table, ("app_name",))
+        payload = self._json_serializer(state)
+        return sql, (app_name, payload, payload)
+
+    def _upsert_user_state_sql_and_params(
+        self, app_name: str, user_id: str, state: dict[str, Any]
+    ) -> tuple[str, tuple[Any, ...]]:
+        sql = self._upsert_state_sql(self._user_state_table, ("app_name", "user_id"))
+        payload = self._json_serializer(state)
+        return sql, (app_name, user_id, payload, payload)
+
+    def _get_metadata_sql_and_params(self, key: str) -> tuple[str, tuple[str]]:
+        return self._get_metadata_sql(), (key,)
+
+    def _set_metadata_sql_and_params(self, key: str, value: str) -> tuple[str, tuple[str, str]]:
+        return self._upsert_metadata_sql(), (key, value)
+
+
+class MSSQLSyncADKStore(_MSSQLADKSessionSQLMixin, AdapterSyncADKStore):
     """Synchronous SQL Server ADK session, event, app/user state, and metadata store."""
 
-    __slots__ = ("_json_column_type", "_json_deserializer", "_json_serializer", "_native_json")
+    __slots__ = ("_json_column_type", "_native_json")
 
     adapter_name = "vertebra_mssql"
     _max_table_name_parts: ClassVar[int] = 2
@@ -874,63 +915,6 @@ class MSSQLSyncADKStore(_MSSQLADKSessionSQLMixin, BaseSyncADKStore["MSSQLSyncCon
             raise
         return _row_to_session(row, deserializer=self._json_deserializer) if row is not None else None
 
-    def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Replace durable JSON state on an ADK session row."""
-        with self._config.provide_session() as driver:
-            driver.execute(
-                self._update_session_state_sql(),
-                self._json_serializer(state),
-                app_name,
-                user_id,
-                session_id,
-            )
-            driver.commit()
-
-    def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List ADK sessions with ``OFFSET ... FETCH NEXT`` T-SQL pagination."""
-        built = self._list_sessions_sql_and_params(app_name, user_id, order_by, descending, limit, offset)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        return [_row_to_session(row, deserializer=self._json_deserializer) for row in rows]
-
-    def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete an ADK session row (cascading to events)."""
-        with self._config.provide_session() as driver:
-            driver.execute(self._delete_session_sql(), app_name, user_id, session_id)
-            driver.commit()
-
-    def append_event(self, event_record: StoredEvent) -> None:
-        """Append an ADK event record after verifying owning session existence."""
-        sql, params = self._append_event_sql_and_params(event_record)
-        with self._config.provide_session() as driver:
-            res = driver.execute(sql, *params)
-            if int(getattr(res, "rows_affected", 0) or 0) <= 0:
-                with contextlib.suppress(Exception):
-                    driver.rollback()
-                msg = (
-                    f"Session {event_record['session_id']} not found "
-                    f"for app={event_record['app_name']!r}, user={event_record['user_id']!r}"
-                )
-                raise ValueError(msg)
-            driver.commit()
-
     def append_event_and_update_state(
         self,
         event_record: StoredEvent,
@@ -978,53 +962,6 @@ class MSSQLSyncADKStore(_MSSQLADKSessionSQLMixin, BaseSyncADKStore["MSSQLSyncCon
             session["state"] = merge_scoped_state(session["state"], merged_app, merged_user)
         return session
 
-    def get_events(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[StoredEvent]:
-        """Return ordered ADK events for a session."""
-        if limit == 0:
-            return []
-        sql, params = self._get_events_sql_and_params(app_name, user_id, session_id, after_timestamp, limit)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        if limit is not None:
-            rows = list(reversed(rows))
-        return [_row_to_event(row, deserializer=self._json_deserializer) for row in rows]
-
-    def _delete_before(self, table: str, column: str, threshold: datetime, app_name: str | None) -> int:
-        sql, params = self._delete_before_sql_and_params(table, column, threshold, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(res.rows_affected or 0)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return 0
-            raise
-
-    def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete events older than ``before``."""
-        return self._delete_before(self._events_table, "timestamp", before, app_name)
-
-    def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete idle sessions older than ``updated_before``."""
-        return self._delete_before(self._session_table, "update_time", updated_before, app_name)
-
-    def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete idle user states older than ``updated_before``."""
-        return self._delete_before(self._user_state_table, "update_time", updated_before, app_name)
-
     def get_app_state(self, app_name: str) -> dict[str, Any] | None:
         """Fetch app-scoped JSON state for ``app_name``."""
         try:
@@ -1045,50 +982,11 @@ class MSSQLSyncADKStore(_MSSQLADKSessionSQLMixin, BaseSyncADKStore["MSSQLSyncCon
                 return None
             raise
 
-    def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Merge app-scoped JSON state using ``MERGE ... WITH (HOLDLOCK)``."""
-        with self._config.provide_session() as driver:
-            driver.execute(
-                self._upsert_state_sql(self._app_state_table, ("app_name",)),
-                app_name,
-                self._json_serializer(state),
-            )
-            driver.commit()
 
-    def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Merge user-scoped JSON state using ``MERGE ... WITH (HOLDLOCK)``."""
-        with self._config.provide_session() as driver:
-            driver.execute(
-                self._upsert_state_sql(self._user_state_table, ("app_name", "user_id")),
-                app_name,
-                user_id,
-                self._json_serializer(state),
-            )
-            driver.commit()
-
-    def get_metadata(self, key: str) -> str | None:
-        """Return a metadata value by key."""
-        try:
-            with self._config.provide_session() as driver:
-                row = driver.select_one_or_none(self._get_metadata_sql(), key)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return None
-            raise
-        val = mssql_row_value(row, "value", 0) if row is not None else None
-        return str(val) if val is not None else None
-
-    def set_metadata(self, key: str, value: str) -> None:
-        """Upsert a metadata key-value entry via ``MERGE ... WITH (HOLDLOCK)``."""
-        with self._config.provide_session() as driver:
-            driver.execute(self._upsert_metadata_sql(), key, value)
-            driver.commit()
-
-
-class MSSQLAsyncADKStore(_MSSQLADKSessionSQLMixin, BaseAsyncADKStore["MSSQLAsyncConfig"]):
+class MSSQLAsyncADKStore(_MSSQLADKSessionSQLMixin, AdapterAsyncADKStore):
     """Asynchronous SQL Server ADK session, event, app/user state, and metadata store."""
 
-    __slots__ = ("_json_column_type", "_json_deserializer", "_json_serializer", "_native_json")
+    __slots__ = ("_json_column_type", "_native_json")
 
     adapter_name = "vertebra_mssql"
     _max_table_name_parts: ClassVar[int] = 2
@@ -1264,63 +1162,6 @@ class MSSQLAsyncADKStore(_MSSQLADKSessionSQLMixin, BaseAsyncADKStore["MSSQLAsync
             raise
         return _row_to_session(row, deserializer=self._json_deserializer) if row is not None else None
 
-    async def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Replace session state asynchronously."""
-        async with self._config.provide_session() as driver:
-            await driver.execute(
-                self._update_session_state_sql(),
-                self._json_serializer(state),
-                app_name,
-                user_id,
-                session_id,
-            )
-            await driver.commit()
-
-    async def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List ADK sessions asynchronously with ``OFFSET ... FETCH NEXT`` pagination."""
-        built = self._list_sessions_sql_and_params(app_name, user_id, order_by, descending, limit, offset)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        return [_row_to_session(row, deserializer=self._json_deserializer) for row in rows]
-
-    async def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete an ADK session asynchronously."""
-        async with self._config.provide_session() as driver:
-            await driver.execute(self._delete_session_sql(), app_name, user_id, session_id)
-            await driver.commit()
-
-    async def append_event(self, event_record: StoredEvent) -> None:
-        """Append an ADK event record asynchronously after verifying owning session existence."""
-        sql, params = self._append_event_sql_and_params(event_record)
-        async with self._config.provide_session() as driver:
-            res = await driver.execute(sql, *params)
-            if int(getattr(res, "rows_affected", 0) or 0) <= 0:
-                with contextlib.suppress(Exception):
-                    await driver.rollback()
-                msg = (
-                    f"Session {event_record['session_id']} not found "
-                    f"for app={event_record['app_name']!r}, user={event_record['user_id']!r}"
-                )
-                raise ValueError(msg)
-            await driver.commit()
-
     async def append_event_and_update_state(
         self,
         event_record: StoredEvent,
@@ -1370,53 +1211,6 @@ class MSSQLAsyncADKStore(_MSSQLADKSessionSQLMixin, BaseAsyncADKStore["MSSQLAsync
             session["state"] = merge_scoped_state(session["state"], merged_app, merged_user)
         return session
 
-    async def get_events(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[StoredEvent]:
-        """Return ordered ADK events for a session asynchronously."""
-        if limit == 0:
-            return []
-        sql, params = self._get_events_sql_and_params(app_name, user_id, session_id, after_timestamp, limit)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        if limit is not None:
-            rows = list(reversed(rows))
-        return [_row_to_event(row, deserializer=self._json_deserializer) for row in rows]
-
-    async def _delete_before(self, table: str, column: str, threshold: datetime, app_name: str | None) -> int:
-        sql, params = self._delete_before_sql_and_params(table, column, threshold, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(res.rows_affected or 0)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete events older than ``before`` asynchronously."""
-        return await self._delete_before(self._events_table, "timestamp", before, app_name)
-
-    async def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete idle sessions older than ``updated_before`` asynchronously."""
-        return await self._delete_before(self._session_table, "update_time", updated_before, app_name)
-
-    async def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete idle user states older than ``updated_before`` asynchronously."""
-        return await self._delete_before(self._user_state_table, "update_time", updated_before, app_name)
-
     async def get_app_state(self, app_name: str) -> dict[str, Any] | None:
         """Fetch app-scoped state asynchronously."""
         try:
@@ -1436,45 +1230,6 @@ class MSSQLAsyncADKStore(_MSSQLADKSessionSQLMixin, BaseAsyncADKStore["MSSQLAsync
             if is_mssql_table_missing(exc):
                 return None
             raise
-
-    async def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Merge app-scoped JSON state asynchronously."""
-        async with self._config.provide_session() as driver:
-            await driver.execute(
-                self._upsert_state_sql(self._app_state_table, ("app_name",)),
-                app_name,
-                self._json_serializer(state),
-            )
-            await driver.commit()
-
-    async def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Merge user-scoped JSON state asynchronously."""
-        async with self._config.provide_session() as driver:
-            await driver.execute(
-                self._upsert_state_sql(self._user_state_table, ("app_name", "user_id")),
-                app_name,
-                user_id,
-                self._json_serializer(state),
-            )
-            await driver.commit()
-
-    async def get_metadata(self, key: str) -> str | None:
-        """Fetch metadata table value asynchronously."""
-        try:
-            async with self._config.provide_session() as driver:
-                row = await driver.select_one_or_none(self._get_metadata_sql(), key)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return None
-            raise
-        val = mssql_row_value(row, "value", 0) if row is not None else None
-        return str(val) if val is not None else None
-
-    async def set_metadata(self, key: str, value: str) -> None:
-        """Upsert a metadata key-value entry asynchronously."""
-        async with self._config.provide_session() as driver:
-            await driver.execute(self._upsert_metadata_sql(), key, value)
-            await driver.commit()
 
 
 class _MSSQLADKMemorySQLMixin:
@@ -1613,11 +1368,14 @@ class _MSSQLADKMemorySQLMixin:
         sql = f"DELETE FROM {mssql_table_ref(self._memory_table)} WHERE {' AND '.join(clauses)}"
         return sql, tuple(params)
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_mssql_table_missing(exc)
 
-class MSSQLSyncADKMemoryStore(_MSSQLADKMemorySQLMixin, _BaseSyncADKMemoryStore["MSSQLSyncConfig"]):
+
+class MSSQLSyncADKMemoryStore(_MSSQLADKMemorySQLMixin, AdapterSyncADKMemoryStore):
     """Synchronous SQL Server ADK memory store with ``UPDLOCK, HOLDLOCK`` deduplication and ``LIKE`` search."""
 
-    __slots__ = ("_json_column_type", "_json_deserializer", "_json_serializer", "_native_json")
+    __slots__ = ("_json_column_type", "_native_json")
 
     adapter_name = "vertebra_mssql"
     _max_table_name_parts: ClassVar[int] = 2
@@ -1708,43 +1466,11 @@ class MSSQLSyncADKMemoryStore(_MSSQLADKMemorySQLMixin, _BaseSyncADKMemoryStore["
             raise
         return [_row_to_memory(row, deserializer=self._json_deserializer) for row in rows[:limit_value]]
 
-    def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete memory entries for ``session_id`` scoped to ``app_name`` and ``user_id``."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(res.rows_affected or 0)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return 0
-            raise
 
-    def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete memory entries older than ``days`` days."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(res.rows_affected or 0)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return 0
-            raise
-
-
-class MSSQLAsyncADKMemoryStore(_MSSQLADKMemorySQLMixin, _BaseAsyncADKMemoryStore["MSSQLAsyncConfig"]):
+class MSSQLAsyncADKMemoryStore(_MSSQLADKMemorySQLMixin, AdapterAsyncADKMemoryStore):
     """Asynchronous SQL Server ADK memory store."""
 
-    __slots__ = ("_json_column_type", "_json_deserializer", "_json_serializer", "_native_json")
+    __slots__ = ("_json_column_type", "_native_json")
 
     adapter_name = "vertebra_mssql"
     _max_table_name_parts: ClassVar[int] = 2
@@ -1834,38 +1560,6 @@ class MSSQLAsyncADKMemoryStore(_MSSQLADKMemorySQLMixin, _BaseAsyncADKMemoryStore
                 return []
             raise
         return [_row_to_memory(row, deserializer=self._json_deserializer) for row in rows[:limit_value]]
-
-    async def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete memory entries for ``session_id`` scoped to ``app_name`` and ``user_id`` asynchronously."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(res.rows_affected or 0)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete memory entries older than ``days`` days asynchronously."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(res.rows_affected or 0)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return 0
-            raise
 
 
 class _MSSQLADKArtifactSQLMixin:
@@ -2077,11 +1771,22 @@ class _MSSQLADKArtifactSQLMixin:
         delete_sql = f"DELETE FROM {table_ref} WHERE created_at < ?"
         return select_sql, delete_sql, (cutoff,)
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_mssql_table_missing(exc)
 
-class MSSQLSyncADKArtifactStore(_MSSQLADKArtifactSQLMixin, _BaseSyncADKArtifactStore["MSSQLSyncConfig"]):
+    def _decode_artifact_row(self, row: Any) -> StoredArtifact:
+        return _row_to_stored_artifact(row, deserializer=self._json_deserializer)
+
+    def _decode_artifact_ref_row(self, row: Any) -> ArtifactReference:
+        return _row_to_artifact_reference(row)
+
+
+class MSSQLSyncADKArtifactStore(_MSSQLADKArtifactSQLMixin, AdapterSyncADKArtifactStore):
     """Synchronous SQL Server ADK artifact metadata store supporting ``ArtifactReference``."""
 
-    __slots__ = ("_json_column_type", "_json_deserializer", "_json_serializer", "_native_json")
+    _transactional_artifact_delete: ClassVar[bool] = True
+
+    __slots__ = ("_json_column_type", "_native_json")
 
     adapter_name = "vertebra_mssql"
     extension_config_options = _MSSQL_ADK_EXTENSION_OPTIONS
@@ -2104,167 +1809,13 @@ class MSSQLSyncADKArtifactStore(_MSSQLADKArtifactSQLMixin, _BaseSyncADKArtifactS
             driver.execute_script(self._build_artifact_ddl(self._json_column_type or _JSON_FALLBACK_TYPE))
             driver.commit()
 
-    def insert_artifact(self, record: StoredArtifact) -> None:
-        """Insert or merge a ``StoredArtifact`` revision."""
-        sql, params = self._insert_artifact_sql_and_params(record)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
 
-    def insert_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        reference: ArtifactReference,
-        *,
-        session_id: str | None = None,
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Upsert an artifact revision backed by a storage-neutral ``ArtifactReference`` struct."""
-        sql, params = self._insert_artifact_ref_sql_and_params(
-            app_name, user_id, filename, reference, session_id, custom_metadata
-        )
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Fetch an ``ArtifactReference`` revision by exact version or latest."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=True
-        )
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return None
-            raise
-        return _row_to_artifact_reference(row) if row is not None else None
-
-    def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch a ``StoredArtifact`` revision by exact version or latest."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=False
-        )
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return None
-            raise
-        return _row_to_stored_artifact(row, deserializer=self._json_deserializer) if row is not None else None
-
-    def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames within user or session scope."""
-        sql, params = self._list_artifact_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        return [str(mssql_row_value(row, "filename", 0)) for row in rows]
-
-    def list_artifact_versions(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """List all stored versions for an artifact sorted ascending."""
-        sql, params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_artifact(row, deserializer=self._json_deserializer) for row in rows]
-
-    def delete_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete all versions for an artifact atomically and return the deleted records."""
-        select_sql, select_params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        delete_sql, delete_params = self._delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._config.provide_session() as driver:
-                driver.begin()
-                try:
-                    rows = driver.select(select_sql, *select_params)
-                    driver.execute(delete_sql, *delete_params)
-                    driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        driver.rollback()
-                    raise
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_artifact(row, deserializer=self._json_deserializer) for row in rows]
-
-    def get_next_version(self, app_name: str, user_id: str, filename: str, session_id: str | None = None) -> int:
-        """Compute the next zero-based artifact version number."""
-        sql, params = self._get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._config.provide_session() as driver:
-                max_ver = driver.select_value_or_none(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return 0
-            raise
-        return int(max_ver) + 1 if max_ver is not None else 0
-
-    def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Delete artifact rows recorded strictly before ``before`` and return them."""
-        select_sql, delete_sql, params = self._delete_older_than_sqls_and_params(before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                driver.begin()
-                try:
-                    rows = driver.select(select_sql, *params)
-                    driver.execute(delete_sql, *params)
-                    driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        driver.rollback()
-                    raise
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_artifact(row, deserializer=self._json_deserializer) for row in rows]
-
-
-class MSSQLAsyncADKArtifactStore(_MSSQLADKArtifactSQLMixin, _BaseAsyncADKArtifactStore["MSSQLAsyncConfig"]):
+class MSSQLAsyncADKArtifactStore(_MSSQLADKArtifactSQLMixin, AdapterAsyncADKArtifactStore):
     """Asynchronous SQL Server ADK artifact metadata store supporting ``ArtifactReference``."""
 
-    __slots__ = ("_json_column_type", "_json_deserializer", "_json_serializer", "_native_json")
+    _transactional_artifact_delete: ClassVar[bool] = True
+
+    __slots__ = ("_json_column_type", "_native_json")
 
     adapter_name = "vertebra_mssql"
     extension_config_options = _MSSQL_ADK_EXTENSION_OPTIONS
@@ -2286,159 +1837,3 @@ class MSSQLAsyncADKArtifactStore(_MSSQLADKArtifactSQLMixin, _BaseAsyncADKArtifac
             await self.prepare_schema_async(driver)
             await driver.execute_script(self._build_artifact_ddl(self._json_column_type or _JSON_FALLBACK_TYPE))
             await driver.commit()
-
-    async def insert_artifact(self, record: StoredArtifact) -> None:
-        """Insert or merge a ``StoredArtifact`` revision asynchronously."""
-        sql, params = self._insert_artifact_sql_and_params(record)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def insert_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        reference: ArtifactReference,
-        *,
-        session_id: str | None = None,
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Upsert an artifact revision asynchronously backed by ``ArtifactReference``."""
-        sql, params = self._insert_artifact_ref_sql_and_params(
-            app_name, user_id, filename, reference, session_id, custom_metadata
-        )
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Fetch an ``ArtifactReference`` revision asynchronously by exact version or latest."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=True
-        )
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return None
-            raise
-        return _row_to_artifact_reference(row) if row is not None else None
-
-    async def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch a ``StoredArtifact`` revision asynchronously by exact version or latest."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=False
-        )
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return None
-            raise
-        return _row_to_stored_artifact(row, deserializer=self._json_deserializer) if row is not None else None
-
-    async def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames asynchronously within user or session scope."""
-        sql, params = self._list_artifact_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        return [str(mssql_row_value(row, "filename", 0)) for row in rows]
-
-    async def list_artifact_versions(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """List all stored versions for an artifact sorted ascending asynchronously."""
-        sql, params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_artifact(row, deserializer=self._json_deserializer) for row in rows]
-
-    async def delete_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete all versions for an artifact atomically asynchronously and return deleted records."""
-        select_sql, select_params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        delete_sql, delete_params = self._delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._config.provide_session() as driver:
-                await driver.begin()
-                try:
-                    rows = await driver.select(select_sql, *select_params)
-                    await driver.execute(delete_sql, *delete_params)
-                    await driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        await driver.rollback()
-                    raise
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_artifact(row, deserializer=self._json_deserializer) for row in rows]
-
-    async def get_next_version(self, app_name: str, user_id: str, filename: str, session_id: str | None = None) -> int:
-        """Compute the next zero-based artifact version number asynchronously."""
-        sql, params = self._get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._config.provide_session() as driver:
-                max_ver = await driver.select_value_or_none(sql, *params)
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return 0
-            raise
-        return int(max_ver) + 1 if max_ver is not None else 0
-
-    async def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Delete artifact rows recorded strictly before ``before`` asynchronously and return them."""
-        select_sql, delete_sql, params = self._delete_older_than_sqls_and_params(before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                await driver.begin()
-                try:
-                    rows = await driver.select(select_sql, *params)
-                    await driver.execute(delete_sql, *params)
-                    await driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        await driver.rollback()
-                    raise
-        except Exception as exc:
-            if is_mssql_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_artifact(row, deserializer=self._json_deserializer) for row in rows]

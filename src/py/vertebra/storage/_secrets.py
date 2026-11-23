@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Self
 
 from vertebra._vertebra import AsyncGcpTokenCache, SyncGcpTokenCache
-from vertebra.storage._store import GCS_DEFAULT_SCOPES, GCSConfig
+from vertebra.storage._config import GCS_DEFAULT_SCOPES, GCSConfig
 
 __all__ = (
     "AsyncGcsBearerSecretProvider",

@@ -33,8 +33,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 url = { workspace = true }
-vertebra-core = { path = "../vertebra-core" }
-vertebra-db = { path = "../vertebra-db", features = ["gcp", "pyo3"] }
+vertebra-core = { path = "../vertebra-core", default-features = false, features = ["gcp-auth"] }
+vertebra-db = { path = "../vertebra-db", default-features = false, features = ["arrow-shm", "gcp", "pyo3"] }
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }

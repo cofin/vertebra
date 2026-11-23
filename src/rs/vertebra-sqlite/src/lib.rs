@@ -11,12 +11,7 @@ use py_client::{
     AsyncSQLiteClient, AsyncSQLiteCursor, SyncSQLiteClient, SyncSQLiteCursor, broker_engine_capsule,
 };
 use pyo3::prelude::*;
-
-/// Whether this build targets free-threaded Python (3.14t+).
-#[cfg(Py_GIL_DISABLED)]
-pub const FREE_THREADED: bool = true;
-#[cfg(not(Py_GIL_DISABLED))]
-pub const FREE_THREADED: bool = false;
+pub use vertebra_db::py_broker::FREE_THREADED;
 
 /// Extension module initialization.
 #[pymodule(gil_used = false)]

@@ -418,10 +418,198 @@ def _build_expire_overdue_sql_and_params(
     return sql, (now_ms,)
 
 
-class SyncPostgresQueueStore(SyncQueueStore):
-    """Synchronous PostgreSQL queue store backed by SKIP LOCKED and atomic CTE updates."""
+class _BasePostgresQueueStore:
+    """Shared SQL and parameter builders for synchronous and asynchronous PostgreSQL queue stores."""
 
     __slots__ = ("_driver", "_notification_source", "_table_name")
+
+    _driver: Any
+    _notification_source: Any
+    _table_name: str
+
+    def _init_store(self, driver: Any, notification_source: Any, table_name: str) -> None:
+        self._driver = driver
+        self._notification_source = notification_source
+        self._table_name = validate_identifier(table_name, "table_name")
+
+    @staticmethod
+    def _now_ms() -> int:
+        return int(time.time() * 1000)
+
+    def _claim_sql(
+        self, queues: Sequence[str], *, limit: int, worker_id: str, lease_seconds: float
+    ) -> tuple[str, tuple[Any, ...]]:
+        now_ms = self._now_ms()
+        sql = f"""
+        WITH next_jobs AS (
+            SELECT q.job_id
+            FROM {self._table_name} q
+            WHERE q.queue = ANY($1)
+              AND (
+                  (q.status = 'ready' AND (q.scheduled_at_ms IS NULL OR q.scheduled_at_ms <= $2))
+                  OR (q.status = 'claimed' AND q.lease_until_ms <= $2 AND q.attempt < q.max_attempts)
+              )
+            ORDER BY q.priority DESC, q.created_at_ms ASC
+            LIMIT $3
+            FOR UPDATE OF q SKIP LOCKED
+        )
+        UPDATE {self._table_name} u
+        SET status = 'claimed',
+            worker_id = $4,
+            lease_until_ms = $5,
+            attempt = CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END,
+            updated_at_ms = $2
+        FROM next_jobs
+        WHERE u.job_id = next_jobs.job_id
+        RETURNING {_QUALIFIED_ENTRY_SELECT_COLUMNS}
+        """
+        return sql, (list(queues), now_ms, limit, worker_id, now_ms + int(lease_seconds * 1000))
+
+    def _claim_job_sql(
+        self, job_id: str, *, worker_id: str, lease_seconds: float, expected_attempt: int | None
+    ) -> tuple[str, tuple[Any, ...]]:
+        now_ms = self._now_ms()
+        sql = f"""
+        UPDATE {self._table_name} u
+        SET status = 'claimed',
+            worker_id = $3,
+            lease_until_ms = $4,
+            attempt = CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END,
+            updated_at_ms = $2
+        WHERE u.job_id = $1
+          AND (
+              (u.status = 'ready' AND (u.scheduled_at_ms IS NULL OR u.scheduled_at_ms <= $2))
+              OR (u.status = 'claimed' AND u.lease_until_ms <= $2 AND u.attempt < u.max_attempts)
+          )
+          AND (
+              $5::INT IS NULL
+              OR (CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END) = $5
+          )
+        RETURNING {_QUALIFIED_ENTRY_SELECT_COLUMNS}
+        """
+        return sql, (job_id, now_ms, worker_id, now_ms + int(lease_seconds * 1000), expected_attempt)
+
+    def _ack_sql(self, job_id: str, attempt: int) -> tuple[str, tuple[Any, ...]]:
+        sql = (
+            f"UPDATE {self._table_name} SET status = 'completed', lease_until_ms = 0, "
+            "worker_id = NULL, completed_at_ms = $3, updated_at_ms = $3 "
+            "WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'"
+        )
+        return sql, (job_id, attempt, self._now_ms())
+
+    def _nack_sql(
+        self, entry: QueueEntry, *, job_id: str, attempt: int, error: str, retry_delay_s: float | None, now_ms: int
+    ) -> tuple[str, tuple[Any, ...]]:
+        if entry.attempt >= entry.max_attempts or retry_delay_s is None:
+            sql = (
+                f"UPDATE {self._table_name} SET status = 'dead_letter', error = $3, last_error = $3, "
+                "lease_until_ms = 0, worker_id = NULL, completed_at_ms = $4, updated_at_ms = $4 "
+                "WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'"
+            )
+            return sql, (job_id, attempt, error, now_ms)
+        sql = (
+            f"UPDATE {self._table_name} SET status = 'ready', attempt = attempt + 1, scheduled_at_ms = $3, "
+            "error = $4, last_error = $4, lease_until_ms = 0, worker_id = NULL, updated_at_ms = $5 "
+            "WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'"
+        )
+        return sql, (job_id, attempt, now_ms + int(retry_delay_s * 1000), error, now_ms)
+
+    def _heartbeat_sql(
+        self, job_ids: Sequence[str], *, worker_id: str, lease_seconds: float
+    ) -> tuple[str, tuple[Any, ...]]:
+        now_ms = self._now_ms()
+        sql = (
+            f"UPDATE {self._table_name} SET lease_until_ms = $1, heartbeat_at_ms = $2, updated_at_ms = $2 "
+            "WHERE job_id = ANY($3) AND worker_id = $4 AND status = 'claimed'"
+        )
+        return sql, (now_ms + int(lease_seconds * 1000), now_ms, list(job_ids), worker_id)
+
+    def _reap_stale_sql(self) -> tuple[str, tuple[int]]:
+        sql = f"""
+        UPDATE {self._table_name}
+        SET status = CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END,
+            attempt = CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END,
+            last_error = CASE
+                WHEN attempt >= max_attempts THEN COALESCE(last_error, 'Visibility lease expired')
+                ELSE last_error
+            END,
+            error = CASE
+                WHEN attempt >= max_attempts THEN COALESCE(error, last_error, 'Visibility lease expired')
+                ELSE error
+            END,
+            completed_at_ms = CASE WHEN attempt >= max_attempts THEN $1 ELSE completed_at_ms END,
+            worker_id = NULL,
+            lease_until_ms = 0,
+            updated_at_ms = $1
+        WHERE status = 'claimed' AND lease_until_ms <= $1
+        """
+        return sql, (self._now_ms(),)
+
+    def _promote_scheduled_sql(self, limit: int) -> tuple[str, tuple[int, int]]:
+        sql = f"""
+        WITH due_jobs AS (
+            SELECT job_id FROM {self._table_name}
+            WHERE status = 'ready' AND scheduled_at_ms IS NOT NULL AND scheduled_at_ms <= $1
+            LIMIT $2 FOR UPDATE SKIP LOCKED
+        )
+        UPDATE {self._table_name} u SET scheduled_at_ms = NULL, updated_at_ms = $1
+        FROM due_jobs WHERE u.job_id = due_jobs.job_id
+        """
+        return sql, (self._now_ms(), limit)
+
+    def _cancel_sql(self, job_id: str) -> tuple[str, tuple[str, int]]:
+        sql = (
+            f"UPDATE {self._table_name} SET status = 'cancelled', lease_until_ms = 0, worker_id = NULL, "
+            "completed_at_ms = $2, updated_at_ms = $2 WHERE job_id = $1 AND status IN ('ready', 'claimed')"
+        )
+        return sql, (job_id, self._now_ms())
+
+    def _get_entry_sql(self, job_id: str) -> tuple[str, tuple[str]]:
+        return f"SELECT {_ENTRY_SELECT_COLUMNS} FROM {self._table_name} WHERE job_id = $1", (job_id,)
+
+    def _pop_dead_letter_sql(self, job_id: str) -> tuple[str, tuple[str]]:
+        return (
+            f"DELETE FROM {self._table_name} WHERE job_id = $1 AND status = 'dead_letter' "
+            f"RETURNING {_ENTRY_SELECT_COLUMNS}",
+            (job_id,),
+        )
+
+    @staticmethod
+    def _reserve_unique_key_sql(key: str, ttl_seconds: float) -> tuple[str, tuple[Any, ...]]:
+        now_ms = int(time.time() * 1000)
+        sql = """
+        INSERT INTO vertebra_queue_unique_keys (unique_key, expires_at_ms) VALUES ($1, $2)
+        ON CONFLICT (unique_key) DO UPDATE SET expires_at_ms = EXCLUDED.expires_at_ms
+        WHERE vertebra_queue_unique_keys.expires_at_ms IS NOT NULL
+          AND vertebra_queue_unique_keys.expires_at_ms <= $3
+        RETURNING unique_key;
+        """
+        return sql, (key, now_ms + int(ttl_seconds * 1000), now_ms)
+
+    @staticmethod
+    def _acquire_lease_sql(lease_key: str, owner_id: str, ttl_seconds: float) -> tuple[str, tuple[Any, ...]]:
+        now_ms = int(time.time() * 1000)
+        sql = """
+        INSERT INTO vertebra_queue_leases (lease_key, owner_id, expires_at_ms) VALUES ($1, $2, $3)
+        ON CONFLICT (lease_key) DO UPDATE
+        SET owner_id = EXCLUDED.owner_id, expires_at_ms = EXCLUDED.expires_at_ms
+        WHERE vertebra_queue_leases.expires_at_ms <= $4 OR vertebra_queue_leases.owner_id = EXCLUDED.owner_id
+        RETURNING lease_key;
+        """
+        return sql, (lease_key, owner_id, now_ms + int(ttl_seconds * 1000), now_ms)
+
+    def _get_reservation_sql(self, key: str) -> tuple[str, tuple[str, int]]:
+        sql = (
+            "SELECT unique_key, job_id, task_name, created_at_ms FROM vertebra_queue_unique_keys "
+            "WHERE unique_key = $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)"
+        )
+        return sql, (key, self._now_ms())
+
+
+class SyncPostgresQueueStore(_BasePostgresQueueStore, SyncQueueStore):
+    """Synchronous PostgreSQL queue store backed by SKIP LOCKED and atomic CTE updates."""
+
+    __slots__ = ()
 
     def __init__(
         self,
@@ -431,9 +619,7 @@ class SyncPostgresQueueStore(SyncQueueStore):
         table_name: str = "vertebra_queue_jobs",
     ) -> None:
         """Initialize the queue store with a synchronous driver and optional notification publisher."""
-        self._driver = driver
-        self._notification_source = notification_source
-        self._table_name = validate_identifier(table_name, "table_name")
+        self._init_store(driver, notification_source, table_name)
 
     def ensure_schema(self) -> None:
         """Idempotently create queue, lease, and uniqueness tables and indexes."""
@@ -442,9 +628,7 @@ class SyncPostgresQueueStore(SyncQueueStore):
     def enqueue(self, entry: QueueEntry) -> str:
         """Enqueue a single queue entry and emit a compact notification wakeup."""
         jid = entry.job_id or uuid.uuid4().hex
-        now_ms = int(time.time() * 1000)
-        sql, params = _build_enqueue_sql_and_params(self._table_name, entry, jid, now_ms)
-        self._driver.execute(sql, params)
+        self._driver.execute(*_build_enqueue_sql_and_params(self._table_name, entry, jid, self._now_ms()))
         if self._notification_source is not None:
             self._notification_source.publish(f"vtb:queue:{entry.queue}", f"wakeup:{jid}")
         return jid
@@ -454,258 +638,92 @@ class SyncPostgresQueueStore(SyncQueueStore):
         return [self.enqueue(e) for e in entries]
 
     def claim(
-        self,
-        queues: Sequence[str],
-        *,
-        limit: int = 1,
-        worker_id: str,
-        lease_seconds: float = 30.0,
+        self, queues: Sequence[str], *, limit: int = 1, worker_id: str, lease_seconds: float = 30.0
     ) -> list[QueueEntry]:
         """Atomically claim up to limit ready jobs under a visibility lease via CTE."""
         _validate_positive_limit(limit)
         if not queues:
             return []
-        now_ms = int(time.time() * 1000)
-        lease_until_ms = now_ms + int(lease_seconds * 1000)
-        sql = f"""
-        WITH next_jobs AS (
-            SELECT q.job_id
-            FROM {self._table_name} q
-            WHERE q.queue = ANY($1)
-              AND (
-                  (q.status = 'ready' AND (q.scheduled_at_ms IS NULL OR q.scheduled_at_ms <= $2))
-                  OR (q.status = 'claimed' AND q.lease_until_ms <= $2 AND q.attempt < q.max_attempts)
-              )
-            ORDER BY q.priority DESC, q.created_at_ms ASC
-            LIMIT $3
-            FOR UPDATE OF q SKIP LOCKED
+        rows = self._driver.select(
+            *self._claim_sql(queues, limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
         )
-        UPDATE {self._table_name} u
-        SET status = 'claimed',
-            worker_id = $4,
-            lease_until_ms = $5,
-            attempt = CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END,
-            updated_at_ms = $2
-        FROM next_jobs
-        WHERE u.job_id = next_jobs.job_id
-        RETURNING {_QUALIFIED_ENTRY_SELECT_COLUMNS}
-        """
-        rows = self._driver.select(sql, (list(queues), now_ms, limit, worker_id, lease_until_ms))
         return [_row_to_entry(r) for r in rows]
 
     def claim_job(
-        self,
-        job_id: str,
-        *,
-        worker_id: str,
-        lease_seconds: float = 30.0,
-        expected_attempt: int | None = None,
+        self, job_id: str, *, worker_id: str, lease_seconds: float = 30.0, expected_attempt: int | None = None
     ) -> QueueEntry | None:
         """Atomically claim a specific ready job by job_id under a visibility lease."""
-        now_ms = int(time.time() * 1000)
-        lease_until_ms = now_ms + int(lease_seconds * 1000)
-        sql = f"""
-        UPDATE {self._table_name} u
-        SET status = 'claimed',
-            worker_id = $3,
-            lease_until_ms = $4,
-            attempt = CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END,
-            updated_at_ms = $2
-        WHERE u.job_id = $1
-          AND (
-              (u.status = 'ready' AND (u.scheduled_at_ms IS NULL OR u.scheduled_at_ms <= $2))
-              OR (u.status = 'claimed' AND u.lease_until_ms <= $2 AND u.attempt < u.max_attempts)
-          )
-          AND (
-              $5::INT IS NULL
-              OR (CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END) = $5
-          )
-        RETURNING {_QUALIFIED_ENTRY_SELECT_COLUMNS}
-        """
-        rows = self._driver.select(sql, (job_id, now_ms, worker_id, lease_until_ms, expected_attempt))
+        rows = self._driver.select(
+            *self._claim_job_sql(
+                job_id, worker_id=worker_id, lease_seconds=lease_seconds, expected_attempt=expected_attempt
+            )
+        )
         return _row_to_entry(rows[0]) if rows else None
 
     def ack(self, job_id: str, *, attempt: int) -> bool:
         """Mark a fenced (job_id, attempt) claim as completed."""
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET status = 'completed',
-            lease_until_ms = 0,
-            worker_id = NULL,
-            completed_at_ms = $3,
-            updated_at_ms = $3
-        WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'
-        """
-        affected = self._driver.execute(sql, (job_id, attempt, now_ms))
-        return affected > 0
+        return bool(self._driver.execute(*self._ack_sql(job_id, attempt)) > 0)
 
-    def nack(
-        self,
-        job_id: str,
-        *,
-        attempt: int,
-        error: str,
-        retry_delay_s: float | None = None,
-    ) -> bool:
+    def nack(self, job_id: str, *, attempt: int, error: str, retry_delay_s: float | None = None) -> bool:
         """Record a failed (job_id, attempt) execution and schedule retry or dead-letter transition."""
-        now_ms = int(time.time() * 1000)
+        now_ms = self._now_ms()
         entry = self.get_entry(job_id)
         if entry is None or entry.attempt != attempt:
             return False
+        sql, params = self._nack_sql(
+            entry, job_id=job_id, attempt=attempt, error=error, retry_delay_s=retry_delay_s, now_ms=now_ms
+        )
+        return bool(self._driver.execute(sql, params) > 0)
 
-        if entry.attempt >= entry.max_attempts or retry_delay_s is None:
-            sql = f"""
-            UPDATE {self._table_name}
-            SET status = 'dead_letter',
-                error = $3,
-                last_error = $3,
-                lease_until_ms = 0,
-                worker_id = NULL,
-                completed_at_ms = $4,
-                updated_at_ms = $4
-            WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'
-            """
-            affected = self._driver.execute(sql, (job_id, attempt, error, now_ms))
-            return affected > 0
-
-        retry_sched_ms = now_ms + int(retry_delay_s * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET status = 'ready',
-            attempt = attempt + 1,
-            scheduled_at_ms = $3,
-            error = $4,
-            last_error = $4,
-            lease_until_ms = 0,
-            worker_id = NULL,
-            updated_at_ms = $5
-        WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'
-        """
-        affected = self._driver.execute(sql, (job_id, attempt, retry_sched_ms, error, now_ms))
-        return affected > 0
-
-    def heartbeat(
-        self,
-        job_ids: Sequence[str],
-        *,
-        worker_id: str,
-        lease_seconds: float,
-    ) -> int:
+    def heartbeat(self, job_ids: Sequence[str], *, worker_id: str, lease_seconds: float) -> int:
         """Extend the visibility lease for active (job_ids, worker_id) claims."""
         if not job_ids:
             return 0
-        now_ms = int(time.time() * 1000)
-        new_lease_ms = now_ms + int(lease_seconds * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET lease_until_ms = $1, heartbeat_at_ms = $2, updated_at_ms = $2
-        WHERE job_id = ANY($3) AND worker_id = $4 AND status = 'claimed'
-        """
-        return self._driver.execute(sql, (new_lease_ms, now_ms, list(job_ids), worker_id))
+        return int(
+            self._driver.execute(*self._heartbeat_sql(job_ids, worker_id=worker_id, lease_seconds=lease_seconds))
+        )
 
     def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
         """Reap abandoned in-flight claims by bumping attempt or transitioning exhausted jobs to dead_letter."""
         _ = lease_seconds
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET status = CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END,
-            attempt = CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END,
-            last_error = CASE
-                WHEN attempt >= max_attempts THEN COALESCE(last_error, 'Visibility lease expired')
-                ELSE last_error
-            END,
-            error = CASE
-                WHEN attempt >= max_attempts THEN COALESCE(error, last_error, 'Visibility lease expired')
-                ELSE error
-            END,
-            completed_at_ms = CASE WHEN attempt >= max_attempts THEN $1 ELSE completed_at_ms END,
-            worker_id = NULL,
-            lease_until_ms = 0,
-            updated_at_ms = $1
-        WHERE status = 'claimed' AND lease_until_ms <= $1
-        """
-        return self._driver.execute(sql, (now_ms,))
+        return int(self._driver.execute(*self._reap_stale_sql()))
 
     def promote_scheduled(self, *, limit: int = 100) -> int:
         """Promote due scheduled jobs into ready status."""
         _validate_positive_limit(limit)
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        WITH due_jobs AS (
-            SELECT job_id
-            FROM {self._table_name}
-            WHERE status = 'ready' AND scheduled_at_ms IS NOT NULL AND scheduled_at_ms <= $1
-            LIMIT $2
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE {self._table_name} u
-        SET scheduled_at_ms = NULL, updated_at_ms = $1
-        FROM due_jobs
-        WHERE u.job_id = due_jobs.job_id
-        """
-        return self._driver.execute(sql, (now_ms, limit))
+        return int(self._driver.execute(*self._promote_scheduled_sql(limit)))
 
     def cancel(self, job_id: str) -> bool:
         """Cancel an enqueued or scheduled job."""
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET status = 'cancelled',
-            lease_until_ms = 0,
-            worker_id = NULL,
-            completed_at_ms = $2,
-            updated_at_ms = $2
-        WHERE job_id = $1 AND status IN ('ready', 'claimed')
-        """
-        affected = self._driver.execute(sql, (job_id, now_ms))
-        return affected > 0
+        return bool(self._driver.execute(*self._cancel_sql(job_id)) > 0)
 
     def get_entry(self, job_id: str) -> QueueEntry | None:
         """Retrieve a specific queue entry by job_id."""
-        sql = f"""
-        SELECT {_ENTRY_SELECT_COLUMNS}
-        FROM {self._table_name}
-        WHERE job_id = $1
-        """
-        row = self._driver.select_one_or_none(sql, (job_id,))
+        row = self._driver.select_one_or_none(*self._get_entry_sql(job_id))
         return _row_to_entry(row) if row is not None else None
 
     def get_entry_status(self, job_id: str) -> str | None:
         """Retrieve the current status string of job_id, or None if absent."""
-        sql = f"SELECT status FROM {self._table_name} WHERE job_id = $1"
-        row = self._driver.select_one_or_none(sql, (job_id,))
-        if row is None or row.get("status") is None:
-            return None
-        return str(row["status"])
+        row = self._driver.select_one_or_none(f"SELECT status FROM {self._table_name} WHERE job_id = $1", (job_id,))
+        return str(row["status"]) if row is not None and row.get("status") is not None else None
 
     def pop_dead_letter(self, job_id: str) -> QueueEntry | None:
         """Atomically remove and return a dead-lettered queue entry by job_id."""
-        sql = f"""
-        DELETE FROM {self._table_name}
-        WHERE job_id = $1 AND status = 'dead_letter'
-        RETURNING {_ENTRY_SELECT_COLUMNS}
-        """
-        rows = self._driver.select(sql, (job_id,))
+        rows = self._driver.select(*self._pop_dead_letter_sql(job_id))
         return _row_to_entry(rows[0]) if rows else None
 
     def list_entries(
-        self,
-        queue: str | None = None,
-        *,
-        status: str | None = None,
-        limit: int = 100,
+        self, queue: str | None = None, *, status: str | None = None, limit: int = 100
     ) -> list[QueueEntry]:
         """List queue entries matching optional queue and status up to limit."""
-        sql, params = _build_list_entries_sql_and_params(self._table_name, queue, status, limit)
-        rows = self._driver.select(sql, params)
-        return [_row_to_entry(r) for r in rows]
+        return [
+            _row_to_entry(r)
+            for r in self._driver.select(*_build_list_entries_sql_and_params(self._table_name, queue, status, limit))
+        ]
 
     def cleanup_terminal(self, *, before_ms: int, limit: int | None = None) -> int:
         """Delete oldest terminal queue records before before_ms while preserving forever reservations."""
-        sql, params = _build_cleanup_terminal_sql_and_params(self._table_name, before_ms, limit)
-        deleted = self._driver.execute(sql, params)
+        deleted = int(self._driver.execute(*_build_cleanup_terminal_sql_and_params(self._table_name, before_ms, limit)))
         self._driver.execute(
             "DELETE FROM vertebra_queue_unique_keys WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= $1",
             (before_ms,),
@@ -714,154 +732,98 @@ class SyncPostgresQueueStore(SyncQueueStore):
 
     def get_entry_by_key(self, key: str, *, queue: str | None = None) -> QueueEntry | None:
         """Retrieve a queue entry matching idempotency key and optional queue."""
-        sql, params = _build_get_entry_by_key_sql_and_params(self._table_name, key, queue)
-        row = self._driver.select_one_or_none(sql, params)
+        row = self._driver.select_one_or_none(*_build_get_entry_by_key_sql_and_params(self._table_name, key, queue))
         return _row_to_entry(row) if row is not None else None
 
     def reserve_identity(
-        self,
-        key: str,
-        *,
-        job_id: str,
-        task_name: str,
-        ttl_seconds: float | None = None,
+        self, key: str, *, job_id: str, task_name: str, ttl_seconds: float | None = None
     ) -> QueueReservation | None:
         """Acquire a single-winner reservation, returning None when acquired or the existing owner."""
-        now_ms = int(time.time() * 1000)
-        sql, params = _build_reserve_identity_sql_and_params(key, job_id, task_name, ttl_seconds, now_ms)
-        rows = self._driver.select(sql, params)
-        if rows:
-            return None
-        return self.get_reservation(key)
+        rows = self._driver.select(
+            *_build_reserve_identity_sql_and_params(key, job_id, task_name, ttl_seconds, self._now_ms())
+        )
+        return None if rows else self.get_reservation(key)
 
     def get_reservation(self, key: str) -> QueueReservation | None:
         """Retrieve an active identity reservation for key, or None."""
-        now_ms = int(time.time() * 1000)
-        sql = """
-        SELECT unique_key, job_id, task_name, created_at_ms
-        FROM vertebra_queue_unique_keys
-        WHERE unique_key = $1
-          AND (expires_at_ms IS NULL OR expires_at_ms > $2)
-        """
-        row = self._driver.select_one_or_none(sql, (key, now_ms))
+        row = self._driver.select_one_or_none(*self._get_reservation_sql(key))
         return _row_to_reservation(row) if row is not None else None
 
     def reset_identity(self, key: str, *, expected_job_id: str | None = None) -> bool:
         """Release an identity reservation, optionally fenced by expected_job_id."""
-        sql, params = _build_reset_identity_sql_and_params(key, expected_job_id)
-        return self._driver.execute(sql, params) > 0
+        return bool(self._driver.execute(*_build_reset_identity_sql_and_params(key, expected_job_id)) > 0)
 
     def assign_worker(self, job_id: str, *, worker_id: str, attempt: int) -> bool:
         """Record worker_id assignment for an active fenced claim."""
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET worker_id = $2, updated_at_ms = $4
-        WHERE job_id = $1 AND attempt = $3 AND status = 'claimed'
-        """
-        return self._driver.execute(sql, (job_id, worker_id, attempt, now_ms)) > 0
+        sql = f"UPDATE {self._table_name} SET worker_id = $2, updated_at_ms = $4 WHERE job_id = $1 AND attempt = $3 AND status = 'claimed'"
+        return bool(self._driver.execute(sql, (job_id, worker_id, attempt, self._now_ms())) > 0)
 
     def touch_heartbeats(self, job_ids: Sequence[str], *, heartbeat_at_ms: int) -> int:
         """Update heartbeat_at_ms for active claimed jobs and return updated count."""
         if not job_ids:
             return 0
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET heartbeat_at_ms = $1, updated_at_ms = $2
-        WHERE status = 'claimed' AND job_id = ANY($3)
-        """
-        return self._driver.execute(sql, (heartbeat_at_ms, now_ms, list(job_ids)))
+        sql = f"UPDATE {self._table_name} SET heartbeat_at_ms = $1, updated_at_ms = $2 WHERE status = 'claimed' AND job_id = ANY($3)"
+        return int(self._driver.execute(sql, (heartbeat_at_ms, self._now_ms(), list(job_ids))))
 
     def null_heartbeats(self, job_ids: Sequence[str]) -> int:
         """Clear heartbeat_at_ms for the given job_ids and return updated count."""
         if not job_ids:
             return 0
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET heartbeat_at_ms = NULL, updated_at_ms = $1
-        WHERE job_id = ANY($2)
-        """
-        return self._driver.execute(sql, (now_ms, list(job_ids)))
+        sql = f"UPDATE {self._table_name} SET heartbeat_at_ms = NULL, updated_at_ms = $1 WHERE job_id = ANY($2)"
+        return int(self._driver.execute(sql, (self._now_ms(), list(job_ids))))
 
     def interrupt_task(self, job_id: str, *, error: str | None = None) -> bool:
         """Interrupt a pending or running job with optional error detail."""
-        now_ms = int(time.time() * 1000)
-        sql, params = _build_interrupt_task_sql_and_params(self._table_name, job_id, error, now_ms)
-        return self._driver.execute(sql, params) > 0
+        return bool(
+            self._driver.execute(*_build_interrupt_task_sql_and_params(self._table_name, job_id, error, self._now_ms()))
+            > 0
+        )
 
     def expire_overdue(self, *, now_ms: int, limit: int | None = None) -> int:
         """Mark overdue jobs with expires_at_ms <= now_ms as expired up to limit."""
-        sql, params = _build_expire_overdue_sql_and_params(self._table_name, now_ms, limit)
-        return self._driver.execute(sql, params)
+        return int(self._driver.execute(*_build_expire_overdue_sql_and_params(self._table_name, now_ms, limit)))
 
     def next_due_delay(self, queues: Sequence[str]) -> float | None:
         """Return the delay in seconds until the next scheduled job is due, or None."""
         if not queues:
             return None
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        SELECT MIN(scheduled_at_ms) AS min_sched
-        FROM {self._table_name}
-        WHERE queue = ANY($1) AND status = 'ready' AND scheduled_at_ms > $2
-        """
+        now_ms = self._now_ms()
+        sql = f"SELECT MIN(scheduled_at_ms) AS min_sched FROM {self._table_name} WHERE queue = ANY($1) AND status = 'ready' AND scheduled_at_ms > $2"
         row = self._driver.select_one_or_none(sql, (list(queues), now_ms))
-        if row is None or row.get("min_sched") is None:
-            return None
-        min_sched = int(row["min_sched"])
-        return max(0.0, (min_sched - now_ms) / 1000.0)
+        return (
+            None if row is None or row.get("min_sched") is None else max(0.0, (int(row["min_sched"]) - now_ms) / 1000.0)
+        )
 
     def reserve_unique_key(self, key: str, *, ttl_seconds: float) -> bool:
         """Reserve an idempotency key for ttl_seconds."""
-        now_ms = int(time.time() * 1000)
-        expires_at_ms = now_ms + int(ttl_seconds * 1000)
-        sql = """
-        INSERT INTO vertebra_queue_unique_keys (unique_key, expires_at_ms)
-        VALUES ($1, $2)
-        ON CONFLICT (unique_key) DO UPDATE
-        SET expires_at_ms = EXCLUDED.expires_at_ms
-        WHERE vertebra_queue_unique_keys.expires_at_ms IS NOT NULL
-          AND vertebra_queue_unique_keys.expires_at_ms <= $3
-        RETURNING unique_key;
-        """
-        rows = self._driver.select(sql, (key, expires_at_ms, now_ms))
-        return len(rows) > 0
+        return len(self._driver.select(*self._reserve_unique_key_sql(key, ttl_seconds))) > 0
 
     def release_unique_key(self, key: str) -> bool:
         """Release an idempotency key reservation."""
-        sql = "DELETE FROM vertebra_queue_unique_keys WHERE unique_key = $1"
-        return self._driver.execute(sql, (key,)) > 0
+        return bool(self._driver.execute("DELETE FROM vertebra_queue_unique_keys WHERE unique_key = $1", (key,)) > 0)
 
     def acquire_lease(self, lease_key: str, *, owner_id: str, ttl_seconds: float) -> bool:
         """Attempt to acquire a distributed leader lease for a cron or coordination slot."""
-        now_ms = int(time.time() * 1000)
-        expires_at_ms = now_ms + int(ttl_seconds * 1000)
-        sql = """
-        INSERT INTO vertebra_queue_leases (lease_key, owner_id, expires_at_ms)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (lease_key) DO UPDATE
-        SET owner_id = EXCLUDED.owner_id, expires_at_ms = EXCLUDED.expires_at_ms
-        WHERE vertebra_queue_leases.expires_at_ms <= $4 OR vertebra_queue_leases.owner_id = EXCLUDED.owner_id
-        RETURNING lease_key;
-        """
-        rows = self._driver.select(sql, (lease_key, owner_id, expires_at_ms, now_ms))
-        return len(rows) > 0
+        return len(self._driver.select(*self._acquire_lease_sql(lease_key, owner_id, ttl_seconds))) > 0
 
     def release_lease(self, lease_key: str, *, owner_id: str) -> bool:
         """Release a held distributed leader lease."""
-        sql = "DELETE FROM vertebra_queue_leases WHERE lease_key = $1 AND owner_id = $2"
-        return self._driver.execute(sql, (lease_key, owner_id)) > 0
+        return bool(
+            self._driver.execute(
+                "DELETE FROM vertebra_queue_leases WHERE lease_key = $1 AND owner_id = $2", (lease_key, owner_id)
+            )
+            > 0
+        )
 
     def close(self) -> None:
         """Close backing driver resources if owned."""
         self._driver.close()
 
 
-class AsyncPostgresQueueStore(AsyncQueueStore):
+class AsyncPostgresQueueStore(_BasePostgresQueueStore, AsyncQueueStore):
     """Asynchronous PostgreSQL queue store backed by SKIP LOCKED and atomic CTE updates."""
 
-    __slots__ = ("_driver", "_notification_source", "_table_name")
+    __slots__ = ()
 
     def __init__(
         self,
@@ -870,286 +832,114 @@ class AsyncPostgresQueueStore(AsyncQueueStore):
         notification_source: AsyncPostgresNotificationSource | None = None,
         table_name: str = "vertebra_queue_jobs",
     ) -> None:
-        """Initialize the asynchronous queue store with a driver and optional notification publisher."""
-        self._driver = driver
-        self._notification_source = notification_source
-        self._table_name = validate_identifier(table_name, "table_name")
+        """Initialize the queue store with an asynchronous driver and optional notification publisher."""
+        self._init_store(driver, notification_source, table_name)
 
     async def ensure_schema(self) -> None:
         """Idempotently create queue, lease, and uniqueness tables and indexes."""
         await self._driver.execute(_build_schema_ddl(self._table_name))
 
     async def enqueue(self, entry: QueueEntry) -> str:
-        """Enqueue a single queue entry asynchronously and emit a compact notification wakeup."""
+        """Enqueue a single queue entry and emit a compact notification wakeup."""
         jid = entry.job_id or uuid.uuid4().hex
-        now_ms = int(time.time() * 1000)
-        sql, params = _build_enqueue_sql_and_params(self._table_name, entry, jid, now_ms)
-        await self._driver.execute(sql, params)
+        await self._driver.execute(*_build_enqueue_sql_and_params(self._table_name, entry, jid, self._now_ms()))
         if self._notification_source is not None:
             await self._notification_source.publish(f"vtb:queue:{entry.queue}", f"wakeup:{jid}")
         return jid
 
     async def enqueue_many(self, entries: Sequence[QueueEntry]) -> list[str]:
-        """Bulk-enqueue job entries asynchronously and return assigned identifiers."""
-        result: list[str] = []
-        for e in entries:
-            res = await self.enqueue(e)
-            result.append(res)
-        return result
+        """Bulk-enqueue job entries and return assigned identifiers."""
+        return [await self.enqueue(e) for e in entries]
 
     async def claim(
-        self,
-        queues: Sequence[str],
-        *,
-        limit: int = 1,
-        worker_id: str,
-        lease_seconds: float = 30.0,
+        self, queues: Sequence[str], *, limit: int = 1, worker_id: str, lease_seconds: float = 30.0
     ) -> list[QueueEntry]:
-        """Atomically claim up to limit ready jobs asynchronously under a visibility lease via CTE."""
+        """Atomically claim up to limit ready jobs under a visibility lease via CTE."""
         _validate_positive_limit(limit)
         if not queues:
             return []
-        now_ms = int(time.time() * 1000)
-        lease_until_ms = now_ms + int(lease_seconds * 1000)
-        sql = f"""
-        WITH next_jobs AS (
-            SELECT q.job_id
-            FROM {self._table_name} q
-            WHERE q.queue = ANY($1)
-              AND (
-                  (q.status = 'ready' AND (q.scheduled_at_ms IS NULL OR q.scheduled_at_ms <= $2))
-                  OR (q.status = 'claimed' AND q.lease_until_ms <= $2 AND q.attempt < q.max_attempts)
-              )
-            ORDER BY q.priority DESC, q.created_at_ms ASC
-            LIMIT $3
-            FOR UPDATE OF q SKIP LOCKED
+        rows = await self._driver.select(
+            *self._claim_sql(queues, limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
         )
-        UPDATE {self._table_name} u
-        SET status = 'claimed',
-            worker_id = $4,
-            lease_until_ms = $5,
-            attempt = CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END,
-            updated_at_ms = $2
-        FROM next_jobs
-        WHERE u.job_id = next_jobs.job_id
-        RETURNING {_QUALIFIED_ENTRY_SELECT_COLUMNS}
-        """
-        rows = await self._driver.select(sql, (list(queues), now_ms, limit, worker_id, lease_until_ms))
         return [_row_to_entry(r) for r in rows]
 
     async def claim_job(
-        self,
-        job_id: str,
-        *,
-        worker_id: str,
-        lease_seconds: float = 30.0,
-        expected_attempt: int | None = None,
+        self, job_id: str, *, worker_id: str, lease_seconds: float = 30.0, expected_attempt: int | None = None
     ) -> QueueEntry | None:
-        """Atomically claim a specific ready job asynchronously by job_id under a visibility lease."""
-        now_ms = int(time.time() * 1000)
-        lease_until_ms = now_ms + int(lease_seconds * 1000)
-        sql = f"""
-        UPDATE {self._table_name} u
-        SET status = 'claimed',
-            worker_id = $3,
-            lease_until_ms = $4,
-            attempt = CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END,
-            updated_at_ms = $2
-        WHERE u.job_id = $1
-          AND (
-              (u.status = 'ready' AND (u.scheduled_at_ms IS NULL OR u.scheduled_at_ms <= $2))
-              OR (u.status = 'claimed' AND u.lease_until_ms <= $2 AND u.attempt < u.max_attempts)
-          )
-          AND (
-              $5::INT IS NULL
-              OR (CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END) = $5
-          )
-        RETURNING {_QUALIFIED_ENTRY_SELECT_COLUMNS}
-        """
-        rows = await self._driver.select(sql, (job_id, now_ms, worker_id, lease_until_ms, expected_attempt))
+        """Atomically claim a specific ready job by job_id under a visibility lease."""
+        rows = await self._driver.select(
+            *self._claim_job_sql(
+                job_id, worker_id=worker_id, lease_seconds=lease_seconds, expected_attempt=expected_attempt
+            )
+        )
         return _row_to_entry(rows[0]) if rows else None
 
     async def ack(self, job_id: str, *, attempt: int) -> bool:
-        """Mark a fenced (job_id, attempt) claim as completed asynchronously."""
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET status = 'completed',
-            lease_until_ms = 0,
-            worker_id = NULL,
-            completed_at_ms = $3,
-            updated_at_ms = $3
-        WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'
-        """
-        affected = await self._driver.execute(sql, (job_id, attempt, now_ms))
-        return affected > 0
+        """Mark a fenced (job_id, attempt) claim as completed."""
+        return bool((await self._driver.execute(*self._ack_sql(job_id, attempt))) > 0)
 
-    async def nack(
-        self,
-        job_id: str,
-        *,
-        attempt: int,
-        error: str,
-        retry_delay_s: float | None = None,
-    ) -> bool:
-        """Record a failed (job_id, attempt) execution asynchronously and schedule retry or dead-lettering."""
-        now_ms = int(time.time() * 1000)
+    async def nack(self, job_id: str, *, attempt: int, error: str, retry_delay_s: float | None = None) -> bool:
+        """Record a failed (job_id, attempt) execution and schedule retry or dead-letter transition."""
+        now_ms = self._now_ms()
         entry = await self.get_entry(job_id)
         if entry is None or entry.attempt != attempt:
             return False
+        sql, params = self._nack_sql(
+            entry, job_id=job_id, attempt=attempt, error=error, retry_delay_s=retry_delay_s, now_ms=now_ms
+        )
+        return bool((await self._driver.execute(sql, params)) > 0)
 
-        if entry.attempt >= entry.max_attempts or retry_delay_s is None:
-            sql = f"""
-            UPDATE {self._table_name}
-            SET status = 'dead_letter',
-                error = $3,
-                last_error = $3,
-                lease_until_ms = 0,
-                worker_id = NULL,
-                completed_at_ms = $4,
-                updated_at_ms = $4
-            WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'
-            """
-            affected = await self._driver.execute(sql, (job_id, attempt, error, now_ms))
-            return affected > 0
-
-        retry_sched_ms = now_ms + int(retry_delay_s * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET status = 'ready',
-            attempt = attempt + 1,
-            scheduled_at_ms = $3,
-            error = $4,
-            last_error = $4,
-            lease_until_ms = 0,
-            worker_id = NULL,
-            updated_at_ms = $5
-        WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'
-        """
-        affected = await self._driver.execute(sql, (job_id, attempt, retry_sched_ms, error, now_ms))
-        return affected > 0
-
-    async def heartbeat(
-        self,
-        job_ids: Sequence[str],
-        *,
-        worker_id: str,
-        lease_seconds: float,
-    ) -> int:
-        """Extend the visibility lease for active (job_ids, worker_id) claims asynchronously."""
+    async def heartbeat(self, job_ids: Sequence[str], *, worker_id: str, lease_seconds: float) -> int:
+        """Extend the visibility lease for active (job_ids, worker_id) claims."""
         if not job_ids:
             return 0
-        now_ms = int(time.time() * 1000)
-        new_lease_ms = now_ms + int(lease_seconds * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET lease_until_ms = $1, heartbeat_at_ms = $2, updated_at_ms = $2
-        WHERE job_id = ANY($3) AND worker_id = $4 AND status = 'claimed'
-        """
-        return await self._driver.execute(sql, (new_lease_ms, now_ms, list(job_ids), worker_id))
+        return int(
+            await self._driver.execute(*self._heartbeat_sql(job_ids, worker_id=worker_id, lease_seconds=lease_seconds))
+        )
 
     async def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
-        """Reap abandoned in-flight claims asynchronously by bumping attempt or dead-lettering."""
+        """Reap abandoned in-flight claims by bumping attempt or transitioning exhausted jobs to dead_letter."""
         _ = lease_seconds
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET status = CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END,
-            attempt = CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END,
-            last_error = CASE
-                WHEN attempt >= max_attempts THEN COALESCE(last_error, 'Visibility lease expired')
-                ELSE last_error
-            END,
-            error = CASE
-                WHEN attempt >= max_attempts THEN COALESCE(error, last_error, 'Visibility lease expired')
-                ELSE error
-            END,
-            completed_at_ms = CASE WHEN attempt >= max_attempts THEN $1 ELSE completed_at_ms END,
-            worker_id = NULL,
-            lease_until_ms = 0,
-            updated_at_ms = $1
-        WHERE status = 'claimed' AND lease_until_ms <= $1
-        """
-        return await self._driver.execute(sql, (now_ms,))
+        return int(await self._driver.execute(*self._reap_stale_sql()))
 
     async def promote_scheduled(self, *, limit: int = 100) -> int:
-        """Promote due scheduled jobs into ready status asynchronously."""
+        """Promote due scheduled jobs into ready status."""
         _validate_positive_limit(limit)
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        WITH due_jobs AS (
-            SELECT job_id
-            FROM {self._table_name}
-            WHERE status = 'ready' AND scheduled_at_ms IS NOT NULL AND scheduled_at_ms <= $1
-            LIMIT $2
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE {self._table_name} u
-        SET scheduled_at_ms = NULL, updated_at_ms = $1
-        FROM due_jobs
-        WHERE u.job_id = due_jobs.job_id
-        """
-        return await self._driver.execute(sql, (now_ms, limit))
+        return int(await self._driver.execute(*self._promote_scheduled_sql(limit)))
 
     async def cancel(self, job_id: str) -> bool:
-        """Cancel an enqueued or scheduled job asynchronously."""
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET status = 'cancelled',
-            lease_until_ms = 0,
-            worker_id = NULL,
-            completed_at_ms = $2,
-            updated_at_ms = $2
-        WHERE job_id = $1 AND status IN ('ready', 'claimed')
-        """
-        affected = await self._driver.execute(sql, (job_id, now_ms))
-        return affected > 0
+        """Cancel an enqueued or scheduled job."""
+        return bool((await self._driver.execute(*self._cancel_sql(job_id))) > 0)
 
     async def get_entry(self, job_id: str) -> QueueEntry | None:
-        """Retrieve a specific queue entry by job_id asynchronously."""
-        sql = f"""
-        SELECT {_ENTRY_SELECT_COLUMNS}
-        FROM {self._table_name}
-        WHERE job_id = $1
-        """
-        row = await self._driver.select_one_or_none(sql, (job_id,))
+        """Retrieve a specific queue entry by job_id."""
+        row = await self._driver.select_one_or_none(*self._get_entry_sql(job_id))
         return _row_to_entry(row) if row is not None else None
 
     async def get_entry_status(self, job_id: str) -> str | None:
-        """Retrieve the current status string of job_id asynchronously, or None if absent."""
-        sql = f"SELECT status FROM {self._table_name} WHERE job_id = $1"
-        row = await self._driver.select_one_or_none(sql, (job_id,))
-        if row is None or row.get("status") is None:
-            return None
-        return str(row["status"])
+        """Retrieve the current status string of job_id, or None if absent."""
+        row = await self._driver.select_one_or_none(
+            f"SELECT status FROM {self._table_name} WHERE job_id = $1", (job_id,)
+        )
+        return str(row["status"]) if row is not None and row.get("status") is not None else None
 
     async def pop_dead_letter(self, job_id: str) -> QueueEntry | None:
-        """Atomically remove and return a dead-lettered queue entry asynchronously by job_id."""
-        sql = f"""
-        DELETE FROM {self._table_name}
-        WHERE job_id = $1 AND status = 'dead_letter'
-        RETURNING {_ENTRY_SELECT_COLUMNS}
-        """
-        rows = await self._driver.select(sql, (job_id,))
+        """Atomically remove and return a dead-lettered queue entry by job_id."""
+        rows = await self._driver.select(*self._pop_dead_letter_sql(job_id))
         return _row_to_entry(rows[0]) if rows else None
 
     async def list_entries(
-        self,
-        queue: str | None = None,
-        *,
-        status: str | None = None,
-        limit: int = 100,
+        self, queue: str | None = None, *, status: str | None = None, limit: int = 100
     ) -> list[QueueEntry]:
-        """List queue entries matching optional queue and status up to limit asynchronously."""
-        sql, params = _build_list_entries_sql_and_params(self._table_name, queue, status, limit)
-        rows = await self._driver.select(sql, params)
+        """List queue entries matching optional queue and status up to limit."""
+        rows = await self._driver.select(*_build_list_entries_sql_and_params(self._table_name, queue, status, limit))
         return [_row_to_entry(r) for r in rows]
 
     async def cleanup_terminal(self, *, before_ms: int, limit: int | None = None) -> int:
         """Delete oldest terminal queue records before before_ms while preserving forever reservations."""
-        sql, params = _build_cleanup_terminal_sql_and_params(self._table_name, before_ms, limit)
-        deleted = await self._driver.execute(sql, params)
+        deleted = int(
+            await self._driver.execute(*_build_cleanup_terminal_sql_and_params(self._table_name, before_ms, limit))
+        )
         await self._driver.execute(
             "DELETE FROM vertebra_queue_unique_keys WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= $1",
             (before_ms,),
@@ -1157,146 +947,100 @@ class AsyncPostgresQueueStore(AsyncQueueStore):
         return deleted
 
     async def get_entry_by_key(self, key: str, *, queue: str | None = None) -> QueueEntry | None:
-        """Retrieve a queue entry matching idempotency key and optional queue asynchronously."""
-        sql, params = _build_get_entry_by_key_sql_and_params(self._table_name, key, queue)
-        row = await self._driver.select_one_or_none(sql, params)
+        """Retrieve a queue entry matching idempotency key and optional queue."""
+        row = await self._driver.select_one_or_none(
+            *_build_get_entry_by_key_sql_and_params(self._table_name, key, queue)
+        )
         return _row_to_entry(row) if row is not None else None
 
     async def reserve_identity(
-        self,
-        key: str,
-        *,
-        job_id: str,
-        task_name: str,
-        ttl_seconds: float | None = None,
+        self, key: str, *, job_id: str, task_name: str, ttl_seconds: float | None = None
     ) -> QueueReservation | None:
-        """Acquire a single-winner reservation asynchronously, returning None or the existing owner."""
-        now_ms = int(time.time() * 1000)
-        sql, params = _build_reserve_identity_sql_and_params(key, job_id, task_name, ttl_seconds, now_ms)
-        rows = await self._driver.select(sql, params)
-        if rows:
-            return None
-        return await self.get_reservation(key)
+        """Acquire a single-winner reservation, returning None when acquired or the existing owner."""
+        rows = await self._driver.select(
+            *_build_reserve_identity_sql_and_params(key, job_id, task_name, ttl_seconds, self._now_ms())
+        )
+        return None if rows else await self.get_reservation(key)
 
     async def get_reservation(self, key: str) -> QueueReservation | None:
-        """Retrieve an active identity reservation for key asynchronously, or None."""
-        now_ms = int(time.time() * 1000)
-        sql = """
-        SELECT unique_key, job_id, task_name, created_at_ms
-        FROM vertebra_queue_unique_keys
-        WHERE unique_key = $1
-          AND (expires_at_ms IS NULL OR expires_at_ms > $2)
-        """
-        row = await self._driver.select_one_or_none(sql, (key, now_ms))
+        """Retrieve an active identity reservation for key, or None."""
+        row = await self._driver.select_one_or_none(*self._get_reservation_sql(key))
         return _row_to_reservation(row) if row is not None else None
 
     async def reset_identity(self, key: str, *, expected_job_id: str | None = None) -> bool:
-        """Release an identity reservation asynchronously, optionally fenced by expected_job_id."""
-        sql, params = _build_reset_identity_sql_and_params(key, expected_job_id)
-        return await self._driver.execute(sql, params) > 0
+        """Release an identity reservation, optionally fenced by expected_job_id."""
+        return bool((await self._driver.execute(*_build_reset_identity_sql_and_params(key, expected_job_id))) > 0)
 
     async def assign_worker(self, job_id: str, *, worker_id: str, attempt: int) -> bool:
-        """Record worker_id assignment for an active fenced claim asynchronously."""
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET worker_id = $2, updated_at_ms = $4
-        WHERE job_id = $1 AND attempt = $3 AND status = 'claimed'
-        """
-        return await self._driver.execute(sql, (job_id, worker_id, attempt, now_ms)) > 0
+        """Record worker_id assignment for an active fenced claim."""
+        sql = f"UPDATE {self._table_name} SET worker_id = $2, updated_at_ms = $4 WHERE job_id = $1 AND attempt = $3 AND status = 'claimed'"
+        return bool((await self._driver.execute(sql, (job_id, worker_id, attempt, self._now_ms()))) > 0)
 
     async def touch_heartbeats(self, job_ids: Sequence[str], *, heartbeat_at_ms: int) -> int:
-        """Update heartbeat_at_ms for active claimed jobs asynchronously and return updated count."""
+        """Update heartbeat_at_ms for active claimed jobs and return updated count."""
         if not job_ids:
             return 0
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET heartbeat_at_ms = $1, updated_at_ms = $2
-        WHERE status = 'claimed' AND job_id = ANY($3)
-        """
-        return await self._driver.execute(sql, (heartbeat_at_ms, now_ms, list(job_ids)))
+        sql = f"UPDATE {self._table_name} SET heartbeat_at_ms = $1, updated_at_ms = $2 WHERE status = 'claimed' AND job_id = ANY($3)"
+        return int(await self._driver.execute(sql, (heartbeat_at_ms, self._now_ms(), list(job_ids))))
 
     async def null_heartbeats(self, job_ids: Sequence[str]) -> int:
-        """Clear heartbeat_at_ms for the given job_ids asynchronously and return updated count."""
+        """Clear heartbeat_at_ms for the given job_ids and return updated count."""
         if not job_ids:
             return 0
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        UPDATE {self._table_name}
-        SET heartbeat_at_ms = NULL, updated_at_ms = $1
-        WHERE job_id = ANY($2)
-        """
-        return await self._driver.execute(sql, (now_ms, list(job_ids)))
+        sql = f"UPDATE {self._table_name} SET heartbeat_at_ms = NULL, updated_at_ms = $1 WHERE job_id = ANY($2)"
+        return int(await self._driver.execute(sql, (self._now_ms(), list(job_ids))))
 
     async def interrupt_task(self, job_id: str, *, error: str | None = None) -> bool:
-        """Interrupt a pending or running job asynchronously with optional error detail."""
-        now_ms = int(time.time() * 1000)
-        sql, params = _build_interrupt_task_sql_and_params(self._table_name, job_id, error, now_ms)
-        return await self._driver.execute(sql, params) > 0
+        """Interrupt a pending or running job with optional error detail."""
+        return bool(
+            (
+                await self._driver.execute(
+                    *_build_interrupt_task_sql_and_params(self._table_name, job_id, error, self._now_ms())
+                )
+            )
+            > 0
+        )
 
     async def expire_overdue(self, *, now_ms: int, limit: int | None = None) -> int:
-        """Mark overdue jobs with expires_at_ms <= now_ms as expired asynchronously up to limit."""
-        sql, params = _build_expire_overdue_sql_and_params(self._table_name, now_ms, limit)
-        return await self._driver.execute(sql, params)
+        """Mark overdue jobs with expires_at_ms <= now_ms as expired up to limit."""
+        return int(await self._driver.execute(*_build_expire_overdue_sql_and_params(self._table_name, now_ms, limit)))
 
     async def next_due_delay(self, queues: Sequence[str]) -> float | None:
         """Return the delay in seconds until the next scheduled job is due, or None."""
         if not queues:
             return None
-        now_ms = int(time.time() * 1000)
-        sql = f"""
-        SELECT MIN(scheduled_at_ms) AS min_sched
-        FROM {self._table_name}
-        WHERE queue = ANY($1) AND status = 'ready' AND scheduled_at_ms > $2
-        """
+        now_ms = self._now_ms()
+        sql = f"SELECT MIN(scheduled_at_ms) AS min_sched FROM {self._table_name} WHERE queue = ANY($1) AND status = 'ready' AND scheduled_at_ms > $2"
         row = await self._driver.select_one_or_none(sql, (list(queues), now_ms))
-        if row is None or row.get("min_sched") is None:
-            return None
-        min_sched = int(row["min_sched"])
-        return max(0.0, (min_sched - now_ms) / 1000.0)
+        return (
+            None if row is None or row.get("min_sched") is None else max(0.0, (int(row["min_sched"]) - now_ms) / 1000.0)
+        )
 
     async def reserve_unique_key(self, key: str, *, ttl_seconds: float) -> bool:
-        """Reserve an idempotency key asynchronously for ttl_seconds."""
-        now_ms = int(time.time() * 1000)
-        expires_at_ms = now_ms + int(ttl_seconds * 1000)
-        sql = """
-        INSERT INTO vertebra_queue_unique_keys (unique_key, expires_at_ms)
-        VALUES ($1, $2)
-        ON CONFLICT (unique_key) DO UPDATE
-        SET expires_at_ms = EXCLUDED.expires_at_ms
-        WHERE vertebra_queue_unique_keys.expires_at_ms IS NOT NULL
-          AND vertebra_queue_unique_keys.expires_at_ms <= $3
-        RETURNING unique_key;
-        """
-        rows = await self._driver.select(sql, (key, expires_at_ms, now_ms))
-        return len(rows) > 0
+        """Reserve an idempotency key for ttl_seconds."""
+        return len(await self._driver.select(*self._reserve_unique_key_sql(key, ttl_seconds))) > 0
 
     async def release_unique_key(self, key: str) -> bool:
-        """Release an idempotency key reservation asynchronously."""
-        sql = "DELETE FROM vertebra_queue_unique_keys WHERE unique_key = $1"
-        return await self._driver.execute(sql, (key,)) > 0
+        """Release an idempotency key reservation."""
+        return bool(
+            (await self._driver.execute("DELETE FROM vertebra_queue_unique_keys WHERE unique_key = $1", (key,))) > 0
+        )
 
     async def acquire_lease(self, lease_key: str, *, owner_id: str, ttl_seconds: float) -> bool:
-        """Attempt to acquire a distributed leader lease asynchronously."""
-        now_ms = int(time.time() * 1000)
-        expires_at_ms = now_ms + int(ttl_seconds * 1000)
-        sql = """
-        INSERT INTO vertebra_queue_leases (lease_key, owner_id, expires_at_ms)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (lease_key) DO UPDATE
-        SET owner_id = EXCLUDED.owner_id, expires_at_ms = EXCLUDED.expires_at_ms
-        WHERE vertebra_queue_leases.expires_at_ms <= $4 OR vertebra_queue_leases.owner_id = EXCLUDED.owner_id
-        RETURNING lease_key;
-        """
-        rows = await self._driver.select(sql, (lease_key, owner_id, expires_at_ms, now_ms))
-        return len(rows) > 0
+        """Attempt to acquire a distributed leader lease for a cron or coordination slot."""
+        return len(await self._driver.select(*self._acquire_lease_sql(lease_key, owner_id, ttl_seconds))) > 0
 
     async def release_lease(self, lease_key: str, *, owner_id: str) -> bool:
-        """Release a held distributed leader lease asynchronously."""
-        sql = "DELETE FROM vertebra_queue_leases WHERE lease_key = $1 AND owner_id = $2"
-        return await self._driver.execute(sql, (lease_key, owner_id)) > 0
+        """Release a held distributed leader lease."""
+        return bool(
+            (
+                await self._driver.execute(
+                    "DELETE FROM vertebra_queue_leases WHERE lease_key = $1 AND owner_id = $2", (lease_key, owner_id)
+                )
+            )
+            > 0
+        )
 
     async def aclose(self) -> None:
-        """Close backing driver resources asynchronously."""
-        await self._driver.close()
+        """Close backing driver resources if owned."""
+        await self._driver.aclose()

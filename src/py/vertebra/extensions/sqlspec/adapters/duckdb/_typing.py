@@ -5,17 +5,20 @@ from __future__ import annotations
 import contextlib
 import inspect
 from collections.abc import Callable, Mapping, Sequence
-from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, TypedDict, cast
 
 from anyio import CancelScope
 
 from vertebra.db.adapters.duckdb.config import DuckDBSecretConfig
+from vertebra.extensions.sqlspec._driver import (
+    _AdapterAsyncConnectionContext,
+    _AdapterAsyncSessionContext,
+    _AdapterSyncConnectionContext,
+    _AdapterSyncSessionContext,
+)
 from vertebra.utils.text import quote_identifier
 
 if TYPE_CHECKING:
-    from sqlspec.core import StatementConfig
-
     from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, SyncDuckDBDriver
     from vertebra.extensions.sqlspec.adapters.duckdb.config import DuckDBAsyncConfig, DuckDBSyncConfig
     from vertebra.extensions.sqlspec.adapters.duckdb.driver import DuckDBAsyncDriver, DuckDBSyncDriver
@@ -128,14 +131,6 @@ class DuckDBDriverFeatures(TypedDict, total=False):
 def _is_unopened_native_driver(conn: Any) -> bool:
     """Return whether `conn` is a closed or uninitialized native DuckDB driver."""
     return getattr(conn, "_client", _MISSING) is None or bool(getattr(conn, "closed", False))
-
-
-def _record_exit_exception(primary: BaseException | None, secondary: BaseException, label: str) -> BaseException:
-    """Promote `secondary` or attach it onto `primary` via `add_note`."""
-    if primary is None:
-        return secondary
-    primary.add_note(f"{label}: {secondary!r}")
-    return primary
 
 
 def _render_extension_statements(entry: str | Mapping[str, Any]) -> tuple[str, str, bool]:
@@ -508,457 +503,75 @@ async def _reset_duckdb_connection_async(conn: Any, config: Any) -> None:
                 await res
 
 
-class DuckDBSyncConnectionContext:
+class DuckDBSyncConnectionContext(_AdapterSyncConnectionContext):
     """Synchronous connection context manager acquiring DuckDB drivers/leases and running lifecycle hooks."""
 
-    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_created_unshared", "_kwargs", "_tenant_lease")
+    __slots__ = ()
+    _engine_label: ClassVar[str] = "DuckDB"
+    _strict_cleanup: ClassVar[bool] = True
 
     def __init__(self, config: DuckDBSyncConfig, *args: Any, **kwargs: Any) -> None:
-        self._config = config
-        self._args = args
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._connection: SyncDuckDBDriver | None = None
-        self._created_unshared: bool = False
-        self._tenant_lease: Any = None
+        super().__init__(config, *args, **kwargs)
+
+    def _on_first_acquire(self, conn: Any) -> None:
+        _capture_baseline_databases_sync(conn, self._config)
+        _apply_duckdb_extensions_sync(conn, self._config)
+        _apply_duckdb_secrets_sync(conn, self._config)
+
+    def _rollback_conn(self, conn: Any) -> None:
+        _rollback_duckdb_connection_sync(conn)
+
+    def _reset_conn(self, conn: Any) -> None:
+        _reset_duckdb_connection_sync(conn, self._config)
 
     def __enter__(self) -> SyncDuckDBDriver:
-        """Acquire a native DuckDB driver or tenant lease and run extension/secret/create hooks."""
-        lease = self._config._create_tenant_lease()
-        if lease is not None:
-            self._tenant_lease = lease
-            try:
-                self._connection = lease.acquire()
-            except BaseException:
-                self._tenant_lease = None
-                raise
-        else:
-            had_instance = self._config.connection_instance is not None
-            pool = self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            if callable(get_conn):
-                conn_ctx: Any = cast("Any", get_conn)()
-                self._connection = conn_ctx.__enter__()
-                self._conn_ctx = conn_ctx
-            else:
-                self._connection = pool
-                self._created_unshared = not had_instance and not self._config.share_pool
-        try:
-            initialized_ids: set[int] | None = getattr(self._config, "_initialized_conn_ids", None)
-            conn_id = id(self._connection)
-            if initialized_ids is None or conn_id not in initialized_ids:
-                _capture_baseline_databases_sync(self._connection, self._config)
-                _apply_duckdb_extensions_sync(self._connection, self._config)
-                _apply_duckdb_secrets_sync(self._connection, self._config)
-                hook = self._config.driver_features.get("on_connection_create")
-                if callable(hook):
-                    replacement = cast("SyncDuckDBDriver | None", hook(self._connection))
-                    if replacement is not None:
-                        self._connection = replacement
-                        conn_id = id(self._connection)
-                if initialized_ids is not None:
-                    initialized_ids.add(conn_id)
-            return cast("SyncDuckDBDriver", self._connection)
-        except BaseException as exc:
-            self._cleanup_enter_failure(exc)
-            raise
-
-    def _cleanup_enter_failure(self, exc: BaseException) -> None:
-        conn = self._connection
-        created_unshared = self._created_unshared
-        try:
-            self.__exit__(type(exc), exc, exc.__traceback__)
-        except BaseException as cleanup_exc:
-            if cleanup_exc is not exc:
-                exc.add_note(f"DuckDB connection enter cleanup failed: {cleanup_exc!r}")
-        if created_unshared and conn is not None:
-            close_fn = getattr(conn, "close", None)
-            if callable(close_fn):
-                with contextlib.suppress(Exception):
-                    close_fn()
-            if self._config.connection_instance is conn:
-                self._config.connection_instance = None
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Roll back active transactions, optionally reset session state, and release the lease."""
-        conn = self._connection
-        reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-        primary_exc: BaseException | None = exc_val
-        suppressed: bool | None = None
-        try:
-            if conn is not None and (exc_type is not None or reset_on_release):
-                try:
-                    _rollback_duckdb_connection_sync(conn)
-                except BaseException as rb_exc:
-                    primary_exc = _record_exit_exception(primary_exc, rb_exc, "DuckDB connection rollback failed")
-                if reset_on_release:
-                    try:
-                        _reset_duckdb_connection_sync(conn, self._config)
-                    except BaseException as reset_exc:
-                        primary_exc = _record_exit_exception(primary_exc, reset_exc, "DuckDB session reset failed")
-            rel_type = type(primary_exc) if primary_exc is not None else exc_type
-            rel_val = primary_exc if primary_exc is not None else exc_val
-            rel_tb = primary_exc.__traceback__ if primary_exc is not None else exc_tb
-            if self._tenant_lease is not None:
-                try:
-                    self._tenant_lease.release(exc_type=rel_type, exc_val=rel_val, exc_tb=rel_tb)
-                except BaseException as rel_exc:
-                    primary_exc = _record_exit_exception(primary_exc, rel_exc, "DuckDB tenant lease release failed")
-            elif self._conn_ctx is not None:
-                try:
-                    suppressed = cast("bool | None", self._conn_ctx.__exit__(rel_type, rel_val, rel_tb))
-                except BaseException as ctx_exc:
-                    primary_exc = _record_exit_exception(primary_exc, ctx_exc, "DuckDB connection release failed")
-        finally:
-            self._connection = None
-            self._conn_ctx = None
-            self._created_unshared = False
-            self._tenant_lease = None
-        if primary_exc is not None and primary_exc is not exc_val:
-            raise primary_exc
-        return suppressed
+        return cast("SyncDuckDBDriver", super().__enter__())
 
 
-class DuckDBAsyncConnectionContext:
+class DuckDBAsyncConnectionContext(_AdapterAsyncConnectionContext):
     """Asynchronous connection context manager acquiring DuckDB drivers/leases and running lifecycle hooks."""
 
-    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_created_unshared", "_kwargs", "_tenant_lease")
+    __slots__ = ()
+    _engine_label: ClassVar[str] = "DuckDB"
+    _strict_cleanup: ClassVar[bool] = True
 
     def __init__(self, config: DuckDBAsyncConfig, *args: Any, **kwargs: Any) -> None:
-        self._config = config
-        self._args = args
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._connection: AsyncDuckDBDriver | None = None
-        self._created_unshared: bool = False
-        self._tenant_lease: Any = None
+        super().__init__(config, *args, **kwargs)
+
+    async def _on_first_acquire(self, conn: Any) -> None:
+        await _capture_baseline_databases_async(conn, self._config)
+        await _apply_duckdb_extensions_async(conn, self._config)
+        await _apply_duckdb_secrets_async(conn, self._config)
+
+    async def _rollback_conn(self, conn: Any) -> None:
+        await _rollback_duckdb_connection_async(conn)
+
+    async def _reset_conn(self, conn: Any) -> None:
+        await _reset_duckdb_connection_async(conn, self._config)
 
     async def __aenter__(self) -> AsyncDuckDBDriver:
-        """Asynchronously acquire a native DuckDB driver or lease and run extension/secret/create hooks."""
-        lease = self._config._create_tenant_lease()
-        if lease is not None:
-            self._tenant_lease = lease
-            try:
-                self._connection = await lease.acquire()
-            except BaseException:
-                self._tenant_lease = None
-                raise
-        else:
-            had_instance = self._config.connection_instance is not None
-            pool = await self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            if callable(get_conn):
-                conn_ctx: Any = cast("Any", get_conn)()
-                self._connection = await conn_ctx.__aenter__()
-                self._conn_ctx = conn_ctx
-            else:
-                self._connection = pool
-                self._created_unshared = not had_instance and not self._config.share_pool
-        try:
-            initialized_ids: set[int] | None = getattr(self._config, "_initialized_conn_ids", None)
-            conn_id = id(self._connection)
-            if initialized_ids is None or conn_id not in initialized_ids:
-                await _capture_baseline_databases_async(self._connection, self._config)
-                await _apply_duckdb_extensions_async(self._connection, self._config)
-                await _apply_duckdb_secrets_async(self._connection, self._config)
-                hook = self._config.driver_features.get("on_connection_create")
-                if callable(hook):
-                    hook_res: Any = cast("Any", hook)(self._connection)
-                    if inspect.isawaitable(hook_res):
-                        hook_res = await hook_res
-                    if hook_res is not None:
-                        self._connection = cast("AsyncDuckDBDriver", hook_res)
-                        conn_id = id(self._connection)
-                if initialized_ids is not None:
-                    initialized_ids.add(conn_id)
-            return cast("AsyncDuckDBDriver", self._connection)
-        except BaseException as exc:
-            await self._cleanup_aenter_failure(exc)
-            raise
-
-    async def _cleanup_aenter_failure(self, exc: BaseException) -> None:
-        conn = self._connection
-        created_unshared = self._created_unshared
-        try:
-            await self.__aexit__(type(exc), exc, exc.__traceback__)
-        except BaseException as cleanup_exc:
-            if cleanup_exc is not exc:
-                exc.add_note(f"DuckDB async connection enter cleanup failed: {cleanup_exc!r}")
-        if created_unshared and conn is not None:
-            close_fn = getattr(conn, "close", None)
-            if callable(close_fn):
-                with CancelScope(shield=True), contextlib.suppress(Exception):
-                    res = close_fn()
-                    if inspect.isawaitable(res):
-                        await res
-            if self._config.connection_instance is conn:
-                self._config.connection_instance = None
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Roll back active transactions, optionally reset session state, and release the lease."""
-        conn = self._connection
-        reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-        primary_exc: BaseException | None = exc_val
-        suppressed: bool | None = None
-        try:
-            if conn is not None and (exc_type is not None or reset_on_release):
-                try:
-                    await _rollback_duckdb_connection_async(conn)
-                except BaseException as rb_exc:
-                    primary_exc = _record_exit_exception(primary_exc, rb_exc, "DuckDB async connection rollback failed")
-                if reset_on_release:
-                    try:
-                        await _reset_duckdb_connection_async(conn, self._config)
-                    except BaseException as reset_exc:
-                        primary_exc = _record_exit_exception(
-                            primary_exc, reset_exc, "DuckDB async session reset failed"
-                        )
-            rel_type = type(primary_exc) if primary_exc is not None else exc_type
-            rel_val = primary_exc if primary_exc is not None else exc_val
-            rel_tb = primary_exc.__traceback__ if primary_exc is not None else exc_tb
-            if self._tenant_lease is not None:
-                try:
-                    with CancelScope(shield=True):
-                        await self._tenant_lease.release(exc_type=rel_type, exc_val=rel_val, exc_tb=rel_tb)
-                except BaseException as rel_exc:
-                    primary_exc = _record_exit_exception(
-                        primary_exc, rel_exc, "DuckDB async tenant lease release failed"
-                    )
-            elif self._conn_ctx is not None:
-                try:
-                    with CancelScope(shield=True):
-                        suppressed = cast(
-                            "bool | None",
-                            await self._conn_ctx.__aexit__(rel_type, rel_val, rel_tb),
-                        )
-                except BaseException as ctx_exc:
-                    primary_exc = _record_exit_exception(primary_exc, ctx_exc, "DuckDB async connection release failed")
-        finally:
-            self._connection = None
-            self._conn_ctx = None
-            self._created_unshared = False
-            self._tenant_lease = None
-        if primary_exc is not None and primary_exc is not exc_val:
-            raise primary_exc
-        return suppressed
+        return cast("AsyncDuckDBDriver", await super().__aenter__())
 
 
-class DuckDBSyncSessionContext:
+class DuckDBSyncSessionContext(_AdapterSyncSessionContext):
     """Synchronous session context manager building a fresh `DuckDBSyncDriver` per session entry."""
 
-    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_driver", "_kwargs", "_statement_config")
-
-    def __init__(
-        self,
-        config: DuckDBSyncConfig,
-        *args: Any,
-        statement_config: StatementConfig | None = None,
-        **kwargs: Any,
-    ) -> None:
-        self._config = config
-        self._args = args
-        self._statement_config = statement_config
-        self._kwargs = kwargs
-        self._conn_ctx: DuckDBSyncConnectionContext | None = None
-        self._connection: SyncDuckDBDriver | None = None
-        self._driver: DuckDBSyncDriver | None = None
+    __slots__ = ()
+    _connection_context_type: ClassVar[type[_AdapterSyncConnectionContext]] = DuckDBSyncConnectionContext
+    _engine_label: ClassVar[str] = "DuckDB"
+    _strict_cleanup: ClassVar[bool] = True
 
     def __enter__(self) -> DuckDBSyncDriver:
-        """Acquire a leased connection and instantiate a fresh `DuckDBSyncDriver`."""
-        conn_ctx = DuckDBSyncConnectionContext(self._config, *self._args, **self._kwargs)
-        self._connection = conn_ctx.__enter__()
-        self._conn_ctx = conn_ctx
-        try:
-            stmt_cfg = self._statement_config if self._statement_config is not None else self._config.statement_config
-            driver = self._config.driver_type(
-                self._connection,
-                statement_config=stmt_cfg,
-                driver_features=dict(self._config.driver_features),
-                shared_pool=self._config._pool_is_shared,
-            )
-            self._driver = driver
-            self._driver = self._config._prepare_driver(driver)
-            return self._driver
-        except BaseException as exc:
-            try:
-                self.__exit__(type(exc), exc, exc.__traceback__)
-            except BaseException as cleanup_exc:
-                if cleanup_exc is not exc:
-                    exc.add_note(f"DuckDB session enter cleanup failed: {cleanup_exc!r}")
-            raise
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Close open streams, roll back uncommitted work, release/reset lease, and mark driver closed."""
-        driver = self._driver
-        conn_ctx = self._conn_ctx
-        primary_exc: BaseException | None = exc_val
-        suppressed: bool | None = None
-        try:
-            if driver is not None:
-                close_streams_fn = getattr(driver, "_close_open_streams", None)
-                if callable(close_streams_fn):
-                    try:
-                        close_streams_fn(error=exc_type is not None)
-                    except BaseException as close_exc:
-                        primary_exc = _record_exit_exception(primary_exc, close_exc, "DuckDB stream close failed")
-        finally:
-            try:
-                reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-                pooled_state = bool(
-                    self._config.share_pool
-                    or (conn_ctx is not None and (conn_ctx._tenant_lease is not None or conn_ctx._conn_ctx is not None))
-                )
-                if driver is not None and (
-                    exc_type is not None or primary_exc is not None or pooled_state or reset_on_release
-                ):
-                    in_tx_fn = getattr(driver, "_connection_in_transaction", None)
-                    in_tx = bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
-                    if in_tx:
-                        try:
-                            driver.rollback()
-                        except BaseException as rb_exc:
-                            primary_exc = _record_exit_exception(primary_exc, rb_exc, "DuckDB session rollback failed")
-                if conn_ctx is not None:
-                    rel_type = type(primary_exc) if primary_exc is not None else exc_type
-                    rel_val = primary_exc if primary_exc is not None else exc_val
-                    rel_tb = primary_exc.__traceback__ if primary_exc is not None else exc_tb
-                    try:
-                        suppressed = conn_ctx.__exit__(rel_type, rel_val, rel_tb)
-                    except BaseException as rel_exc:
-                        primary_exc = _record_exit_exception(
-                            primary_exc, rel_exc, "DuckDB connection context exit failed"
-                        )
-            finally:
-                self._connection = None
-                self._conn_ctx = None
-                self._driver = None
-                if driver is not None:
-                    mark_closed_fn = getattr(driver, "_mark_closed", None)
-                    if callable(mark_closed_fn):
-                        mark_closed_fn()
-        if primary_exc is not None and primary_exc is not exc_val:
-            raise primary_exc
-        return suppressed
+        return cast("DuckDBSyncDriver", super().__enter__())
 
 
-class DuckDBAsyncSessionContext:
+class DuckDBAsyncSessionContext(_AdapterAsyncSessionContext):
     """Asynchronous session context manager building a fresh `DuckDBAsyncDriver` per session entry."""
 
-    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_driver", "_kwargs", "_statement_config")
-
-    def __init__(
-        self,
-        config: DuckDBAsyncConfig,
-        *args: Any,
-        statement_config: StatementConfig | None = None,
-        **kwargs: Any,
-    ) -> None:
-        self._config = config
-        self._args = args
-        self._statement_config = statement_config
-        self._kwargs = kwargs
-        self._conn_ctx: DuckDBAsyncConnectionContext | None = None
-        self._connection: AsyncDuckDBDriver | None = None
-        self._driver: DuckDBAsyncDriver | None = None
+    __slots__ = ()
+    _connection_context_type: ClassVar[type[_AdapterAsyncConnectionContext]] = DuckDBAsyncConnectionContext
+    _engine_label: ClassVar[str] = "DuckDB"
+    _strict_cleanup: ClassVar[bool] = True
 
     async def __aenter__(self) -> DuckDBAsyncDriver:
-        """Asynchronously acquire a leased connection and instantiate a fresh `DuckDBAsyncDriver`."""
-        conn_ctx = DuckDBAsyncConnectionContext(self._config, *self._args, **self._kwargs)
-        self._connection = await conn_ctx.__aenter__()
-        self._conn_ctx = conn_ctx
-        try:
-            stmt_cfg = self._statement_config if self._statement_config is not None else self._config.statement_config
-            driver = self._config.driver_type(
-                self._connection,
-                statement_config=stmt_cfg,
-                driver_features=dict(self._config.driver_features),
-                shared_pool=self._config._pool_is_shared,
-            )
-            self._driver = driver
-            self._driver = self._config._prepare_driver(driver)
-            return self._driver
-        except BaseException as exc:
-            try:
-                await self.__aexit__(type(exc), exc, exc.__traceback__)
-            except BaseException as cleanup_exc:
-                if cleanup_exc is not exc:
-                    exc.add_note(f"DuckDB async session enter cleanup failed: {cleanup_exc!r}")
-            raise
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Close open streams, roll back uncommitted work, release/reset lease, and mark driver closed."""
-        driver = self._driver
-        conn_ctx = self._conn_ctx
-        primary_exc: BaseException | None = exc_val
-        suppressed: bool | None = None
-        try:
-            if driver is not None:
-                close_streams_fn = getattr(driver, "_close_open_streams", None)
-                if callable(close_streams_fn):
-                    try:
-                        res = close_streams_fn(error=exc_type is not None)
-                        if inspect.isawaitable(res):
-                            await res
-                    except BaseException as close_exc:
-                        primary_exc = _record_exit_exception(primary_exc, close_exc, "DuckDB async stream close failed")
-        finally:
-            try:
-                reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-                pooled_state = bool(
-                    self._config.share_pool
-                    or (conn_ctx is not None and (conn_ctx._tenant_lease is not None or conn_ctx._conn_ctx is not None))
-                )
-                if driver is not None and (
-                    exc_type is not None or primary_exc is not None or pooled_state or reset_on_release
-                ):
-                    in_tx_fn = getattr(driver, "_connection_in_transaction", None)
-                    in_tx = bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
-                    if in_tx:
-                        try:
-                            with CancelScope(shield=True):
-                                await driver.rollback()
-                        except BaseException as rb_exc:
-                            primary_exc = _record_exit_exception(
-                                primary_exc, rb_exc, "DuckDB async session rollback failed"
-                            )
-                if conn_ctx is not None:
-                    rel_type = type(primary_exc) if primary_exc is not None else exc_type
-                    rel_val = primary_exc if primary_exc is not None else exc_val
-                    rel_tb = primary_exc.__traceback__ if primary_exc is not None else exc_tb
-                    try:
-                        suppressed = await conn_ctx.__aexit__(rel_type, rel_val, rel_tb)
-                    except BaseException as rel_exc:
-                        primary_exc = _record_exit_exception(
-                            primary_exc, rel_exc, "DuckDB async connection context exit failed"
-                        )
-            finally:
-                self._connection = None
-                self._conn_ctx = None
-                self._driver = None
-                if driver is not None:
-                    mark_closed_fn = getattr(driver, "_mark_closed", None)
-                    if callable(mark_closed_fn):
-                        mark_closed_fn()
-        if primary_exc is not None and primary_exc is not exc_val:
-            raise primary_exc
-        return suppressed
+        return cast("DuckDBAsyncDriver", await super().__aenter__())

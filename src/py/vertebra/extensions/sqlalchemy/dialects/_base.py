@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy.engine.default import DefaultExecutionContext
 from sqlalchemy.engine.url import URL
@@ -15,6 +16,7 @@ from vertebra.extensions.sqlalchemy.async_adapter import SQLAlchemyAsyncDBAPI
 from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool
 from vertebra.typing import ImproperConfigurationError
 
+_GRPC_UNAVAILABLE_CODE: int = 14
 _NON_DISCONNECT_SQLSTATES: frozenset[str] = frozenset({"40001", "40P01"})
 _DISCONNECT_SQLSTATES: frozenset[str] = frozenset({"57P01", "57P02", "57P03"})
 _DISCONNECT_VENDOR_CODES: frozenset[int] = frozenset(
@@ -47,6 +49,31 @@ _DISCONNECT_PHRASES: tuple[str, ...] = (
     "disconnect",
     "socket closed",
 )
+_GCP_DISCONNECT_PHRASES: tuple[str, ...] = (
+    "unavailable",
+    "channel closed",
+    "closed channel",
+    "channel is closed",
+    "transport is closing",
+    "goaway",
+    "reset by peer",
+)
+
+
+def _is_grpc_unavailable(exc_obj: BaseException) -> bool:
+    for candidate in (exc_obj, getattr(exc_obj, "__cause__", None)):
+        if candidate is None:
+            continue
+        code = getattr(candidate, "code", None)
+        if getattr(code, "name", None) == "UNAVAILABLE":
+            return True
+    return _extract_vendor_code(exc_obj) == _GRPC_UNAVAILABLE_CODE
+
+
+def _is_connection_closed(connection: Any) -> bool:
+    return bool(
+        getattr(connection, "closed", False) or getattr(getattr(connection, "_connection", None), "closed", False)
+    )
 
 
 def _extract_sqlstate(exc: BaseException) -> str | None:
@@ -102,7 +129,12 @@ def _is_disconnect_common(
     return False
 
 
-def _resolve_broker_pool_class(url: URL, *, is_async: bool) -> type[Pool]:
+def _resolve_broker_pool_class(
+    url: URL,
+    *,
+    is_async: bool,
+    default_null_pool: bool = False,
+) -> type[Pool]:
     query: dict[str, Any] = dict(url.query) if url.query else {}
     if query.get("shm_broker") in {"true", "1", "yes"}:
         return NullPool
@@ -116,6 +148,8 @@ def _resolve_broker_pool_class(url: URL, *, is_async: bool) -> type[Pool]:
             broker=broker,
             url=url.render_as_string(hide_password=False),
         )
+    if default_null_pool:
+        return NullPool
     return AsyncAdaptedQueuePool if is_async else QueuePool
 
 
@@ -127,16 +161,85 @@ class AsyncExecutionContext(DefaultExecutionContext):
     """Execution context for Vertebra asynchronous dialects."""
 
 
-class _SyncDialectMixin:
-    """Shared synchronous dialect functionality for Vertebra drivers."""
+class _CommonDialectMixin:
+    """Shared connection, pool-class, terminate, and declarative disconnect checks."""
 
     supports_statement_cache: bool = True
-    is_async: bool = False
+    _non_disconnect_sqlstates: ClassVar[frozenset[str]] = frozenset()
+    _disconnect_sqlstates: ClassVar[frozenset[str]] = frozenset()
+    _disconnect_codes: ClassVar[frozenset[int]] = frozenset()
+    _non_disconnect_codes: ClassVar[frozenset[int]] = frozenset()
+    _extra_disconnect_phrases: ClassVar[tuple[str, ...]] = ()
+    _non_disconnect_phrases: ClassVar[tuple[str, ...]] = ()
+    _disconnect_regex: ClassVar[re.Pattern[str] | None] = None
+    _check_connection_closed: ClassVar[bool] = False
+    _check_grpc_unavailable: ClassVar[bool] = False
+    _use_null_pool_when_unbrokered: ClassVar[bool] = False
+    _guard_parent_dbapi: ClassVar[bool] = False
 
     def create_connect_args(self, url: URL) -> tuple[list[Any], dict[str, Any]]:
         """Pass the rendered URL explicitly so non-SQLite connections do not fall back to SQLite."""
         clean_url = url.difference_update_query(["shm_broker"]) if "shm_broker" in url.query else url
         return [], {"url": clean_url.render_as_string(hide_password=False)}
+
+    def do_terminate(self, dbapi_connection: Any) -> None:
+        """Terminate the DBAPI connection."""
+        terminate_fn = getattr(dbapi_connection, "terminate", None)
+        if callable(terminate_fn):
+            terminate_fn()
+            return
+        dbapi_connection.close()
+
+    def _extract_error_code_for_disconnect(self, e: Exception) -> int | None:
+        return _extract_vendor_code(e)
+
+    def is_disconnect(self, e: Exception, connection: Any = None, cursor: Any = None) -> bool:
+        """Return True if the exception represents a database disconnect, never raising."""
+        try:
+            sqlstate = _extract_sqlstate(e)
+            if (
+                sqlstate in _NON_DISCONNECT_SQLSTATES
+                or (sqlstate is not None and sqlstate in self._non_disconnect_sqlstates)
+                or type(e).__name__ == "SerializationFailure"
+            ):
+                return False
+            if sqlstate is not None and (sqlstate.startswith("08") or sqlstate in self._disconnect_sqlstates):
+                return True
+            if self._check_connection_closed and _is_connection_closed(connection):
+                return True
+            vendor_code = self._extract_error_code_for_disconnect(e)
+            if vendor_code is not None:
+                if vendor_code in self._non_disconnect_codes:
+                    return False
+                if vendor_code in self._disconnect_codes:
+                    return True
+            if self._check_grpc_unavailable and _is_grpc_unavailable(e):
+                return True
+            if self._non_disconnect_phrases or self._extra_disconnect_phrases or self._disconnect_regex is not None:
+                for candidate in (e, getattr(e, "orig", None), getattr(e, "__cause__", None)):
+                    if candidate is None:
+                        continue
+                    msg = str(candidate).lower()
+                    if any(phrase in msg for phrase in self._non_disconnect_phrases):
+                        return False
+                    if any(phrase in msg for phrase in self._extra_disconnect_phrases):
+                        return True
+                    if self._disconnect_regex is not None and self._disconnect_regex.search(msg):
+                        return True
+            raw_parent = getattr(super(), "is_disconnect", None)
+            if self._guard_parent_dbapi and getattr(self, "dbapi", None) is None:
+                parent_fn = None
+            else:
+                parent_fn = raw_parent if callable(raw_parent) else None
+            return _is_disconnect_common(e, connection, cursor, parent_fn)
+        except Exception:
+            return False
+
+
+class _SyncDialectMixin(_CommonDialectMixin):
+    """Shared synchronous dialect functionality for Vertebra drivers."""
+
+    is_async: bool = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -153,38 +256,18 @@ class _SyncDialectMixin:
     @classmethod
     def get_pool_class(cls, url: URL) -> type[Pool]:
         """Return bound BrokerPool, NullPool, or QueuePool based on broker configuration."""
-        return _resolve_broker_pool_class(url, is_async=False)
+        return _resolve_broker_pool_class(url, is_async=False, default_null_pool=cls._use_null_pool_when_unbrokered)
 
     def get_driver_connection(self, connection: Any) -> Any:
         """Return the underlying synchronous DBAPI connection."""
         return connection
 
-    def do_terminate(self, dbapi_connection: Any) -> None:
-        """Terminate the synchronous DBAPI connection."""
-        terminate_fn = getattr(dbapi_connection, "terminate", None)
-        if callable(terminate_fn):
-            terminate_fn()
-            return
-        dbapi_connection.close()
 
-    def is_disconnect(self, e: Exception, connection: Any = None, cursor: Any = None) -> bool:
-        """Return True if the exception represents a database disconnect, never raising."""
-        parent = super()
-        parent_fn = getattr(parent, "is_disconnect", None)
-        return _is_disconnect_common(e, connection, cursor, parent_fn)
-
-
-class _AsyncDialectMixin:
+class _AsyncDialectMixin(_CommonDialectMixin):
     """Shared asynchronous dialect functionality for Vertebra drivers."""
 
-    supports_statement_cache: bool = True
     is_async: bool = True
     has_terminate: bool = True
-
-    def create_connect_args(self, url: URL) -> tuple[list[Any], dict[str, Any]]:
-        """Pass the rendered URL explicitly so non-SQLite connections do not fall back to SQLite."""
-        clean_url = url.difference_update_query(["shm_broker"]) if "shm_broker" in url.query else url
-        return [], {"url": clean_url.render_as_string(hide_password=False)}
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -201,22 +284,8 @@ class _AsyncDialectMixin:
     @classmethod
     def get_pool_class(cls, url: URL) -> type[Pool]:
         """Return bound AsyncBrokerPool, NullPool, or AsyncAdaptedQueuePool based on broker configuration."""
-        return _resolve_broker_pool_class(url, is_async=True)
+        return _resolve_broker_pool_class(url, is_async=True, default_null_pool=cls._use_null_pool_when_unbrokered)
 
     def get_driver_connection(self, connection: Any) -> Any:
         """Unwrap the async adapter connection to return the underlying AsyncDBAPIConnection."""
         return getattr(connection, "_connection", connection)
-
-    def do_terminate(self, dbapi_connection: Any) -> None:
-        """Terminate the adapted asynchronous DBAPI connection."""
-        terminate_fn = getattr(dbapi_connection, "terminate", None)
-        if callable(terminate_fn):
-            terminate_fn()
-            return
-        dbapi_connection.close()
-
-    def is_disconnect(self, e: Exception, connection: Any = None, cursor: Any = None) -> bool:
-        """Return True if the exception represents a database disconnect, never raising."""
-        parent = super()
-        parent_fn = getattr(parent, "is_disconnect", None)
-        return _is_disconnect_common(e, connection, cursor, parent_fn)

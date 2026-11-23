@@ -1,8 +1,7 @@
 //! Native Rust PostgreSQL Protocol 3.0 client and pool extension (`vertebra._postgres`).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pyo3::prelude::*;
@@ -11,6 +10,7 @@ use url::Url;
 use vertebra_core::broker::DIALECT_TAG_POSTGRES;
 use vertebra_core::dbrpc::DbRpcOp;
 use vertebra_db::py_async::block_on_db;
+use vertebra_db::py_broker::BrokerPoolRegistry;
 use vertebra_db::{
     BrokerEngineBackend, BrokerPoolBackend, DbRpcEncodedResponse, DbRpcScalar, PlaceholderStyle,
     decode_dbrpc_request_frame, encode_dbrpc_response_frame, new_broker_engine_pycapsule,
@@ -98,8 +98,7 @@ pub use transaction::{
 };
 pub use types::{CompositeField, TypeCatalog, TypeInfo, TypeKind};
 
-/// Whether this build targets free-threaded CPython (`Py_GIL_DISABLED`).
-pub const FREE_THREADED: bool = cfg!(Py_GIL_DISABLED);
+pub use vertebra_db::py_broker::FREE_THREADED;
 
 /// Whether the `vertebra._postgres` module requires the GIL on import (`false`).
 pub const GIL_USED: bool = false;
@@ -280,9 +279,8 @@ enum PinnedActionLookup {
 
 /// Shared-memory broker backend managing broker-hosted `PostgresPool` instances (`DIALECT_TAG_POSTGRES = 1`).
 pub struct PostgresBrokerBackend {
-    pools: RwLock<HashMap<u64, Arc<PostgresPool>>>,
+    pools: BrokerPoolRegistry<PostgresPool>,
     pinned: Mutex<HashMap<(u64, u32), PinnedSlotState>>,
-    next_pool_id: AtomicU64,
 }
 
 impl Default for PostgresBrokerBackend {
@@ -296,9 +294,8 @@ impl PostgresBrokerBackend {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            pools: RwLock::new(HashMap::new()),
+            pools: BrokerPoolRegistry::new(),
             pinned: Mutex::new(HashMap::new()),
-            next_pool_id: AtomicU64::new(1),
         }
     }
 
@@ -311,10 +308,7 @@ impl PostgresBrokerBackend {
     }
 
     fn has_pool(&self, pool_id: u64) -> bool {
-        self.pools
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&pool_id)
+        self.pools.get(pool_id).is_some()
     }
 
     fn begin_pinned_slot(
@@ -656,24 +650,14 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
             ..PostgresPoolOptions::default()
         };
         let pool = PostgresPool::new(cfg, opts).map_err(|e| e.to_string())?;
-        let pool_id = self.next_pool_id.fetch_add(1, Ordering::Relaxed);
-        let mut guard = self
-            .pools
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.insert(pool_id, pool);
-        Ok(pool_id)
+        Ok(self.pools.register(pool))
     }
 
     fn execute(&self, pool_id: u64, frame: &[u8]) -> Result<Vec<u8>, String> {
-        let pool = {
-            let guard = self
-                .pools
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.get(&pool_id).cloned()
-        }
-        .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
+        let pool = self
+            .pools
+            .get(pool_id)
+            .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
 
         let req = decode_dbrpc_request_frame(frame)?;
         let req_id = req.request_id;
@@ -944,13 +928,7 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
     }
 
     fn close_pool(&self, pool_id: u64) {
-        let removed = {
-            let mut guard = self
-                .pools
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.remove(&pool_id)
-        };
+        let removed = self.pools.remove(pool_id);
         let drained = self.drain_pool_pinned(pool_id);
         if !drained.is_empty() {
             block_on_db(async move {

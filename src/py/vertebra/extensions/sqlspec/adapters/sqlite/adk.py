@@ -6,19 +6,28 @@ import contextlib
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, Literal, NotRequired, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, NotRequired, cast
 
 from sqlspec.config import ADKConfig
 from sqlspec.exceptions import SQLParsingError
 from sqlspec.extensions.adk import (
-    BaseAsyncADKStore,
-    BaseSyncADKStore,
     StoredEvent,
     StoredSession,
     normalize_session_list_options,
 )
 from sqlspec.utils.serializers import from_json, to_json
 
+from vertebra.extensions.sqlspec._adk import (
+    AdapterAsyncADKArtifactStore,
+    AdapterAsyncADKMemoryStore,
+    AdapterAsyncADKStore,
+    AdapterSyncADKArtifactStore,
+    AdapterSyncADKMemoryStore,
+    AdapterSyncADKStore,
+    StoredArtifact,
+    StoredMemory,
+    merge_scoped_state,
+)
 from vertebra.extensions.sqlspec.adapters.sqlite.core import (
     JULIAN_EPOCH,
     SECONDS_PER_DAY,
@@ -42,26 +51,11 @@ from vertebra.utils.module_loader import ensure_module
 if TYPE_CHECKING:
     from sqlspec.extensions.adk import SessionOrderBy, StoredMemory
     from sqlspec.extensions.adk.artifact import StoredArtifact
-    from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore as _BaseAsyncADKArtifactStore
-    from sqlspec.extensions.adk.artifact.store import BaseSyncADKArtifactStore as _BaseSyncADKArtifactStore
     from sqlspec.extensions.adk.converters import merge_scoped_state
-    from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore as _BaseAsyncADKMemoryStore
-    from sqlspec.extensions.adk.memory.store import BaseSyncADKMemoryStore as _BaseSyncADKMemoryStore
 
     from vertebra.extensions.sqlspec.adapters.sqlite.config import SQLiteAsyncConfig, SQLiteSyncConfig
 else:
-    _memory_store_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
-    _artifact_store_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="google-adk", extra="adk")
-    _converters_mod = ensure_module("sqlspec.extensions.adk.converters", package="google-adk", extra="adk")
-    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact", package="google-adk", extra="adk")
-    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory", package="google-adk", extra="adk")
-    _BaseAsyncADKMemoryStore = _memory_store_mod.BaseAsyncADKMemoryStore
-    _BaseSyncADKMemoryStore = _memory_store_mod.BaseSyncADKMemoryStore
-    _BaseAsyncADKArtifactStore = _artifact_store_mod.BaseAsyncADKArtifactStore
-    _BaseSyncADKArtifactStore = _artifact_store_mod.BaseSyncADKArtifactStore
-    merge_scoped_state = _converters_mod.merge_scoped_state
-    StoredArtifact = _artifact_types_mod.StoredArtifact
-    StoredMemory = _memory_types_mod.StoredMemory
+    ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
 
 __all__ = (
     "JULIAN_EPOCH",
@@ -592,8 +586,44 @@ class _SQLiteADKSessionSQLMixin:
             )
             raise ValueError(msg)
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return _is_missing_table_error(exc)
 
-class SQLiteSyncADKStore(_SQLiteADKSessionSQLMixin, BaseSyncADKStore["SQLiteSyncConfig"]):
+    def _prepare_driver_sync(self, driver: Any) -> None:
+        cast("Any", self)._ensure_pragmas(driver)
+
+    async def _prepare_driver_async(self, driver: Any) -> None:
+        await cast("Any", self)._ensure_pragmas(driver)
+
+    def _decode_session_row(
+        self,
+        row: Any,
+        *,
+        app_state: dict[str, Any] | None = None,
+        user_state: dict[str, Any] | None = None,
+        merge_scopes: bool = False,
+    ) -> StoredSession:
+        rec = _row_to_stored_session(row)
+        if merge_scopes:
+            rec["state"] = merge_scoped_state(rec["state"], app_state, user_state)
+        return rec
+
+    def _decode_event_row(self, row: Any) -> StoredEvent:
+        return _row_to_stored_event(row)
+
+    def _delete_session_sqls_and_params(
+        self, app_name: str, user_id: str, session_id: str
+    ) -> tuple[tuple[str, tuple[str, str, str]]]:
+        return ((self._delete_session_sql(), (app_name, user_id, session_id)),)
+
+    def _get_metadata_sql_and_params(self, key: str) -> tuple[str, tuple[str]]:
+        return self._get_metadata_sql(), (key,)
+
+    def _set_metadata_sql_and_params(self, key: str, value: str) -> tuple[str, tuple[str, str]]:
+        return self._set_metadata_sql(), (key, value)
+
+
+class SQLiteSyncADKStore(_SQLiteADKSessionSQLMixin, AdapterSyncADKStore):
     """Synchronous SQLite ADK session and event store over Vertebra ``SQLiteSyncDriver``."""
 
     __slots__ = ("_configured_driver_ids", "_pragma_statements")
@@ -611,21 +641,6 @@ class SQLiteSyncADKStore(_SQLiteADKSessionSQLMixin, BaseSyncADKStore["SQLiteSync
         if id(driver) not in self._configured_driver_ids:
             apply_pragmas_sync(driver, self._pragma_statements)
             self._configured_driver_ids.add(id(driver))
-
-    def _sessions_table_ddl(self) -> str:
-        return self._build_sessions_ddl()
-
-    def _events_table_ddl(self) -> str:
-        return self._build_events_ddl()
-
-    def _app_states_table_ddl(self) -> str:
-        return self._build_app_states_ddl()
-
-    def _user_states_table_ddl(self) -> str:
-        return self._build_user_states_ddl()
-
-    def _metadata_table_ddl(self) -> str:
-        return self._build_metadata_ddl()
 
     def reconcile_companion_objects_sync(self, driver: Any) -> None:
         """Create missing SQLite session and event companion indexes without committing."""
@@ -754,61 +769,6 @@ class SQLiteSyncADKStore(_SQLiteADKSessionSQLMixin, BaseSyncADKStore["SQLiteSync
                 return None
             raise
 
-    def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Replace stored session JSON state and touch ``update_time``."""
-        sql, params = self._update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas(driver)
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List ADK sessions ordered by timestamp with optional pagination."""
-        built = self._list_sessions_sql_and_params(app_name, user_id, order_by, descending, limit, offset)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                self._ensure_pragmas(driver)
-                rows = driver.select(sql, *params)
-                return [_row_to_stored_session(row) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-    def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete an ADK session and cascade-delete associated events."""
-        sql = self._delete_session_sql()
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas(driver)
-            driver.execute(sql, app_name, user_id, session_id)
-            driver.commit()
-
-    def append_event(self, event_record: StoredEvent) -> None:
-        """Insert a single ADK event row after verifying owning session existence."""
-        sql, params = self._append_event_sql_and_params(event_record)
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas(driver)
-            res = driver.execute(sql, *params)
-            driver.commit()
-        if int(getattr(res, "rows_affected", 0) or 0) == 0:
-            msg = (
-                f"Session {event_record['session_id']} not found "
-                f"for app={event_record['app_name']!r}, user={event_record['user_id']!r}"
-            )
-            raise ValueError(msg)
-
     def append_event_and_update_state(
         self,
         event_record: StoredEvent,
@@ -866,74 +826,6 @@ class SQLiteSyncADKStore(_SQLiteADKSessionSQLMixin, BaseSyncADKStore["SQLiteSync
         session_record["state"] = merge_scoped_state(session_record["state"], merged_app, merged_user)
         return session_record
 
-    def get_events(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[StoredEvent]:
-        """Retrieve events for a session ordered chronologically."""
-        if limit == 0:
-            return []
-        sql, params = self._get_events_sql_and_params(app_name, user_id, session_id, after_timestamp, limit)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                self._ensure_pragmas(driver)
-                rows = driver.select(sql, *params)
-            if limit is not None:
-                rows = list(reversed(rows))
-            return [_row_to_stored_event(row) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-    def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete event rows created strictly before ``before``."""
-        sql, params = self._delete_before_sql_and_params(self._events_table, "timestamp", before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas(driver)
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(res.rows_affected or 0)
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
-    def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete session rows whose ``update_time`` predates ``updated_before``."""
-        sql, params = self._delete_before_sql_and_params(self._session_table, "update_time", updated_before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas(driver)
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(res.rows_affected or 0)
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
-    def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete user state rows whose ``update_time`` predates ``updated_before``."""
-        sql, params = self._delete_before_sql_and_params(
-            self._user_state_table, "update_time", updated_before, app_name
-        )
-        try:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas(driver)
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(res.rows_affected or 0)
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
     def get_app_state(self, app_name: str) -> dict[str, Any] | None:
         """Return app-scoped ADK state dictionary if present."""
         sql = self._select_state_sql(self._app_state_table, ("app_name",))
@@ -960,45 +852,8 @@ class SQLiteSyncADKStore(_SQLiteADKSessionSQLMixin, BaseSyncADKStore["SQLiteSync
                 return None
             raise
 
-    def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Upsert app-scoped ADK state using ``ON CONFLICT(app_name) DO UPDATE``."""
-        sql, params = self._upsert_app_state_sql_and_params(app_name, state)
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas(driver)
-            driver.execute(sql, *params)
-            driver.commit()
 
-    def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Upsert user-scoped ADK state using ``ON CONFLICT(app_name, user_id) DO UPDATE``."""
-        sql, params = self._upsert_user_state_sql_and_params(app_name, user_id, state)
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas(driver)
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def get_metadata(self, key: str) -> str | None:
-        """Fetch an internal ADK metadata string by key."""
-        sql = self._get_metadata_sql()
-        try:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas(driver)
-                val = driver.select_value_or_none(sql, key)
-                return str(val) if val is not None else None
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return None
-            raise
-
-    def set_metadata(self, key: str, value: str) -> None:
-        """Store or overwrite an internal ADK metadata key-value entry."""
-        sql = self._set_metadata_sql()
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas(driver)
-            driver.execute(sql, key, value)
-            driver.commit()
-
-
-class SQLiteAsyncADKStore(_SQLiteADKSessionSQLMixin, BaseAsyncADKStore["SQLiteAsyncConfig"]):
+class SQLiteAsyncADKStore(_SQLiteADKSessionSQLMixin, AdapterAsyncADKStore):
     """Asynchronous SQLite ADK session and event store over Vertebra ``SQLiteAsyncDriver``."""
 
     __slots__ = ("_configured_driver_ids", "_pragma_statements")
@@ -1016,21 +871,6 @@ class SQLiteAsyncADKStore(_SQLiteADKSessionSQLMixin, BaseAsyncADKStore["SQLiteAs
         if id(driver) not in self._configured_driver_ids:
             await apply_pragmas_async(driver, self._pragma_statements)
             self._configured_driver_ids.add(id(driver))
-
-    async def _sessions_table_ddl(self) -> str:
-        return self._build_sessions_ddl()
-
-    async def _events_table_ddl(self) -> str:
-        return self._build_events_ddl()
-
-    async def _app_states_table_ddl(self) -> str:
-        return self._build_app_states_ddl()
-
-    async def _user_states_table_ddl(self) -> str:
-        return self._build_user_states_ddl()
-
-    async def _metadata_table_ddl(self) -> str:
-        return self._build_metadata_ddl()
 
     async def reconcile_companion_objects_async(self, driver: Any) -> None:
         """Create missing SQLite session and event companion indexes asynchronously."""
@@ -1161,61 +1001,6 @@ class SQLiteAsyncADKStore(_SQLiteADKSessionSQLMixin, BaseAsyncADKStore["SQLiteAs
                 return None
             raise
 
-    async def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Replace session JSON state asynchronously."""
-        sql, params = self._update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        async with self._config.provide_session() as driver:
-            await self._ensure_pragmas(driver)
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List ADK sessions asynchronously."""
-        built = self._list_sessions_sql_and_params(app_name, user_id, order_by, descending, limit, offset)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                await self._ensure_pragmas(driver)
-                rows = await driver.select(sql, *params)
-                return [_row_to_stored_session(row) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-    async def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete an ADK session asynchronously."""
-        sql = self._delete_session_sql()
-        async with self._config.provide_session() as driver:
-            await self._ensure_pragmas(driver)
-            await driver.execute(sql, app_name, user_id, session_id)
-            await driver.commit()
-
-    async def append_event(self, event_record: StoredEvent) -> None:
-        """Append an ADK event row asynchronously after verifying owning session existence."""
-        sql, params = self._append_event_sql_and_params(event_record)
-        async with self._config.provide_session() as driver:
-            await self._ensure_pragmas(driver)
-            res = await driver.execute(sql, *params)
-            await driver.commit()
-        if int(getattr(res, "rows_affected", 0) or 0) == 0:
-            msg = (
-                f"Session {event_record['session_id']} not found "
-                f"for app={event_record['app_name']!r}, user={event_record['user_id']!r}"
-            )
-            raise ValueError(msg)
-
     async def append_event_and_update_state(
         self,
         event_record: StoredEvent,
@@ -1273,74 +1058,6 @@ class SQLiteAsyncADKStore(_SQLiteADKSessionSQLMixin, BaseAsyncADKStore["SQLiteAs
         session_record["state"] = merge_scoped_state(session_record["state"], merged_app, merged_user)
         return session_record
 
-    async def get_events(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[StoredEvent]:
-        """Fetch session events asynchronously in chronological order."""
-        if limit == 0:
-            return []
-        sql, params = self._get_events_sql_and_params(app_name, user_id, session_id, after_timestamp, limit)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                await self._ensure_pragmas(driver)
-                rows = await driver.select(sql, *params)
-            if limit is not None:
-                rows = list(reversed(rows))
-            return [_row_to_stored_event(row) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-    async def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete expired events asynchronously."""
-        sql, params = self._delete_before_sql_and_params(self._events_table, "timestamp", before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas(driver)
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(res.rows_affected or 0)
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
-    async def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete idle sessions asynchronously."""
-        sql, params = self._delete_before_sql_and_params(self._session_table, "update_time", updated_before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas(driver)
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(res.rows_affected or 0)
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
-    async def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete idle user state entries asynchronously."""
-        sql, params = self._delete_before_sql_and_params(
-            self._user_state_table, "update_time", updated_before, app_name
-        )
-        try:
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas(driver)
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(res.rows_affected or 0)
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
     async def get_app_state(self, app_name: str) -> dict[str, Any] | None:
         """Return app-scoped ADK state asynchronously."""
         sql = self._select_state_sql(self._app_state_table, ("app_name",))
@@ -1366,43 +1083,6 @@ class SQLiteAsyncADKStore(_SQLiteADKSessionSQLMixin, BaseAsyncADKStore["SQLiteAs
             if _is_missing_table_error(exc):
                 return None
             raise
-
-    async def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Upsert app-scoped ADK state asynchronously."""
-        sql, params = self._upsert_app_state_sql_and_params(app_name, state)
-        async with self._config.provide_session() as driver:
-            await self._ensure_pragmas(driver)
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Upsert user-scoped ADK state asynchronously."""
-        sql, params = self._upsert_user_state_sql_and_params(app_name, user_id, state)
-        async with self._config.provide_session() as driver:
-            await self._ensure_pragmas(driver)
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def get_metadata(self, key: str) -> str | None:
-        """Fetch an internal ADK metadata string asynchronously."""
-        sql = self._get_metadata_sql()
-        try:
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas(driver)
-                val = await driver.select_value_or_none(sql, key)
-                return str(val) if val is not None else None
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return None
-            raise
-
-    async def set_metadata(self, key: str, value: str) -> None:
-        """Upsert an internal ADK metadata string asynchronously."""
-        sql = self._set_metadata_sql()
-        async with self._config.provide_session() as driver:
-            await self._ensure_pragmas(driver)
-            await driver.execute(sql, key, value)
-            await driver.commit()
 
 
 class _SQLiteADKMemorySQLMixin:
@@ -1614,8 +1294,17 @@ class _SQLiteADKMemorySQLMixin:
             params.append(scope)
         return sql, tuple(params)
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return _is_missing_table_error(exc)
 
-class SQLiteSyncADKMemoryStore(_SQLiteADKMemorySQLMixin, _BaseSyncADKMemoryStore["SQLiteSyncConfig"]):
+    def _prepare_driver_sync(self, driver: Any) -> None:
+        cast("Any", self)._ensure_pragmas(driver)
+
+    async def _prepare_driver_async(self, driver: Any) -> None:
+        await cast("Any", self)._ensure_pragmas(driver)
+
+
+class SQLiteSyncADKMemoryStore(_SQLiteADKMemorySQLMixin, AdapterSyncADKMemoryStore):
     """Synchronous SQLite ADK memory store with FTS5 and embedding cosine ranking."""
 
     __slots__ = ("_configured_driver_ids", "_fts_options", "_pragma_statements")
@@ -1752,42 +1441,8 @@ class SQLiteSyncADKMemoryStore(_SQLiteADKMemorySQLMixin, _BaseSyncADKMemoryStore
         records = [_row_to_stored_memory(row) for row in (rows or ())]
         return _rank_by_embedding(records, embedding, effective_limit)
 
-    def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete memory entries associated with a given session, app, and user."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas(driver)
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(res.rows_affected or 0)
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
 
-    def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete memory entries older than ``days`` days."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas(driver)
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(res.rows_affected or 0)
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
-
-class SQLiteAsyncADKMemoryStore(_SQLiteADKMemorySQLMixin, _BaseAsyncADKMemoryStore["SQLiteAsyncConfig"]):
+class SQLiteAsyncADKMemoryStore(_SQLiteADKMemorySQLMixin, AdapterAsyncADKMemoryStore):
     """Asynchronous SQLite ADK memory store with FTS5 and embedding cosine ranking."""
 
     __slots__ = ("_configured_driver_ids", "_fts_options", "_pragma_statements")
@@ -1925,42 +1580,9 @@ class SQLiteAsyncADKMemoryStore(_SQLiteADKMemorySQLMixin, _BaseAsyncADKMemorySto
         records = [_row_to_stored_memory(row) for row in (rows or ())]
         return _rank_by_embedding(records, embedding, effective_limit)
 
-    async def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete memory entries for a session, app, and user asynchronously."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas(driver)
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(res.rows_affected or 0)
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
-    async def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete memory entries older than ``days`` days asynchronously."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas(driver)
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(res.rows_affected or 0)
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
 
 class _SQLiteADKArtifactSQLMixin:
+    _transactional_artifact_delete: ClassVar[bool] = True
     """Shared SQLite DDL and query builders for synchronous and asynchronous ADK artifact stores."""
 
     __slots__ = ()
@@ -2144,9 +1766,29 @@ class _SQLiteADKArtifactSQLMixin:
         delete_sql = f"DELETE FROM {self._artifact_table} WHERE created_at < ?"
         return select_sql, delete_sql, (cutoff,)
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return _is_missing_table_error(exc)
 
-class SQLiteSyncADKArtifactStore(_SQLiteADKArtifactSQLMixin, _BaseSyncADKArtifactStore["SQLiteSyncConfig"]):
+    def _prepare_driver_sync(self, driver: Any) -> None:
+        cast("Any", self)._ensure_pragmas(driver)
+
+    async def _prepare_driver_async(self, driver: Any) -> None:
+        await cast("Any", self)._ensure_pragmas(driver)
+
+    def _build_artifact_table_ddl(self) -> str:
+        return self._artifact_table_ddl()
+
+    def _decode_artifact_row(self, row: Any) -> StoredArtifact:
+        return _row_to_stored_artifact(row)
+
+    def _decode_artifact_ref_row(self, row: Any) -> ArtifactReference:
+        return _row_to_artifact_reference(row)
+
+
+class SQLiteSyncADKArtifactStore(_SQLiteADKArtifactSQLMixin, AdapterSyncADKArtifactStore):
     """Synchronous SQLite ADK artifact metadata store supporting ``ArtifactReference`` records."""
+
+    _transactional_artifact_delete: ClassVar[bool] = True
 
     __slots__ = ("_configured_driver_ids", "_pragma_statements")
 
@@ -2163,181 +1805,11 @@ class SQLiteSyncADKArtifactStore(_SQLiteADKArtifactSQLMixin, _BaseSyncADKArtifac
             apply_pragmas_sync(driver, self._pragma_statements)
             self._configured_driver_ids.add(id(driver))
 
-    def create_table(self) -> None:
-        """Create the SQLite artifact metadata table if absent."""
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas(driver)
-            driver.execute_script(self._artifact_table_ddl())
-            driver.commit()
 
-    def insert_artifact(self, record: StoredArtifact) -> None:
-        """Insert a ``StoredArtifact`` metadata record."""
-        sql, params = self._insert_artifact_sql_and_params(record)
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas(driver)
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def insert_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        reference: ArtifactReference,
-        *,
-        session_id: str | None = None,
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Insert an artifact revision backed by a storage-neutral ``ArtifactReference`` struct."""
-        sql, params = self._insert_artifact_ref_sql_and_params(
-            app_name, user_id, filename, reference, session_id, custom_metadata
-        )
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas(driver)
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Fetch the requested artifact revision as an ``ArtifactReference`` value object."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=True
-        )
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                self._ensure_pragmas(driver)
-                row = driver.select_one_or_none(sql, *params)
-            return _row_to_artifact_reference(row) if row is not None else None
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return None
-            raise
-
-    def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch a specific or latest ``StoredArtifact`` record."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=False
-        )
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                self._ensure_pragmas(driver)
-                row = driver.select_one_or_none(sql, *params)
-            return _row_to_stored_artifact(row) if row is not None else None
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return None
-            raise
-
-    def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames within user or session scope."""
-        sql, params = self._list_artifact_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                self._ensure_pragmas(driver)
-                rows = driver.select(sql, *params)
-            return [str(row["filename"]) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-    def list_artifact_versions(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """List all stored versions for an artifact sorted ascending by version."""
-        sql, params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                self._ensure_pragmas(driver)
-                rows = driver.select(sql, *params)
-            return [_row_to_stored_artifact(row) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-    def delete_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete all metadata versions for an artifact and return the removed records."""
-        select_sql, select_params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        delete_sql, delete_params = self._delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas(driver)
-                driver.begin()
-                try:
-                    rows = driver.select(select_sql, *select_params)
-                    driver.execute(delete_sql, *delete_params)
-                    driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        driver.rollback()
-                    raise
-            return [_row_to_stored_artifact(row) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-    def get_next_version(self, app_name: str, user_id: str, filename: str, session_id: str | None = None) -> int:
-        """Compute the next zero-based artifact version number."""
-        sql, params = self._get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas(driver)
-                max_ver = driver.select_value_or_none(sql, *params)
-            return int(max_ver) + 1 if max_ver is not None else 0
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
-    def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Delete artifact rows recorded strictly before ``before`` and return them."""
-        select_sql, delete_sql, params = self._delete_older_than_sqls_and_params(before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas(driver)
-                driver.begin()
-                try:
-                    rows = driver.select(select_sql, *params)
-                    driver.execute(delete_sql, *params)
-                    driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        driver.rollback()
-                    raise
-            return [_row_to_stored_artifact(row) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-
-class SQLiteAsyncADKArtifactStore(_SQLiteADKArtifactSQLMixin, _BaseAsyncADKArtifactStore["SQLiteAsyncConfig"]):
+class SQLiteAsyncADKArtifactStore(_SQLiteADKArtifactSQLMixin, AdapterAsyncADKArtifactStore):
     """Asynchronous SQLite ADK artifact metadata store supporting ``ArtifactReference`` records."""
+
+    _transactional_artifact_delete: ClassVar[bool] = True
 
     __slots__ = ("_configured_driver_ids", "_pragma_statements")
 
@@ -2353,175 +1825,3 @@ class SQLiteAsyncADKArtifactStore(_SQLiteADKArtifactSQLMixin, _BaseAsyncADKArtif
         if id(driver) not in self._configured_driver_ids:
             await apply_pragmas_async(driver, self._pragma_statements)
             self._configured_driver_ids.add(id(driver))
-
-    async def create_table(self) -> None:
-        """Create the SQLite artifact metadata table asynchronously."""
-        async with self._config.provide_session() as driver:
-            await self._ensure_pragmas(driver)
-            await driver.execute_script(self._artifact_table_ddl())
-            await driver.commit()
-
-    async def insert_artifact(self, record: StoredArtifact) -> None:
-        """Insert a ``StoredArtifact`` metadata record asynchronously."""
-        sql, params = self._insert_artifact_sql_and_params(record)
-        async with self._config.provide_session() as driver:
-            await self._ensure_pragmas(driver)
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def insert_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        reference: ArtifactReference,
-        *,
-        session_id: str | None = None,
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Insert an artifact revision backed by a storage-neutral ``ArtifactReference`` asynchronously."""
-        sql, params = self._insert_artifact_ref_sql_and_params(
-            app_name, user_id, filename, reference, session_id, custom_metadata
-        )
-        async with self._config.provide_session() as driver:
-            await self._ensure_pragmas(driver)
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Fetch an ``ArtifactReference`` value object asynchronously."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=True
-        )
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                await self._ensure_pragmas(driver)
-                row = await driver.select_one_or_none(sql, *params)
-            return _row_to_artifact_reference(row) if row is not None else None
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return None
-            raise
-
-    async def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch a specific or latest ``StoredArtifact`` record asynchronously."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=False
-        )
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                await self._ensure_pragmas(driver)
-                row = await driver.select_one_or_none(sql, *params)
-            return _row_to_stored_artifact(row) if row is not None else None
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return None
-            raise
-
-    async def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames asynchronously."""
-        sql, params = self._list_artifact_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                await self._ensure_pragmas(driver)
-                rows = await driver.select(sql, *params)
-            return [str(row["filename"]) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-    async def list_artifact_versions(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """List all stored versions for an artifact asynchronously."""
-        sql, params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                await self._ensure_pragmas(driver)
-                rows = await driver.select(sql, *params)
-            return [_row_to_stored_artifact(row) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-    async def delete_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete all metadata versions for an artifact asynchronously."""
-        select_sql, select_params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        delete_sql, delete_params = self._delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas(driver)
-                await driver.begin()
-                try:
-                    rows = await driver.select(select_sql, *select_params)
-                    await driver.execute(delete_sql, *delete_params)
-                    await driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        await driver.rollback()
-                    raise
-            return [_row_to_stored_artifact(row) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise
-
-    async def get_next_version(self, app_name: str, user_id: str, filename: str, session_id: str | None = None) -> int:
-        """Compute the next zero-based artifact version asynchronously."""
-        sql, params = self._get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas(driver)
-                max_ver = await driver.select_value_or_none(sql, *params)
-            return int(max_ver) + 1 if max_ver is not None else 0
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return 0
-            raise
-
-    async def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Delete artifact rows recorded before ``before`` asynchronously."""
-        select_sql, delete_sql, params = self._delete_older_than_sqls_and_params(before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas(driver)
-                await driver.begin()
-                try:
-                    rows = await driver.select(select_sql, *params)
-                    await driver.execute(delete_sql, *params)
-                    await driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        await driver.rollback()
-                    raise
-            return [_row_to_stored_artifact(row) for row in rows]
-        except SQLParsingError as exc:
-            if _is_missing_table_error(exc):
-                return []
-            raise

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, ClassVar, NotRequired
+from datetime import datetime
+from typing import Any, ClassVar, NotRequired
 
 from sqlspec.config import LitestarConfig
-from sqlspec.extensions.litestar.store import BaseSQLSpecStore, CompanionIndex
+from sqlspec.extensions.litestar.store import BaseSQLSpecStore
 
+from vertebra.extensions.sqlspec._litestar import AdapterLitestarStore
 from vertebra.extensions.sqlspec.adapters.sqlite.core import (
     apply_pragmas_async,
     apply_pragmas_sync,
@@ -15,9 +16,6 @@ from vertebra.extensions.sqlspec.adapters.sqlite.core import (
     extension_pragma_statements,
     julian_to_datetime,
 )
-
-if TYPE_CHECKING:
-    from sqlspec.migrations.schema import DropStatement, SchemaTarget
 
 __all__ = ("SQLiteLitestarConfig", "SQLiteLitestarStore")
 
@@ -32,18 +30,18 @@ class SQLiteLitestarConfig(LitestarConfig):
     """Validated SQLite PRAGMA overrides applied during schema preparation."""
 
 
-class SQLiteLitestarStore(BaseSQLSpecStore[Any]):
+class SQLiteLitestarStore(AdapterLitestarStore):
     """Litestar server-side session store supporting both sync and async SQLite configs."""
 
     __slots__ = ("_configured_driver_ids", "_pragma_statements")
 
     adapter_name = "vertebra_sqlite"
     _dialect: ClassVar[str] = "sqlite"
+    _use_threadpool_for_sync: ClassVar[bool] = False
+    _reconcile_after_create_table: ClassVar[bool] = True
+    _uses_select_value: ClassVar[bool] = True
     extension_config_options = BaseSQLSpecStore.extension_config_options | frozenset(
-        {
-            "pragma_overrides",
-            "pragma_profile",
-        }
+        {"pragma_overrides", "pragma_profile"}
     )
 
     def __init__(self, config: Any) -> None:
@@ -52,21 +50,17 @@ class SQLiteLitestarStore(BaseSQLSpecStore[Any]):
         self._pragma_statements = extension_pragma_statements(config, "litestar")
         self._configured_driver_ids: set[int] = set()
 
-    def _is_async_config(self) -> bool:
-        return bool(getattr(self._config, "is_async", False))
-
-    def _ensure_pragmas_sync(self, driver: Any) -> None:
+    def _prepare_driver_sync(self, driver: Any) -> None:
         if self._pragma_statements and id(driver) not in self._configured_driver_ids:
             apply_pragmas_sync(driver, self._pragma_statements)
             self._configured_driver_ids.add(id(driver))
 
-    async def _ensure_pragmas_async(self, driver: Any) -> None:
+    async def _prepare_driver_async(self, driver: Any) -> None:
         if self._pragma_statements and id(driver) not in self._configured_driver_ids:
             await apply_pragmas_async(driver, self._pragma_statements)
             self._configured_driver_ids.add(id(driver))
 
     def _table_ddl(self) -> str:
-        """Return SQLite CREATE TABLE and expiration index DDL for Litestar sessions."""
         return (
             f"CREATE TABLE IF NOT EXISTS {self._table_name} ("
             "session_id TEXT PRIMARY KEY, "
@@ -78,7 +72,6 @@ class SQLiteLitestarStore(BaseSQLSpecStore[Any]):
         )
 
     def _drop_table_sql(self) -> list[str]:
-        """Return SQL statements dropping the session index and table."""
         return [
             f"DROP INDEX IF EXISTS idx_{self._table_name}_expires_at",
             f"DROP TABLE IF EXISTS {self._table_name}",
@@ -86,189 +79,61 @@ class SQLiteLitestarStore(BaseSQLSpecStore[Any]):
 
     def prepare_schema_sync(self, driver: Any) -> None:
         """Apply configured SQLite PRAGMAs before migration DDL generation."""
-        self._ensure_pragmas_sync(driver)
+        self._prepare_driver_sync(driver)
 
     async def prepare_schema_async(self, driver: Any) -> None:
         """Apply configured SQLite PRAGMAs asynchronously before migration DDL generation."""
-        await self._ensure_pragmas_async(driver)
-
-    def get_schema_targets(self) -> list[SchemaTarget]:
-        """Return ordered `SchemaTarget` definitions for the SQLite session table."""
-        return super().get_schema_targets()
-
-    def get_companion_indexes(self) -> list[CompanionIndex]:
-        """Return the SQLite partial expiration index companion definition."""
-        return super().get_companion_indexes()
+        await self._prepare_driver_async(driver)
 
     def reconcile_companion_objects_sync(self, driver: Any) -> None:
         """Apply PRAGMAs and ensure the SQLite partial expiration index exists."""
-        self._ensure_pragmas_sync(driver)
+        self._prepare_driver_sync(driver)
         super().reconcile_companion_objects_sync(driver)
 
     async def reconcile_companion_objects_async(self, driver: Any) -> None:
         """Apply PRAGMAs and ensure the SQLite partial expiration index exists asynchronously."""
-        await self._ensure_pragmas_async(driver)
+        await self._prepare_driver_async(driver)
         await super().reconcile_companion_objects_async(driver)
 
-    def downgrade_drops(self) -> list[DropStatement]:
-        """Return ordered downgrade drop statements for the SQLite session index and table."""
-        return super().downgrade_drops()
+    def _encode_expires_at(self, expires_at: datetime | None) -> Any:
+        return datetime_to_julian(expires_at)
 
-    async def create_table(self) -> None:
-        """Create the Litestar session table if enabled by `create_schema_enabled`."""
-        if not self.create_schema_enabled:
-            await self.reconcile_schema()
-            return
-        ddl = self._table_ddl()
-        if self._is_async_config():
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas_async(driver)
-                await driver.execute_script(ddl)
-                await driver.commit()
-        else:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas_sync(driver)
-                driver.execute_script(ddl)
-                driver.commit()
-        self._log_table_created()
-        await self.reconcile_schema(assume_existing=True)
+    def _decode_expires_at(self, raw: Any) -> datetime | None:
+        return None if raw is None else julian_to_datetime(raw)
 
-    async def get(self, key: str, renew_for: int | timedelta | None = None) -> bytes | None:
-        """Retrieve a non-expired session payload by key, optionally extending its TTL."""
-        select_sql = (
+    def _get_query(self, key: str) -> tuple[str, tuple[Any, ...]]:
+        sql = (
             f"SELECT data, expires_at FROM {self._table_name} "
             "WHERE session_id = ? AND (expires_at IS NULL OR expires_at > julianday('now'))"
         )
-        if self._is_async_config():
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas_async(driver)
-                row = await driver.select_one_or_none(select_sql, key)
-                if row is None:
-                    return None
-                if renew_for is not None and row.get("expires_at") is not None:
-                    new_expires = datetime_to_julian(self._calculate_expires_at(renew_for))
-                    if new_expires is not None:
-                        await driver.execute(
-                            f"UPDATE {self._table_name} SET expires_at = ? WHERE session_id = ?",
-                            new_expires,
-                            key,
-                        )
-                        await driver.commit()
-                return bytes(row["data"])
+        return sql, (key,)
 
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas_sync(driver)
-            row = driver.select_one_or_none(select_sql, key)
-            if row is None:
-                return None
-            if renew_for is not None and row.get("expires_at") is not None:
-                new_expires = datetime_to_julian(self._calculate_expires_at(renew_for))
-                if new_expires is not None:
-                    driver.execute(
-                        f"UPDATE {self._table_name} SET expires_at = ? WHERE session_id = ?",
-                        new_expires,
-                        key,
-                    )
-                    driver.commit()
-            return bytes(row["data"])
+    def _renew_query(self, key: str, encoded_expires_at: Any) -> tuple[str, tuple[Any, ...]]:
+        return f"UPDATE {self._table_name} SET expires_at = ? WHERE session_id = ?", (encoded_expires_at, key)
 
-    async def set(self, key: str, value: str | bytes, expires_in: int | timedelta | None = None) -> None:
-        """Insert or replace a Litestar session record with `ON CONFLICT(session_id) DO UPDATE`."""
-        data = self._value_to_bytes(value)
-        expires_julian = datetime_to_julian(self._calculate_expires_at(expires_in))
+    def _set_query(self, key: str, data: bytes, encoded_expires_at: Any) -> tuple[str, tuple[Any, ...]]:
         sql = (
             f"INSERT INTO {self._table_name} (session_id, data, expires_at) VALUES (?, ?, ?) "
             "ON CONFLICT(session_id) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at"
         )
-        if self._is_async_config():
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas_async(driver)
-                await driver.execute(sql, key, data, expires_julian)
-                await driver.commit()
-            return
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas_sync(driver)
-            driver.execute(sql, key, data, expires_julian)
-            driver.commit()
+        return sql, (key, data, encoded_expires_at)
 
-    async def delete(self, key: str) -> None:
-        """Delete a single session row by `session_id`."""
-        sql = f"DELETE FROM {self._table_name} WHERE session_id = ?"
-        if self._is_async_config():
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas_async(driver)
-                await driver.execute(sql, key)
-                await driver.commit()
-            return
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas_sync(driver)
-            driver.execute(sql, key)
-            driver.commit()
+    def _delete_query(self, key: str) -> tuple[str, tuple[Any, ...]]:
+        return f"DELETE FROM {self._table_name} WHERE session_id = ?", (key,)
 
-    async def delete_all(self) -> None:
-        """Delete every stored session row from the session table."""
-        sql = f"DELETE FROM {self._table_name}"
-        if self._is_async_config():
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas_async(driver)
-                await driver.execute(sql)
-                await driver.commit()
-        else:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas_sync(driver)
-                driver.execute(sql)
-                driver.commit()
-        self._log_delete_all()
+    def _delete_all_query(self) -> tuple[str, tuple[Any, ...]]:
+        return f"DELETE FROM {self._table_name}", ()
 
-    async def exists(self, key: str) -> bool:
-        """Return True when `key` exists and has not expired."""
+    def _exists_query(self, key: str) -> tuple[str, tuple[Any, ...]]:
         sql = (
             f"SELECT 1 FROM {self._table_name} "
             "WHERE session_id = ? AND (expires_at IS NULL OR expires_at > julianday('now'))"
         )
-        if self._is_async_config():
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas_async(driver)
-                return await driver.select_value_or_none(sql, key) is not None
-        with self._config.provide_session() as driver:
-            self._ensure_pragmas_sync(driver)
-            return driver.select_value_or_none(sql, key) is not None
+        return sql, (key,)
 
-    async def expires_in(self, key: str) -> int | None:
-        """Return remaining lifetime in seconds for `key`, or `None` when absent/unexpiring."""
-        sql = f"SELECT expires_at FROM {self._table_name} WHERE session_id = ?"
-        if self._is_async_config():
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas_async(driver)
-                raw = await driver.select_value_or_none(sql, key)
-        else:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas_sync(driver)
-                raw = driver.select_value_or_none(sql, key)
-        if raw is None:
-            return None
-        expires_dt = julian_to_datetime(raw)
-        if expires_dt is None:
-            return None
-        remaining = int((expires_dt - datetime.now(UTC)).total_seconds())
-        return max(0, remaining)
+    def _expires_in_query(self, key: str) -> tuple[str, tuple[Any, ...]]:
+        return f"SELECT expires_at FROM {self._table_name} WHERE session_id = ?", (key,)
 
-    async def delete_expired(self) -> int:
-        """Delete all expired session rows and return the affected row count."""
-        sql = f"DELETE FROM {self._table_name} WHERE expires_at IS NOT NULL AND expires_at <= julianday('now')"
-        if self._is_async_config():
-            async with self._config.provide_session() as driver:
-                await self._ensure_pragmas_async(driver)
-                res = await driver.execute(sql)
-                await driver.commit()
-                deleted = res.rows_affected
-        else:
-            with self._config.provide_session() as driver:
-                self._ensure_pragmas_sync(driver)
-                res = driver.execute(sql)
-                driver.commit()
-                deleted = res.rows_affected
-        count = int(deleted) if deleted and deleted > 0 else 0
-        if count > 0:
-            self._log_delete_expired(count)
-        return count
+    def _delete_expired_query(self, now: datetime) -> tuple[str, tuple[Any, ...]]:
+        _ = now
+        return f"DELETE FROM {self._table_name} WHERE expires_at IS NOT NULL AND expires_at <= julianday('now')", ()

@@ -1,0 +1,31 @@
+[package]
+name = "vertebra-resp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared pure-Rust RESP2/RESP3 wire engine, Cluster, Sentinel, CLIENT TRACKING, Pub/Sub, Streams, and Memorystore IAM core for Vertebra"
+
+[lib]
+name = "vertebra_resp"
+crate-type = ["rlib"]
+
+[features]
+default = []
+pyo3 = ["dep:pyo3", "vertebra-db/pyo3"]
+
+[dependencies]
+bytes = { workspace = true }
+lru = "0.16"
+parking_lot = "0.12"
+pyo3 = { workspace = true, optional = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+url = { workspace = true }
+vertebra-core = { path = "../vertebra-core", default-features = false, features = ["gcp-auth"] }
+vertebra-db = { path = "../vertebra-db", default-features = false, features = ["rustls-ring"] }
+webpki-root-certs = { workspace = true }

@@ -321,6 +321,41 @@ class _SpannerDataDictionaryMixin:
             return _SPANGRES_TYPE_OVERRIDES[type_category]
         return self.get_dialect_config().get_optimal_type(type_category)
 
+    def _prepare_scoped_query(
+        self,
+        driver: Any,
+        domain: str,
+        *,
+        table: str | None = None,
+        schema: str | None = None,
+    ) -> tuple[str, dict[str, Any], str]:
+        mode = _resolve_driver_mode(driver, self._configured_dialect)
+        default_schema = "public" if mode == "postgresql" else ""
+        query_name = "by_table" if table is not None else "by_schema"
+        sql = self._resolve_catalog_sql(domain, query_name, mode)
+        params: dict[str, Any] = {"schema_name": schema}
+        if table is not None:
+            params["table_name"] = table
+        return sql, params, default_schema
+
+    @staticmethod
+    def _filter_interleaved_rows(rows: list[dict[str, Any]], parent_table: str | None) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in rows
+            if row.get("parent_table_name") and (parent_table is None or str(row["parent_table_name"]) == parent_table)
+        ]
+
+    @staticmethod
+    def _build_change_streams_result(rows: list[dict[str, Any]]) -> MetadataResult:
+        capability = MetadataCapability(
+            domain="change_streams",
+            support=MetadataSupport.SUPPORTED,
+            fidelity=MetadataFidelity.NATIVE,
+            source=MetadataSource.INFORMATION_SCHEMA,
+        )
+        return MetadataResult("change_streams", capability=capability, items=tuple(rows))
+
 
 class SpannerSyncDataDictionary(_SpannerDataDictionaryMixin, _UpstreamSpannerSyncDataDictionary):
     """Synchronous SQLSpec data dictionary for Cloud Spanner (GoogleSQL and Spangres)."""
@@ -351,118 +386,50 @@ class SpannerSyncDataDictionary(_SpannerDataDictionaryMixin, _UpstreamSpannerSyn
         resolved_mode = _resolve_driver_mode(driver, mode if mode is not None else self._configured_dialect)
         return _spanner_capabilities(domains, resolved_mode, type(self).__name__)
 
-    def get_tables(
-        self,
-        driver: SyncDriverAdapterBase,
-        schema: str | None = None,
-    ) -> list[TableMetadata]:
+    def get_tables(self, driver: SyncDriverAdapterBase, schema: str | None = None) -> list[TableMetadata]:
         """List Cloud Spanner tables including interleaved parent metadata when available."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        default_schema = "public" if mode == "postgresql" else ""
-        sql = self._resolve_catalog_sql("tables", "by_schema", mode)
-        rows = [dict(row) for row in driver.select(sql, {"schema_name": schema})]
-        return _table_metadata_from_rows(rows, default_schema)
+        sql, params, default_schema = self._prepare_scoped_query(driver, "tables", schema=schema)
+        return _table_metadata_from_rows([dict(row) for row in driver.select(sql, params)], default_schema)
 
     def get_columns(
-        self,
-        driver: SyncDriverAdapterBase,
-        table: str | None = None,
-        schema: str | None = None,
+        self, driver: SyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[ColumnMetadata]:
         """Retrieve column metadata for a Cloud Spanner table or schema."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        default_schema = "public" if mode == "postgresql" else ""
-        query_name = "by_table" if table is not None else "by_schema"
-        sql = self._resolve_catalog_sql("columns", query_name, mode)
-        params: dict[str, Any] = {"schema_name": schema}
-        if table is not None:
-            params["table_name"] = table
-        rows = [dict(row) for row in driver.select(sql, params)]
-        return _column_metadata_from_rows(rows, table, default_schema)
+        sql, params, default_schema = self._prepare_scoped_query(driver, "columns", table=table, schema=schema)
+        return _column_metadata_from_rows([dict(row) for row in driver.select(sql, params)], table, default_schema)
 
     def get_indexes(
-        self,
-        driver: SyncDriverAdapterBase,
-        table: str | None = None,
-        schema: str | None = None,
+        self, driver: SyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[IndexMetadata]:
         """Retrieve secondary, null-filtered, vector, and search indexes."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        default_schema = "public" if mode == "postgresql" else ""
-        query_name = "by_table" if table is not None else "by_schema"
-        sql = self._resolve_catalog_sql("indexes", query_name, mode)
-        params: dict[str, Any] = {"schema_name": schema}
-        if table is not None:
-            params["table_name"] = table
-        rows = [dict(row) for row in driver.select(sql, params)]
-        return _index_metadata_from_rows(rows, default_schema)
+        sql, params, default_schema = self._prepare_scoped_query(driver, "indexes", table=table, schema=schema)
+        return _index_metadata_from_rows([dict(row) for row in driver.select(sql, params)], default_schema)
 
     def get_foreign_keys(
-        self,
-        driver: SyncDriverAdapterBase,
-        table: str | None = None,
-        schema: str | None = None,
+        self, driver: SyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[ForeignKeyMetadata]:
         """Retrieve referential foreign key constraints."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        default_schema = "public" if mode == "postgresql" else ""
-        query_name = "by_table" if table is not None else "by_schema"
-        sql = self._resolve_catalog_sql("foreign_keys", query_name, mode)
-        params: dict[str, Any] = {"schema_name": schema}
-        if table is not None:
-            params["table_name"] = table
-        rows = [dict(row) for row in driver.select(sql, params)]
-        return _foreign_key_metadata_from_rows(rows, default_schema)
+        sql, params, default_schema = self._prepare_scoped_query(driver, "foreign_keys", table=table, schema=schema)
+        return _foreign_key_metadata_from_rows([dict(row) for row in driver.select(sql, params)], default_schema)
 
     def get_interleaved_tables(
-        self,
-        driver: SyncDriverAdapterBase,
-        parent_table: str | None = None,
-        schema: str | None = None,
+        self, driver: SyncDriverAdapterBase, parent_table: str | None = None, schema: str | None = None
     ) -> list[dict[str, Any]]:
         """List interleaved child tables and their ``on_delete_action``."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        sql = self._resolve_catalog_sql("tables", "by_schema", mode)
-        rows = [dict(row) for row in driver.select(sql, {"schema_name": schema})]
-        filtered: list[dict[str, Any]] = []
-        for row in rows:
-            parent_val = row.get("parent_table_name")
-            if not parent_val:
-                continue
-            if parent_table is not None and str(parent_val) != parent_table:
-                continue
-            filtered.append(row)
-        return filtered
+        sql, params, _ = self._prepare_scoped_query(driver, "tables", schema=schema)
+        return self._filter_interleaved_rows([dict(row) for row in driver.select(sql, params)], parent_table)
 
     def get_change_streams(
-        self,
-        driver: SyncDriverAdapterBase,
-        schema: str | None = None,
-        stream_name: str | None = None,
+        self, driver: SyncDriverAdapterBase, schema: str | None = None, stream_name: str | None = None
     ) -> MetadataResult:
         """List Cloud Spanner change streams registered in ``INFORMATION_SCHEMA``."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         sql = self._resolve_catalog_sql("change_streams", "list", mode)
-        rows = [
-            dict(row)
-            for row in driver.select(
-                sql,
-                {"schema_name": schema, "change_stream_name": stream_name},
-            )
-        ]
-        capability = MetadataCapability(
-            domain="change_streams",
-            support=MetadataSupport.SUPPORTED,
-            fidelity=MetadataFidelity.NATIVE,
-            source=MetadataSource.INFORMATION_SCHEMA,
-        )
-        return MetadataResult("change_streams", capability=capability, items=tuple(rows))
+        rows = [dict(row) for row in driver.select(sql, {"schema_name": schema, "change_stream_name": stream_name})]
+        return self._build_change_streams_result(rows)
 
     def get_property_graphs(
-        self,
-        driver: SyncDriverAdapterBase,
-        property_graph_name: str | None = None,
-        schema: str | None = None,
+        self, driver: SyncDriverAdapterBase, property_graph_name: str | None = None, schema: str | None = None
     ) -> list[dict[str, Any]]:
         """List Spanner Graph property graph definitions in GoogleSQL databases."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
@@ -470,11 +437,7 @@ class SpannerSyncDataDictionary(_SpannerDataDictionaryMixin, _UpstreamSpannerSyn
             return []
         sql = self._resolve_catalog_sql("property_graphs", "list", mode)
         return [
-            dict(row)
-            for row in driver.select(
-                sql,
-                {"schema_name": schema, "property_graph_name": property_graph_name},
-            )
+            dict(row) for row in driver.select(sql, {"schema_name": schema, "property_graph_name": property_graph_name})
         ]
 
 
@@ -507,118 +470,54 @@ class SpannerAsyncDataDictionary(_SpannerDataDictionaryMixin, _UpstreamSpannerAs
         resolved_mode = _resolve_driver_mode(driver, mode if mode is not None else self._configured_dialect)
         return _spanner_capabilities(domains, resolved_mode, type(self).__name__)
 
-    async def get_tables(
-        self,
-        driver: AsyncDriverAdapterBase,
-        schema: str | None = None,
-    ) -> list[TableMetadata]:
+    async def get_tables(self, driver: AsyncDriverAdapterBase, schema: str | None = None) -> list[TableMetadata]:
         """Asynchronously list Cloud Spanner tables."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        default_schema = "public" if mode == "postgresql" else ""
-        sql = self._resolve_catalog_sql("tables", "by_schema", mode)
-        rows = [dict(row) for row in await driver.select(sql, {"schema_name": schema})]
-        return _table_metadata_from_rows(rows, default_schema)
+        sql, params, default_schema = self._prepare_scoped_query(driver, "tables", schema=schema)
+        return _table_metadata_from_rows([dict(row) for row in await driver.select(sql, params)], default_schema)
 
     async def get_columns(
-        self,
-        driver: AsyncDriverAdapterBase,
-        table: str | None = None,
-        schema: str | None = None,
+        self, driver: AsyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[ColumnMetadata]:
         """Asynchronously retrieve column metadata for a Cloud Spanner table or schema."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        default_schema = "public" if mode == "postgresql" else ""
-        query_name = "by_table" if table is not None else "by_schema"
-        sql = self._resolve_catalog_sql("columns", query_name, mode)
-        params: dict[str, Any] = {"schema_name": schema}
-        if table is not None:
-            params["table_name"] = table
-        rows = [dict(row) for row in await driver.select(sql, params)]
-        return _column_metadata_from_rows(rows, table, default_schema)
+        sql, params, default_schema = self._prepare_scoped_query(driver, "columns", table=table, schema=schema)
+        return _column_metadata_from_rows(
+            [dict(row) for row in await driver.select(sql, params)], table, default_schema
+        )
 
     async def get_indexes(
-        self,
-        driver: AsyncDriverAdapterBase,
-        table: str | None = None,
-        schema: str | None = None,
+        self, driver: AsyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[IndexMetadata]:
         """Asynchronously retrieve secondary, null-filtered, vector, and search indexes."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        default_schema = "public" if mode == "postgresql" else ""
-        query_name = "by_table" if table is not None else "by_schema"
-        sql = self._resolve_catalog_sql("indexes", query_name, mode)
-        params: dict[str, Any] = {"schema_name": schema}
-        if table is not None:
-            params["table_name"] = table
-        rows = [dict(row) for row in await driver.select(sql, params)]
-        return _index_metadata_from_rows(rows, default_schema)
+        sql, params, default_schema = self._prepare_scoped_query(driver, "indexes", table=table, schema=schema)
+        return _index_metadata_from_rows([dict(row) for row in await driver.select(sql, params)], default_schema)
 
     async def get_foreign_keys(
-        self,
-        driver: AsyncDriverAdapterBase,
-        table: str | None = None,
-        schema: str | None = None,
+        self, driver: AsyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[ForeignKeyMetadata]:
         """Asynchronously retrieve referential foreign key constraints."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        default_schema = "public" if mode == "postgresql" else ""
-        query_name = "by_table" if table is not None else "by_schema"
-        sql = self._resolve_catalog_sql("foreign_keys", query_name, mode)
-        params: dict[str, Any] = {"schema_name": schema}
-        if table is not None:
-            params["table_name"] = table
-        rows = [dict(row) for row in await driver.select(sql, params)]
-        return _foreign_key_metadata_from_rows(rows, default_schema)
+        sql, params, default_schema = self._prepare_scoped_query(driver, "foreign_keys", table=table, schema=schema)
+        return _foreign_key_metadata_from_rows([dict(row) for row in await driver.select(sql, params)], default_schema)
 
     async def get_interleaved_tables(
-        self,
-        driver: AsyncDriverAdapterBase,
-        parent_table: str | None = None,
-        schema: str | None = None,
+        self, driver: AsyncDriverAdapterBase, parent_table: str | None = None, schema: str | None = None
     ) -> list[dict[str, Any]]:
         """Asynchronously list interleaved child tables and their ``on_delete_action``."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        sql = self._resolve_catalog_sql("tables", "by_schema", mode)
-        rows = [dict(row) for row in await driver.select(sql, {"schema_name": schema})]
-        filtered: list[dict[str, Any]] = []
-        for row in rows:
-            parent_val = row.get("parent_table_name")
-            if not parent_val:
-                continue
-            if parent_table is not None and str(parent_val) != parent_table:
-                continue
-            filtered.append(row)
-        return filtered
+        sql, params, _ = self._prepare_scoped_query(driver, "tables", schema=schema)
+        return self._filter_interleaved_rows([dict(row) for row in await driver.select(sql, params)], parent_table)
 
     async def get_change_streams(
-        self,
-        driver: AsyncDriverAdapterBase,
-        schema: str | None = None,
-        stream_name: str | None = None,
+        self, driver: AsyncDriverAdapterBase, schema: str | None = None, stream_name: str | None = None
     ) -> MetadataResult:
         """Asynchronously list Cloud Spanner change streams registered in ``INFORMATION_SCHEMA``."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         sql = self._resolve_catalog_sql("change_streams", "list", mode)
         rows = [
-            dict(row)
-            for row in await driver.select(
-                sql,
-                {"schema_name": schema, "change_stream_name": stream_name},
-            )
+            dict(row) for row in await driver.select(sql, {"schema_name": schema, "change_stream_name": stream_name})
         ]
-        capability = MetadataCapability(
-            domain="change_streams",
-            support=MetadataSupport.SUPPORTED,
-            fidelity=MetadataFidelity.NATIVE,
-            source=MetadataSource.INFORMATION_SCHEMA,
-        )
-        return MetadataResult("change_streams", capability=capability, items=tuple(rows))
+        return self._build_change_streams_result(rows)
 
     async def get_property_graphs(
-        self,
-        driver: AsyncDriverAdapterBase,
-        property_graph_name: str | None = None,
-        schema: str | None = None,
+        self, driver: AsyncDriverAdapterBase, property_graph_name: str | None = None, schema: str | None = None
     ) -> list[dict[str, Any]]:
         """Asynchronously list Spanner Graph property graph definitions in GoogleSQL databases."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
@@ -627,8 +526,5 @@ class SpannerAsyncDataDictionary(_SpannerDataDictionaryMixin, _UpstreamSpannerAs
         sql = self._resolve_catalog_sql("property_graphs", "list", mode)
         return [
             dict(row)
-            for row in await driver.select(
-                sql,
-                {"schema_name": schema, "property_graph_name": property_graph_name},
-            )
+            for row in await driver.select(sql, {"schema_name": schema, "property_graph_name": property_graph_name})
         ]

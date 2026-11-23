@@ -97,12 +97,9 @@ class DatabaseTokenProvider(Protocol):
         ...
 
 
-class AwsRdsIamTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=True):
-    """AWS RDS IAM database authentication token provider using SigV4 `rds-db` presigned URLs."""
+class _BaseAwsSigV4TokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=True):
+    """Shared AWS SigV4 presigned IAM token caching and acquisition behavior."""
 
-    endpoint_host: str
-    username: str
-    port: int = 5432
     region: str | None = None
     access_key_id: str | None = None
     secret_access_key: str | None = None
@@ -115,28 +112,15 @@ class AwsRdsIamTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=Tru
     clock: Callable[[], float] | None = None
     signer: Callable[..., Any] | None = None
 
-    def __post_init__(self) -> None:
-        """Normalize host, validate RDS token bounds and endpoints, and initialize cache state."""
-        normalized_host = _normalize_host(self.endpoint_host, field_name="endpoint_host")
-        if normalized_host != self.endpoint_host:
-            msgspec.structs.force_setattr(self, "endpoint_host", normalized_host)
-        if isinstance(self.port, bool) or not isinstance(self.port, int) or not (1 <= self.port <= 65535):
-            msg = f"port must be an integer between 1 and 65535, got {self.port!r}"
-            raise ImproperConfigurationError(msg)
+    def _init_aws_provider(self, *, max_ttl_seconds: int) -> None:
         normalized_region = _validate_timing_bounds(
             self.region,
             self.token_ttl_seconds,
             self.refresh_margin_seconds,
-            max_ttl_seconds=_MAX_RDS_IAM_TTL_SECONDS,
+            max_ttl_seconds=max_ttl_seconds,
         )
         if normalized_region != self.region:
             msgspec.structs.force_setattr(self, "region", normalized_region)
-        normalized_user = self.username.strip()
-        if not normalized_user:
-            msg = "username must be a non-empty string"
-            raise ImproperConfigurationError(msg)
-        if normalized_user != self.username:
-            msgspec.structs.force_setattr(self, "username", normalized_user)
         if self.sts_endpoint is not None:
             normalized_sts = _validate_aws_sts_url(self.sts_endpoint, field_name="sts_endpoint")
             if normalized_sts != self.sts_endpoint:
@@ -152,11 +136,8 @@ class AwsRdsIamTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=Tru
                 msgspec.structs.force_setattr(self, "imds_endpoint", normalized_imds)
         msgspec.structs.force_setattr(self, "_cache_slot", _TokenCacheSlot())
 
-    def __repr__(self) -> str:
-        """Return a redacted representation that omits AWS keys and session tokens."""
+    def _redacted_secret_suffix(self) -> str:
         return (
-            f"AwsRdsIamTokenProvider(endpoint_host={self.endpoint_host!r}, port={self.port!r}, "
-            f"region={self.region!r}, username={self.username!r}, "
             f"access_key_id={'<redacted>' if self.access_key_id else None!r}, "
             f"secret_access_key={'<redacted>' if self.secret_access_key else None!r}, "
             f"session_token={'<redacted>' if self.session_token else None!r}, "
@@ -165,7 +146,7 @@ class AwsRdsIamTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=Tru
         )
 
     def resolve_sync(self, *, force_refresh: bool = False) -> str:
-        """Synchronously return a cached or freshly signed RDS IAM database token."""
+        """Synchronously return a cached or freshly signed AWS IAM database token."""
         slot: _TokenCacheSlot = self.__dict__["_cache_slot"]
         return _resolve_snapshot_sync(
             slot,
@@ -176,7 +157,7 @@ class AwsRdsIamTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=Tru
         )
 
     async def resolve_async(self, *, force_refresh: bool = False) -> str:
-        """Asynchronously return a cached or freshly signed RDS IAM database token without blocking the loop."""
+        """Asynchronously return a cached or freshly signed AWS IAM database token without blocking the loop."""
         slot: _TokenCacheSlot = self.__dict__["_cache_slot"]
         return await _resolve_snapshot_async(
             slot,
@@ -187,9 +168,96 @@ class AwsRdsIamTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=Tru
         )
 
     def invalidate(self) -> None:
-        """Invalidate the cached RDS IAM token snapshot."""
+        """Invalidate the cached AWS IAM token snapshot."""
         slot: _TokenCacheSlot = self.__dict__["_cache_slot"]
         slot.clear()
+
+    def _signer_context(self, now_ts: float) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _sigv4_params(self) -> tuple[str, str, str, str | None]:
+        raise NotImplementedError
+
+    def _mint_sigv4_snapshot(self, now_ts: float) -> TokenSnapshot:
+        region = self.region
+        assert region is not None
+        creds = _resolve_aws_credentials(
+            self.access_key_id,
+            self.secret_access_key,
+            self.session_token,
+            region=region,
+            sts_endpoint=self.sts_endpoint,
+            ecs_endpoint=self.ecs_endpoint,
+            imds_endpoint=self.imds_endpoint,
+        )
+        host_header, service, action, db_user = self._sigv4_params()
+        token = _sign_sigv4_presigned_token(
+            host_header=host_header,
+            region=region,
+            service=service,
+            action=action,
+            ttl_seconds=self.token_ttl_seconds,
+            now_ts=now_ts,
+            access_key_id=creds.access_key_id,
+            secret_access_key=creds.secret_access_key,
+            session_token=creds.session_token,
+            db_user=db_user,
+        )
+        expires_at = now_ts + self.token_ttl_seconds
+        if creds.expires_at is not None:
+            expires_at = min(expires_at, creds.expires_at)
+        return TokenSnapshot(token=token, expires_at=expires_at)
+
+    def _acquire_sync(self, now_ts: float) -> TokenSnapshot:
+        if self.signer is not None:
+            raw = _invoke_custom_signer(self.signer, self._signer_context(now_ts))
+            if inspect.isawaitable(raw):
+                close_coro = getattr(raw, "close", None)
+                if callable(close_coro):
+                    close_coro()
+                msg = "Async token signer cannot be used with resolve_sync(); use resolve_async()"
+                raise ImproperConfigurationError(msg)
+            return TokenSnapshot(token=_normalize_signed_token(raw), expires_at=now_ts + self.token_ttl_seconds)
+        return self._mint_sigv4_snapshot(now_ts)
+
+    async def _acquire_async(self, now_ts: float) -> TokenSnapshot:
+        if self.signer is not None:
+            raw = _invoke_custom_signer(self.signer, self._signer_context(now_ts))
+            if inspect.isawaitable(raw):
+                raw = await raw
+            return TokenSnapshot(token=_normalize_signed_token(raw), expires_at=now_ts + self.token_ttl_seconds)
+        return await anyio.to_thread.run_sync(self._mint_sigv4_snapshot, now_ts)
+
+
+class AwsRdsIamTokenProvider(_BaseAwsSigV4TokenProvider, frozen=True, kw_only=True, dict=True):
+    """AWS RDS IAM database authentication token provider using SigV4 `rds-db` presigned URLs."""
+
+    endpoint_host: str
+    username: str
+    port: int = 5432
+
+    def __post_init__(self) -> None:
+        """Normalize host, validate RDS token bounds and endpoints, and initialize cache state."""
+        normalized_host = _normalize_host(self.endpoint_host, field_name="endpoint_host")
+        if normalized_host != self.endpoint_host:
+            msgspec.structs.force_setattr(self, "endpoint_host", normalized_host)
+        if isinstance(self.port, bool) or not isinstance(self.port, int) or not (1 <= self.port <= 65535):
+            msg = f"port must be an integer between 1 and 65535, got {self.port!r}"
+            raise ImproperConfigurationError(msg)
+        normalized_user = self.username.strip()
+        if not normalized_user:
+            msg = "username must be a non-empty string"
+            raise ImproperConfigurationError(msg)
+        if normalized_user != self.username:
+            msgspec.structs.force_setattr(self, "username", normalized_user)
+        self._init_aws_provider(max_ttl_seconds=_MAX_RDS_IAM_TTL_SECONDS)
+
+    def __repr__(self) -> str:
+        """Return a redacted representation that omits AWS keys and session tokens."""
+        return (
+            f"AwsRdsIamTokenProvider(endpoint_host={self.endpoint_host!r}, port={self.port!r}, "
+            f"region={self.region!r}, username={self.username!r}, {self._redacted_secret_suffix()}"
+        )
 
     def _signer_context(self, now_ts: float) -> dict[str, Any]:
         return {
@@ -205,139 +273,29 @@ class AwsRdsIamTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=Tru
             "now_ts": now_ts,
         }
 
-    def _mint_sigv4_snapshot(self, now_ts: float) -> TokenSnapshot:
-        region = self.region
-        assert region is not None
-        creds = _resolve_aws_credentials(
-            self.access_key_id,
-            self.secret_access_key,
-            self.session_token,
-            region=region,
-            sts_endpoint=self.sts_endpoint,
-            ecs_endpoint=self.ecs_endpoint,
-            imds_endpoint=self.imds_endpoint,
-        )
-        token = _sign_sigv4_presigned_token(
-            host_header=f"{self.endpoint_host}:{self.port}",
-            region=region,
-            service="rds-db",
-            action="connect",
-            ttl_seconds=self.token_ttl_seconds,
-            now_ts=now_ts,
-            access_key_id=creds.access_key_id,
-            secret_access_key=creds.secret_access_key,
-            session_token=creds.session_token,
-            db_user=self.username,
-        )
-        expires_at = now_ts + self.token_ttl_seconds
-        if creds.expires_at is not None:
-            expires_at = min(expires_at, creds.expires_at)
-        return TokenSnapshot(token=token, expires_at=expires_at)
-
-    def _acquire_sync(self, now_ts: float) -> TokenSnapshot:
-        if self.signer is not None:
-            raw = _invoke_custom_signer(self.signer, self._signer_context(now_ts))
-            if inspect.isawaitable(raw):
-                close_coro = getattr(raw, "close", None)
-                if callable(close_coro):
-                    close_coro()
-                msg = "Async token signer cannot be used with resolve_sync(); use resolve_async()"
-                raise ImproperConfigurationError(msg)
-            return TokenSnapshot(token=_normalize_signed_token(raw), expires_at=now_ts + self.token_ttl_seconds)
-        return self._mint_sigv4_snapshot(now_ts)
-
-    async def _acquire_async(self, now_ts: float) -> TokenSnapshot:
-        if self.signer is not None:
-            raw = _invoke_custom_signer(self.signer, self._signer_context(now_ts))
-            if inspect.isawaitable(raw):
-                raw = await raw
-            return TokenSnapshot(token=_normalize_signed_token(raw), expires_at=now_ts + self.token_ttl_seconds)
-        return await anyio.to_thread.run_sync(self._mint_sigv4_snapshot, now_ts)
+    def _sigv4_params(self) -> tuple[str, str, str, str | None]:
+        return f"{self.endpoint_host}:{self.port}", "rds-db", "connect", self.username
 
 
-class AwsAuroraDsqlIamTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=True):
+class AwsAuroraDsqlIamTokenProvider(_BaseAwsSigV4TokenProvider, frozen=True, kw_only=True, dict=True):
     """AWS Aurora DSQL IAM authentication token provider using SigV4 `dsql` presigned URLs."""
 
     hostname: str
-    region: str | None = None
     admin: bool = False
-    access_key_id: str | None = None
-    secret_access_key: str | None = None
-    session_token: str | None = None
-    sts_endpoint: str | None = None
-    ecs_endpoint: str | None = None
-    imds_endpoint: str | None = None
-    refresh_margin_seconds: float = 60.0
-    token_ttl_seconds: int = _MAX_RDS_IAM_TTL_SECONDS
-    clock: Callable[[], float] | None = None
-    signer: Callable[..., Any] | None = None
 
     def __post_init__(self) -> None:
         """Normalize hostname, validate Aurora DSQL bounds and endpoints, and initialize cache state."""
         normalized_host = _normalize_host(self.hostname, field_name="hostname")
         if normalized_host != self.hostname:
             msgspec.structs.force_setattr(self, "hostname", normalized_host)
-        normalized_region = _validate_timing_bounds(
-            self.region,
-            self.token_ttl_seconds,
-            self.refresh_margin_seconds,
-            max_ttl_seconds=_MAX_DSQL_IAM_TTL_SECONDS,
-        )
-        if normalized_region != self.region:
-            msgspec.structs.force_setattr(self, "region", normalized_region)
-        if self.sts_endpoint is not None:
-            normalized_sts = _validate_aws_sts_url(self.sts_endpoint, field_name="sts_endpoint")
-            if normalized_sts != self.sts_endpoint:
-                msgspec.structs.force_setattr(self, "sts_endpoint", normalized_sts)
-        if self.ecs_endpoint is not None:
-            normalized_ecs, _ = _validate_ecs_credentials_url(self.ecs_endpoint)
-            normalized_ecs = normalized_ecs.rstrip("/")
-            if normalized_ecs != self.ecs_endpoint:
-                msgspec.structs.force_setattr(self, "ecs_endpoint", normalized_ecs)
-        if self.imds_endpoint is not None:
-            normalized_imds = _validate_aws_imds_base_url(self.imds_endpoint, field_name="imds_endpoint")
-            if normalized_imds != self.imds_endpoint:
-                msgspec.structs.force_setattr(self, "imds_endpoint", normalized_imds)
-        msgspec.structs.force_setattr(self, "_cache_slot", _TokenCacheSlot())
+        self._init_aws_provider(max_ttl_seconds=_MAX_DSQL_IAM_TTL_SECONDS)
 
     def __repr__(self) -> str:
         """Return a redacted representation that omits AWS keys and session tokens."""
         return (
             f"AwsAuroraDsqlIamTokenProvider(hostname={self.hostname!r}, region={self.region!r}, "
-            f"admin={self.admin!r}, "
-            f"access_key_id={'<redacted>' if self.access_key_id else None!r}, "
-            f"secret_access_key={'<redacted>' if self.secret_access_key else None!r}, "
-            f"session_token={'<redacted>' if self.session_token else None!r}, "
-            f"refresh_margin_seconds={self.refresh_margin_seconds!r}, "
-            f"token_ttl_seconds={self.token_ttl_seconds!r})"
+            f"admin={self.admin!r}, {self._redacted_secret_suffix()}"
         )
-
-    def resolve_sync(self, *, force_refresh: bool = False) -> str:
-        """Synchronously return a cached or freshly signed Aurora DSQL IAM token."""
-        slot: _TokenCacheSlot = self.__dict__["_cache_slot"]
-        return _resolve_snapshot_sync(
-            slot,
-            self.clock,
-            self.refresh_margin_seconds,
-            self._acquire_sync,
-            force_refresh=force_refresh,
-        )
-
-    async def resolve_async(self, *, force_refresh: bool = False) -> str:
-        """Asynchronously return a cached or freshly signed Aurora DSQL IAM token without blocking the loop."""
-        slot: _TokenCacheSlot = self.__dict__["_cache_slot"]
-        return await _resolve_snapshot_async(
-            slot,
-            self.clock,
-            self.refresh_margin_seconds,
-            self._acquire_async,
-            force_refresh=force_refresh,
-        )
-
-    def invalidate(self) -> None:
-        """Invalidate the cached Aurora DSQL IAM token snapshot."""
-        slot: _TokenCacheSlot = self.__dict__["_cache_slot"]
-        slot.clear()
 
     def _signer_context(self, now_ts: float) -> dict[str, Any]:
         action = "DbConnectAdmin" if self.admin else "DbConnect"
@@ -353,54 +311,8 @@ class AwsAuroraDsqlIamTokenProvider(msgspec.Struct, frozen=True, kw_only=True, d
             "now_ts": now_ts,
         }
 
-    def _mint_sigv4_snapshot(self, now_ts: float) -> TokenSnapshot:
-        region = self.region
-        assert region is not None
-        action = "DbConnectAdmin" if self.admin else "DbConnect"
-        creds = _resolve_aws_credentials(
-            self.access_key_id,
-            self.secret_access_key,
-            self.session_token,
-            region=region,
-            sts_endpoint=self.sts_endpoint,
-            ecs_endpoint=self.ecs_endpoint,
-            imds_endpoint=self.imds_endpoint,
-        )
-        token = _sign_sigv4_presigned_token(
-            host_header=self.hostname,
-            region=region,
-            service="dsql",
-            action=action,
-            ttl_seconds=self.token_ttl_seconds,
-            now_ts=now_ts,
-            access_key_id=creds.access_key_id,
-            secret_access_key=creds.secret_access_key,
-            session_token=creds.session_token,
-        )
-        expires_at = now_ts + self.token_ttl_seconds
-        if creds.expires_at is not None:
-            expires_at = min(expires_at, creds.expires_at)
-        return TokenSnapshot(token=token, expires_at=expires_at)
-
-    def _acquire_sync(self, now_ts: float) -> TokenSnapshot:
-        if self.signer is not None:
-            raw = _invoke_custom_signer(self.signer, self._signer_context(now_ts))
-            if inspect.isawaitable(raw):
-                close_coro = getattr(raw, "close", None)
-                if callable(close_coro):
-                    close_coro()
-                msg = "Async token signer cannot be used with resolve_sync(); use resolve_async()"
-                raise ImproperConfigurationError(msg)
-            return TokenSnapshot(token=_normalize_signed_token(raw), expires_at=now_ts + self.token_ttl_seconds)
-        return self._mint_sigv4_snapshot(now_ts)
-
-    async def _acquire_async(self, now_ts: float) -> TokenSnapshot:
-        if self.signer is not None:
-            raw = _invoke_custom_signer(self.signer, self._signer_context(now_ts))
-            if inspect.isawaitable(raw):
-                raw = await raw
-            return TokenSnapshot(token=_normalize_signed_token(raw), expires_at=now_ts + self.token_ttl_seconds)
-        return await anyio.to_thread.run_sync(self._mint_sigv4_snapshot, now_ts)
+    def _sigv4_params(self) -> tuple[str, str, str, str | None]:
+        return self.hostname, "dsql", "DbConnectAdmin" if self.admin else "DbConnect", None
 
 
 class AzureEntraTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=True):

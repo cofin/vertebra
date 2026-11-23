@@ -1,6 +1,5 @@
 //! Shared PEP 249 cursor state, placeholder rewrite plan cache, and sync/async cursor classes for `vertebra-mssql`.
 
-use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -11,18 +10,19 @@ use tokio::sync::Mutex as AsyncMutex;
 use vertebra_db::py_async::{
     ReadyAwaitable, RustDbTaskAwaitable, ready_err, ready_ok, spawn_rust_db_task_with_attr,
 };
+use vertebra_db::py_cursor::{
+    BufferedCursorState, DEFAULT_PLAN_CACHE_CAPACITY, PlanLruCache, build_description_7tuple,
+};
+use vertebra_db::py_errors::cursor_interface_err;
 use vertebra_db::rewrite_mssql_placeholders;
 
 use crate::client::MssqlClient;
 use crate::codecs::{MssqlCellValue, MssqlColumnMeta, cell_to_py};
-use crate::errors::{MssqlError, mssql_error_to_py, resolve_exception_types};
+use crate::errors::{MssqlError, mssql_error_to_py};
 use crate::params::{
     MssqlParam, prepare_many_sql_and_params, prepare_sql_and_params, py_any_to_mssql_param,
 };
 use crate::{MSSQL_COMPLETION_DRAINER_ATTR, run_sync_with_completion_queue};
-
-/// Maximum number of rewritten SQL plans retained in the per-process LRU cache.
-pub(crate) const CURSOR_PLAN_CACHE_CAPACITY: usize = 512;
 
 /// Cached placeholder rewrite result for a SQL string.
 #[derive(Debug, PartialEq, Eq)]
@@ -31,52 +31,10 @@ pub(crate) struct RewritePlan {
     pub(crate) param_count: usize,
 }
 
-struct PlanLruCache {
-    capacity: usize,
-    entries: HashMap<Box<str>, Arc<RewritePlan>>,
-    order: VecDeque<Box<str>>,
-}
+static REWRITE_PLAN_CACHE: OnceLock<Mutex<PlanLruCache<Arc<RewritePlan>>>> = OnceLock::new();
 
-impl PlanLruCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            entries: HashMap::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-        }
-    }
-
-    fn get(&mut self, key: &str) -> Option<Arc<RewritePlan>> {
-        let plan = self.entries.get(key).map(Arc::clone)?;
-        if let Some(pos) = self.order.iter().position(|k| k.as_ref() == key)
-            && let Some(entry_key) = self.order.remove(pos)
-        {
-            self.order.push_back(entry_key);
-        }
-        Some(plan)
-    }
-
-    fn insert(&mut self, key: Box<str>, plan: Arc<RewritePlan>) -> Arc<RewritePlan> {
-        if let Some(existing) = self.get(key.as_ref()) {
-            return existing;
-        }
-        while self.entries.len() >= self.capacity {
-            if let Some(evicted) = self.order.pop_front() {
-                self.entries.remove(evicted.as_ref());
-            } else {
-                break;
-            }
-        }
-        self.order.push_back(key.clone());
-        self.entries.insert(key, Arc::clone(&plan));
-        plan
-    }
-}
-
-static REWRITE_PLAN_CACHE: OnceLock<Mutex<PlanLruCache>> = OnceLock::new();
-
-fn plan_cache() -> &'static Mutex<PlanLruCache> {
-    REWRITE_PLAN_CACHE.get_or_init(|| Mutex::new(PlanLruCache::new(CURSOR_PLAN_CACHE_CAPACITY)))
+fn plan_cache() -> &'static Mutex<PlanLruCache<Arc<RewritePlan>>> {
+    REWRITE_PLAN_CACHE.get_or_init(|| Mutex::new(PlanLruCache::new(DEFAULT_PLAN_CACHE_CAPACITY)))
 }
 
 /// Return the cached [`RewritePlan`] for `sql`, computing and inserting it on a cache miss.
@@ -186,143 +144,6 @@ pub(crate) fn bind_positional(
     Ok((plan, out))
 }
 
-/// Build an `InterfaceError` from the shared exception cache in `errors.rs`.
-pub(crate) fn cursor_interface_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py) {
-        Ok(types) => PyErr::from_type(types.interface.bind(py).clone(), (message.to_string(),)),
-        Err(py_err) => py_err,
-    }
-}
-
-/// Build a `ProgrammingError` from the shared exception cache in `errors.rs`.
-pub(crate) fn cursor_programming_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py) {
-        Ok(types) => PyErr::from_type(types.programming.bind(py).clone(), (message.to_string(),)),
-        Err(py_err) => py_err,
-    }
-}
-
-/// Buffered result and PEP 249 state shared by `SyncMSSQLCursor` and `AsyncMSSQLCursor`.
-pub(crate) struct CursorState {
-    pub(crate) rows: Vec<Py<PyTuple>>,
-    pub(crate) pos: usize,
-    pub(crate) description: Option<Py<PyTuple>>,
-    pub(crate) rowcount: i64,
-    pub(crate) lastrowid: Option<Py<PyAny>>,
-    pub(crate) arraysize: usize,
-    pub(crate) executed: bool,
-    pub(crate) closed: bool,
-}
-
-impl CursorState {
-    /// Construct a fresh, open cursor state with `rowcount = -1` and `arraysize = 1`.
-    pub(crate) fn new() -> Self {
-        Self {
-            rows: Vec::new(),
-            pos: 0,
-            description: None,
-            rowcount: -1,
-            lastrowid: None,
-            arraysize: 1,
-            executed: false,
-            closed: false,
-        }
-    }
-
-    /// Return `InterfaceError` if the cursor has been closed.
-    pub(crate) fn ensure_open(&self, py: Python<'_>) -> PyResult<()> {
-        if self.closed {
-            return Err(cursor_interface_err(py, "cursor is closed"));
-        }
-        Ok(())
-    }
-
-    /// Clear buffered rows and reset statement metadata after a failed call or `close()`.
-    pub(crate) fn clear_result(&mut self) {
-        self.rows.clear();
-        self.pos = 0;
-        self.description = None;
-        self.rowcount = -1;
-        self.lastrowid = None;
-    }
-
-    /// Replace the buffered result set and update statement attributes.
-    pub(crate) fn store(
-        &mut self,
-        description: Option<Py<PyTuple>>,
-        rows: Vec<Py<PyTuple>>,
-        rowcount: i64,
-        lastrowid: Option<Py<PyAny>>,
-    ) {
-        self.description = description;
-        self.rows = rows;
-        self.pos = 0;
-        self.rowcount = rowcount;
-        self.lastrowid = lastrowid;
-        self.executed = true;
-    }
-
-    /// Fetch the next buffered row, or `None` when no result set exists or rows are exhausted.
-    pub(crate) fn fetchone(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(None);
-        }
-        let row = self.rows[self.pos].clone_ref(py);
-        self.pos += 1;
-        Ok(Some(row))
-    }
-
-    /// Fetch up to `size` (or `arraysize` when `None`) buffered rows.
-    pub(crate) fn fetchmany(
-        &mut self,
-        py: Python<'_>,
-        size: Option<usize>,
-    ) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        let wanted = size.unwrap_or(self.arraysize);
-        if self.description.is_none() || wanted == 0 || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let end = self.pos.saturating_add(wanted).min(self.rows.len());
-        let out = self.rows[self.pos..end]
-            .iter()
-            .map(|r| r.clone_ref(py))
-            .collect();
-        self.pos = end;
-        Ok(out)
-    }
-
-    /// Fetch all remaining buffered rows and leave the cursor exhausted.
-    pub(crate) fn fetchall(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let out = self.rows[self.pos..]
-            .iter()
-            .map(|r| r.clone_ref(py))
-            .collect();
-        self.pos = self.rows.len();
-        Ok(out)
-    }
-
-    /// Update `arraysize`, rejecting values below `1` with `ProgrammingError`.
-    pub(crate) fn set_arraysize(&mut self, py: Python<'_>, value: i64) -> PyResult<()> {
-        if value < 1 {
-            return Err(cursor_programming_err(py, "arraysize must be at least 1"));
-        }
-        self.arraysize = value as usize;
-        Ok(())
-    }
-
-    /// Close the cursor idempotently and release buffered rows.
-    pub(crate) fn close(&mut self) {
-        self.closed = true;
-        self.clear_result();
-    }
-}
-
 /// Map a TDS [`ColumnType`] to its SQL Server type name, or `None` when untyped (`Null`).
 pub(crate) const fn column_type_name(col_type: ColumnType) -> Option<&'static str> {
     match col_type {
@@ -368,29 +189,15 @@ pub(crate) fn describe_columns(
     if columns.is_empty() {
         return Ok(None);
     }
-    let none = py.None();
     let mut items = Vec::with_capacity(columns.len());
     for col in columns {
-        let name_obj = col.name.as_str().into_pyobject(py)?.into_any().unbind();
         let type_obj = match column_type_name(col.column_type) {
-            Some(type_name) => type_name.into_pyobject(py)?.into_any().unbind(),
-            None => none.clone_ref(py),
+            Some(type_name) => Some(type_name.into_pyobject(py)?.into_any().unbind()),
+            None => None,
         };
-        let entry = PyTuple::new(
-            py,
-            [
-                name_obj,
-                type_obj,
-                none.clone_ref(py),
-                none.clone_ref(py),
-                none.clone_ref(py),
-                none.clone_ref(py),
-                none.clone_ref(py),
-            ],
-        )?;
-        items.push(entry.into_any().unbind());
+        items.push((col.name.as_str(), type_obj, None));
     }
-    Ok(Some(PyTuple::new(py, items)?.unbind()))
+    Ok(Some(build_description_7tuple(py, items)?))
 }
 
 /// Materialize decoded SQL Server rows into Python tuples once.
@@ -457,7 +264,7 @@ impl Drop for InFlightGuard {
 )]
 pub struct PySyncMSSQLCursor {
     client: Arc<MssqlClient>,
-    state: Arc<Mutex<CursorState>>,
+    state: Arc<Mutex<BufferedCursorState>>,
     exec_lock: Arc<AsyncMutex<()>>,
     lazy_begin: bool,
 }
@@ -467,7 +274,7 @@ impl PySyncMSSQLCursor {
     pub(crate) fn new(client: Arc<MssqlClient>, lazy_begin: bool) -> Self {
         Self {
             client,
-            state: Arc::new(Mutex::new(CursorState::new())),
+            state: Arc::new(Mutex::new(BufferedCursorState::new())),
             exec_lock: Arc::new(AsyncMutex::new(())),
             lazy_begin,
         }
@@ -671,26 +478,14 @@ impl PySyncMSSQLCursor {
     }
 
     #[pyo3(signature = (size = None))]
-    fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Vec<Py<PyTuple>>> {
-        let mut st = self
-            .state
+    fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<PyList>> {
+        self.state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        st.ensure_open(py)?;
-        let wanted = match size {
-            Some(n) if n < 0 => {
-                return Err(cursor_programming_err(
-                    py,
-                    "fetchmany size must be non-negative",
-                ));
-            }
-            Some(n) => Some(n as usize),
-            None => None,
-        };
-        st.fetchmany(py, wanted)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .fetchmany(py, size)
     }
 
-    fn fetchall(&self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
+    fn fetchall(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -727,7 +522,7 @@ impl PySyncMSSQLCursor {
 )]
 pub struct PyAsyncMSSQLCursor {
     client: Arc<MssqlClient>,
-    state: Arc<Mutex<CursorState>>,
+    state: Arc<Mutex<BufferedCursorState>>,
     in_flight: Arc<AtomicBool>,
     lazy_begin: bool,
 }
@@ -737,7 +532,7 @@ impl PyAsyncMSSQLCursor {
     pub(crate) fn new(client: Arc<MssqlClient>, lazy_begin: bool) -> Self {
         Self {
             client,
-            state: Arc::new(Mutex::new(CursorState::new())),
+            state: Arc::new(Mutex::new(BufferedCursorState::new())),
             in_flight: Arc::new(AtomicBool::new(false)),
             lazy_begin,
         }
@@ -986,28 +781,12 @@ impl PyAsyncMSSQLCursor {
 
     #[pyo3(signature = (size = None))]
     fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<ReadyAwaitable>> {
-        let res = {
-            let mut st = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            st.ensure_open(py)?;
-            let wanted = match size {
-                Some(n) if n < 0 => {
-                    return Err(cursor_programming_err(
-                        py,
-                        "fetchmany size must be non-negative",
-                    ));
-                }
-                Some(n) => Some(n as usize),
-                None => None,
-            };
-            st.fetchmany(py, wanted)
-        };
-        match res {
-            Ok(rows) => ready_ok(py, PyList::new(py, rows)?.into_any().unbind()),
-            Err(err) => ready_err(py, err),
-        }
+        let rows = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .fetchmany(py, size)?;
+        ready_ok(py, rows.into_any())
     }
 
     fn fetchall(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
@@ -1019,7 +798,7 @@ impl PyAsyncMSSQLCursor {
             st.fetchall(py)
         };
         match res {
-            Ok(rows) => ready_ok(py, PyList::new(py, rows)?.into_any().unbind()),
+            Ok(rows) => ready_ok(py, rows.into_any()),
             Err(err) => ready_err(py, err),
         }
     }
@@ -1047,6 +826,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::*;
     use crate::errors::MssqlErrorKind;
+    use vertebra_db::py_errors::cursor_programming_err;
 
     fn make_row(py: Python<'_>, value: i64) -> Py<PyTuple> {
         PyTuple::new(py, [value]).unwrap().unbind()
@@ -1064,7 +844,7 @@ mod tests {
     fn cursor_state_fresh_and_fetch_without_result_set() {
         Python::initialize();
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             assert_eq!(state.rowcount, -1);
             assert_eq!(state.arraysize, 1);
             assert!(state.description.is_none());
@@ -1073,15 +853,15 @@ mod tests {
             assert!(!state.closed);
 
             assert!(state.fetchone(py).unwrap().is_none());
-            assert!(state.fetchmany(py, None).unwrap().is_empty());
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert!(state.fetchmany(py, None).unwrap().bind(py).is_empty());
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
 
             state.store(None, Vec::new(), 3, None);
             assert_eq!(state.rowcount, 3);
             assert!(state.description.is_none());
             assert!(state.executed);
             assert!(state.fetchone(py).unwrap().is_none());
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
         });
     }
 
@@ -1089,26 +869,26 @@ mod tests {
     fn cursor_state_empty_result_set_and_fetch_pagination() {
         Python::initialize();
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             let desc = make_desc(py);
             state.store(Some(desc.clone_ref(py)), Vec::new(), 0, None);
             assert!(state.description.is_some());
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
 
             let rows: Vec<Py<PyTuple>> = (1..=5).map(|v| make_row(py, v)).collect();
             state.store(Some(desc.clone_ref(py)), rows, 5, None);
             state.set_arraysize(py, 2).unwrap();
             assert_eq!(state.arraysize, 2);
-            assert!(state.fetchmany(py, Some(0)).unwrap().is_empty());
+            assert!(state.fetchmany(py, Some(0)).unwrap().bind(py).is_empty());
 
             let batch1 = state.fetchmany(py, None).unwrap();
             let batch2 = state.fetchmany(py, None).unwrap();
             let batch3 = state.fetchmany(py, None).unwrap();
             let batch4 = state.fetchmany(py, None).unwrap();
-            assert_eq!(batch1.len(), 2);
-            assert_eq!(batch2.len(), 2);
-            assert_eq!(batch3.len(), 1);
-            assert!(batch4.is_empty());
+            assert_eq!(batch1.bind(py).len(), 2);
+            assert_eq!(batch2.bind(py).len(), 2);
+            assert_eq!(batch3.bind(py).len(), 1);
+            assert!(batch4.bind(py).is_empty());
 
             let rows2: Vec<Py<PyTuple>> = (10..=14).map(|v| make_row(py, v)).collect();
             state.store(Some(desc), rows2, 5, None);
@@ -1123,8 +903,8 @@ mod tests {
                 10
             );
             let rest = state.fetchall(py).unwrap();
-            assert_eq!(rest.len(), 4);
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert_eq!(rest.bind(py).len(), 4);
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
         });
     }
 
@@ -1132,7 +912,7 @@ mod tests {
     fn cursor_state_close_clear_and_invalid_arraysize() {
         Python::initialize();
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             let err = state.set_arraysize(py, 0).unwrap_err();
             assert_eq!(
                 err.get_type(py).name().unwrap().to_str().unwrap(),

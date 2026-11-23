@@ -8,20 +8,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast, overload
 from urllib.parse import urlparse
 
+from vertebra.extensions._storage_common import resolve_object_store_pair
 from vertebra.storage import (
     AsyncGcpTokenCache,
     AsyncObjectStore,
     AsyncReadableFile,
-    AzureConfig,
-    GCSConfig,
-    HTTPConfig,
-    LocalConfig,
-    MemoryConfig,
     ObjectMeta,
-    OCIConfig,
     PutResult,
-    R2Config,
-    S3Config,
     SigningConfig,
     StorageConfig,
     StreamingStorageResponse,
@@ -67,8 +60,6 @@ __all__ = (
     "get_object_store_registry",
     "register_storage_alias",
 )
-
-_STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig)
 
 
 class ArrowFlightSerializer:
@@ -130,33 +121,13 @@ class ObjectStoreBackend(ObjectStoreBase):
                 merged_options.setdefault(str(key), str(value))
 
         target = store if store is not None else uri
-        if target is None or (isinstance(target, str) and not target.strip()):
-            msg = "SQLSpec storage requires an explicit store, configuration, or URI"
-            raise ImproperConfigurationError(msg)
-        if isinstance(target, (SyncObjectStore, AsyncObjectStore)) and (signing is not None or token_cache is not None):
-            msg = "signing and token_cache apply only when building a store from a StorageConfig or URI"
-            raise ImproperConfigurationError(msg)
-        sync_store: SyncObjectStore
-        async_store: AsyncObjectStore
-
-        if isinstance(target, SyncObjectStore):
-            sync_store = target
-            async_store = target.to_async()
-        elif isinstance(target, AsyncObjectStore):
-            async_store = target
-            sync_store = target.to_sync()
-        elif isinstance(target, _STORAGE_CONFIGS):
-            sync_store = SyncObjectStore.from_config(target, signing=signing, token_cache=token_cache)
-            async_store = sync_store.to_async()
-        else:
-            uri_str = str(target)
-            sync_store = SyncObjectStore(
-                uri_str,
-                options=merged_options or None,
-                signing=signing,
-                token_cache=token_cache,
-            )
-            async_store = sync_store.to_async()
+        sync_store, async_store = resolve_object_store_pair(
+            target,
+            options=merged_options or None,
+            signing=signing,
+            token_cache=token_cache,
+            missing_message="SQLSpec storage requires an explicit store, configuration, or URI",
+        )
 
         effective_prefix = (base_path or prefix).strip("/")
         self._sync_store = sync_store

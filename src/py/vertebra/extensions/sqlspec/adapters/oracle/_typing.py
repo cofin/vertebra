@@ -6,10 +6,16 @@ import contextlib
 import inspect
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, TypedDict, cast
 
 from anyio import CancelScope
 
+from vertebra.extensions.sqlspec._driver import (
+    _AdapterAsyncConnectionContext,
+    _AdapterAsyncSessionContext,
+    _AdapterSyncConnectionContext,
+    _AdapterSyncSessionContext,
+)
 from vertebra.extensions.sqlspec.adapters.oracle.core import (
     OracleSessionContextConfig,
     apply_oracle_session_attrs,
@@ -22,8 +28,6 @@ from vertebra.typing import ImproperConfigurationError
 
 if TYPE_CHECKING:
     from types import TracebackType
-
-    from sqlspec.core import StatementConfig
 
     from vertebra.extensions.sqlspec.adapters.oracle.config import OracleAsyncConfig, OracleSyncConfig
     from vertebra.extensions.sqlspec.adapters.oracle.driver import OracleAsyncDriver, OracleSyncDriver
@@ -430,428 +434,118 @@ async def _apply_release_async(conn: Any, config: OracleAsyncConfig) -> None:
             await _exec_async(conn, sql, params)
 
 
-class OracleSyncConnectionContext:
+class OracleSyncConnectionContext(_AdapterSyncConnectionContext):
     """Synchronous connection context manager acquiring, configuring, and releasing Oracle leases."""
 
-    __slots__ = (
-        "_acquired_pool",
-        "_args",
-        "_config",
-        "_conn_ctx",
-        "_connection",
-        "_kwargs",
-        "_tenant_lease",
-    )
+    __slots__ = ()
+    _engine_label: ClassVar[str] = "Oracle"
+    _run_on_connection_create: ClassVar[bool] = False
 
     def __init__(self, config: OracleSyncConfig, *args: Any, **kwargs: Any) -> None:
-        """Store configuration and forwarded connection arguments."""
-        self._config = config
-        self._args = args
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._acquired_pool: Any = None
-        self._connection: Any = None
-        self._tenant_lease: Any = None
+        super().__init__(config, *args, **kwargs)
 
-    def __enter__(self) -> Any:
-        """Acquire a native Oracle connection or tenant lease and apply checkout session hooks."""
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = self._tenant_lease.acquire()
-        else:
-            pool = self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            lease_fn = getattr(pool, "lease", None)
-            acquire_fn = getattr(pool, "acquire", None)
-            release_fn = getattr(pool, "release", None)
-            if callable(get_conn):
-                self._conn_ctx = get_conn()
-                self._connection = self._conn_ctx.__enter__()
-            elif callable(lease_fn):
-                self._conn_ctx = lease_fn()
-                self._connection = self._conn_ctx.__enter__()
-            elif callable(acquire_fn) and callable(release_fn):
-                self._acquired_pool = pool
-                self._connection = acquire_fn()
-            else:
-                self._connection = pool
-        try:
-            _apply_checkout_sync(self._connection, self._config, self._kwargs)
-        except BaseException as exc:
-            self.__exit__(type(exc), exc, exc.__traceback__)
-            raise
-        return self._connection
+    def _on_acquire(self, conn: Any) -> Any:
+        _apply_checkout_sync(conn, self._config, self._kwargs)
+        return conn
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Roll back open transactions, clear/reset session state, and release the Oracle lease."""
-        conn = self._connection
-        reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-        hook = self._config.driver_features.get("session_context_hook")
-        try:
-            if conn is not None and (exc_type is not None or reset_on_release or hook is not None):
-                _rollback_connection_sync(conn)
-                _apply_release_sync(conn, self._config)
-            if self._tenant_lease is not None:
-                self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-            elif self._conn_ctx is not None:
-                return cast("bool | None", self._conn_ctx.__exit__(exc_type, exc_val, exc_tb))
-            elif self._acquired_pool is not None and conn is not None:
-                self._acquired_pool.release(conn)
-        finally:
-            self._connection = None
-            self._conn_ctx = None
-            self._acquired_pool = None
-            self._tenant_lease = None
-        return None
+    def _needs_cleanup(self, exc_type: type[BaseException] | None, reset_on_release: bool) -> bool:
+        return (
+            exc_type is not None
+            or reset_on_release
+            or self._config.driver_features.get("session_context_hook") is not None
+        )
+
+    def _should_reset(self, reset_on_release: bool) -> bool:
+        return reset_on_release or self._config.driver_features.get("session_context_hook") is not None
+
+    def _rollback_conn(self, conn: Any) -> None:
+        _rollback_connection_sync(conn)
+
+    def _reset_conn(self, conn: Any) -> None:
+        _apply_release_sync(conn, self._config)
 
 
-class OracleAsyncConnectionContext:
+class OracleAsyncConnectionContext(_AdapterAsyncConnectionContext):
     """Asynchronous connection context manager acquiring, configuring, and releasing Oracle leases."""
 
-    __slots__ = (
-        "_acquired_pool",
-        "_args",
-        "_config",
-        "_conn_ctx",
-        "_connection",
-        "_kwargs",
-        "_tenant_lease",
-    )
+    __slots__ = ()
+    _engine_label: ClassVar[str] = "Oracle"
+    _run_on_connection_create: ClassVar[bool] = False
 
     def __init__(self, config: OracleAsyncConfig, *args: Any, **kwargs: Any) -> None:
-        """Store configuration and forwarded connection arguments."""
-        self._config = config
-        self._args = args
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._acquired_pool: Any = None
-        self._connection: Any = None
-        self._tenant_lease: Any = None
+        super().__init__(config, *args, **kwargs)
 
-    async def __aenter__(self) -> Any:
-        """Acquire an asynchronous native Oracle connection or tenant lease and apply checkout hooks."""
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = await self._tenant_lease.acquire()
-        else:
-            pool = await self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            lease_fn = getattr(pool, "lease", None)
-            acquire_fn = getattr(pool, "acquire", None)
-            release_fn = getattr(pool, "release", None)
-            if callable(get_conn):
-                self._conn_ctx = get_conn()
-                self._connection = await self._conn_ctx.__aenter__()
-            elif callable(lease_fn):
-                self._conn_ctx = lease_fn()
-                self._connection = await self._conn_ctx.__aenter__()
-            elif callable(acquire_fn) and callable(release_fn):
-                self._acquired_pool = pool
-                conn_res = acquire_fn()
-                self._connection = await conn_res if inspect.isawaitable(conn_res) else conn_res
-            else:
-                self._connection = pool
-        try:
-            await _apply_checkout_async(self._connection, self._config, self._kwargs)
-        except BaseException as exc:
-            await self.__aexit__(type(exc), exc, exc.__traceback__)
-            raise
-        return self._connection
+    async def _on_acquire(self, conn: Any) -> Any:
+        await _apply_checkout_async(conn, self._config, self._kwargs)
+        return conn
 
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Roll back open transactions, clear/reset session state, and release the Oracle lease."""
-        conn = self._connection
-        reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-        hook = self._config.driver_features.get("session_context_hook")
-        try:
-            if conn is not None and (exc_type is not None or reset_on_release or hook is not None):
-                await _rollback_connection_async(conn)
-                await _apply_release_async(conn, self._config)
-            if self._tenant_lease is not None:
-                await self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-            elif self._conn_ctx is not None:
-                return cast("bool | None", await self._conn_ctx.__aexit__(exc_type, exc_val, exc_tb))
-            elif self._acquired_pool is not None and conn is not None:
-                rel_res = self._acquired_pool.release(conn)
-                if inspect.isawaitable(rel_res):
-                    await rel_res
-        finally:
-            self._connection = None
-            self._conn_ctx = None
-            self._acquired_pool = None
-            self._tenant_lease = None
-        return None
+    def _needs_cleanup(self, exc_type: type[BaseException] | None, reset_on_release: bool) -> bool:
+        return (
+            exc_type is not None
+            or reset_on_release
+            or self._config.driver_features.get("session_context_hook") is not None
+        )
+
+    def _should_reset(self, reset_on_release: bool) -> bool:
+        return reset_on_release or self._config.driver_features.get("session_context_hook") is not None
+
+    async def _rollback_conn(self, conn: Any) -> None:
+        await _rollback_connection_async(conn)
+
+    async def _reset_conn(self, conn: Any) -> None:
+        await _apply_release_async(conn, self._config)
 
 
-class OracleSyncSessionContext:
+class OracleSyncSessionContext(_AdapterSyncSessionContext):
     """Synchronous session context manager yielding a fresh `OracleSyncDriver` per entry."""
 
-    __slots__ = (
-        "_acquired_pool",
-        "_args",
-        "_config",
-        "_conn_ctx",
-        "_connection",
-        "_driver",
-        "_kwargs",
-        "_statement_config",
-        "_tenant_lease",
-    )
+    __slots__ = ()
+    _connection_context_type: ClassVar[type[_AdapterSyncConnectionContext]] = OracleSyncConnectionContext
+    _engine_label: ClassVar[str] = "Oracle"
 
-    def __init__(
+    def _driver_in_transaction(self, driver: Any) -> bool:
+        return super()._driver_in_transaction(driver) or getattr(driver, "sessionless_transaction_id", None) is not None
+
+    def _needs_tx_rollback(
         self,
-        config: OracleSyncConfig,
-        *args: Any,
-        statement_config: StatementConfig | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Store configuration, optional statement override, and forwarded session arguments."""
-        self._config = config
-        self._args = args
-        self._statement_config = statement_config
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._acquired_pool: Any = None
-        self._connection: Any = None
-        self._driver: OracleSyncDriver | None = None
-        self._tenant_lease: Any = None
+        exc_type: type[BaseException] | None,
+        primary_exc: BaseException | None,
+        pooled_state: bool,
+        reset_on_release: bool,
+    ) -> bool:
+        return (
+            super()._needs_tx_rollback(exc_type, primary_exc, pooled_state, reset_on_release)
+            or self._config.driver_features.get("session_context_hook") is not None
+        )
 
     def __enter__(self) -> OracleSyncDriver:
-        """Acquire a lease, apply checkout hooks, and instantiate a fresh `OracleSyncDriver`."""
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = self._tenant_lease.acquire()
-        else:
-            pool = self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            lease_fn = getattr(pool, "lease", None)
-            acquire_fn = getattr(pool, "acquire", None)
-            release_fn = getattr(pool, "release", None)
-            if callable(get_conn):
-                self._conn_ctx = get_conn()
-                self._connection = self._conn_ctx.__enter__()
-            elif callable(lease_fn):
-                self._conn_ctx = lease_fn()
-                self._connection = self._conn_ctx.__enter__()
-            elif callable(acquire_fn) and callable(release_fn):
-                self._acquired_pool = pool
-                self._connection = acquire_fn()
-            else:
-                self._connection = pool
-        try:
-            _apply_checkout_sync(self._connection, self._config, self._kwargs)
-            stmt_cfg = self._statement_config if self._statement_config is not None else self._config.statement_config
-            driver = self._config.driver_type(
-                self._connection,
-                statement_config=stmt_cfg,
-                driver_features=dict(self._config.driver_features),
-                shared_pool=self._config._pool_is_shared,
-            )
-            self._driver = self._config._prepare_driver(driver)
-            return self._driver
-        except BaseException as exc:
-            self.__exit__(type(exc), exc, exc.__traceback__)
-            raise
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Close open streams, roll back uncommitted work, reset session, release lease, and mark closed."""
-        driver = self._driver
-        conn = self._connection
-        try:
-            if driver is not None:
-                close_streams_fn = getattr(driver, "_close_open_streams", None)
-                if callable(close_streams_fn):
-                    close_streams_fn(error=exc_type is not None)
-        except BaseException as close_exc:
-            if exc_type is None:
-                exc_type, exc_val, exc_tb = type(close_exc), close_exc, close_exc.__traceback__
-            raise
-        finally:
-            try:
-                reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-                hook = self._config.driver_features.get("session_context_hook")
-                pooled_state = bool(
-                    self._config.share_pool
-                    or self._tenant_lease is not None
-                    or self._conn_ctx is not None
-                    or self._acquired_pool is not None
-                )
-                if driver is not None and (
-                    exc_type is not None or pooled_state or reset_on_release or hook is not None
-                ):
-                    in_tx_fn = getattr(driver, "_connection_in_transaction", None)
-                    in_tx = bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
-                    if in_tx or getattr(driver, "sessionless_transaction_id", None) is not None:
-                        with contextlib.suppress(Exception):
-                            driver.rollback()
-                if conn is not None and (reset_on_release or hook is not None):
-                    _apply_release_sync(conn, self._config)
-                if self._tenant_lease is not None:
-                    self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-                elif self._conn_ctx is not None:
-                    self._conn_ctx.__exit__(exc_type, exc_val, exc_tb)
-                elif self._acquired_pool is not None and conn is not None:
-                    self._acquired_pool.release(conn)
-            finally:
-                self._connection = None
-                self._conn_ctx = None
-                self._acquired_pool = None
-                self._tenant_lease = None
-                self._driver = None
-                if driver is not None:
-                    mark_closed_fn = getattr(driver, "_mark_closed", None)
-                    if callable(mark_closed_fn):
-                        mark_closed_fn()
-        return None
+        return cast("OracleSyncDriver", super().__enter__())
 
 
-class OracleAsyncSessionContext:
+class OracleAsyncSessionContext(_AdapterAsyncSessionContext):
     """Asynchronous session context manager yielding a fresh `OracleAsyncDriver` per entry."""
 
-    __slots__ = (
-        "_acquired_pool",
-        "_args",
-        "_config",
-        "_conn_ctx",
-        "_connection",
-        "_driver",
-        "_kwargs",
-        "_statement_config",
-        "_tenant_lease",
-    )
+    __slots__ = ()
+    _connection_context_type: ClassVar[type[_AdapterAsyncConnectionContext]] = OracleAsyncConnectionContext
+    _engine_label: ClassVar[str] = "Oracle"
 
-    def __init__(
-        self,
-        config: OracleAsyncConfig,
-        *args: Any,
-        statement_config: StatementConfig | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Store configuration, optional statement override, and forwarded session arguments."""
-        self._config = config
-        self._args = args
-        self._statement_config = statement_config
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._acquired_pool: Any = None
-        self._connection: Any = None
-        self._driver: OracleAsyncDriver | None = None
-        self._tenant_lease: Any = None
+    def _driver_in_transaction(self, driver: Any) -> bool:
+        return super()._driver_in_transaction(driver) or getattr(driver, "sessionless_transaction_id", None) is not None
 
-    async def __aenter__(self) -> OracleAsyncDriver:
-        """Acquire a lease, apply checkout hooks, and instantiate a fresh `OracleAsyncDriver`."""
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = await self._tenant_lease.acquire()
-        else:
-            pool = await self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            lease_fn = getattr(pool, "lease", None)
-            acquire_fn = getattr(pool, "acquire", None)
-            release_fn = getattr(pool, "release", None)
-            if callable(get_conn):
-                self._conn_ctx = get_conn()
-                self._connection = await self._conn_ctx.__aenter__()
-            elif callable(lease_fn):
-                self._conn_ctx = lease_fn()
-                self._connection = await self._conn_ctx.__aenter__()
-            elif callable(acquire_fn) and callable(release_fn):
-                self._acquired_pool = pool
-                conn_res = acquire_fn()
-                self._connection = await conn_res if inspect.isawaitable(conn_res) else conn_res
-            else:
-                self._connection = pool
-        try:
-            await _apply_checkout_async(self._connection, self._config, self._kwargs)
-            stmt_cfg = self._statement_config if self._statement_config is not None else self._config.statement_config
-            driver = self._config.driver_type(
-                self._connection,
-                statement_config=stmt_cfg,
-                driver_features=dict(self._config.driver_features),
-                shared_pool=self._config._pool_is_shared,
-            )
-            self._driver = self._config._prepare_driver(driver)
-            return self._driver
-        except BaseException as exc:
-            await self.__aexit__(type(exc), exc, exc.__traceback__)
-            raise
-
-    async def __aexit__(
+    def _needs_tx_rollback(
         self,
         exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Close open streams, roll back uncommitted work, reset session, release lease, and mark closed."""
-        driver = self._driver
-        conn = self._connection
-        try:
-            if driver is not None:
-                close_streams_fn = getattr(driver, "_close_open_streams", None)
-                if callable(close_streams_fn):
-                    res = close_streams_fn(error=exc_type is not None)
-                    if inspect.isawaitable(res):
-                        await res
-        except BaseException as close_exc:
-            if exc_type is None:
-                exc_type, exc_val, exc_tb = type(close_exc), close_exc, close_exc.__traceback__
-            raise
-        finally:
-            try:
-                reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-                hook = self._config.driver_features.get("session_context_hook")
-                pooled_state = bool(
-                    self._config.share_pool
-                    or self._tenant_lease is not None
-                    or self._conn_ctx is not None
-                    or self._acquired_pool is not None
-                )
-                if driver is not None and (
-                    exc_type is not None or pooled_state or reset_on_release or hook is not None
-                ):
-                    in_tx_fn = getattr(driver, "_connection_in_transaction", None)
-                    in_tx = bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
-                    if in_tx or getattr(driver, "sessionless_transaction_id", None) is not None:
-                        with CancelScope(shield=True), contextlib.suppress(Exception):
-                            res = driver.rollback()
-                            if inspect.isawaitable(res):
-                                await res
-                if conn is not None and (reset_on_release or hook is not None):
-                    await _apply_release_async(conn, self._config)
-                if self._tenant_lease is not None:
-                    await self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-                elif self._conn_ctx is not None:
-                    await self._conn_ctx.__aexit__(exc_type, exc_val, exc_tb)
-                elif self._acquired_pool is not None and conn is not None:
-                    rel_res = self._acquired_pool.release(conn)
-                    if inspect.isawaitable(rel_res):
-                        await rel_res
-            finally:
-                self._connection = None
-                self._conn_ctx = None
-                self._acquired_pool = None
-                self._tenant_lease = None
-                self._driver = None
-                if driver is not None:
-                    mark_closed_fn = getattr(driver, "_mark_closed", None)
-                    if callable(mark_closed_fn):
-                        mark_closed_fn()
-        return None
+        primary_exc: BaseException | None,
+        pooled_state: bool,
+        reset_on_release: bool,
+    ) -> bool:
+        return (
+            super()._needs_tx_rollback(exc_type, primary_exc, pooled_state, reset_on_release)
+            or self._config.driver_features.get("session_context_hook") is not None
+        )
+
+    async def __aenter__(self) -> OracleAsyncDriver:
+        return cast("OracleAsyncDriver", await super().__aenter__())
 
 
 class OracleSyncSessionlessTransactionContext:

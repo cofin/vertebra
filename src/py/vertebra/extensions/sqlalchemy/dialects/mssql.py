@@ -9,10 +9,7 @@ from sqlalchemy import exc
 from sqlalchemy.dialects.mssql.base import MSDialect, MSExecutionContext
 
 from vertebra.extensions.sqlalchemy.dialects._base import (
-    _NON_DISCONNECT_SQLSTATES,
     _AsyncDialectMixin,
-    _extract_sqlstate,
-    _extract_vendor_code,
     _SyncDialectMixin,
 )
 
@@ -134,27 +131,8 @@ class _MSSQLDialectMixin:
                 return tuple(int(group) for group in fallback_match.groups())
         return ()
 
-    def is_disconnect(self, e: Exception, connection: Any = None, cursor: Any = None) -> bool:
-        """Return True if the exception represents an MSSQL disconnect, never raising."""
-        try:
-            sqlstate = _extract_sqlstate(e)
-            if sqlstate in _NON_DISCONNECT_SQLSTATES or type(e).__name__ == "SerializationFailure":
-                return False
-            if sqlstate is not None and (sqlstate in _MSSQL_DISCONNECT_SQLSTATES or sqlstate.startswith("08")):
-                return True
-            vendor_code = _extract_vendor_code(e)
-            if vendor_code == 10054:
-                return True
-        except Exception:
-            return False
-        parent = super()
-        parent_fn = getattr(parent, "is_disconnect", None)
-        if callable(parent_fn):
-            try:
-                return bool(parent_fn(e, connection, cursor))
-            except Exception:
-                return False
-        return False
+    _disconnect_sqlstates = _MSSQL_DISCONNECT_SQLSTATES
+    _disconnect_codes = frozenset({10054})
 
 
 class SyncMSSQLDialect(_MSSQLDialectMixin, _SyncDialectMixin, MSDialect):

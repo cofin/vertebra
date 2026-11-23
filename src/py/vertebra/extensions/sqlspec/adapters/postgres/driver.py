@@ -25,7 +25,37 @@ from vertebra.extensions.sqlspec.adapters.postgres.data_dictionary import (
 __all__ = ("PostgresAsyncDriver", "PostgresSyncDriver")
 
 
-class PostgresSyncDriver(BaseSyncDriver):
+class _PostgresDriverMixin:
+    """Shared pure-Python PostgreSQL driver hooks, numeric transport, and exception mapping."""
+
+    __slots__ = ()
+
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
+        """Build default PostgreSQL `StatementConfig` targeting `postgres` `$1..$N` binds."""
+        return build_postgres_statement_config()
+
+    def _map_exception(self, exc: BaseException) -> Exception | None:
+        return map_postgres_exception(exc)
+
+    def compile_numeric_transport(
+        self,
+        statement: Any,
+        parameters: tuple[Any, ...] | list[Any] = (),
+        statement_config: StatementConfig | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> tuple[Any, str, Any]:
+        """Prepare and compile a statement to `$N` numeric binds preserving transformers and filters."""
+        return compile_postgres_numeric_transport(
+            cast("Any", self),
+            statement,
+            parameters,
+            statement_config=statement_config,
+            kwargs=kwargs,
+        )
+
+
+class PostgresSyncDriver(_PostgresDriverMixin, BaseSyncDriver):
     """Synchronous PostgreSQL SQLSpec driver emitting native `$1..$N` binds and Arrow COPY streams."""
 
     __slots__ = ("_data_dictionary", "_savepoint_tokens")
@@ -59,30 +89,6 @@ class PostgresSyncDriver(BaseSyncDriver):
         if self._data_dictionary is None:
             self._data_dictionary = PostgresSyncDataDictionary()
         return self._data_dictionary
-
-    @classmethod
-    def _default_statement_config(cls) -> StatementConfig:
-        """Build default PostgreSQL `StatementConfig` targeting `postgres` `$1..$N` binds."""
-        return build_postgres_statement_config()
-
-    def _map_exception(self, exc: BaseException) -> Exception | None:
-        return map_postgres_exception(exc)
-
-    def compile_numeric_transport(
-        self,
-        statement: Any,
-        parameters: tuple[Any, ...] | list[Any] = (),
-        statement_config: StatementConfig | None = None,
-        kwargs: dict[str, Any] | None = None,
-    ) -> tuple[Any, str, Any]:
-        """Prepare and compile a statement to `$N` numeric binds preserving transformers and filters."""
-        return compile_postgres_numeric_transport(
-            self,
-            statement,
-            parameters,
-            statement_config=statement_config,
-            kwargs=kwargs,
-        )
 
     def load_from_arrow(
         self,
@@ -190,7 +196,7 @@ class PostgresSyncDriver(BaseSyncDriver):
         return PostgreSQLCore.build_tenant_predicate_sql(predicate, param_index=1)
 
 
-class PostgresAsyncDriver(BaseAsyncDriver):
+class PostgresAsyncDriver(_PostgresDriverMixin, BaseAsyncDriver):
     """Asynchronous PostgreSQL SQLSpec driver emitting native `$1..$N` binds and Arrow COPY streams."""
 
     __slots__ = ("_data_dictionary", "_savepoint_tokens")
@@ -224,30 +230,6 @@ class PostgresAsyncDriver(BaseAsyncDriver):
         if self._data_dictionary is None:
             self._data_dictionary = PostgresAsyncDataDictionary()
         return self._data_dictionary
-
-    @classmethod
-    def _default_statement_config(cls) -> StatementConfig:
-        """Build default PostgreSQL `StatementConfig` targeting `postgres` `$1..$N` binds."""
-        return build_postgres_statement_config()
-
-    def _map_exception(self, exc: BaseException) -> Exception | None:
-        return map_postgres_exception(exc)
-
-    def compile_numeric_transport(
-        self,
-        statement: Any,
-        parameters: tuple[Any, ...] | list[Any] = (),
-        statement_config: StatementConfig | None = None,
-        kwargs: dict[str, Any] | None = None,
-    ) -> tuple[Any, str, Any]:
-        """Prepare and compile a statement to `$N` numeric binds preserving transformers and filters."""
-        return compile_postgres_numeric_transport(
-            self,
-            statement,
-            parameters,
-            statement_config=statement_config,
-            kwargs=kwargs,
-        )
 
     async def load_from_arrow(
         self,

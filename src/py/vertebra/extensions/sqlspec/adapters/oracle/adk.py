@@ -11,9 +11,20 @@ from typing import TYPE_CHECKING, Any, Final, Literal, NotRequired, TypedDict, c
 
 from sqlspec.config import ADKConfig
 from sqlspec.exceptions import SerializationConflictError
-from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, StoredEvent, StoredSession
+from sqlspec.extensions.adk import StoredEvent, StoredSession
 from sqlspec.extensions.adk.store import adk_primary_read_scope, normalize_session_list_options
 
+from vertebra.extensions.sqlspec._adk import (
+    AdapterAsyncADKArtifactStore,
+    AdapterAsyncADKMemoryStore,
+    AdapterAsyncADKStore,
+    AdapterSyncADKArtifactStore,
+    AdapterSyncADKMemoryStore,
+    AdapterSyncADKStore,
+    StoredArtifact,
+    StoredMemory,
+    merge_scoped_state,
+)
 from vertebra.extensions.sqlspec.adapters.oracle.core import (
     escape_oracle_literal,
     is_oracle_table_missing,
@@ -35,26 +46,11 @@ from vertebra.utils.module_loader import ensure_module
 if TYPE_CHECKING:
     from sqlspec.extensions.adk import SessionOrderBy, StoredMemory
     from sqlspec.extensions.adk.artifact import StoredArtifact
-    from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore as _BaseAsyncADKArtifactStore
-    from sqlspec.extensions.adk.artifact.store import BaseSyncADKArtifactStore as _BaseSyncADKArtifactStore
     from sqlspec.extensions.adk.converters import merge_scoped_state
-    from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore as _BaseAsyncADKMemoryStore
-    from sqlspec.extensions.adk.memory.store import BaseSyncADKMemoryStore as _BaseSyncADKMemoryStore
 
     from vertebra.extensions.sqlspec.adapters.oracle.config import OracleAsyncConfig, OracleSyncConfig
 else:
-    _memory_store_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
-    _artifact_store_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="google-adk", extra="adk")
-    _converters_mod = ensure_module("sqlspec.extensions.adk.converters", package="google-adk", extra="adk")
-    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact", package="google-adk", extra="adk")
-    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory", package="google-adk", extra="adk")
-    _BaseAsyncADKMemoryStore = _memory_store_mod.BaseAsyncADKMemoryStore
-    _BaseSyncADKMemoryStore = _memory_store_mod.BaseSyncADKMemoryStore
-    _BaseAsyncADKArtifactStore = _artifact_store_mod.BaseAsyncADKArtifactStore
-    _BaseSyncADKArtifactStore = _artifact_store_mod.BaseSyncADKArtifactStore
-    merge_scoped_state = _converters_mod.merge_scoped_state
-    StoredArtifact = _artifact_types_mod.StoredArtifact
-    StoredMemory = _memory_types_mod.StoredMemory
+    ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
 
 __all__ = (
     "OracleADKCompressionConfig",
@@ -878,11 +874,46 @@ class _OracleADKSessionSQLMixin:
             "WHEN NOT MATCHED THEN INSERT (key, value, update_time) VALUES (src.key, src.value, SYSTIMESTAMP)"
         )
 
+    _unpack_params = False
 
-class OracleSyncADKStore(_OracleADKSessionSQLMixin, BaseSyncADKStore["OracleSyncConfig"]):
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_oracle_table_missing(exc)
+
+    def _decode_session_row(
+        self,
+        row: Any,
+        *,
+        app_state: dict[str, Any] | None = None,
+        user_state: dict[str, Any] | None = None,
+        merge_scopes: bool = False,
+    ) -> StoredSession:
+        return _row_to_stored_session(
+            row,
+            deserializer=self._json_deserializer,
+            app_state=app_state,
+            user_state=user_state,
+            merge_scopes=merge_scopes,
+        )
+
+    def _decode_event_row(self, row: Any) -> StoredEvent:
+        return _row_to_stored_event(row, deserializer=self._json_deserializer)
+
+    def _delete_session_sqls_and_params(
+        self, app_name: str, user_id: str, session_id: str
+    ) -> tuple[tuple[str, dict[str, Any]]]:
+        return ((self._delete_session_sql(), {"app_name": app_name, "user_id": user_id, "id": session_id}),)
+
+    def _get_metadata_sql_and_params(self, key: str) -> tuple[str, dict[str, Any]]:
+        return self._get_metadata_sql(), {"key": key}
+
+    def _set_metadata_sql_and_params(self, key: str, value: str) -> tuple[str, dict[str, Any]]:
+        return self._set_metadata_sql(), {"key": key, "value": value}
+
+
+class OracleSyncADKStore(_OracleADKSessionSQLMixin, AdapterSyncADKStore):
     """Synchronous Oracle ADK session and event store using ``MERGE INTO`` and PL/SQL guards."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer", "_json_storage_override")
+    __slots__ = ("_json_storage_override",)
 
     extension_config_options = _ORACLE_ADK_EXTENSION_OPTIONS
 
@@ -1037,46 +1068,6 @@ class OracleSyncADKStore(_OracleADKSessionSQLMixin, BaseSyncADKStore["OracleSync
                 return None
             raise
 
-    def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Update Oracle ADK session state."""
-        sql, params = self._update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-            driver.commit()
-
-    def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List Oracle ADK sessions using ``OFFSET`` / ``FETCH NEXT`` pagination."""
-        built = self._list_sessions_sql_and_params(
-            app_name, user_id, order_by=order_by, descending=descending, limit=limit, offset=offset
-        )
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, params)
-            return [_row_to_stored_session(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return []
-            raise
-
-    def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete an ADK session row by composite key."""
-        sql = self._delete_session_sql()
-        with self._config.provide_session() as driver:
-            driver.execute(sql, {"app_name": app_name, "user_id": user_id, "id": session_id})
-            driver.commit()
-
     def _insert_event_with_driver(self, driver: Any, event_record: StoredEvent) -> None:
         sql, params = self._insert_event_sql_and_params(event_record)
         try:
@@ -1085,12 +1076,6 @@ class OracleSyncADKStore(_OracleADKSessionSQLMixin, BaseSyncADKStore["OracleSync
             if is_oracle_unique_violation(exc):
                 return
             raise
-
-    def append_event(self, event_record: StoredEvent) -> None:
-        """Append a single Oracle ADK event row safely skipping duplicate primary keys."""
-        with self._config.provide_session() as driver:
-            self._insert_event_with_driver(driver, event_record)
-            driver.commit()
 
     def append_event_and_update_state(
         self,
@@ -1148,70 +1133,6 @@ class OracleSyncADKStore(_OracleADKSessionSQLMixin, BaseSyncADKStore["OracleSync
             merge_scopes=True,
         )
 
-    def get_events(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[StoredEvent]:
-        """Fetch Oracle ADK events ordered chronologically."""
-        if limit == 0:
-            return []
-        sql, params = self._get_events_sql_and_params(app_name, user_id, session_id, after_timestamp, limit)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, params)
-            if limit is not None:
-                rows = list(reversed(rows))
-            return [_row_to_stored_event(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return []
-            raise
-
-    def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete Oracle events older than ``before``."""
-        sql, params = self._delete_before_sql_and_params(self._events_table, "timestamp", before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, params)
-                driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return 0
-            raise
-
-    def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete user states whose ``update_time`` predates ``updated_before``."""
-        sql, params = self._delete_before_sql_and_params(
-            self._user_state_table, "update_time", updated_before, app_name
-        )
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, params)
-                driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return 0
-            raise
-
-    def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete sessions whose ``update_time`` predates ``updated_before``."""
-        sql, params = self._delete_before_sql_and_params(self._session_table, "update_time", updated_before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, params)
-                driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return 0
-            raise
-
     def get_app_state(self, app_name: str) -> dict[str, Any] | None:
         """Fetch app-scoped ADK state from Oracle."""
         try:
@@ -1239,42 +1160,11 @@ class OracleSyncADKStore(_OracleADKSessionSQLMixin, BaseSyncADKStore["OracleSync
                 return None
             raise
 
-    def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Upsert app-scoped ADK state via ``MERGE INTO``."""
-        sql, params = self._upsert_app_state_sql_and_params(app_name, state)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-            driver.commit()
 
-    def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Upsert user-scoped ADK state via ``MERGE INTO``."""
-        sql, params = self._upsert_user_state_sql_and_params(app_name, user_id, state)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-            driver.commit()
-
-    def get_metadata(self, key: str) -> str | None:
-        """Fetch an internal metadata entry by key."""
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(self._get_metadata_sql(), {"key": key})
-            return str(oracle_row_value(row, "value", 0)) if row is not None else None
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return None
-            raise
-
-    def set_metadata(self, key: str, value: str) -> None:
-        """Upsert an internal metadata entry via ``MERGE INTO``."""
-        with self._config.provide_session() as driver:
-            driver.execute(self._set_metadata_sql(), {"key": key, "value": value})
-            driver.commit()
-
-
-class OracleAsyncADKStore(_OracleADKSessionSQLMixin, BaseAsyncADKStore["OracleAsyncConfig"]):
+class OracleAsyncADKStore(_OracleADKSessionSQLMixin, AdapterAsyncADKStore):
     """Asynchronous Oracle ADK session and event store using ``MERGE INTO`` and PL/SQL guards."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer", "_json_storage_override")
+    __slots__ = ("_json_storage_override",)
 
     extension_config_options = _ORACLE_ADK_EXTENSION_OPTIONS
 
@@ -1429,46 +1319,6 @@ class OracleAsyncADKStore(_OracleADKSessionSQLMixin, BaseAsyncADKStore["OracleAs
                 return None
             raise
 
-    async def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Asynchronously update Oracle ADK session state."""
-        sql, params = self._update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-            await driver.commit()
-
-    async def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """Asynchronously list Oracle ADK sessions."""
-        built = self._list_sessions_sql_and_params(
-            app_name, user_id, order_by=order_by, descending=descending, limit=limit, offset=offset
-        )
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, params)
-            return [_row_to_stored_session(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return []
-            raise
-
-    async def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Asynchronously delete an ADK session row."""
-        sql = self._delete_session_sql()
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, {"app_name": app_name, "user_id": user_id, "id": session_id})
-            await driver.commit()
-
     async def _insert_event_with_driver(self, driver: Any, event_record: StoredEvent) -> None:
         sql, params = self._insert_event_sql_and_params(event_record)
         try:
@@ -1477,12 +1327,6 @@ class OracleAsyncADKStore(_OracleADKSessionSQLMixin, BaseAsyncADKStore["OracleAs
             if is_oracle_unique_violation(exc):
                 return
             raise
-
-    async def append_event(self, event_record: StoredEvent) -> None:
-        """Asynchronously append an Oracle ADK event row."""
-        async with self._config.provide_session() as driver:
-            await self._insert_event_with_driver(driver, event_record)
-            await driver.commit()
 
     async def append_event_and_update_state(
         self,
@@ -1540,70 +1384,6 @@ class OracleAsyncADKStore(_OracleADKSessionSQLMixin, BaseAsyncADKStore["OracleAs
             merge_scopes=True,
         )
 
-    async def get_events(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[StoredEvent]:
-        """Asynchronously retrieve Oracle ADK events."""
-        if limit == 0:
-            return []
-        sql, params = self._get_events_sql_and_params(app_name, user_id, session_id, after_timestamp, limit)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, params)
-            if limit is not None:
-                rows = list(reversed(rows))
-            return [_row_to_stored_event(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return []
-            raise
-
-    async def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Asynchronously delete events older than ``before``."""
-        sql, params = self._delete_before_sql_and_params(self._events_table, "timestamp", before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, params)
-                await driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Asynchronously delete idle user states."""
-        sql, params = self._delete_before_sql_and_params(
-            self._user_state_table, "update_time", updated_before, app_name
-        )
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, params)
-                await driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Asynchronously delete idle sessions."""
-        sql, params = self._delete_before_sql_and_params(self._session_table, "update_time", updated_before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, params)
-                await driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return 0
-            raise
-
     async def get_app_state(self, app_name: str) -> dict[str, Any] | None:
         """Asynchronously fetch app state."""
         try:
@@ -1630,37 +1410,6 @@ class OracleAsyncADKStore(_OracleADKSessionSQLMixin, BaseAsyncADKStore["OracleAs
             if is_oracle_table_missing(exc):
                 return None
             raise
-
-    async def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Asynchronously upsert app state via ``MERGE INTO``."""
-        sql, params = self._upsert_app_state_sql_and_params(app_name, state)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-            await driver.commit()
-
-    async def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Asynchronously upsert user state via ``MERGE INTO``."""
-        sql, params = self._upsert_user_state_sql_and_params(app_name, user_id, state)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-            await driver.commit()
-
-    async def get_metadata(self, key: str) -> str | None:
-        """Asynchronously fetch an internal metadata value."""
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(self._get_metadata_sql(), {"key": key})
-            return str(oracle_row_value(row, "value", 0)) if row is not None else None
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return None
-            raise
-
-    async def set_metadata(self, key: str, value: str) -> None:
-        """Asynchronously upsert an internal metadata value."""
-        async with self._config.provide_session() as driver:
-            await driver.execute(self._set_metadata_sql(), {"key": key, "value": value})
-            await driver.commit()
 
 
 class _OracleADKMemorySQLMixin:
@@ -1861,14 +1610,17 @@ class _OracleADKMemorySQLMixin:
             clauses.append("scope = :scope")
         return f"DELETE FROM {table_ref} WHERE {' AND '.join(clauses)}", params
 
+    _unpack_params = False
 
-class OracleSyncADKMemoryStore(_OracleADKMemorySQLMixin, _BaseSyncADKMemoryStore["OracleSyncConfig"]):
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_oracle_table_missing(exc)
+
+
+class OracleSyncADKMemoryStore(_OracleADKMemorySQLMixin, AdapterSyncADKMemoryStore):
     """Synchronous Oracle ADK memory store with 23ai ``VECTOR_DISTANCE``, RRF fusion, and Oracle Text FTS."""
 
     __slots__ = (
         "_fts_operator",
-        "_json_deserializer",
-        "_json_serializer",
         "_json_storage_override",
         "_retention_days",
         "_vector_dim_override",
@@ -1895,17 +1647,6 @@ class OracleSyncADKMemoryStore(_OracleADKMemorySQLMixin, _BaseSyncADKMemoryStore
 
     def _memory_table_ddl(self) -> str:
         return self._build_memory_table_ddl(self._storage_mode())
-
-    def create_tables(self) -> None:
-        """Create Oracle ADK memory table and indexes idempotently."""
-        if not self._enabled:
-            return
-        if not self.create_schema_enabled:
-            self.reconcile_schema()
-            return
-        with self._config.provide_session() as driver:
-            driver.execute_script(self._memory_table_ddl())
-            driver.commit()
 
     def insert_memory_entries(self, entries: list[StoredMemory], owner_id: object | None = None) -> int:
         """Bulk-insert memory entries ignoring ``ORA-00001`` duplicate ``event_id`` violations."""
@@ -1958,40 +1699,12 @@ class OracleSyncADKMemoryStore(_OracleADKMemorySQLMixin, _BaseSyncADKMemoryStore
                 return []
             raise
 
-    def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete all Oracle memory rows for ``session_id`` owned by ``app_name`` and ``user_id``."""
-        sql, params = self._delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, params)
-                driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return 0
-            raise
 
-    def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = "all") -> int:
-        """Delete Oracle memory entries older than ``days`` days."""
-        sql, params = self._delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, params)
-                driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return 0
-            raise
-
-
-class OracleAsyncADKMemoryStore(_OracleADKMemorySQLMixin, _BaseAsyncADKMemoryStore["OracleAsyncConfig"]):
+class OracleAsyncADKMemoryStore(_OracleADKMemorySQLMixin, AdapterAsyncADKMemoryStore):
     """Asynchronous Oracle ADK memory store supporting 23ai vectors, RRF fusion, and Oracle Text."""
 
     __slots__ = (
         "_fts_operator",
-        "_json_deserializer",
-        "_json_serializer",
         "_json_storage_override",
         "_retention_days",
         "_vector_dim_override",
@@ -2016,18 +1729,6 @@ class OracleAsyncADKMemoryStore(_OracleADKMemorySQLMixin, _BaseAsyncADKMemorySto
     async def _memory_table_ddl(self) -> str:
         mode = await _detect_storage_mode_async(self._config, self._json_storage_override)
         return self._build_memory_table_ddl(mode)
-
-    async def create_tables(self) -> None:
-        """Asynchronously create Oracle ADK memory table and indexes."""
-        if not self._enabled:
-            return
-        if not self.create_schema_enabled:
-            await self.reconcile_schema()
-            return
-        ddl = await self._memory_table_ddl()
-        async with self._config.provide_session() as driver:
-            await driver.execute_script(ddl)
-            await driver.commit()
 
     async def insert_memory_entries(self, entries: list[StoredMemory], owner_id: object | None = None) -> int:
         """Asynchronously bulk-insert memory entries with duplicate suppression."""
@@ -2078,32 +1779,6 @@ class OracleAsyncADKMemoryStore(_OracleADKMemorySQLMixin, _BaseAsyncADKMemorySto
         except Exception as exc:
             if is_oracle_table_missing(exc):
                 return []
-            raise
-
-    async def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Asynchronously delete memory entries for ``session_id`` owned by ``app_name`` and ``user_id``."""
-        sql, params = self._delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, params)
-                await driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = "all") -> int:
-        """Asynchronously delete memory entries older than ``days`` days."""
-        sql, params = self._delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, params)
-                await driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return 0
             raise
 
 
@@ -2318,11 +1993,32 @@ class _OracleADKArtifactSQLMixin:
         delete_sql = f"DELETE FROM {table_ref} WHERE created_at < :before_ts"
         return select_sql, delete_sql, {"before_ts": cutoff}
 
+    _unpack_params = False
 
-class OracleSyncADKArtifactStore(_OracleADKArtifactSQLMixin, _BaseSyncADKArtifactStore["OracleSyncConfig"]):
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_oracle_table_missing(exc)
+
+    def _list_artifact_keys_sql_and_params(
+        self, app_name: str, user_id: str, session_id: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        return self._list_keys_sql_and_params(app_name, user_id, session_id)
+
+    def _list_artifact_versions_sql_and_params(
+        self, app_name: str, user_id: str, filename: str, session_id: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        return self._list_versions_sql_and_params(app_name, user_id, filename, session_id)
+
+    def _decode_artifact_row(self, row: Any) -> StoredArtifact:
+        return _row_to_stored_artifact(row, deserializer=self._json_deserializer)
+
+    def _decode_artifact_ref_row(self, row: Any) -> ArtifactReference:
+        return _row_to_artifact_reference(row)
+
+
+class OracleSyncADKArtifactStore(_OracleADKArtifactSQLMixin, AdapterSyncADKArtifactStore):
     """Synchronous Oracle ADK artifact metadata store returning ``ArtifactReference``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer", "_json_storage_override")
+    __slots__ = ("_json_storage_override",)
 
     def __init__(self, config: OracleSyncConfig, *, read_config: OracleSyncConfig | None = None) -> None:
         """Initialize synchronous Oracle artifact metadata store."""
@@ -2337,137 +2033,11 @@ class OracleSyncADKArtifactStore(_OracleADKArtifactSQLMixin, _BaseSyncADKArtifac
             driver.execute_script(self._build_artifact_table_ddl(mode))
             driver.commit()
 
-    def insert_artifact(self, record: StoredArtifact) -> None:
-        """Upsert an ADK artifact metadata entry using Oracle ``MERGE INTO``."""
-        sql, params = self._insert_artifact_sql_and_params(record)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-            driver.commit()
 
-    def insert_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        reference: ArtifactReference,
-        *,
-        session_id: str | None = None,
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Persist a ``vertebra.storage.ArtifactReference`` record into Oracle."""
-        sql, params = self._insert_artifact_ref_sql_and_params(
-            app_name, user_id, filename, reference, session_id, custom_metadata
-        )
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-            driver.commit()
-
-    def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch an ADK artifact dictionary from Oracle."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=False
-        )
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, params)
-            return _row_to_stored_artifact(row, deserializer=self._json_deserializer) if row is not None else None
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return None
-            raise
-
-    def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        *,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Fetch stored artifact metadata as a ``vertebra.storage.ArtifactReference``."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=True
-        )
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, params)
-            return _row_to_artifact_reference(row) if row is not None else None
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return None
-            raise
-
-    def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames for ``(app_name, user_id)`` across user and optional session scope."""
-        sql, params = self._list_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, params)
-            return [str(oracle_row_value(r, "filename", 0)) for r in rows]
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return []
-            raise
-
-    def list_artifact_versions(
-        self, app_name: str, user_id: str, filename: str, session_id: str | None = None
-    ) -> list[StoredArtifact]:
-        """List ascending ``StoredArtifact`` versions for a stored artifact."""
-        sql, params = self._list_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, params)
-            return [_row_to_stored_artifact(r, deserializer=self._json_deserializer) for r in rows]
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return []
-            raise
-
-    def delete_artifact(
-        self, app_name: str, user_id: str, filename: str, session_id: str | None = None
-    ) -> list[StoredArtifact]:
-        """Delete all stored versions of an Oracle artifact and return removed records."""
-        existing = self.list_artifact_versions(app_name, user_id, filename, session_id=session_id)
-        sql, params = self._delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-            driver.commit()
-        return existing
-
-    def get_next_version(self, app_name: str, user_id: str, filename: str, session_id: str | None = None) -> int:
-        """Compute the next sequential version integer (``MAX(version) + 1`` or ``0``)."""
-        sql, params = self._get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        with self._config.provide_session() as driver:
-            val = driver.select_value_or_none(sql, params)
-        return 0 if val is None else int(val) + 1
-
-    def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Delete artifact rows older than ``before`` and return removed records."""
-        select_sql, delete_sql, params = self._delete_older_than_sqls_and_params(before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                rows = driver.select(select_sql, params)
-                driver.execute(delete_sql, params)
-                driver.commit()
-            return [_row_to_stored_artifact(r, deserializer=self._json_deserializer) for r in rows]
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return []
-            raise
-
-
-class OracleAsyncADKArtifactStore(_OracleADKArtifactSQLMixin, _BaseAsyncADKArtifactStore["OracleAsyncConfig"]):
+class OracleAsyncADKArtifactStore(_OracleADKArtifactSQLMixin, AdapterAsyncADKArtifactStore):
     """Asynchronous Oracle ADK artifact metadata store returning ``ArtifactReference``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer", "_json_storage_override")
+    __slots__ = ("_json_storage_override",)
 
     def __init__(self, config: OracleAsyncConfig, *, read_config: OracleAsyncConfig | None = None) -> None:
         """Initialize asynchronous Oracle artifact metadata store."""
@@ -2481,129 +2051,3 @@ class OracleAsyncADKArtifactStore(_OracleADKArtifactSQLMixin, _BaseAsyncADKArtif
         async with self._config.provide_session() as driver:
             await driver.execute_script(self._build_artifact_table_ddl(mode))
             await driver.commit()
-
-    async def insert_artifact(self, record: StoredArtifact) -> None:
-        """Asynchronously upsert an ADK artifact metadata entry using ``MERGE INTO``."""
-        sql, params = self._insert_artifact_sql_and_params(record)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-            await driver.commit()
-
-    async def insert_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        reference: ArtifactReference,
-        *,
-        session_id: str | None = None,
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Asynchronously store a ``vertebra.storage.ArtifactReference`` record into Oracle."""
-        sql, params = self._insert_artifact_ref_sql_and_params(
-            app_name, user_id, filename, reference, session_id, custom_metadata
-        )
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-            await driver.commit()
-
-    async def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Asynchronously fetch an ADK artifact metadata dictionary."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=False
-        )
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, params)
-            return _row_to_stored_artifact(row, deserializer=self._json_deserializer) if row is not None else None
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return None
-            raise
-
-    async def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        *,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Asynchronously fetch stored artifact metadata as ``ArtifactReference``."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=True
-        )
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, params)
-            return _row_to_artifact_reference(row) if row is not None else None
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return None
-            raise
-
-    async def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """Asynchronously list distinct artifact filenames across user and optional session scope."""
-        sql, params = self._list_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, params)
-            return [str(oracle_row_value(r, "filename", 0)) for r in rows]
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return []
-            raise
-
-    async def list_artifact_versions(
-        self, app_name: str, user_id: str, filename: str, session_id: str | None = None
-    ) -> list[StoredArtifact]:
-        """Asynchronously list ascending ``StoredArtifact`` versions for a stored artifact."""
-        sql, params = self._list_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, params)
-            return [_row_to_stored_artifact(r, deserializer=self._json_deserializer) for r in rows]
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return []
-            raise
-
-    async def delete_artifact(
-        self, app_name: str, user_id: str, filename: str, session_id: str | None = None
-    ) -> list[StoredArtifact]:
-        """Asynchronously delete all stored versions of an Oracle artifact and return removed records."""
-        existing = await self.list_artifact_versions(app_name, user_id, filename, session_id=session_id)
-        sql, params = self._delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-            await driver.commit()
-        return existing
-
-    async def get_next_version(self, app_name: str, user_id: str, filename: str, session_id: str | None = None) -> int:
-        """Asynchronously compute the next sequential version integer."""
-        sql, params = self._get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        async with self._config.provide_session() as driver:
-            val = await driver.select_value_or_none(sql, params)
-        return 0 if val is None else int(val) + 1
-
-    async def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Asynchronously delete artifact rows older than ``before`` and return removed records."""
-        select_sql, delete_sql, params = self._delete_older_than_sqls_and_params(before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                rows = await driver.select(select_sql, params)
-                await driver.execute(delete_sql, params)
-                await driver.commit()
-            return [_row_to_stored_artifact(r, deserializer=self._json_deserializer) for r in rows]
-        except Exception as exc:
-            if is_oracle_table_missing(exc):
-                return []
-            raise

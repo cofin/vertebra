@@ -64,6 +64,36 @@ export async function parseMcpJsonRpcResponse(response: Response): Promise<unkno
   return data.result;
 }
 
+async function consumeSseStream(resp: Response, onEvent: (event: unknown) => void): Promise<void> {
+  const reader = resp.body?.getReader();
+  if (!reader) return;
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (line.startsWith("data:")) {
+        const raw = line.slice(5).trim();
+        if (raw) {
+          try {
+            onEvent(JSON.parse(raw));
+          } catch {
+            onEvent(raw);
+          }
+        }
+      }
+    }
+  }
+}
+
 export interface McpClientOptions {
   baseUrl?: string;
   transport?: (req: Request) => Promise<Response>;
@@ -279,27 +309,34 @@ export class A2aClient {
     return card;
   }
 
+  private async postJsonRpc(
+    method: string,
+    params: Record<string, unknown>,
+    options: { headers?: Record<string, string>; id?: number; injectTrace?: boolean } = {},
+  ): Promise<Response> {
+    const baseHeaders: Record<string, string> = {
+      "content-type": "application/json",
+      ...options.headers,
+    };
+    const headers = options.injectTrace ? TraceContext.injectHeader(baseHeaders, this.traceContext) : baseHeaders;
+    const req = new Request(`${this.baseUrl}/a2a`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: options.id ?? Math.floor(Math.random() * 1_000_000),
+        method,
+        params,
+      }),
+    });
+    return this.transport(req);
+  }
+
   async sendMessage(
     message: { role: string; content?: string; parts?: unknown[] },
     configuration: Record<string, unknown> = {},
   ): Promise<unknown> {
-    const url = `${this.baseUrl}/a2a`;
-    const headers = TraceContext.injectHeader({ "content-type": "application/json" }, this.traceContext);
-
-    const payload = {
-      jsonrpc: "2.0",
-      id: Math.floor(Math.random() * 1_000_000),
-      method: "message/send",
-      params: { message, configuration },
-    };
-
-    const req = new Request(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
-
-    const resp = await this.transport(req);
+    const resp = await this.postJsonRpc("message/send", { message, configuration }, { injectTrace: true });
     if (!resp.ok) {
       throw new Error(`A2A error ${resp.status}: ${await resp.text()}`);
     }
@@ -314,94 +351,25 @@ export class A2aClient {
     message: { role: string; content?: string; parts?: unknown[] },
     onEvent: (event: unknown) => void,
   ): Promise<void> {
-    const url = `${this.baseUrl}/a2a`;
-    const headers = TraceContext.injectHeader(
-      {
-        "content-type": "application/json",
-        accept: "text/event-stream",
-      },
-      this.traceContext,
+    const resp = await this.postJsonRpc(
+      "message/stream",
+      { message },
+      { headers: { accept: "text/event-stream" }, injectTrace: true },
     );
-
-    const payload = {
-      jsonrpc: "2.0",
-      id: Math.floor(Math.random() * 1_000_000),
-      method: "message/stream",
-      params: { message },
-    };
-
-    const req = new Request(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
-
-    const resp = await this.transport(req);
     if (!resp.ok) {
       throw new Error(`A2A stream error ${resp.status}`);
     }
-
-    const reader = resp.body?.getReader();
-    if (!reader) return;
-
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (line.startsWith("data:")) {
-          const raw = line.slice(5).trim();
-          if (raw) {
-            try {
-              onEvent(JSON.parse(raw));
-            } catch {
-              onEvent(raw);
-            }
-          }
-        }
-      }
-    }
+    await consumeSseStream(resp, onEvent);
   }
 
   async getTask(taskId: string): Promise<unknown> {
-    const url = `${this.baseUrl}/a2a`;
-    const payload = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tasks/get",
-      params: { taskId, id: taskId },
-    };
-    const req = new Request(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const resp = await this.transport(req);
+    const resp = await this.postJsonRpc("tasks/get", { taskId, id: taskId }, { id: 1 });
     const data = (await resp.json()) as { result?: unknown };
     return data.result;
   }
 
   async cancelTask(taskId: string): Promise<unknown> {
-    const url = `${this.baseUrl}/a2a`;
-    const payload = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tasks/cancel",
-      params: { taskId, id: taskId },
-    };
-    const req = new Request(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const resp = await this.transport(req);
+    const resp = await this.postJsonRpc("tasks/cancel", { taskId, id: taskId }, { id: 1 });
     const data = (await resp.json()) as { result?: unknown };
     return data.result;
   }
@@ -411,56 +379,15 @@ export class A2aClient {
     lastEventId: string | undefined,
     onEvent: (event: unknown) => void,
   ): Promise<void> {
-    const url = `${this.baseUrl}/a2a`;
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      accept: "text/event-stream",
-    };
+    const headers: Record<string, string> = { accept: "text/event-stream" };
     if (lastEventId) {
       headers["last-event-id"] = lastEventId;
     }
-
-    const payload = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tasks/resubscribe",
-      params: { taskId, id: taskId },
-    };
-
-    const req = new Request(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
-
-    const resp = await this.transport(req);
-    const reader = resp.body?.getReader();
-    if (!reader) return;
-
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (line.startsWith("data:")) {
-          const raw = line.slice(5).trim();
-          if (raw) {
-            try {
-              onEvent(JSON.parse(raw));
-            } catch {
-              onEvent(raw);
-            }
-          }
-        }
-      }
+    const resp = await this.postJsonRpc("tasks/resubscribe", { taskId, id: taskId }, { id: 1, headers });
+    if (!resp.ok) {
+      throw new Error(`A2A stream error ${resp.status}`);
     }
+    await consumeSseStream(resp, onEvent);
   }
 }
 
@@ -478,6 +405,15 @@ export class AgentStreamClient {
     this.transport = options.transport ?? ((req: Request) => fetch(req));
   }
 
+  private async requestJson(path: string, method: "GET" | "POST", body?: unknown): Promise<unknown> {
+    const init: RequestInit =
+      method === "POST"
+        ? { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) }
+        : { method };
+    const resp = await this.transport(new Request(`${this.baseUrl}${path}`, init));
+    return resp.json();
+  }
+
   async streamChat(
     request: {
       message: string;
@@ -487,8 +423,7 @@ export class AgentStreamClient {
     },
     onFrame: (frame: unknown) => void,
   ): Promise<void> {
-    const url = `${this.baseUrl}/agent/chat`;
-    const req = new Request(url, {
+    const req = new Request(`${this.baseUrl}/agent/chat`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -501,34 +436,7 @@ export class AgentStreamClient {
     if (!resp.ok) {
       throw new Error(`Chat stream failed: ${resp.status}`);
     }
-
-    const reader = resp.body?.getReader();
-    if (!reader) return;
-
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (line.startsWith("data:")) {
-          const raw = line.slice(5).trim();
-          if (raw) {
-            try {
-              onFrame(JSON.parse(raw));
-            } catch {
-              onFrame(raw);
-            }
-          }
-        }
-      }
-    }
+    await consumeSseStream(resp, onFrame);
   }
 
   async runTurn(request: {
@@ -537,43 +445,19 @@ export class AgentStreamClient {
     agentName?: string;
     confirmationToken?: string;
   }): Promise<unknown> {
-    const url = `${this.baseUrl}/agent/turns`;
-    const req = new Request(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
-    });
-    const resp = await this.transport(req);
-    return resp.json();
+    return this.requestJson("/agent/turns", "POST", request);
   }
 
   async approveConfirmation(token: string): Promise<unknown> {
-    const url = `${this.baseUrl}/agent/confirmations/${token}`;
-    const req = new Request(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ decision: "approve" }),
-    });
-    const resp = await this.transport(req);
-    return resp.json();
+    return this.requestJson(`/agent/confirmations/${token}`, "POST", { decision: "approve" });
   }
 
   async rejectConfirmation(token: string, reason?: string): Promise<unknown> {
-    const url = `${this.baseUrl}/agent/confirmations/${token}`;
-    const req = new Request(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ decision: "reject", reason }),
-    });
-    const resp = await this.transport(req);
-    return resp.json();
+    return this.requestJson(`/agent/confirmations/${token}`, "POST", { decision: "reject", reason });
   }
 
   async getSessionHistory(sessionId: string): Promise<unknown> {
-    const url = `${this.baseUrl}/agent/sessions/${sessionId}`;
-    const req = new Request(url, { method: "GET" });
-    const resp = await this.transport(req);
-    return resp.json();
+    return this.requestJson(`/agent/sessions/${sessionId}`, "GET");
   }
 }
 

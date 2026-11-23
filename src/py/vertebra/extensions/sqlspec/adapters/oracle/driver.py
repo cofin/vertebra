@@ -73,7 +73,39 @@ def _normalize_sessionless_txid(txid: Any, fallback: bytes | None = None) -> byt
     return b""
 
 
-class OracleSyncDriver(BaseSyncDriver):
+class _OracleDriverMixin:
+    """Shared dialect helpers inherited by synchronous and asynchronous drivers."""
+
+    __slots__ = ()
+
+    if TYPE_CHECKING:
+        connection: Any
+        _sessionless_transaction_id: bytes | None
+
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
+        """Build default Oracle `StatementConfig` targeting `:name` and `:1` binds."""
+        return build_oracle_statement_config()
+
+    def _map_exception(self, exc: BaseException) -> Exception | None:
+        return map_oracle_exception(exc)
+
+    def _record_out_binds(self, cursor: Any) -> None:
+        """Copy the cursor's out-bind values to the connection when it tracks them."""
+        if hasattr(self.connection, "_last_out_binds"):
+            self.connection._last_out_binds = cursor.out_binds
+
+    @property
+    def sessionless_transaction_id(self) -> bytes | None:
+        """Return the active Oracle 26ai sessionless transaction identifier, if any."""
+        return self._sessionless_transaction_id
+
+    def set_transaction_priority(self, priority: Any) -> None:
+        """Set Oracle 26ai transaction priority (`DEFAULT`, `LOW`, `MEDIUM`, `HIGH`)."""
+        apply_oracle_transaction_priority(self.connection, priority)
+
+
+class OracleSyncDriver(_OracleDriverMixin, BaseSyncDriver):
     """Synchronous Oracle SQLSpec driver supporting `:name` and `:1` binds with `OracleCore` codecs."""
 
     __slots__ = ("_data_dictionary", "_sessionless_cleanup_error", "_sessionless_transaction_id")
@@ -103,20 +135,11 @@ class OracleSyncDriver(BaseSyncDriver):
         self._sessionless_cleanup_error: BaseException | None = None
 
     @property
-    def sessionless_transaction_id(self) -> bytes | None:
-        """Return the active Oracle 26ai sessionless transaction identifier, if any."""
-        return self._sessionless_transaction_id
-
-    @property
     def data_dictionary(self) -> OracleSyncDataDictionary:
         """Return lazily instantiated synchronous Oracle data dictionary."""
         if self._data_dictionary is None:
             self._data_dictionary = OracleSyncDataDictionary()
         return self._data_dictionary
-
-    def set_transaction_priority(self, priority: Any) -> None:
-        """Set Oracle 26ai transaction priority (`DEFAULT`, `LOW`, `MEDIUM`, `HIGH`)."""
-        apply_oracle_transaction_priority(self.connection, priority)
 
     def begin_sessionless_transaction(
         self,
@@ -314,11 +337,6 @@ class OracleSyncDriver(BaseSyncDriver):
             last_inserted_id=BaseSyncDriver._normalize_last_inserted_id(cursor.lastrowid),
         )
 
-    @classmethod
-    def _default_statement_config(cls) -> StatementConfig:
-        """Build default Oracle `StatementConfig` targeting `:name` and `:1` binds."""
-        return build_oracle_statement_config()
-
     def _cache_hit_owner(self) -> type[BaseSyncDriver]:
         """Return `OracleSyncDriver` because it overrides `with_cursor` for `checkout_cursor()`."""
         return OracleSyncDriver
@@ -330,11 +348,6 @@ class OracleSyncDriver(BaseSyncDriver):
         if not callable(getattr(self.native_driver, "checkout_cursor", None)):
             return None
         return self._cached_fetch_rows, self._cached_run_dml
-
-    def _record_out_binds(self, cursor: Any) -> None:
-        """Copy the cursor's out-bind values to the connection when it tracks them."""
-        if hasattr(self.connection, "_last_out_binds"):
-            self.connection._last_out_binds = cursor.out_binds
 
     def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Run a cached row-returning statement on one checked-out cursor and return `(rows, names)`."""
@@ -354,9 +367,6 @@ class OracleSyncDriver(BaseSyncDriver):
             return BaseSyncDriver._normalize_rowcount(cursor.rowcount), BaseSyncDriver._normalize_last_inserted_id(
                 cursor.lastrowid
             )
-
-    def _map_exception(self, exc: BaseException) -> Exception | None:
-        return map_oracle_exception(exc)
 
     def load_from_arrow(
         self,
@@ -464,7 +474,7 @@ class OracleSyncDriver(BaseSyncDriver):
         return predicate.to_sql_fragment(":tenant_id")
 
 
-class OracleAsyncDriver(BaseAsyncDriver):
+class OracleAsyncDriver(_OracleDriverMixin, BaseAsyncDriver):
     """Asynchronous Oracle SQLSpec driver supporting `:name` and `:1` binds with `OracleCore` codecs."""
 
     __slots__ = ("_data_dictionary", "_sessionless_cleanup_error", "_sessionless_transaction_id")
@@ -494,20 +504,11 @@ class OracleAsyncDriver(BaseAsyncDriver):
         self._sessionless_cleanup_error: BaseException | None = None
 
     @property
-    def sessionless_transaction_id(self) -> bytes | None:
-        """Return the active Oracle 26ai sessionless transaction identifier, if any."""
-        return self._sessionless_transaction_id
-
-    @property
     def data_dictionary(self) -> OracleAsyncDataDictionary:
         """Return lazily instantiated asynchronous Oracle data dictionary."""
         if self._data_dictionary is None:
             self._data_dictionary = OracleAsyncDataDictionary()
         return self._data_dictionary
-
-    def set_transaction_priority(self, priority: Any) -> None:
-        """Set Oracle 26ai transaction priority (`DEFAULT`, `LOW`, `MEDIUM`, `HIGH`)."""
-        apply_oracle_transaction_priority(self.connection, priority)
 
     async def begin_sessionless_transaction(
         self,
@@ -709,11 +710,6 @@ class OracleAsyncDriver(BaseAsyncDriver):
             last_inserted_id=BaseSyncDriver._normalize_last_inserted_id(cursor.lastrowid),
         )
 
-    @classmethod
-    def _default_statement_config(cls) -> StatementConfig:
-        """Build default Oracle `StatementConfig` targeting `:name` and `:1` binds."""
-        return build_oracle_statement_config()
-
     def _cache_hit_owner(self) -> type[BaseAsyncDriver]:
         """Return `OracleAsyncDriver` because it overrides `with_cursor` for async `checkout_cursor()`."""
         return OracleAsyncDriver
@@ -725,11 +721,6 @@ class OracleAsyncDriver(BaseAsyncDriver):
         if not callable(getattr(self.native_driver, "checkout_cursor", None)):
             return None
         return self._cached_fetch_rows, self._cached_run_dml
-
-    def _record_out_binds(self, cursor: Any) -> None:
-        """Copy the cursor's out-bind values to the connection when it tracks them."""
-        if hasattr(self.connection, "_last_out_binds"):
-            self.connection._last_out_binds = cursor.out_binds
 
     async def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Run a cached row-returning statement on one checked-out async cursor and return `(rows, names)`."""
@@ -749,9 +740,6 @@ class OracleAsyncDriver(BaseAsyncDriver):
             return BaseSyncDriver._normalize_rowcount(cursor.rowcount), BaseSyncDriver._normalize_last_inserted_id(
                 cursor.lastrowid
             )
-
-    def _map_exception(self, exc: BaseException) -> Exception | None:
-        return map_oracle_exception(exc)
 
     async def load_from_arrow(
         self,

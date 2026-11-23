@@ -1,10 +1,13 @@
-//! Valkey Streams (`XGROUP`, `XADD`, `XREADGROUP`, `XACK`, `XAUTOCLAIM`, `XRANGE`, `XDEL`) and `ZADD`.
+//! RESP Streams (`XGROUP`, `XADD`, `XREADGROUP`, `XACK`, `XAUTOCLAIM`, `XRANGE`, `XDEL`) and Sorted Sets (`ZADD`, `ZRANGEBYSCORE`, `ZREM`).
 
+#[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
+#[cfg(feature = "pyo3")]
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
+#[cfg(feature = "pyo3")]
 use crate::codec::RespValue;
-use crate::error::ValkeyError;
+use crate::error::RespError;
 
 /// Build `XGROUP CREATE <key> <group> <id> [MKSTREAM]`.
 #[must_use]
@@ -30,9 +33,9 @@ pub fn build_xadd(
     maxlen: Option<u64>,
     approximate: bool,
     nomkstream: bool,
-) -> Result<Vec<Vec<u8>>, ValkeyError> {
+) -> Result<Vec<Vec<u8>>, RespError> {
     if fields.is_empty() {
-        return Err(ValkeyError::programming(
+        return Err(RespError::programming(
             "XADD requires at least one field/value pair",
         ));
     }
@@ -65,9 +68,9 @@ pub fn build_xreadgroup(
     count: Option<u64>,
     block_ms: Option<u64>,
     noack: bool,
-) -> Result<Vec<Vec<u8>>, ValkeyError> {
+) -> Result<Vec<Vec<u8>>, RespError> {
     if streams.is_empty() {
-        return Err(ValkeyError::programming(
+        return Err(RespError::programming(
             "XREADGROUP requires at least one stream",
         ));
     }
@@ -99,9 +102,9 @@ pub fn build_xreadgroup(
 }
 
 /// Build `XACK <key> <group> <id> ...`.
-pub fn build_xack(key: &[u8], group: &str, ids: &[String]) -> Result<Vec<Vec<u8>>, ValkeyError> {
+pub fn build_xack(key: &[u8], group: &str, ids: &[String]) -> Result<Vec<Vec<u8>>, RespError> {
     if ids.is_empty() {
-        return Err(ValkeyError::programming(
+        return Err(RespError::programming(
             "XACK requires at least one entry id",
         ));
     }
@@ -161,9 +164,9 @@ pub fn build_xrange(key: &[u8], min: &str, max: &str, count: Option<u64>) -> Vec
 }
 
 /// Build `XDEL <key> <id> ...`.
-pub fn build_xdel(key: &[u8], ids: &[String]) -> Result<Vec<Vec<u8>>, ValkeyError> {
+pub fn build_xdel(key: &[u8], ids: &[String]) -> Result<Vec<Vec<u8>>, RespError> {
     if ids.is_empty() {
-        return Err(ValkeyError::programming(
+        return Err(RespError::programming(
             "XDEL requires at least one entry id",
         ));
     }
@@ -185,14 +188,14 @@ pub fn build_zadd(
     gt: bool,
     lt: bool,
     ch: bool,
-) -> Result<Vec<Vec<u8>>, ValkeyError> {
+) -> Result<Vec<Vec<u8>>, RespError> {
     if nx && xx {
-        return Err(ValkeyError::programming(
+        return Err(RespError::programming(
             "ZADD NX and XX options are mutually exclusive",
         ));
     }
     if gt && lt {
-        return Err(ValkeyError::programming(
+        return Err(RespError::programming(
             "ZADD GT and LT options are mutually exclusive",
         ));
     }
@@ -216,7 +219,7 @@ pub fn build_zadd(
     }
     for (member, score) in members {
         if !score.is_finite() {
-            return Err(ValkeyError::data("ZADD score must be finite"));
+            return Err(RespError::data("ZADD score must be finite"));
         }
         cmd.push(score.to_string().into_bytes());
         cmd.push(member.clone());
@@ -224,7 +227,47 @@ pub fn build_zadd(
     Ok(cmd)
 }
 
+/// Build `ZRANGEBYSCORE <key> <min> <max> [WITHSCORES] [LIMIT <offset> <count>]`.
+#[must_use]
+pub fn build_zrangebyscore(
+    key: &[u8],
+    min: &str,
+    max: &str,
+    withscores: bool,
+    offset: Option<u64>,
+    count: Option<u64>,
+) -> Vec<Vec<u8>> {
+    let mut cmd = vec![
+        b"ZRANGEBYSCORE".to_vec(),
+        key.to_vec(),
+        min.as_bytes().to_vec(),
+        max.as_bytes().to_vec(),
+    ];
+    if withscores {
+        cmd.push(b"WITHSCORES".to_vec());
+    }
+    if let (Some(off), Some(cnt)) = (offset, count) {
+        cmd.push(b"LIMIT".to_vec());
+        cmd.push(off.to_string().into_bytes());
+        cmd.push(cnt.to_string().into_bytes());
+    }
+    cmd
+}
+
+/// Build `ZREM <key> <member> ...`.
+#[must_use]
+pub fn build_zrem(key: &[u8], members: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut cmd = Vec::with_capacity(2 + members.len());
+    cmd.push(b"ZREM".to_vec());
+    cmd.push(key.to_vec());
+    for m in members {
+        cmd.push(m.clone());
+    }
+    cmd
+}
+
 /// Decode `XREADGROUP` response into Python `list[tuple[str, list[tuple[str, dict[str, str | bytes]]]]]`.
+#[cfg(feature = "pyo3")]
 pub fn decode_xreadgroup_py(py: Python<'_>, resp: RespValue) -> PyResult<Py<PyAny>> {
     let val = resp.into_result().map_err(|e| e.to_py_err(py))?;
     let out = PyList::empty(py);
@@ -269,26 +312,28 @@ pub fn decode_xreadgroup_py(py: Python<'_>, resp: RespValue) -> PyResult<Py<PyAn
             Ok(out.into_any().unbind())
         }
         other => Err(
-            ValkeyError::data(format!("Unexpected XREADGROUP response shape: {other:?}"))
+            RespError::data(format!("Unexpected XREADGROUP response shape: {other:?}"))
                 .to_py_err(py),
         ),
     }
 }
 
 /// Decode `XRANGE` response into `list[tuple[str, dict[str, str | bytes]]]`.
+#[cfg(feature = "pyo3")]
 pub fn decode_xrange_py(py: Python<'_>, resp: RespValue) -> PyResult<Py<PyAny>> {
     let val = resp.into_result().map_err(|e| e.to_py_err(py))?;
     Ok(decode_stream_entries_py(py, &val)?.into_any().unbind())
 }
 
 /// Decode `XAUTOCLAIM` response into `(next_start_id, entries, deleted_ids)`.
+#[cfg(feature = "pyo3")]
 pub fn decode_xautoclaim_py(py: Python<'_>, resp: RespValue) -> PyResult<Py<PyAny>> {
     let val = resp.into_result().map_err(|e| e.to_py_err(py))?;
     let Some(parts) = val.as_slice() else {
-        return Err(ValkeyError::data("Unexpected non-array XAUTOCLAIM response").to_py_err(py));
+        return Err(RespError::data("Unexpected non-array XAUTOCLAIM response").to_py_err(py));
     };
     if parts.len() < 2 {
-        return Err(ValkeyError::data("XAUTOCLAIM response truncated").to_py_err(py));
+        return Err(RespError::data("XAUTOCLAIM response truncated").to_py_err(py));
     }
     let next_id = parts[0]
         .as_str()
@@ -315,6 +360,7 @@ pub fn decode_xautoclaim_py(py: Python<'_>, resp: RespValue) -> PyResult<Py<PyAn
     .unbind())
 }
 
+#[cfg(feature = "pyo3")]
 fn decode_stream_entries_py<'py>(py: Python<'py>, val: &RespValue) -> PyResult<Bound<'py, PyList>> {
     let list = PyList::empty(py);
     let Some(entries) = val.as_slice() else {
@@ -364,6 +410,7 @@ fn decode_stream_entries_py<'py>(py: Python<'py>, val: &RespValue) -> PyResult<B
     Ok(list)
 }
 
+#[cfg(feature = "pyo3")]
 fn stream_field_value_to_py(py: Python<'_>, val: &RespValue) -> PyResult<Py<PyAny>> {
     match val.as_bytes() {
         Some(raw) => match std::str::from_utf8(raw) {

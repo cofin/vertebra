@@ -10,8 +10,6 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool, Pool, QueuePool, StaticPool
 
 from vertebra.extensions.sqlalchemy.dialects._base import (
     _AsyncDialectMixin,
-    _extract_sqlstate,
-    _is_disconnect_common,
     _resolve_broker_pool_class,
     _SyncDialectMixin,
 )
@@ -86,25 +84,8 @@ class _SQLiteDialectMixin:
                     dbapi_connection.rollback()
         return True
 
-    def is_disconnect(self, e: Exception, connection: Any = None, cursor: Any = None) -> bool:
-        """Return True for closed SQLite connections or 08* SQLSTATEs, never raising."""
-        try:
-            sqlstate = _extract_sqlstate(e)
-            if sqlstate is not None:
-                if sqlstate in _SQLITE_NON_DISCONNECT_SQLSTATES:
-                    return False
-                if sqlstate.startswith("08"):
-                    return True
-            for candidate in (e, getattr(e, "orig", None), getattr(e, "__cause__", None)):
-                if candidate is None:
-                    continue
-                msg = str(candidate).lower()
-                if any(phrase in msg for phrase in _SQLITE_DISCONNECT_PHRASES):
-                    return True
-            parent_fn = getattr(super(), "is_disconnect", None)
-            return _is_disconnect_common(e, connection, cursor, parent_fn)
-        except Exception:
-            return False
+    _non_disconnect_sqlstates = _SQLITE_NON_DISCONNECT_SQLSTATES
+    _extra_disconnect_phrases = _SQLITE_DISCONNECT_PHRASES
 
 
 class SyncSQLiteDialect(_SQLiteDialectMixin, _SyncDialectMixin, BaseSQLiteDialect):

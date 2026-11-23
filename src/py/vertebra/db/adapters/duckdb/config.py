@@ -11,9 +11,9 @@ from urllib.parse import urlparse
 import msgspec
 
 from vertebra._vertebra import InterfaceError
+from vertebra._vertebra import duckdb_bootstrap_statements as _native_duckdb_bootstrap_statements
 from vertebra.db.driver._common import DUCKDB_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
-from vertebra.utils.module_loader import import_optional
 from vertebra.utils.text import validate_identifier
 
 __all__ = (
@@ -263,28 +263,15 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
     def bootstrap_statements(self) -> list[str]:
         """Return post-initialization `SET` and static `CREATE SECRET` statements."""
         resolved = self.resolved_path()
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "duckdb_bootstrap_statements"):
-            raw_stmts = native.duckdb_bootstrap_statements(
-                resolved,
-                self.memory_limit_mb,
-                self.threads,
-                self.parquet_metadata_cache,
-                self.httpfs_connection_caching,
-                self.enable_http_metadata_cache,
-            )
-            stmts = [s.replace("SET httpfs_connection_caching = ", "SET http_keep_alive = ") for s in raw_stmts]
-        else:
-            parquet_flag = "true" if self.parquet_metadata_cache else "false"
-            keep_alive_flag = "true" if self.httpfs_connection_caching else "false"
-            http_meta_flag = "true" if self.enable_http_metadata_cache else "false"
-            stmts = [
-                f"SET memory_limit = '{self.memory_limit_mb}MB'",
-                f"SET threads = {self.threads}",
-                f"SET parquet_metadata_cache = {parquet_flag}",
-                f"SET http_keep_alive = {keep_alive_flag}",
-                f"SET enable_http_metadata_cache = {http_meta_flag}",
-            ]
+        raw_stmts = _native_duckdb_bootstrap_statements(
+            resolved,
+            self.memory_limit_mb,
+            self.threads,
+            self.parquet_metadata_cache,
+            self.httpfs_connection_caching,
+            self.enable_http_metadata_cache,
+        )
+        stmts = [s.replace("SET httpfs_connection_caching = ", "SET http_keep_alive = ") for s in raw_stmts]
         if self.temp_directory is not None:
             escaped_dir = self._escape_literal(self.temp_directory, "temp_directory")
             stmts.append(f"SET temp_directory = '{escaped_dir}'")

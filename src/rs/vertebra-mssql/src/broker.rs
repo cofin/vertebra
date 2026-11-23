@@ -3,9 +3,7 @@
 //! Coordinates cross-worker connection slot leases (`ShmLeaseTable`) and caches `@P1`-rewritten
 //! SQL plans in `ShmStatementCache` under [`DIALECT_TAG_MSSQL`] (`5`).
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub use vertebra_core::broker::DIALECT_TAG_MSSQL;
@@ -16,6 +14,7 @@ use vertebra_core::dbrpc::DbRpcOp;
 use vertebra_core::shm::ShmRegion;
 use vertebra_core::text::classify_mssql_statement;
 use vertebra_db::py_async::block_on_db;
+use vertebra_db::py_broker::BrokerPoolRegistry;
 use vertebra_db::{
     BrokerEngineBackend, BrokerPoolBackend, DbRpcEncodedResponse, DbRpcScalar,
     decode_dbrpc_request_frame, encode_dbrpc_response_frame, rewrite_mssql_placeholders,
@@ -33,8 +32,7 @@ use crate::params::MssqlParam;
 pub struct MssqlBrokerBackend {
     lease_table: Option<Arc<ShmLeaseTable>>,
     stmt_cache: Option<Arc<ShmStatementCache>>,
-    pools: Arc<RwLock<HashMap<u64, Arc<MssqlClient>>>>,
-    next_pool_id: Arc<AtomicU64>,
+    pools: Arc<BrokerPoolRegistry<MssqlClient>>,
 }
 
 impl MssqlBrokerBackend {
@@ -56,8 +54,7 @@ impl MssqlBrokerBackend {
         Ok(Self {
             lease_table: Some(Arc::new(table)),
             stmt_cache: cache,
-            pools: Arc::new(RwLock::new(HashMap::new())),
-            next_pool_id: Arc::new(AtomicU64::new(1)),
+            pools: Arc::new(BrokerPoolRegistry::new()),
         })
     }
 
@@ -68,8 +65,7 @@ impl MssqlBrokerBackend {
         Self {
             lease_table: None,
             stmt_cache: None,
-            pools: Arc::new(RwLock::new(HashMap::new())),
-            next_pool_id: Arc::new(AtomicU64::new(1)),
+            pools: Arc::new(BrokerPoolRegistry::new()),
         }
     }
 
@@ -229,24 +225,14 @@ impl BrokerPoolBackend for MssqlBrokerBackend {
         let mut cfg = MssqlClientConfig::from_dsn(dsn).map_err(|e| e.to_string())?;
         cfg.pool_size = max_size;
         let client = Arc::new(MssqlClient::new(cfg).map_err(|e| e.to_string())?);
-        let pool_id = self.next_pool_id.fetch_add(1, Ordering::Relaxed);
-        let mut guard = self
-            .pools
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.insert(pool_id, client);
-        Ok(pool_id)
+        Ok(self.pools.register(client))
     }
 
     fn execute(&self, pool_id: u64, frame: &[u8]) -> Result<Vec<u8>, String> {
-        let client = {
-            let guard = self
-                .pools
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.get(&pool_id).cloned()
-        }
-        .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
+        let client = self
+            .pools
+            .get(pool_id)
+            .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
 
         let req = decode_dbrpc_request_frame(frame)?;
         let req_id = req.request_id;
@@ -347,14 +333,7 @@ impl BrokerPoolBackend for MssqlBrokerBackend {
     }
 
     fn close_pool(&self, pool_id: u64) {
-        let removed = {
-            let mut guard = self
-                .pools
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.remove(&pool_id)
-        };
-        if let Some(client) = removed {
+        if let Some(client) = self.pools.remove(pool_id) {
             let _ = block_on_db(async move { client.close().await });
         }
     }

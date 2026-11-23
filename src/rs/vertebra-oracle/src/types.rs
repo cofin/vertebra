@@ -1209,7 +1209,6 @@ pub fn normalize_named_bind_map(
 }
 
 /// Return format for decoded Oracle 26ai `VECTOR` cells.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum VectorReturnFormat {
     #[default]
@@ -1220,7 +1219,6 @@ pub enum VectorReturnFormat {
 
 impl VectorReturnFormat {
     /// Parse a string option (`"list"`, `"vector_view"`, or `"bytes"`).
-    #[allow(dead_code)]
     pub fn parse(raw: &str) -> Result<Self, OracleError> {
         match raw {
             "list" => Ok(Self::List),
@@ -1233,7 +1231,6 @@ impl VectorReturnFormat {
     }
 
     /// Return the canonical string name for Python codec interop.
-    #[allow(dead_code)]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::List => "list",
@@ -1244,7 +1241,6 @@ impl VectorReturnFormat {
 }
 
 /// Per-cursor/driver options governing Oracle value coercion on the worker boundary.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OracleValueOptions {
     pub enable_uuid_binary: bool,
@@ -1262,24 +1258,15 @@ impl Default for OracleValueOptions {
     }
 }
 
-#[allow(dead_code)]
 static DECODE_OSON_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static ENCODE_OSON_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static DECODE_VECTOR_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static ENCODE_VECTOR_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static UUID_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static DECIMAL_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static VECTOR_VIEW_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static MSGSPEC_STRUCT_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
-#[allow(dead_code)]
 fn cached_oracle_core_callable<'py>(
     py: Python<'py>,
     slot: &'static PyOnceLock<Py<PyAny>>,
@@ -1293,27 +1280,22 @@ fn cached_oracle_core_callable<'py>(
     Ok(obj.bind(py).clone())
 }
 
-#[allow(dead_code)]
 fn cached_decode_oson_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     cached_oracle_core_callable(py, &DECODE_OSON_FN, "decode_oson")
 }
 
-#[allow(dead_code)]
 fn cached_encode_oson_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     cached_oracle_core_callable(py, &ENCODE_OSON_FN, "encode_oson")
 }
 
-#[allow(dead_code)]
 fn cached_decode_vector_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     cached_oracle_core_callable(py, &DECODE_VECTOR_FN, "decode_vector")
 }
 
-#[allow(dead_code)]
 fn cached_encode_vector_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     cached_oracle_core_callable(py, &ENCODE_VECTOR_FN, "encode_vector")
 }
 
-#[allow(dead_code)]
 fn cached_uuid_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     let obj = UUID_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         Ok(py.import("uuid")?.getattr("UUID")?.unbind())
@@ -1321,7 +1303,6 @@ fn cached_uuid_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     Ok(obj.bind(py).clone())
 }
 
-#[allow(dead_code)]
 fn cached_decimal_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     let obj = DECIMAL_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         Ok(py.import("decimal")?.getattr("Decimal")?.unbind())
@@ -1329,7 +1310,6 @@ fn cached_decimal_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     Ok(obj.bind(py).clone())
 }
 
-#[allow(dead_code)]
 fn cached_vector_view_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     let obj = VECTOR_VIEW_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         Ok(py
@@ -1340,7 +1320,6 @@ fn cached_vector_view_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     Ok(obj.bind(py).clone())
 }
 
-#[allow(dead_code)]
 fn cached_msgspec_struct_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     let obj = MSGSPEC_STRUCT_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         Ok(py.import("msgspec")?.getattr("Struct")?.unbind())
@@ -1348,7 +1327,6 @@ fn cached_msgspec_struct_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>
     Ok(obj.bind(py).clone())
 }
 
-#[allow(dead_code)]
 fn column_is_raw_or_unknown(column_type: Option<&str>) -> bool {
     match column_type {
         None => true,
@@ -1357,7 +1335,6 @@ fn column_is_raw_or_unknown(column_type: Option<&str>) -> bool {
 }
 
 /// Coerce an [`OracleCellValue`] into a Python object matching `OracleCore.coerce_row_cell`.
-#[allow(dead_code)]
 pub fn coerce_cell_to_py(
     py: Python<'_>,
     cell: OracleCellValue,
@@ -1450,7 +1427,6 @@ pub fn coerce_cell_to_py(
 }
 
 /// Coerce and extract a Python bind parameter matching `OracleCore.coerce_bind_parameter` followed by [`extract_bind_value`].
-#[allow(dead_code)]
 pub fn coerce_bind_from_py(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,

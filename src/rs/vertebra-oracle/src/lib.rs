@@ -10,9 +10,7 @@ pub mod notify;
 pub mod pool;
 pub mod types;
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
@@ -20,6 +18,7 @@ use url::Url;
 use vertebra_core::broker::DIALECT_TAG_ORACLE;
 use vertebra_core::dbrpc::DbRpcOp;
 use vertebra_core::text::first_sql_keyword;
+use vertebra_db::py_broker::BrokerPoolRegistry;
 use vertebra_db::{
     BrokerEngineBackend, BrokerPoolBackend, DbRpcEncodedResponse, DbRpcScalar, PlaceholderStyle,
     decode_dbrpc_request_frame, encode_dbrpc_response_frame, new_broker_engine_pycapsule,
@@ -37,11 +36,7 @@ use crate::notify::{AsyncOracleListener, OracleNotification, SyncOracleListener}
 use crate::pool::{AsyncOraclePool, OraclePoolCore, OraclePoolOptions, SyncOraclePool};
 use crate::types::{OracleCellValue, OracleColumn, OracleQueryResult};
 
-/// Whether this build targets free-threaded Python (3.14t+).
-#[cfg(Py_GIL_DISABLED)]
-pub const FREE_THREADED: bool = true;
-#[cfg(not(Py_GIL_DISABLED))]
-pub const FREE_THREADED: bool = false;
+pub use vertebra_db::py_broker::FREE_THREADED;
 
 /// Whether this extension requires the Python GIL (`false` for free-threaded safety).
 pub const GIL_USED: bool = false;
@@ -203,8 +198,7 @@ fn encode_oracle_err(request_id: u64, err: &OracleError) -> Vec<u8> {
 
 /// Shared-memory broker backend managing broker-hosted Oracle pools (`DIALECT_TAG_ORACLE = 4`).
 pub struct OracleBrokerBackend {
-    pools: RwLock<HashMap<u64, Arc<OraclePoolCore>>>,
-    next_pool_id: AtomicU64,
+    pools: BrokerPoolRegistry<OraclePoolCore>,
 }
 
 impl Default for OracleBrokerBackend {
@@ -218,8 +212,7 @@ impl OracleBrokerBackend {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            pools: RwLock::new(HashMap::new()),
-            next_pool_id: AtomicU64::new(1),
+            pools: BrokerPoolRegistry::new(),
         }
     }
 }
@@ -257,24 +250,14 @@ impl BrokerPoolBackend for OracleBrokerBackend {
         )
         .map_err(|e| e.to_string())?;
         let core = Arc::new(OraclePoolCore::new(opts));
-        let pool_id = self.next_pool_id.fetch_add(1, Ordering::Relaxed);
-        let mut guard = self
-            .pools
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.insert(pool_id, core);
-        Ok(pool_id)
+        Ok(self.pools.register(core))
     }
 
     fn execute(&self, pool_id: u64, frame: &[u8]) -> Result<Vec<u8>, String> {
-        let pool = {
-            let guard = self
-                .pools
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.get(&pool_id).cloned()
-        }
-        .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
+        let pool = self
+            .pools
+            .get(pool_id)
+            .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
 
         let req = decode_dbrpc_request_frame(frame)?;
         let req_id = req.request_id;
@@ -386,14 +369,7 @@ impl BrokerPoolBackend for OracleBrokerBackend {
     }
 
     fn close_pool(&self, pool_id: u64) {
-        let removed = {
-            let mut guard = self
-                .pools
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.remove(&pool_id)
-        };
-        if let Some(pool) = removed {
+        if let Some(pool) = self.pools.remove(pool_id) {
             let _ = pool.close_sync();
         }
     }

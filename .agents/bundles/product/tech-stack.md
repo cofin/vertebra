@@ -74,6 +74,9 @@ sources:
   - id: src-vertebra-valkey-cargo-toml
     resource: src/rs/vertebra-valkey/Cargo.toml
     title: "Rust crate manifest (src/rs/vertebra-valkey/Cargo.toml)"
+  - id: src-vertebra-resp-cargo-toml
+    resource: src/rs/vertebra-resp/Cargo.toml
+    title: "Rust crate manifest (src/rs/vertebra-resp/Cargo.toml)"
   - id: src-package-json
     resource: src/ts/vertebra-client/package.json
     title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
@@ -100,7 +103,7 @@ sources:
 - **Rust (`edition = "2024"`, workspace version `0.3.0`, stable toolchain, `>=1.91.0` required by `google-cloud-*` `rust-version`)**: 16 workspace crates under `src/rs/`:
   - **Runtime & HTTP (`vertebra-core`, `vertebra-http`, `vertebra-py`)**: `vertebra-core` (`SpscRing`, `MpmcRing`, `TieredRingSet`, `BatchBridge`, `ShmCapsule`, `ShmCache`, `jsonwebtoken 11.1`, `lz4_flex`/`zstd`, `gcp-auth`); `vertebra-http` (`vertebra-server` over `hyper 1`, `tokio 1.54`, `matchit 0.9`, `tokio-tungstenite 0.30`, `tls`/`http3`/`compression`); `vertebra-py` (`PyO3 0.30.1` `vertebra._vertebra`, `gil_used = false`).
   - **Frontend, Storage & DB Core (`vertebra-bundler`, `vertebra-storage`, `vertebra-db`)**: `vertebra-bundler` (`_bundler`, `oxc_* 0.155`, `rquickjs 0.14`, `rolldown-notify 11.0`); `vertebra-storage` (`_storage`, `object_store 0.13.2` S3/GCS/Azure/OCI/R2/HTTP + signing); `vertebra-db` (`TransportStream`, Cloud SQL/AlloyDB dialers, `arrow_shm`, wire codecs).
-  - **Standalone Database & Cache Extensions**: `vertebra-mysql` (`_mysql`, `mysql_async 0.37`), `vertebra-bigquery` (`_bigquery`, `google-cloud-bigquery =0.19.0`), `vertebra-mssql` (`_mssql`, `tiberius =0.13.0`), `vertebra-oracle` (`_oracle`, `oracledb =26.0.0-beta.5`), `vertebra-spanner` (`_spanner`, `google-cloud-spanner =0.34.8-preview` + interactive RW tx), `vertebra-duckdb` (`_duckdb`, bundled `duckdb =1.20000.1`), `vertebra-postgres` (`_postgres`, `postgres-protocol =0.6.12`), `vertebra-sqlite` (`_sqlite`, bundled `rusqlite` SQLite `3.50.x` WAL/FTS5/JSONB), `vertebra-redis` (`_redis`, RESP3), and `vertebra-valkey` (`_valkey`, RESP3 + `BCAST`/hash-field expiry/`SPUBLISH`).
+  - **Standalone Database & Cache Extensions**: `vertebra-mysql` (`_mysql`, `mysql_async 0.37`), `vertebra-bigquery` (`_bigquery`, `google-cloud-bigquery =0.19.0`), `vertebra-mssql` (`_mssql`, `tiberius =0.13.0`), `vertebra-oracle` (`_oracle`, `oracledb =26.0.0-beta.5`), `vertebra-spanner` (`_spanner`, `google-cloud-spanner =0.34.8-preview` + interactive RW tx), `vertebra-duckdb` (`_duckdb`, bundled `duckdb =1.20000.1`), `vertebra-postgres` (`_postgres`, `postgres-protocol =0.6.12`), `vertebra-sqlite` (`_sqlite`, bundled `rusqlite` SQLite `3.50.x` WAL/FTS5/JSONB), `vertebra-redis` (`_redis`, RESP3), and `vertebra-valkey` (`_valkey`, RESP3 + `BCAST`/hash-field expiry/`SPUBLISH`); both link the internal `vertebra-resp` `rlib` (RESP2/RESP3 codec, transport, Cluster, Sentinel, `CLIENT TRACKING`, Pub/Sub, Streams) and ship no separate `vertebra-resp` wheel.
 - **TypeScript (`@vertebra/client` `0.3.0`)**: managed by `bun`, bundled with `tsup ^8.5.1`, type-checked with `typescript ^5.9.3`, linted with `@biomejs/biome ^2.6.6`, tested with `vitest ^5.1.0`, and packaged inside `src/py/vertebra/server/_js/bundle/`. Optional peer dependencies: `react ^19.0.0`, `vue ^3.5.0`, `@angular/core ^22.0.0`, `vite ^8.0.0`.
 - **Verification & Documentation Toolchain**: `ruff` (`line-length = 120`, `target-version = "py312"`, `E,F,I,UP,B,SIM`, checking `src/py`, `tools`, `docs/examples`), `mypy` (`strict = true`, `django-stubs>=6.1.2`, `files = ["src/py/vertebra", "src/py/tests/unit", "src/py/tests/integration", "tools/scripts", "tools/pgo", "tools/docs", "tools/benchmarks", "docs/examples"]`) + `mypy.stubtest` across all 13 extensions, `pytest` + `pytest-cov`, `zensical` (`>=0.0.71`) + `mkdocstrings-python` (`>=2.0.3`), `cargo fmt`, `cargo clippy --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings`, `cargo test --workspace --features tls,http3,compression,gcp`, `bunx biome check`, `criterion 0.8`, and `tools.benchmarks`.
 <!-- truth: end -->
@@ -114,7 +117,7 @@ sources:
 | `vertebra-py` | [`src/rs/vertebra-py`](../../../src/rs/vertebra-py/Cargo.toml)[^src-vertebra-py-cargo-toml] | `cdylib` + `rlib` (`_vertebra`) | `extension-module`, `gcp` (`vertebra-db/gcp`) |
 | `vertebra-bundler` | [`src/rs/vertebra-bundler`](../../../src/rs/vertebra-bundler/Cargo.toml)[^src-vertebra-bundler-cargo-toml] | `cdylib` + `rlib` (`_bundler`, `[bundler]` extra) + `ssr_render` bench | `extension-module` |
 | `vertebra-storage` | [`src/rs/vertebra-storage`](../../../src/rs/vertebra-storage/Cargo.toml)[^src-vertebra-storage-cargo-toml] | `cdylib` + `rlib` (`_storage`, `[storage]` extra) | `extension-module` |
-| `vertebra-db` | [`src/rs/vertebra-db`](../../../src/rs/vertebra-db/Cargo.toml)[^src-vertebra-db-cargo-toml] | `rlib` (`vertebra_db`) | `gcp`, `pyo3` (`py_async`), `duckdb` |
+| `vertebra-db` | [`src/rs/vertebra-db`](../../../src/rs/vertebra-db/Cargo.toml)[^src-vertebra-db-cargo-toml] | `rlib` (`vertebra_db`) | `default = []`; opt-in `arrow-shm`, `broker`, `codecs-duckdb`, `codecs-mssql`, `codecs-oracle`, `codecs-pg`, `dialer`, `gcp`, `pyo3` (`py_async`, `py_errors`, `py_cursor`, `py_broker`), `rustls-ring`, `transport` |
 | `vertebra-mysql` | [`src/rs/vertebra-mysql`](../../../src/rs/vertebra-mysql/Cargo.toml)[^src-vertebra-mysql-cargo-toml] | `cdylib` + `rlib` (`_mysql`, `[mysql]` extra) | `extension-module` |
 | `vertebra-bigquery` | [`src/rs/vertebra-bigquery`](../../../src/rs/vertebra-bigquery/Cargo.toml)[^src-vertebra-bigquery-cargo-toml] | `cdylib` + `rlib` (`_bigquery`, `[bigquery]` extra) | `extension-module` |
 | `vertebra-mssql` | [`src/rs/vertebra-mssql`](../../../src/rs/vertebra-mssql/Cargo.toml)[^src-vertebra-mssql-cargo-toml] | `cdylib` + `rlib` (`_mssql`, `[mssql]` extra) | `extension-module` |
@@ -125,6 +128,7 @@ sources:
 | `vertebra-sqlite` | [`src/rs/vertebra-sqlite`](../../../src/rs/vertebra-sqlite/Cargo.toml)[^src-vertebra-sqlite-cargo-toml] | `cdylib` + `rlib` (`_sqlite`, `[sqlite]` extra) | `extension-module` |
 | `vertebra-redis` | [`src/rs/vertebra-redis`](../../../src/rs/vertebra-redis/Cargo.toml)[^src-vertebra-redis-cargo-toml] | `cdylib` + `rlib` (`_redis`, `[redis]` extra) | `extension-module` |
 | `vertebra-valkey` | [`src/rs/vertebra-valkey`](../../../src/rs/vertebra-valkey/Cargo.toml)[^src-vertebra-valkey-cargo-toml] | `cdylib` + `rlib` (`_valkey`, `[valkey]` extra) | `extension-module` |
+| `vertebra-resp` | [`src/rs/vertebra-resp`](../../../src/rs/vertebra-resp/Cargo.toml)[^src-vertebra-resp-cargo-toml] | `rlib` (`vertebra_resp`, linked into `_redis` and `_valkey`) | `pyo3` |
 
 ## Python Package Configuration (`pyproject.toml`)
 
@@ -159,6 +163,7 @@ See [Product Definition](product.md), [Product Guidelines](product-guidelines.md
 [^src-vertebra-sqlite-cargo-toml]: `src/rs/vertebra-sqlite/Cargo.toml` — Rust crate manifest (src/rs/vertebra-sqlite/Cargo.toml).
 [^src-vertebra-redis-cargo-toml]: `src/rs/vertebra-redis/Cargo.toml` — Rust crate manifest (src/rs/vertebra-redis/Cargo.toml).
 [^src-vertebra-valkey-cargo-toml]: `src/rs/vertebra-valkey/Cargo.toml` — Rust crate manifest (src/rs/vertebra-valkey/Cargo.toml).
+[^src-vertebra-resp-cargo-toml]: `src/rs/vertebra-resp/Cargo.toml` — Rust crate manifest (src/rs/vertebra-resp/Cargo.toml).
 [^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).
 [^src-tsup-config-ts]: `src/ts/vertebra-client/tsup.config.ts` — TypeScript client module (src/ts/vertebra-client/tsup.config.ts).
 [^src-cli-init-py]: `src/py/vertebra/cli/__init__.py` — Python implementation module (src/py/vertebra/cli/__init__.py).

@@ -6,6 +6,15 @@ import struct
 from collections.abc import Buffer, Callable, Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final
 
+from vertebra._vertebra import (
+    decode_pgcopy_rows as _native_decode_pgcopy_rows,
+)
+from vertebra._vertebra import (
+    encode_pg_jsonb as _native_encode_pg_jsonb,
+)
+from vertebra._vertebra import (
+    encode_pgcopy_rows as _native_encode_pgcopy_rows,
+)
 from vertebra.db.adapters.postgres.binds import (
     CompiledPostgresBinds,
     compile_postgres_binds,
@@ -16,7 +25,7 @@ from vertebra.db.arrow import ArrowCursor
 from vertebra.db.driver import ProgrammingError
 from vertebra.db.rls import TenantPredicate, TenantScopeConfig
 from vertebra.typing import ImproperConfigurationError
-from vertebra.utils.module_loader import ensure_module, import_optional
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import encode_json_bytes
 from vertebra.utils.text import validate_identifier
 
@@ -76,15 +85,7 @@ class PostgreSQLCore:
             if isinstance(value, (bytes, bytearray, memoryview))
             else (value.encode("utf-8") if isinstance(value, str) else encode_json_bytes(value))
         )
-        native_mod = import_optional("vertebra._vertebra")
-        if native_mod is not None:
-            native_fn: Callable[[bytes], Buffer] | None = getattr(native_mod, "encode_pg_jsonb", None)
-            if callable(native_fn):
-                return bytes(native_fn(raw_arg))
-
-        if isinstance(value, (bytes, bytearray, memoryview)) and raw_arg.startswith(b"\x01"):
-            return raw_arg
-        return b"\x01" + raw_arg
+        return bytes(_native_encode_pg_jsonb(raw_arg))
 
     @staticmethod
     def encode_pgcopy_rows(
@@ -110,13 +111,8 @@ class PostgreSQLCore:
             ]
             for row in rows
         ]
-        native_mod = import_optional("vertebra._vertebra")
-        if native_mod is not None and flags == 0 and not ext_bytes:
-            native_fn: Callable[[list[list[bytes | None]]], Buffer] | None = getattr(
-                native_mod, "encode_pgcopy_rows", None
-            )
-            if callable(native_fn):
-                return bytes(native_fn(normalized_rows))
+        if flags == 0 and not ext_bytes:
+            return bytes(_native_encode_pgcopy_rows(normalized_rows))
 
         buf = bytearray(PGCOPY_BINARY_SIGNATURE)
         buf.extend(struct.pack(">II", flags, len(ext_bytes)))
@@ -146,58 +142,18 @@ class PostgreSQLCore:
             raise ValueError(msg)
 
         _flags, ext_len = struct.unpack_from(">II", raw, sig_len)
-        pos = sig_len + 8 + ext_len
-        if pos > len(raw):
+        if sig_len + 8 + ext_len > len(raw):
             msg = "Corrupted PGCOPY header extension"
             raise ValueError(msg)
 
-        native_mod = import_optional("vertebra._vertebra")
-        if native_mod is not None:
-            native_fn: Callable[[bytes], Iterable[Iterable[Buffer | None]]] | None = getattr(
-                native_mod, "decode_pgcopy_rows", None
-            )
-            if callable(native_fn):
-                try:
-                    res = native_fn(bytes(raw))
-                except ValueError as exc:
-                    if "trailer" in str(exc):
-                        msg = "Unexpected EOF before PGCOPY trailer"
-                        raise ValueError(msg) from exc
-                    raise
-                return [tuple(None if field is None else bytes(field) for field in row) for row in res]
-
-        rows: list[tuple[bytes | None, ...]] = []
-        while pos + 2 <= len(raw):
-            (field_count,) = struct.unpack_from(">h", raw, pos)
-            pos += 2
-            if field_count == -1:
-                return rows
-            if field_count < -1:
-                msg = f"Invalid PGCOPY field count: {field_count}"
-                raise ValueError(msg)
-
-            fields: list[bytes | None] = []
-            for _ in range(field_count):
-                if pos + 4 > len(raw):
-                    msg = "Truncated PGCOPY field length"
-                    raise ValueError(msg)
-                (field_len,) = struct.unpack_from(">i", raw, pos)
-                pos += 4
-                if field_len == -1:
-                    fields.append(None)
-                elif field_len >= 0:
-                    if pos + field_len > len(raw):
-                        msg = "Truncated PGCOPY field data"
-                        raise ValueError(msg)
-                    fields.append(bytes(raw[pos : pos + field_len]))
-                    pos += field_len
-                else:
-                    msg = f"Invalid PGCOPY field length: {field_len}"
-                    raise ValueError(msg)
-            rows.append(tuple(fields))
-
-        msg = "Unexpected EOF before PGCOPY trailer"
-        raise ValueError(msg)
+        try:
+            res = _native_decode_pgcopy_rows(bytes(raw))
+        except ValueError as exc:
+            if "trailer" in str(exc):
+                msg = "Unexpected EOF before PGCOPY trailer"
+                raise ValueError(msg) from exc
+            raise
+        return [tuple(None if field is None else bytes(field) for field in row) for row in res]
 
     @staticmethod
     def compile_binds(

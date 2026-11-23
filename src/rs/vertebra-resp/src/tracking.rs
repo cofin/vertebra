@@ -1,5 +1,6 @@
-//! Valkey `CLIENT TRACKING` L1 LRU cache and RESP3 `invalidate` push invalidation.
+//! RESP3 `CLIENT TRACKING` L1 LRU cache and `>invalidate` push invalidation.
 
+use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -9,6 +10,9 @@ use lru::LruCache;
 use parking_lot::Mutex;
 
 use crate::codec::RespValue;
+
+/// Maximum buffered invalidation key names retained before dropping oldest entries.
+pub const MAX_INVALIDATION_EVENTS: usize = 4096;
 
 #[derive(Debug, Clone)]
 struct CacheEntry {
@@ -20,7 +24,7 @@ struct CacheEntry {
 #[derive(Debug)]
 pub struct TrackingCache {
     lru: Mutex<LruCache<Bytes, CacheEntry>>,
-    invalidated_keys: Mutex<Vec<String>>,
+    invalidated_keys: Mutex<VecDeque<String>>,
     ttl: Option<Duration>,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -34,12 +38,19 @@ impl TrackingCache {
         let cap = NonZeroUsize::new(capacity.max(1)).expect("capacity >= 1");
         Self {
             lru: Mutex::new(LruCache::new(cap)),
-            invalidated_keys: Mutex::new(Vec::new()),
+            invalidated_keys: Mutex::new(VecDeque::new()),
             ttl,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             invalidations: AtomicU64::new(0),
         }
+    }
+
+    fn push_invalidation(inv: &mut VecDeque<String>, key: String) {
+        if inv.len() >= MAX_INVALIDATION_EVENTS {
+            inv.pop_front();
+        }
+        inv.push_back(key);
     }
 
     /// Look up `key` in the L1 cache, evicting expired entries if TTL is active.
@@ -59,9 +70,20 @@ impl TrackingCache {
         Some(val)
     }
 
-    /// Record a cache hit candidate after a server read.
+    /// Record a cache hit candidate after a server read using the default cache TTL.
     pub fn insert(&self, key: Bytes, value: Bytes) {
-        let expires_at = self.ttl.map(|d| Instant::now() + d);
+        self.insert_with_ttl(key, value, None);
+    }
+
+    /// Record a cache entry with an optional per-entry TTL override.
+    pub fn insert_with_ttl(&self, key: Bytes, value: Bytes, ttl_override: Option<Duration>) {
+        let effective_ttl = match (ttl_override, self.ttl) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let expires_at = effective_ttl.map(|d| Instant::now() + d);
         let mut guard = self.lru.lock();
         guard.put(key, CacheEntry { value, expires_at });
     }
@@ -78,14 +100,15 @@ impl TrackingCache {
         let evicted = match key {
             Some(k) => {
                 let s = String::from_utf8_lossy(k).into_owned();
-                self.invalidated_keys.lock().push(s);
+                let mut inv = self.invalidated_keys.lock();
+                Self::push_invalidation(&mut inv, s);
                 if guard.pop(k).is_some() { 1 } else { 0 }
             }
             None => {
                 let count = guard.len();
                 let mut inv = self.invalidated_keys.lock();
                 for (k, _) in guard.iter() {
-                    inv.push(String::from_utf8_lossy(k).into_owned());
+                    Self::push_invalidation(&mut inv, String::from_utf8_lossy(k).into_owned());
                 }
                 guard.clear();
                 count
@@ -123,7 +146,7 @@ impl TrackingCache {
     /// Drain all queued invalidation events since the last call.
     pub fn drain_invalidations(&self) -> Vec<String> {
         let mut guard = self.invalidated_keys.lock();
-        std::mem::take(&mut *guard)
+        guard.drain(..).collect()
     }
 
     /// Return the current number of cached keys.

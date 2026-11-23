@@ -1,5 +1,5 @@
-import { computeBackoffDelay } from "./client/retry";
 import { BoundedKeySet } from "./internal/lru_set";
+import { ReconnectScheduler } from "./internal/reconnect";
 
 export interface SseClientOptions {
   withCredentials?: boolean;
@@ -27,14 +27,10 @@ export class SseClient {
   private readonly baseUrl: string;
   private readonly withCredentials: boolean;
   private readonly lastEventIdParam: string;
-  private readonly maxReconnectAttempts: number;
-  private readonly baseDelayMs: number;
-  private readonly maxDelayMs: number;
+  private readonly reconnect: ReconnectScheduler;
 
   private es: EventSource | null = null;
   private lastEventId: string | null;
-  private reconnectAttempts = 0;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private manuallyClosed = false;
   private handlers = new Map<string, Set<SseEventHandler<unknown>>>();
   private boundDomListeners = new Map<string, (ev: Event) => void>();
@@ -45,9 +41,11 @@ export class SseClient {
     this.withCredentials = options.withCredentials ?? false;
     this.lastEventId = options.initialLastEventId ?? null;
     this.lastEventIdParam = options.lastEventIdQueryParam ?? "lastEventId";
-    this.maxReconnectAttempts = options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
-    this.baseDelayMs = options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
-    this.maxDelayMs = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+    this.reconnect = new ReconnectScheduler(
+      options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS,
+      options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS,
+      options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS,
+    );
   }
 
   /** Return the most recently observed SSE `Last-Event-ID`. */
@@ -103,13 +101,13 @@ export class SseClient {
     this.es = es;
 
     es.onopen = () => {
-      this.reconnectAttempts = 0;
+      this.reconnect.reset();
     };
 
     es.onerror = () => {
       if (this.manuallyClosed) return;
       this.cleanupEventSource();
-      this.scheduleReconnect();
+      this.reconnect.schedule(() => this.connect());
     };
 
     for (const eventName of this.handlers.keys()) {
@@ -120,12 +118,8 @@ export class SseClient {
   /** Permanently close the SSE stream and cancel pending reconnect timers. */
   close(): void {
     this.manuallyClosed = true;
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    this.reconnect.cancel();
     this.cleanupEventSource();
-    this.reconnectAttempts = 0;
   }
 
   private buildConnectionUrl(): string {
@@ -182,15 +176,5 @@ export class SseClient {
     this.boundDomListeners.clear();
     this.es.close();
     this.es = null;
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) return;
-    const delay = computeBackoffDelay(this.reconnectAttempts, this.baseDelayMs, this.maxDelayMs);
-    this.reconnectAttempts += 1;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connect();
-    }, delay);
   }
 }

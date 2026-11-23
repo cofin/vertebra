@@ -1543,68 +1543,65 @@ fn arrow_array_value_to_py<'py>(
     if let Some(a) = arr.as_any().downcast_ref::<BooleanArray>() {
         return Ok(PyBool::new(py, a.value(row)).to_owned().into_any());
     }
-    if let Some(a) = arr.as_any().downcast_ref::<Int8Array>() {
-        return Ok(a.value(row).into_pyobject(py)?.into_any());
+    macro_rules! try_into_py {
+        ($($ty:ty),+ $(,)?) => {
+            $(
+                if let Some(a) = arr.as_any().downcast_ref::<$ty>() {
+                    return Ok(a.value(row).into_pyobject(py)?.into_any());
+                }
+            )+
+        };
     }
-    if let Some(a) = arr.as_any().downcast_ref::<Int16Array>() {
-        return Ok(a.value(row).into_pyobject(py)?.into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<Int32Array>() {
-        return Ok(a.value(row).into_pyobject(py)?.into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
-        return Ok(a.value(row).into_pyobject(py)?.into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<UInt8Array>() {
-        return Ok(a.value(row).into_pyobject(py)?.into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<UInt16Array>() {
-        return Ok(a.value(row).into_pyobject(py)?.into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<UInt32Array>() {
-        return Ok(a.value(row).into_pyobject(py)?.into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
-        return Ok(a.value(row).into_pyobject(py)?.into_any());
-    }
+    try_into_py!(
+        Int8Array,
+        Int16Array,
+        Int32Array,
+        Int64Array,
+        UInt8Array,
+        UInt16Array,
+        UInt32Array,
+        UInt64Array,
+        Float32Array,
+        Float64Array,
+    );
     if let Some(a) = arr.as_any().downcast_ref::<Float16Array>() {
         return Ok(f32::from(a.value(row)).into_pyobject(py)?.into_any());
     }
-    if let Some(a) = arr.as_any().downcast_ref::<Float32Array>() {
-        return Ok(a.value(row).into_pyobject(py)?.into_any());
+    macro_rules! try_str {
+        ($($ty:ty),+ $(,)?) => {
+            $(
+                if let Some(a) = arr.as_any().downcast_ref::<$ty>() {
+                    return Ok(PyString::new(py, a.value(row)).into_any());
+                }
+            )+
+        };
     }
-    if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
-        return Ok(a.value(row).into_pyobject(py)?.into_any());
+    try_str!(StringArray, LargeStringArray, StringViewArray);
+    macro_rules! try_bytes {
+        ($($ty:ty),+ $(,)?) => {
+            $(
+                if let Some(a) = arr.as_any().downcast_ref::<$ty>() {
+                    return Ok(PyBytes::new(py, a.value(row)).into_any());
+                }
+            )+
+        };
     }
-    if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
-        return Ok(PyString::new(py, a.value(row)).into_any());
+    try_bytes!(
+        BinaryArray,
+        LargeBinaryArray,
+        BinaryViewArray,
+        FixedSizeBinaryArray,
+    );
+    macro_rules! try_decimal {
+        ($($ty:ty),+ $(,)?) => {
+            $(
+                if let Some(a) = arr.as_any().downcast_ref::<$ty>() {
+                    return helpers.decimal_cls(py)?.call1((a.value_as_string(row),));
+                }
+            )+
+        };
     }
-    if let Some(a) = arr.as_any().downcast_ref::<LargeStringArray>() {
-        return Ok(PyString::new(py, a.value(row)).into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<StringViewArray>() {
-        return Ok(PyString::new(py, a.value(row)).into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<BinaryArray>() {
-        return Ok(PyBytes::new(py, a.value(row)).into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<LargeBinaryArray>() {
-        return Ok(PyBytes::new(py, a.value(row)).into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<BinaryViewArray>() {
-        return Ok(PyBytes::new(py, a.value(row)).into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
-        return Ok(PyBytes::new(py, a.value(row)).into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<Decimal128Array>() {
-        let text = a.value_as_string(row);
-        return helpers.decimal_cls(py)?.call1((text,));
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<Decimal256Array>() {
-        let text = a.value_as_string(row);
-        return helpers.decimal_cls(py)?.call1((text,));
-    }
+    try_decimal!(Decimal128Array, Decimal256Array);
     if let Some(a) = arr.as_any().downcast_ref::<Date32Array>() {
         return helpers.date_from_days(py, i64::from(a.value(row)));
     }
@@ -1623,74 +1620,40 @@ fn arrow_array_value_to_py<'py>(
     if let Some(a) = arr.as_any().downcast_ref::<Time64NanosecondArray>() {
         return helpers.time_from_us(py, a.value(row).div_euclid(1_000));
     }
-    if let Some(a) = arr.as_any().downcast_ref::<TimestampSecondArray>() {
-        let v = a.value(row);
-        return helpers.timestamp_from_days_us(
-            py,
-            v.div_euclid(86_400),
-            v.rem_euclid(86_400) * 1_000_000,
-            a.timezone(),
-        );
+    macro_rules! try_temporal {
+        ($method:ident, $has_tz:tt, $(($ty:ty, $day_div:expr, $us_mul:expr, $pre_div:expr)),+ $(,)?) => {
+            $(
+                if let Some(a) = arr.as_any().downcast_ref::<$ty>() {
+                    let v = a.value(row).div_euclid($pre_div);
+                    let days = v.div_euclid($day_div);
+                    let us = v.rem_euclid($day_div) * $us_mul;
+                    return try_temporal!(@call helpers, $method, py, days, us, a, $has_tz);
+                }
+            )+
+        };
+        (@call $helpers:ident, $method:ident, $py:ident, $days:ident, $us:ident, $a:ident, true) => {
+            $helpers.$method($py, $days, $us, $a.timezone())
+        };
+        (@call $helpers:ident, $method:ident, $py:ident, $days:ident, $us:ident, $_a:ident, false) => {
+            $helpers.$method($py, $days, $us)
+        };
     }
-    if let Some(a) = arr.as_any().downcast_ref::<TimestampMillisecondArray>() {
-        let v = a.value(row);
-        return helpers.timestamp_from_days_us(
-            py,
-            v.div_euclid(86_400_000),
-            v.rem_euclid(86_400_000) * 1_000,
-            a.timezone(),
-        );
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        let v = a.value(row);
-        return helpers.timestamp_from_days_us(
-            py,
-            v.div_euclid(86_400_000_000),
-            v.rem_euclid(86_400_000_000),
-            a.timezone(),
-        );
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<TimestampNanosecondArray>() {
-        let us = a.value(row).div_euclid(1_000);
-        return helpers.timestamp_from_days_us(
-            py,
-            us.div_euclid(86_400_000_000),
-            us.rem_euclid(86_400_000_000),
-            a.timezone(),
-        );
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<DurationSecondArray>() {
-        let v = a.value(row);
-        return helpers.timedelta_from_days_us(
-            py,
-            v.div_euclid(86_400),
-            v.rem_euclid(86_400) * 1_000_000,
-        );
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<DurationMillisecondArray>() {
-        let v = a.value(row);
-        return helpers.timedelta_from_days_us(
-            py,
-            v.div_euclid(86_400_000),
-            v.rem_euclid(86_400_000) * 1_000,
-        );
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<DurationMicrosecondArray>() {
-        let v = a.value(row);
-        return helpers.timedelta_from_days_us(
-            py,
-            v.div_euclid(86_400_000_000),
-            v.rem_euclid(86_400_000_000),
-        );
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<DurationNanosecondArray>() {
-        let us = a.value(row).div_euclid(1_000);
-        return helpers.timedelta_from_days_us(
-            py,
-            us.div_euclid(86_400_000_000),
-            us.rem_euclid(86_400_000_000),
-        );
-    }
+    try_temporal!(
+        timestamp_from_days_us,
+        true,
+        (TimestampSecondArray, 86_400, 1_000_000, 1),
+        (TimestampMillisecondArray, 86_400_000, 1_000, 1),
+        (TimestampMicrosecondArray, 86_400_000_000, 1, 1),
+        (TimestampNanosecondArray, 86_400_000_000, 1, 1_000),
+    );
+    try_temporal!(
+        timedelta_from_days_us,
+        false,
+        (DurationSecondArray, 86_400, 1_000_000, 1),
+        (DurationMillisecondArray, 86_400_000, 1_000, 1),
+        (DurationMicrosecondArray, 86_400_000_000, 1, 1),
+        (DurationNanosecondArray, 86_400_000_000, 1, 1_000),
+    );
     if let Some(a) = arr.as_any().downcast_ref::<IntervalDayTimeArray>() {
         let v = a.value(row);
         return helpers.timedelta_from_days_us(
@@ -1711,30 +1674,21 @@ fn arrow_array_value_to_py<'py>(
             .into_pyobject(py)?
             .into_any());
     }
-    if let Some(a) = arr.as_any().downcast_ref::<ListArray>() {
-        let child = a.value(row);
-        let out = PyList::empty(py);
-        for i in 0..child.len() {
-            out.append(arrow_array_value_to_py(py, child.as_ref(), i, helpers)?)?;
-        }
-        return Ok(out.into_any());
+    macro_rules! try_list {
+        ($($ty:ty),+ $(,)?) => {
+            $(
+                if let Some(a) = arr.as_any().downcast_ref::<$ty>() {
+                    let child = a.value(row);
+                    let out = PyList::empty(py);
+                    for i in 0..child.len() {
+                        out.append(arrow_array_value_to_py(py, child.as_ref(), i, helpers)?)?;
+                    }
+                    return Ok(out.into_any());
+                }
+            )+
+        };
     }
-    if let Some(a) = arr.as_any().downcast_ref::<LargeListArray>() {
-        let child = a.value(row);
-        let out = PyList::empty(py);
-        for i in 0..child.len() {
-            out.append(arrow_array_value_to_py(py, child.as_ref(), i, helpers)?)?;
-        }
-        return Ok(out.into_any());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<FixedSizeListArray>() {
-        let child = a.value(row);
-        let out = PyList::empty(py);
-        for i in 0..child.len() {
-            out.append(arrow_array_value_to_py(py, child.as_ref(), i, helpers)?)?;
-        }
-        return Ok(out.into_any());
-    }
+    try_list!(ListArray, LargeListArray, FixedSizeListArray);
     if let Some(a) = arr.as_any().downcast_ref::<StructArray>() {
         let dict = PyDict::new(py);
         for (field, col) in a.fields().iter().zip(a.columns().iter()) {
@@ -1763,44 +1717,19 @@ fn arrow_array_value_to_py<'py>(
         }
         arrow_array_value_to_py(py, values, idx, helpers)
     };
-    if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<Int8Type>>() {
-        let idx = usize::try_from(a.keys().value(row))
-            .map_err(|_| PyValueError::new_err("negative Arrow dictionary key"))?;
-        return dict_lookup(idx, a.values().as_ref());
+    macro_rules! try_dict {
+        ($err:expr; $($key_ty:ty),+ $(,)?) => {
+            $(
+                if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<$key_ty>>() {
+                    let idx = usize::try_from(a.keys().value(row))
+                        .map_err(|_| PyValueError::new_err($err))?;
+                    return dict_lookup(idx, a.values().as_ref());
+                }
+            )+
+        };
     }
-    if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<Int16Type>>() {
-        let idx = usize::try_from(a.keys().value(row))
-            .map_err(|_| PyValueError::new_err("negative Arrow dictionary key"))?;
-        return dict_lookup(idx, a.values().as_ref());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
-        let idx = usize::try_from(a.keys().value(row))
-            .map_err(|_| PyValueError::new_err("negative Arrow dictionary key"))?;
-        return dict_lookup(idx, a.values().as_ref());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<Int64Type>>() {
-        let idx = usize::try_from(a.keys().value(row))
-            .map_err(|_| PyValueError::new_err("negative Arrow dictionary key"))?;
-        return dict_lookup(idx, a.values().as_ref());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>() {
-        let idx = usize::from(a.keys().value(row));
-        return dict_lookup(idx, a.values().as_ref());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
-        let idx = usize::from(a.keys().value(row));
-        return dict_lookup(idx, a.values().as_ref());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
-        let idx = usize::try_from(a.keys().value(row))
-            .map_err(|_| PyValueError::new_err("Arrow dictionary key overflow"))?;
-        return dict_lookup(idx, a.values().as_ref());
-    }
-    if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<UInt64Type>>() {
-        let idx = usize::try_from(a.keys().value(row))
-            .map_err(|_| PyValueError::new_err("Arrow dictionary key overflow"))?;
-        return dict_lookup(idx, a.values().as_ref());
-    }
+    try_dict!("negative Arrow dictionary key"; Int8Type, Int16Type, Int32Type, Int64Type);
+    try_dict!("Arrow dictionary key overflow"; UInt8Type, UInt16Type, UInt32Type, UInt64Type);
     Err(PyNotImplementedError::new_err(format!(
         "ArrowCursor.to_pylist does not support Arrow data type {:?}",
         arr.data_type()
@@ -2582,50 +2511,37 @@ pub fn resolve_tns_alias(py: Python<'_>, contents: &str, alias: &str) -> Option<
         .map(|d| (d.host, d.port, d.service_name, d.sid, d.security_cert_dn))
 }
 
+fn with_contiguous_slice_or_vec<T, R, F>(obj: &Bound<'_, PyAny>, f: F) -> PyResult<R>
+where
+    T: pyo3::buffer::Element + for<'a, 'py> pyo3::FromPyObject<'a, 'py>,
+    for<'a, 'py> <T as pyo3::FromPyObject<'a, 'py>>::Error: Into<PyErr>,
+    F: FnOnce(&[T]) -> Result<R, String>,
+{
+    if let Ok(buf) = PyBuffer::<T>::get(obj)
+        && buf.is_c_contiguous()
+    {
+        let len = buf.item_count();
+        let ptr = buf.buf_ptr() as *const T;
+        let slice = if len == 0 || ptr.is_null() {
+            &[]
+        } else {
+            // SAFETY: `buf` pins a contiguous `T` PEP 3118 buffer while the GIL is held in `f`.
+            unsafe { std::slice::from_raw_parts(ptr, len) }
+        };
+        return f(slice).map_err(PyValueError::new_err);
+    }
+    let vec: Vec<T> = obj.extract()?;
+    f(&vec).map_err(PyValueError::new_err)
+}
+
 fn with_f32_slice_or_vec<R, F>(obj: &Bound<'_, PyAny>, f: F) -> PyResult<R>
 where
     F: FnOnce(&[f32]) -> Result<R, String>,
 {
     if let Ok(view_ref) = obj.extract::<PyRef<'_, VectorView>>() {
-        let slice = view_ref.row_f32()?;
-        return f(slice).map_err(PyValueError::new_err);
+        return f(view_ref.row_f32()?).map_err(PyValueError::new_err);
     }
-    if let Ok(buf) = PyBuffer::<f32>::get(obj)
-        && buf.is_c_contiguous()
-    {
-        let len = buf.item_count();
-        let ptr = buf.buf_ptr() as *const f32;
-        let slice = if len == 0 || ptr.is_null() {
-            &[]
-        } else {
-            // SAFETY: `buf` pins a contiguous `f32` PEP 3118 buffer while the GIL is held in `f`.
-            unsafe { std::slice::from_raw_parts(ptr, len) }
-        };
-        return f(slice).map_err(PyValueError::new_err);
-    }
-    let vec: Vec<f32> = obj.extract()?;
-    f(&vec).map_err(PyValueError::new_err)
-}
-
-fn with_f64_slice_or_vec<R, F>(obj: &Bound<'_, PyAny>, f: F) -> PyResult<R>
-where
-    F: FnOnce(&[f64]) -> Result<R, String>,
-{
-    if let Ok(buf) = PyBuffer::<f64>::get(obj)
-        && buf.is_c_contiguous()
-    {
-        let len = buf.item_count();
-        let ptr = buf.buf_ptr() as *const f64;
-        let slice = if len == 0 || ptr.is_null() {
-            &[]
-        } else {
-            // SAFETY: `buf` pins a contiguous `f64` PEP 3118 buffer while the GIL is held in `f`.
-            unsafe { std::slice::from_raw_parts(ptr, len) }
-        };
-        return f(slice).map_err(PyValueError::new_err);
-    }
-    let vec: Vec<f64> = obj.extract()?;
-    f(&vec).map_err(PyValueError::new_err)
+    with_contiguous_slice_or_vec(obj, f)
 }
 
 fn with_i8_slice_or_vec<R, F>(obj: &Bound<'_, PyAny>, f: F) -> PyResult<R>
@@ -2633,24 +2549,9 @@ where
     F: FnOnce(&[i8]) -> Result<R, String>,
 {
     if let Ok(view_ref) = obj.extract::<PyRef<'_, VectorView>>() {
-        let slice = view_ref.row_i8()?;
-        return f(slice).map_err(PyValueError::new_err);
+        return f(view_ref.row_i8()?).map_err(PyValueError::new_err);
     }
-    if let Ok(buf) = PyBuffer::<i8>::get(obj)
-        && buf.is_c_contiguous()
-    {
-        let len = buf.item_count();
-        let ptr = buf.buf_ptr() as *const i8;
-        let slice = if len == 0 || ptr.is_null() {
-            &[]
-        } else {
-            // SAFETY: `buf` pins a contiguous `i8` PEP 3118 buffer while the GIL is held in `f`.
-            unsafe { std::slice::from_raw_parts(ptr, len) }
-        };
-        return f(slice).map_err(PyValueError::new_err);
-    }
-    let vec: Vec<i8> = obj.extract()?;
-    f(&vec).map_err(PyValueError::new_err)
+    with_contiguous_slice_or_vec(obj, f)
 }
 
 fn with_u8_slice_or_vec<R, F>(obj: &Bound<'_, PyAny>, f: F) -> PyResult<R>
@@ -2658,148 +2559,104 @@ where
     F: FnOnce(&[u8]) -> Result<R, String>,
 {
     if let Ok(view_ref) = obj.extract::<PyRef<'_, VectorView>>() {
-        let slice = view_ref.row_bytes()?;
-        return f(slice).map_err(PyValueError::new_err);
+        return f(view_ref.row_bytes()?).map_err(PyValueError::new_err);
     }
     if let Ok(bytes) = obj.extract::<&[u8]>() {
         return f(bytes).map_err(PyValueError::new_err);
     }
-    if let Ok(buf) = PyBuffer::<u8>::get(obj)
-        && buf.is_c_contiguous()
-    {
-        let len = buf.item_count();
-        let ptr = buf.buf_ptr() as *const u8;
-        let slice = if len == 0 || ptr.is_null() {
-            &[]
-        } else {
-            // SAFETY: `buf` pins a contiguous `u8` PEP 3118 buffer while the GIL is held in `f`.
-            unsafe { std::slice::from_raw_parts(ptr, len) }
-        };
-        return f(slice).map_err(PyValueError::new_err);
-    }
-    let vec: Vec<u8> = obj.extract()?;
-    f(&vec).map_err(PyValueError::new_err)
+    with_contiguous_slice_or_vec(obj, f)
 }
 
-/// Encode an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame.
-#[pyfunction]
-pub fn encode_oracle_vector_f32<'py>(
-    py: Python<'py>,
-    values: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = with_f32_slice_or_vec(values, |slice| Ok(rs_encode_oracle_vector_f32(slice)))?;
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
+fn bytes_to_py<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    PyBytes::new_with(py, data.len(), |buf| {
+        buf.copy_from_slice(data);
         Ok(())
     })
 }
 
-/// Decode an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame.
-#[pyfunction]
-pub fn decode_oracle_vector_f32(py: Python<'_>, data: &[u8]) -> PyResult<Vec<f32>> {
-    py.detach(|| rs_decode_oracle_vector_f32(data))
-        .map_err(PyValueError::new_err)
+macro_rules! define_vector_codec_pair {
+    (
+        $(#[$enc_meta:meta])*
+        $enc_name:ident ($arg:ident, $helper:ident, $rs_enc:ident => ok),
+        $(#[$dec_meta:meta])*
+        $dec_name:ident -> $dec_ty:ty, $rs_dec:ident
+    ) => {
+        $(#[$enc_meta])*
+        #[pyfunction]
+        pub fn $enc_name<'py>(
+            py: Python<'py>,
+            $arg: &Bound<'py, PyAny>,
+        ) -> PyResult<Bound<'py, PyBytes>> {
+            let bytes = $helper($arg, |slice| Ok($rs_enc(slice)))?;
+            bytes_to_py(py, &bytes)
+        }
+
+        $(#[$dec_meta])*
+        #[pyfunction]
+        pub fn $dec_name(py: Python<'_>, data: &[u8]) -> PyResult<Vec<$dec_ty>> {
+            py.detach(|| $rs_dec(data)).map_err(PyValueError::new_err)
+        }
+    };
+    (
+        $(#[$enc_meta:meta])*
+        $enc_name:ident ($arg:ident, $helper:ident, $rs_enc:ident => res),
+        $(#[$dec_meta:meta])*
+        $dec_name:ident -> $dec_ty:ty, $rs_dec:ident
+    ) => {
+        $(#[$enc_meta])*
+        #[pyfunction]
+        pub fn $enc_name<'py>(
+            py: Python<'py>,
+            $arg: &Bound<'py, PyAny>,
+        ) -> PyResult<Bound<'py, PyBytes>> {
+            let bytes = $helper($arg, $rs_enc)?;
+            bytes_to_py(py, &bytes)
+        }
+
+        $(#[$dec_meta])*
+        #[pyfunction]
+        pub fn $dec_name(py: Python<'_>, data: &[u8]) -> PyResult<Vec<$dec_ty>> {
+            py.detach(|| $rs_dec(data)).map_err(PyValueError::new_err)
+        }
+    };
 }
 
-/// Encode an Oracle 26ai `VECTOR(*, FLOAT64)` binary frame.
-#[pyfunction]
-pub fn encode_oracle_vector_f64<'py>(
-    py: Python<'py>,
-    values: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = with_f64_slice_or_vec(values, |slice| Ok(rs_encode_oracle_vector_f64(slice)))?;
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    })
-}
-
-/// Decode an Oracle 26ai `VECTOR(*, FLOAT64)` binary frame.
-#[pyfunction]
-pub fn decode_oracle_vector_f64(py: Python<'_>, data: &[u8]) -> PyResult<Vec<f64>> {
-    py.detach(|| rs_decode_oracle_vector_f64(data))
-        .map_err(PyValueError::new_err)
-}
-
-/// Encode an Oracle 26ai `VECTOR(*, INT8)` binary frame.
-#[pyfunction]
-pub fn encode_oracle_vector_i8<'py>(
-    py: Python<'py>,
-    values: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = with_i8_slice_or_vec(values, |slice| Ok(rs_encode_oracle_vector_i8(slice)))?;
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    })
-}
-
-/// Decode an Oracle 26ai `VECTOR(*, INT8)` binary frame.
-#[pyfunction]
-pub fn decode_oracle_vector_i8(py: Python<'_>, data: &[u8]) -> PyResult<Vec<i8>> {
-    py.detach(|| rs_decode_oracle_vector_i8(data))
-        .map_err(PyValueError::new_err)
-}
-
-/// Encode an Oracle 26ai `VECTOR(*, BINARY)` packed bit-vector binary frame.
-#[pyfunction]
-pub fn encode_oracle_vector_binary<'py>(
-    py: Python<'py>,
-    bits: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = with_u8_slice_or_vec(bits, |slice| Ok(rs_encode_oracle_vector_binary(slice)))?;
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    })
-}
-
-/// Decode an Oracle 26ai `VECTOR(*, BINARY)` packed bit-vector binary frame.
-#[pyfunction]
-pub fn decode_oracle_vector_binary(py: Python<'_>, data: &[u8]) -> PyResult<Vec<u8>> {
-    py.detach(|| rs_decode_oracle_vector_binary(data))
-        .map_err(PyValueError::new_err)
-}
-
-/// Encode a `pgvector` binary `vector` (`[u16 dim BE][u16 unused=0 BE][f32 BE; dim]`).
-#[pyfunction]
-pub fn encode_pgvector_f32<'py>(
-    py: Python<'py>,
-    values: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = with_f32_slice_or_vec(values, rs_encode_pgvector_f32)?;
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    })
-}
-
-/// Decode a `pgvector` binary `vector` (`[u16 dim BE][u16 unused=0 BE][f32 BE; dim]`).
-#[pyfunction]
-pub fn decode_pgvector_f32(py: Python<'_>, data: &[u8]) -> PyResult<Vec<f32>> {
-    py.detach(|| rs_decode_pgvector_f32(data))
-        .map_err(PyValueError::new_err)
-}
-
-/// Encode a `pgvector` binary `halfvec` (`[u16 dim BE][u16 unused=0 BE][f16 BE; dim]`).
-#[pyfunction]
-pub fn encode_pgvector_f16<'py>(
-    py: Python<'py>,
-    values: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = with_f32_slice_or_vec(values, rs_encode_pgvector_f16)?;
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    })
-}
-
-/// Decode a `pgvector` binary `halfvec` (`[u16 dim BE][u16 unused=0 BE][f16 BE; dim]`).
-#[pyfunction]
-pub fn decode_pgvector_f16(py: Python<'_>, data: &[u8]) -> PyResult<Vec<f32>> {
-    py.detach(|| rs_decode_pgvector_f16(data))
-        .map_err(PyValueError::new_err)
-}
+define_vector_codec_pair!(
+    /// Encode an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame.
+    encode_oracle_vector_f32(values, with_f32_slice_or_vec, rs_encode_oracle_vector_f32 => ok),
+    /// Decode an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame.
+    decode_oracle_vector_f32 -> f32, rs_decode_oracle_vector_f32
+);
+define_vector_codec_pair!(
+    /// Encode an Oracle 26ai `VECTOR(*, FLOAT64)` binary frame.
+    encode_oracle_vector_f64(values, with_contiguous_slice_or_vec, rs_encode_oracle_vector_f64 => ok),
+    /// Decode an Oracle 26ai `VECTOR(*, FLOAT64)` binary frame.
+    decode_oracle_vector_f64 -> f64, rs_decode_oracle_vector_f64
+);
+define_vector_codec_pair!(
+    /// Encode an Oracle 26ai `VECTOR(*, INT8)` binary frame.
+    encode_oracle_vector_i8(values, with_i8_slice_or_vec, rs_encode_oracle_vector_i8 => ok),
+    /// Decode an Oracle 26ai `VECTOR(*, INT8)` binary frame.
+    decode_oracle_vector_i8 -> i8, rs_decode_oracle_vector_i8
+);
+define_vector_codec_pair!(
+    /// Encode an Oracle 26ai `VECTOR(*, BINARY)` packed bit-vector binary frame.
+    encode_oracle_vector_binary(bits, with_u8_slice_or_vec, rs_encode_oracle_vector_binary => ok),
+    /// Decode an Oracle 26ai `VECTOR(*, BINARY)` packed bit-vector binary frame.
+    decode_oracle_vector_binary -> u8, rs_decode_oracle_vector_binary
+);
+define_vector_codec_pair!(
+    /// Encode a `pgvector` binary `vector` (`[u16 dim BE][u16 unused=0 BE][f32 BE; dim]`).
+    encode_pgvector_f32(values, with_f32_slice_or_vec, rs_encode_pgvector_f32 => res),
+    /// Decode a `pgvector` binary `vector` (`[u16 dim BE][u16 unused=0 BE][f32 BE; dim]`).
+    decode_pgvector_f32 -> f32, rs_decode_pgvector_f32
+);
+define_vector_codec_pair!(
+    /// Encode a `pgvector` binary `halfvec` (`[u16 dim BE][u16 unused=0 BE][f16 BE; dim]`).
+    encode_pgvector_f16(values, with_f32_slice_or_vec, rs_encode_pgvector_f16 => res),
+    /// Decode a `pgvector` binary `halfvec` (`[u16 dim BE][u16 unused=0 BE][f16 BE; dim]`).
+    decode_pgvector_f16 -> f32, rs_decode_pgvector_f16
+);
 
 /// Encode a PostgreSQL / `pgvector` binary `bit` (`VARBIT`).
 #[pyfunction]
@@ -2809,10 +2666,7 @@ pub fn encode_pgvector_bit<'py>(
     bit_len: usize,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let bytes = with_u8_slice_or_vec(packed_bytes, |slice| rs_encode_pgvector_bit(slice, bit_len))?;
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    })
+    bytes_to_py(py, &bytes)
 }
 
 /// Decode a PostgreSQL / `pgvector` binary `bit` (`VARBIT`) into `(packed_bytes, bit_len)`.
@@ -2824,31 +2678,21 @@ pub fn decode_pgvector_bit<'py>(
     let (raw, bit_len) = py
         .detach(|| rs_decode_pgvector_bit(data))
         .map_err(PyValueError::new_err)?;
-    let py_bytes = PyBytes::new_with(py, raw.len(), |buf| {
-        buf.copy_from_slice(&raw);
-        Ok(())
-    })?;
-    Ok((py_bytes, bit_len))
+    Ok((bytes_to_py(py, &raw)?, bit_len))
 }
 
 /// Encode JSON bytes with an Oracle 26ai `OSON` binary header (`\xff\x4a\x5a`).
 #[pyfunction]
 pub fn encode_oson_payload<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let bytes = py.detach(|| rs_encode_oson_payload(data));
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    })
+    bytes_to_py(py, &bytes)
 }
 
 /// Validate an Oracle 26ai `OSON` binary header and return the underlying JSON payload bytes.
 #[pyfunction]
 pub fn decode_oson_payload<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let slice = rs_decode_oson_payload(data).map_err(PyValueError::new_err)?;
-    PyBytes::new_with(py, slice.len(), |buf| {
-        buf.copy_from_slice(slice);
-        Ok(())
-    })
+    bytes_to_py(py, slice)
 }
 
 /// Encode zero-RTT piggybacked Oracle TTC session attributes (`CLIENT_IDENTIFIER`, `MODULE`, `ACTION`, `ECID`).

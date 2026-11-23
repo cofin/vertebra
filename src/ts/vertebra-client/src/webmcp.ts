@@ -85,6 +85,14 @@ function getBrowserModelContext(explicit?: BrowserModelContext | null): BrowserM
   return null;
 }
 
+function forwardAbort(source: AbortSignal, target: AbortController): void {
+  if (source.aborted) {
+    target.abort(source.reason);
+  } else {
+    source.addEventListener("abort", () => target.abort(source.reason), { once: true });
+  }
+}
+
 function isWebMCPManifest(value: WebMCPManifest | RegisterWebMCPOptions | undefined): value is WebMCPManifest {
   return value !== undefined && "tools" in value && Array.isArray((value as WebMCPManifest).tools);
 }
@@ -140,17 +148,7 @@ export async function registerWebMCPTools(
 
   const handleController = new AbortController();
   if (resolvedOptions.signal) {
-    if (resolvedOptions.signal.aborted) {
-      handleController.abort(resolvedOptions.signal.reason);
-    } else {
-      resolvedOptions.signal.addEventListener(
-        "abort",
-        () => {
-          handleController.abort(resolvedOptions.signal?.reason);
-        },
-        { once: true },
-      );
-    }
+    forwardAbort(resolvedOptions.signal, handleController);
   }
 
   const defaultEndpoint = manifest.mcpEndpoint || "/mcp";
@@ -158,17 +156,7 @@ export async function registerWebMCPTools(
     (descriptor) => {
       const endpoint = descriptor.endpoint || defaultEndpoint;
       const toolController = new AbortController();
-      if (handleController.signal.aborted) {
-        toolController.abort(handleController.signal.reason);
-      } else {
-        handleController.signal.addEventListener(
-          "abort",
-          () => {
-            toolController.abort(handleController.signal.reason);
-          },
-          { once: true },
-        );
-      }
+      forwardAbort(handleController.signal, toolController);
 
       const tool: BrowserModelContextTool = {
         name: descriptor.name,

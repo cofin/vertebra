@@ -1,4 +1,4 @@
-//! Asynchronous TCP, Rustls TLS/mTLS, and Unix socket RESP3 transport for `vertebra-valkey`.
+//! Asynchronous TCP, Rustls TLS/mTLS, and Unix socket RESP2/RESP3 transport.
 
 use std::future::poll_fn;
 use std::pin::Pin;
@@ -19,19 +19,22 @@ use crate::codec::{
     RespValue, build_auth, build_client_capa_redirect, build_hello_3, encode_owned_command,
     try_decode_frame,
 };
-use crate::config::{ValkeyConfigInner, ValkeyTarget};
-use crate::error::ValkeyError;
+use crate::config::{RespConfig, RespTarget};
+use crate::error::RespError;
 use crate::tracking::{TrackingCache, build_client_tracking_cmd};
 
 /// Unified async stream supporting plain TCP, Rustls TLS/mTLS TCP, and Unix domain sockets.
-pub enum ValkeyStream {
+pub enum RespStream {
     Tcp(TcpStream),
     TlsTcp(Box<TlsStream<TcpStream>>),
     #[cfg(unix)]
     Unix(UnixStream),
 }
 
-impl AsyncRead for ValkeyStream {
+/// Backward-compatible alias for Valkey callers.
+pub type ValkeyStream = RespStream;
+
+impl AsyncRead for RespStream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -46,7 +49,7 @@ impl AsyncRead for ValkeyStream {
     }
 }
 
-impl AsyncWrite for ValkeyStream {
+impl AsyncWrite for RespStream {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -79,55 +82,55 @@ impl AsyncWrite for ValkeyStream {
     }
 }
 
-/// Connect a [`ValkeyStream`] to `target` respecting TLS/mTLS and connect timeout.
+/// Connect a [`RespStream`] to `target` respecting TLS/mTLS and connect timeout.
 pub async fn connect_target(
-    target: &ValkeyTarget,
-    config: &ValkeyConfigInner,
-) -> Result<ValkeyStream, ValkeyError> {
+    target: &RespTarget,
+    config: &RespConfig,
+) -> Result<RespStream, RespError> {
     let dial_fut = async move {
         match target {
-            ValkeyTarget::Unix { path } => {
+            RespTarget::Unix { path } => {
                 #[cfg(unix)]
                 {
                     let stream = UnixStream::connect(path).await.map_err(|e| {
-                        ValkeyError::connection(format!(
+                        RespError::connection(format!(
                             "Failed to connect Unix socket {}: {e}",
                             path.display()
                         ))
                     })?;
-                    Ok(ValkeyStream::Unix(stream))
+                    Ok(RespStream::Unix(stream))
                 }
                 #[cfg(not(unix))]
                 {
                     let _ = path;
-                    Err(ValkeyError::not_supported(
+                    Err(RespError::not_supported(
                         "unix:// sockets are not supported on this platform",
                     ))
                 }
             }
-            ValkeyTarget::Tcp { host, port } => {
+            RespTarget::Tcp { host, port } => {
                 let tcp = TcpStream::connect((host.as_str(), *port))
                     .await
                     .map_err(|e| {
-                        ValkeyError::connection(format!(
-                            "Failed to connect to Valkey {host}:{port}: {e}"
+                        RespError::connection(format!(
+                            "Failed to connect to RESP server {host}:{port}: {e}"
                         ))
                     })?;
                 let _ = tcp.set_nodelay(true);
                 if let Some(ref tls_cfg) = config.tls_config {
                     let sni_host = config.tls_server_name.as_deref().unwrap_or(host.as_str());
                     let server_name = ServerName::try_from(sni_host.to_string()).map_err(|e| {
-                        ValkeyError::config(format!("Invalid TLS SNI hostname '{sni_host}': {e}"))
+                        RespError::config(format!("Invalid TLS SNI hostname '{sni_host}': {e}"))
                     })?;
                     let connector = TlsConnector::from(Arc::clone(tls_cfg));
                     let tls_stream = connector.connect(server_name, tcp).await.map_err(|e| {
-                        ValkeyError::connection(format!(
-                            "Valkey TLS handshake failed for {host}:{port}: {e}"
+                        RespError::connection(format!(
+                            "RESP TLS handshake failed for {host}:{port}: {e}"
                         ))
                     })?;
-                    Ok(ValkeyStream::TlsTcp(Box::new(tls_stream)))
+                    Ok(RespStream::TlsTcp(Box::new(tls_stream)))
                 } else {
-                    Ok(ValkeyStream::Tcp(tcp))
+                    Ok(RespStream::Tcp(tcp))
                 }
             }
         }
@@ -136,8 +139,8 @@ pub async fn connect_target(
     tokio::time::timeout(config.connect_timeout, dial_fut)
         .await
         .map_err(|_| {
-            ValkeyError::connection(format!(
-                "Timed out connecting to Valkey after {} ms",
+            RespError::connection(format!(
+                "Timed out connecting to RESP server after {} ms",
                 config.connect_timeout.as_millis()
             ))
         })?
@@ -145,25 +148,26 @@ pub async fn connect_target(
 
 /// Active framed RESP2/RESP3 connection owning buffers and handshake state.
 pub struct RespConnection {
-    pub stream: ValkeyStream,
+    pub stream: RespStream,
     read_buf: BytesMut,
     write_buf: BytesMut,
     pub resp3_negotiated: bool,
     pub capa_redirect_supported: bool,
+    pub tracking_negotiated: bool,
     pub is_readonly_replica: bool,
     command_timeout: Duration,
     tracking_cache: Option<Arc<TrackingCache>>,
 }
 
 impl RespConnection {
-    /// Wrap a freshly connected stream and perform Valkey `HELLO 3` / `CLIENT CAPA redirect` handshake.
+    /// Wrap a freshly connected stream and perform `HELLO 3` / `CLIENT CAPA redirect` handshake.
     pub async fn establish(
-        target: &ValkeyTarget,
-        config: &ValkeyConfigInner,
+        target: &RespTarget,
+        config: &RespConfig,
         is_replica: bool,
         use_auth: bool,
         tracking_cache: Option<Arc<TrackingCache>>,
-    ) -> Result<Self, ValkeyError> {
+    ) -> Result<Self, RespError> {
         let stream = connect_target(target, config).await?;
         let mut conn = Self {
             stream,
@@ -171,6 +175,7 @@ impl RespConnection {
             write_buf: BytesMut::with_capacity(4096),
             resp3_negotiated: false,
             capa_redirect_supported: false,
+            tracking_negotiated: false,
             is_readonly_replica: false,
             command_timeout: config.command_timeout,
             tracking_cache,
@@ -181,11 +186,7 @@ impl RespConnection {
         Ok(conn)
     }
 
-    async fn handshake(
-        &mut self,
-        config: &ValkeyConfigInner,
-        is_replica: bool,
-    ) -> Result<(), ValkeyError> {
+    async fn handshake(&mut self, config: &RespConfig, is_replica: bool) -> Result<(), RespError> {
         let (user, mut pass, token_gen) = config.resolve_auth(None).await?;
 
         if config.protocol_resp3 {
@@ -256,7 +257,15 @@ impl RespConnection {
             && self.tracking_cache.is_some()
         {
             let track_cmd = build_client_tracking_cmd(&config.client_tracking_prefixes, true);
-            let _ = self.execute_single(&track_cmd).await?;
+            match self.execute_single(&track_cmd).await {
+                Ok(_) => {
+                    self.tracking_negotiated = true;
+                }
+                Err(err) if is_capa_unsupported(&err) => {
+                    self.tracking_negotiated = false;
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         if let Some(ref cache) = self.tracking_cache {
@@ -268,11 +277,11 @@ impl RespConnection {
 
     async fn fallback_resp2_auth(
         &mut self,
-        config: &ValkeyConfigInner,
+        config: &RespConfig,
         user: Option<&str>,
         pass: Option<&str>,
         token_gen: Option<u64>,
-    ) -> Result<(), ValkeyError> {
+    ) -> Result<(), RespError> {
         if let Some(p) = pass {
             let auth_cmd = build_auth(user, p);
             match self.execute_single(&auth_cmd).await {
@@ -305,7 +314,7 @@ impl RespConnection {
     }
 
     /// Execute one command and return the validated [`RespValue`] reply.
-    pub async fn execute_single(&mut self, args: &[Vec<u8>]) -> Result<RespValue, ValkeyError> {
+    pub async fn execute_single(&mut self, args: &[Vec<u8>]) -> Result<RespValue, RespError> {
         self.write_buf.clear();
         encode_owned_command(&mut self.write_buf, args);
         let write_timeout = self.command_timeout;
@@ -316,12 +325,12 @@ impl RespConnection {
         })
         .await
         .map_err(|_| {
-            ValkeyError::connection(format!(
-                "Valkey write timed out after {} ms",
+            RespError::connection(format!(
+                "RESP write timed out after {} ms",
                 write_timeout.as_millis()
             ))
         })?
-        .map_err(ValkeyError::from)?;
+        .map_err(RespError::from)?;
 
         let read_timeout = self.effective_read_timeout(args);
         let reply = self.read_reply_with_timeout(read_timeout).await?;
@@ -332,7 +341,7 @@ impl RespConnection {
     pub async fn execute_batch(
         &mut self,
         cmds: &[Vec<Vec<u8>>],
-    ) -> Result<Vec<RespValue>, ValkeyError> {
+    ) -> Result<Vec<RespValue>, RespError> {
         if cmds.is_empty() {
             return Ok(Vec::new());
         }
@@ -348,12 +357,12 @@ impl RespConnection {
         })
         .await
         .map_err(|_| {
-            ValkeyError::connection(format!(
-                "Valkey batch write timed out after {} ms",
+            RespError::connection(format!(
+                "RESP batch write timed out after {} ms",
                 timeout.as_millis()
             ))
         })?
-        .map_err(ValkeyError::from)?;
+        .map_err(RespError::from)?;
 
         let mut replies = Vec::with_capacity(cmds.len());
         for cmd in cmds {
@@ -430,7 +439,7 @@ impl RespConnection {
     }
 
     /// Non-blocking drain of any already-arrived RESP3 push frames (such as `>invalidate`).
-    pub async fn try_drain_pushes_nonblocking(&mut self) -> Result<(), ValkeyError> {
+    pub async fn try_drain_pushes_nonblocking(&mut self) -> Result<(), RespError> {
         let mut tmp = [0u8; 4096];
         loop {
             while let Some(frame) = try_decode_frame(&mut self.read_buf)? {
@@ -439,18 +448,18 @@ impl RespConnection {
                 }
             }
             let maybe_n = match &mut self.stream {
-                ValkeyStream::Tcp(s) => match s.try_read(&mut tmp) {
+                RespStream::Tcp(s) => match s.try_read(&mut tmp) {
                     Ok(n) => Some(Ok(n)),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
                     Err(e) => Some(Err(e)),
                 },
                 #[cfg(unix)]
-                ValkeyStream::Unix(s) => match s.try_read(&mut tmp) {
+                RespStream::Unix(s) => match s.try_read(&mut tmp) {
                     Ok(n) => Some(Ok(n)),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
                     Err(e) => Some(Err(e)),
                 },
-                ValkeyStream::TlsTcp(s) => {
+                RespStream::TlsTcp(s) => {
                     poll_fn(|cx| {
                         let mut rbuf = ReadBuf::new(&mut tmp);
                         match Pin::new(s.as_mut()).poll_read(cx, &mut rbuf) {
@@ -464,14 +473,14 @@ impl RespConnection {
             };
             match maybe_n {
                 Some(Ok(0)) => {
-                    return Err(ValkeyError::connection(
-                        "Valkey connection closed by peer while draining push frames",
+                    return Err(RespError::connection(
+                        "RESP connection closed by peer while draining push frames",
                     ));
                 }
                 Some(Ok(n)) => {
                     self.read_buf.put_slice(&tmp[..n]);
                 }
-                Some(Err(e)) => return Err(ValkeyError::from(e)),
+                Some(Err(e)) => return Err(RespError::from(e)),
                 None => break,
             }
         }
@@ -479,7 +488,7 @@ impl RespConnection {
     }
 
     /// Read the next non-invalidation RESP3 reply frame, forwarding `>invalidate` pushes to tracking.
-    pub async fn read_reply(&mut self) -> Result<RespValue, ValkeyError> {
+    pub async fn read_reply(&mut self) -> Result<RespValue, RespError> {
         self.read_reply_with_timeout(Some(self.command_timeout))
             .await
     }
@@ -488,13 +497,13 @@ impl RespConnection {
     pub async fn read_reply_with_timeout(
         &mut self,
         timeout: Option<Duration>,
-    ) -> Result<RespValue, ValkeyError> {
+    ) -> Result<RespValue, RespError> {
         match timeout {
             Some(dur) => tokio::time::timeout(dur, self.read_reply_inner())
                 .await
                 .map_err(|_| {
-                    ValkeyError::connection(format!(
-                        "Timed out waiting for Valkey response after {} ms",
+                    RespError::connection(format!(
+                        "Timed out waiting for RESP response after {} ms",
                         dur.as_millis()
                     ))
                 })?,
@@ -502,7 +511,7 @@ impl RespConnection {
         }
     }
 
-    async fn read_reply_inner(&mut self) -> Result<RespValue, ValkeyError> {
+    async fn read_reply_inner(&mut self) -> Result<RespValue, RespError> {
         let mut scratch = [0u8; 8192];
         loop {
             while let Some(frame) = try_decode_frame(&mut self.read_buf)? {
@@ -515,19 +524,20 @@ impl RespConnection {
             }
             let n = self.stream.read(&mut scratch).await?;
             if n == 0 {
-                return Err(ValkeyError::connection(
-                    "Unexpected EOF reading response from Valkey server",
+                return Err(RespError::connection(
+                    "Unexpected EOF reading response from RESP server",
                 ));
             }
             self.read_buf.put_slice(&scratch[..n]);
         }
     }
+
     /// Split the underlying transport preserving any already-buffered incoming bytes.
     pub fn into_split(
         self,
     ) -> (
-        tokio::io::ReadHalf<ValkeyStream>,
-        tokio::io::WriteHalf<ValkeyStream>,
+        tokio::io::ReadHalf<RespStream>,
+        tokio::io::WriteHalf<RespStream>,
         BytesMut,
     ) {
         let (reader, writer) = tokio::io::split(self.stream);
@@ -535,12 +545,12 @@ impl RespConnection {
     }
 }
 
-fn is_hello_unsupported(err: &ValkeyError) -> bool {
+fn is_hello_unsupported(err: &RespError) -> bool {
     let lower = err.message.to_ascii_lowercase();
     lower.contains("unknown command") || lower.contains("noproto")
 }
 
-fn is_capa_unsupported(err: &ValkeyError) -> bool {
+fn is_capa_unsupported(err: &RespError) -> bool {
     let lower = err.message.to_ascii_lowercase();
     lower.contains("unknown subcommand")
         || lower.contains("unknown command")

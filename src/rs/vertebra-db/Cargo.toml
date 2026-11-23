@@ -12,39 +12,29 @@ name = "vertebra_db"
 crate-type = ["rlib"]
 
 [dependencies]
-vertebra-core = { path = "../vertebra-core" }
-base64 = { workspace = true }
-bytes = { workspace = true }
-chrono = { workspace = true }
-dashmap = { workspace = true }
+vertebra-core = { path = "../vertebra-core", default-features = false }
+bytes = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
 google-cloud-auth = { workspace = true, optional = true }
 google-cloud-gax = { workspace = true, optional = true }
 google-cloud-rpc = { workspace = true, optional = true }
 google-cloud-wkt = { workspace = true, optional = true }
-half = "=2.7.1"
-hex = { workspace = true }
-hmac = { workspace = true }
-http = { workspace = true }
-http-body-util = { workspace = true }
-hyper = { workspace = true }
-hyper-util = { workspace = true }
-lz4_flex = { workspace = true }
+half = { version = "=2.7.1", optional = true }
+hex = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
 pyo3 = { workspace = true, optional = true }
-rcgen = { workspace = true }
-reqwest = { workspace = true }
-rsa = { version = "0.9", features = ["sha2"] }
-rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
-socket2 = { version = "=0.6.5", features = ["all"] }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-rustls = { workspace = true }
-url = { workspace = true }
-webpki-root-certs = { workspace = true }
-zstd = { workspace = true }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+socket2 = { version = "=0.6.5", features = ["all"], optional = true }
+thiserror = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+webpki-root-certs = { workspace = true, optional = true }
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }
@@ -55,15 +45,63 @@ tempfile = "3"
 
 [features]
 default = []
-duckdb = []
+arrow-shm = ["dep:dashmap"]
+broker = []
+codecs-duckdb = ["arrow-shm", "dep:serde"]
+codecs-mssql = []
+codecs-oracle = ["dep:bytes", "dep:serde"]
+codecs-pg = ["dep:bytes", "dep:half", "dep:serde"]
+dialer = [
+    "dep:bytes",
+    "dep:chrono",
+    "dep:hex",
+    "dep:hmac",
+    "dep:rcgen",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:serde",
+    "dep:sha2",
+    "dep:tokio",
+]
 gcp = [
+    "rustls-ring",
+    "dep:bytes",
     "dep:google-cloud-auth",
     "dep:google-cloud-gax",
     "dep:google-cloud-rpc",
     "dep:google-cloud-wkt",
+    "dep:http",
+    "vertebra-core/gcp-auth",
 ]
-pyo3 = ["dep:pyo3", "vertebra-core/pyo3"]
+pyo3 = ["dep:pyo3", "dep:tokio", "vertebra-core/pyo3"]
+rustls-ring = ["dep:rustls"]
+transport = [
+    "dialer",
+    "rustls-ring",
+    "dep:bytes",
+    "dep:rcgen",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:serde",
+    "dep:socket2",
+    "dep:thiserror",
+    "dep:tokio",
+    "dep:tokio-rustls",
+    "dep:webpki-root-certs",
+]
+
+[[test]]
+name = "arrow_shm_stream_tests"
+required-features = ["arrow-shm"]
+
+[[test]]
+name = "broker_engine_capsule_tests"
+required-features = ["broker"]
 
 [[test]]
 name = "gcp_credentials_tests"
 required-features = ["gcp"]
+
+[[test]]
+name = "postgres_vector_tests"
+required-features = ["codecs-pg"]

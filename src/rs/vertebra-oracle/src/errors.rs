@@ -1,8 +1,8 @@
 //! Deterministic `ORA-xxxxx` to SQLSTATE and canonical `DbExceptionTypes` mapping.
 
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyList, PyTuple, PyType};
+use pyo3::types::PyType;
+use vertebra_db::py_errors::{DbPyExceptionTypes, instantiate_db_exc, resolve_db_exceptions};
 
 /// Logical database exception category in the canonical Vertebra hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,127 +188,7 @@ pub fn classify_oracle_error(vendor_code: Option<i32>, message: &str) -> OracleE
     }
 }
 
-pub(crate) struct CachedOracleExceptionTypes {
-    database: Py<PyType>,
-    pub(crate) interface: Py<PyType>,
-    data: Py<PyType>,
-    pub(crate) not_found: Py<PyType>,
-    operational: Py<PyType>,
-    connection_failure: Py<PyType>,
-    query_cancelled: Py<PyType>,
-    pool_exhausted: Py<PyType>,
-    serialization_failure: Py<PyType>,
-    integrity: Py<PyType>,
-    pub(crate) programming: Py<PyType>,
-}
-
-static ORACLE_EXCEPTION_TYPES: PyOnceLock<CachedOracleExceptionTypes> = PyOnceLock::new();
-
-fn new_stand_in_class<'py>(
-    py: Python<'py>,
-    name: &str,
-    bases: &Bound<'py, PyTuple>,
-) -> PyResult<Py<PyType>> {
-    let dict = PyDict::new(py);
-    dict.set_item("__module__", "vertebra.db.driver")?;
-    let ty = py
-        .get_type::<PyType>()
-        .call1((name, bases, dict))?
-        .cast_into::<PyType>()?;
-    Ok(ty.unbind())
-}
-
-fn build_stand_in_types(py: Python<'_>) -> PyResult<CachedOracleExceptionTypes> {
-    let root = py.get_type::<pyo3::exceptions::PyException>();
-    let database = new_stand_in_class(py, "DatabaseError", &PyTuple::new(py, [&root])?)?;
-    let db_bound = database.bind(py);
-    let interface = new_stand_in_class(py, "InterfaceError", &PyTuple::new(py, [db_bound])?)?;
-    let data = new_stand_in_class(py, "DataError", &PyTuple::new(py, [db_bound])?)?;
-    let not_found = new_stand_in_class(
-        py,
-        "NotFoundError",
-        &PyTuple::new(
-            py,
-            [
-                data.bind(py),
-                &py.get_type::<pyo3::exceptions::PyValueError>(),
-            ],
-        )?,
-    )?;
-    let operational = new_stand_in_class(py, "OperationalError", &PyTuple::new(py, [db_bound])?)?;
-    let op_bound = operational.bind(py);
-    let connection_failure =
-        new_stand_in_class(py, "ConnectionFailure", &PyTuple::new(py, [op_bound])?)?;
-    let query_cancelled =
-        new_stand_in_class(py, "QueryCancelledError", &PyTuple::new(py, [op_bound])?)?;
-    let pool_exhausted =
-        new_stand_in_class(py, "PoolExhaustedError", &PyTuple::new(py, [op_bound])?)?;
-    let serialization_failure =
-        new_stand_in_class(py, "SerializationFailure", &PyTuple::new(py, [op_bound])?)?;
-    let integrity = new_stand_in_class(py, "IntegrityError", &PyTuple::new(py, [db_bound])?)?;
-    let programming = new_stand_in_class(py, "ProgrammingError", &PyTuple::new(py, [db_bound])?)?;
-    Ok(CachedOracleExceptionTypes {
-        database,
-        interface,
-        data,
-        not_found,
-        operational,
-        connection_failure,
-        query_cancelled,
-        pool_exhausted,
-        serialization_failure,
-        integrity,
-        programming,
-    })
-}
-
-fn load_from_driver_module(
-    driver_mod: &Bound<'_, PyModule>,
-) -> PyResult<CachedOracleExceptionTypes> {
-    let get = |name: &str| -> PyResult<Py<PyType>> {
-        Ok(driver_mod.getattr(name)?.cast_into::<PyType>()?.unbind())
-    };
-    Ok(CachedOracleExceptionTypes {
-        database: get("DatabaseError")?,
-        interface: get("InterfaceError")?,
-        data: get("DataError")?,
-        not_found: get("NotFoundError")?,
-        operational: get("OperationalError")?,
-        connection_failure: get("ConnectionFailure")?,
-        query_cancelled: get("QueryCancelledError")?,
-        pool_exhausted: get("PoolExhaustedError")?,
-        serialization_failure: get("SerializationFailure")?,
-        integrity: get("IntegrityError")?,
-        programming: get("ProgrammingError")?,
-    })
-}
-
-pub(crate) fn resolve_exception_types(
-    py: Python<'_>,
-) -> PyResult<&'static CachedOracleExceptionTypes> {
-    ORACLE_EXCEPTION_TYPES.get_or_try_init(py, || {
-        if let Ok(driver_mod) = py.import("vertebra.db.driver")
-            && let Ok(cached) = load_from_driver_module(&driver_mod)
-        {
-            return Ok(cached);
-        }
-        if let Ok(sys) = py.import("sys")
-            && let Ok(path_any) = sys.getattr("path")
-            && let Ok(path_list) = path_any.cast::<PyList>()
-        {
-            let repo_py = concat!(env!("CARGO_MANIFEST_DIR"), "/../../py");
-            let _ = path_list.insert(0, repo_py);
-        }
-        if let Ok(driver_mod) = py.import("vertebra.db.driver")
-            && let Ok(cached) = load_from_driver_module(&driver_mod)
-        {
-            return Ok(cached);
-        }
-        build_stand_in_types(py)
-    })
-}
-
-fn select_type_for_kind(types: &CachedOracleExceptionTypes, kind: OracleErrorKind) -> &Py<PyType> {
+fn select_type_for_kind(types: &DbPyExceptionTypes, kind: OracleErrorKind) -> &Py<PyType> {
     match kind {
         OracleErrorKind::Integrity => &types.integrity,
         OracleErrorKind::SerializationFailure => &types.serialization_failure,
@@ -404,30 +284,27 @@ impl OracleError {
         }
     }
 
-    /// Convert this [`OracleError`] into a canonical `vertebra.db.driver` Python exception with `.sqlstate`, `.vendor_code`, and `.is_transient` populated.
+    /// Convert this [`OracleError`] into a canonical `vertebra._vertebra` Python exception with `.sqlstate`, `.vendor_code`, and `.is_transient` populated.
     pub fn to_py_err(self, py: Python<'_>) -> PyErr {
-        let types = match resolve_exception_types(py) {
+        let types = match resolve_db_exceptions(py) {
             Ok(t) => t,
             Err(e) => return e,
         };
-        let _ = &types.database;
         let classification = self.classify();
         let message = self.to_string();
         let ty = select_type_for_kind(types, classification.kind);
-        let py_err = PyErr::from_type(ty.bind(py).clone(), (message,));
-        let val = py_err.value(py);
         let sqlstate_opt: Option<&str> = match self {
             Self::Config(_) | Self::Interface(_) => None,
             _ => Some(classification.sqlstate),
         };
-        if let Err(attr_err) = val
-            .setattr("sqlstate", sqlstate_opt)
-            .and_then(|()| val.setattr("vendor_code", classification.vendor_code))
-            .and_then(|()| val.setattr("is_transient", classification.is_transient))
-        {
-            return attr_err;
-        }
-        py_err
+        instantiate_db_exc(
+            py,
+            ty,
+            &message,
+            sqlstate_opt,
+            classification.vendor_code.map(i64::from),
+            classification.is_transient,
+        )
     }
 }
 

@@ -8,11 +8,22 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, NotRequired, TypedDict, cast
 
 from sqlspec.config import ADKConfig
-from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, StoredEvent, StoredSession
+from sqlspec.extensions.adk import StoredEvent, StoredSession
 from sqlspec.extensions.adk.store import normalize_session_list_options
 from sqlspec.utils.serializers import from_json, to_json
 
 from vertebra.db.adapters.bigquery import ObjectRef, ObjectTableConfig
+from vertebra.extensions.sqlspec._adk import (
+    AdapterAsyncADKMemoryStore,
+    AdapterAsyncADKStore,
+    AdapterSyncADKMemoryStore,
+    AdapterSyncADKStore,
+    CloudAsyncADKArtifactStore,
+    CloudSyncADKArtifactStore,
+    StoredArtifact,
+    StoredMemory,
+    merge_scoped_state,
+)
 from vertebra.extensions.sqlspec.adapters.bigquery.core import (
     bigquery_partition_clauses,
     is_bigquery_table_missing,
@@ -30,34 +41,11 @@ from vertebra.utils.module_loader import ensure_module
 if TYPE_CHECKING:
     from sqlspec.extensions.adk import SessionOrderBy, StoredMemory
     from sqlspec.extensions.adk.artifact import StoredArtifact
-    from sqlspec.extensions.adk.artifact.store import (
-        BaseAsyncADKArtifactStore as _BaseAsyncADKArtifactStore,
-    )
-    from sqlspec.extensions.adk.artifact.store import (
-        BaseSyncADKArtifactStore as _BaseSyncADKArtifactStore,
-    )
     from sqlspec.extensions.adk.converters import merge_scoped_state
-    from sqlspec.extensions.adk.memory.store import (
-        BaseAsyncADKMemoryStore as _BaseAsyncADKMemoryStore,
-    )
-    from sqlspec.extensions.adk.memory.store import (
-        BaseSyncADKMemoryStore as _BaseSyncADKMemoryStore,
-    )
 
     from vertebra.extensions.sqlspec.adapters.bigquery.config import BigQueryAsyncConfig, BigQuerySyncConfig
 else:
-    _memory_store_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
-    _artifact_store_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="google-adk", extra="adk")
-    _converters_mod = ensure_module("sqlspec.extensions.adk.converters", package="google-adk", extra="adk")
-    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact", package="google-adk", extra="adk")
-    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory", package="google-adk", extra="adk")
-    _BaseAsyncADKMemoryStore = _memory_store_mod.BaseAsyncADKMemoryStore
-    _BaseSyncADKMemoryStore = _memory_store_mod.BaseSyncADKMemoryStore
-    _BaseAsyncADKArtifactStore = _artifact_store_mod.BaseAsyncADKArtifactStore
-    _BaseSyncADKArtifactStore = _artifact_store_mod.BaseSyncADKArtifactStore
-    merge_scoped_state = _converters_mod.merge_scoped_state
-    StoredArtifact = _artifact_types_mod.StoredArtifact
-    StoredMemory = _memory_types_mod.StoredMemory
+    ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
 
 __all__ = (
     "BigQueryADKConfig",
@@ -369,6 +357,11 @@ class _BigQueryADKSessionMixin:
     """Shared SQL and parameter builders for BigQuery sync and async ADK session stores."""
 
     __slots__ = ()
+
+    if TYPE_CHECKING:
+        _json_deserializer: Any
+        _events_table: str
+        _user_state_table: str
 
     _max_table_name_parts: ClassVar[int] = 3
     adapter_name: ClassVar[str | None] = "vertebra_bigquery"
@@ -721,11 +714,82 @@ class _BigQueryADKSessionMixin:
             params["app_name"] = app_name
         return f"DELETE FROM {table_ref} WHERE {where}", params
 
+    _commit_after_write = False
+    _unpack_params = False
+    _ignore_missing_on_delete_session = True
 
-class BigQuerySyncADKStore(_BigQueryADKSessionMixin, BaseSyncADKStore["BigQuerySyncConfig"]):
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_bigquery_table_missing(exc)
+
+    def _decode_session_row(
+        self,
+        row: Any,
+        *,
+        app_state: dict[str, Any] | None = None,
+        user_state: dict[str, Any] | None = None,
+        merge_scopes: bool = False,
+    ) -> StoredSession:
+        rec = _row_to_stored_session(row, deserializer=self._json_deserializer)
+        if merge_scopes:
+            rec["state"] = merge_scoped_state(rec["state"], app_state, user_state)
+        return rec
+
+    def _update_session_state_sql_and_params(
+        self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_update_session_state_sql_and_params(app_name, user_id, session_id, state)
+
+    def _list_sessions_sql_and_params(
+        self,
+        app_name: str,
+        user_id: str | None = None,
+        *,
+        order_by: Any = "update_time",
+        descending: bool = True,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> tuple[str, dict[str, Any]] | None:
+        return self._build_list_sessions_sql_and_params(
+            app_name, user_id, order_by=order_by, descending=descending, limit=limit, offset=offset
+        )
+
+    def _delete_session_sqls_and_params(
+        self, app_name: str, user_id: str, session_id: str
+    ) -> list[tuple[str, dict[str, Any]]]:
+        events_sql, sessions_sql, params = self._build_delete_session_sqls_and_params(app_name, user_id, session_id)
+        return [(events_sql, params), (sessions_sql, params)]
+
+    def _append_event_sql_and_params(self, event_record: StoredEvent) -> tuple[str, dict[str, Any]]:
+        return self._build_append_event_sql_and_params(event_record)
+
+    def _delete_before_sql_and_params(
+        self, table_name: str, column_name: str, before: datetime, app_name: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        if table_name == self._events_table:
+            return self._build_delete_expired_events_sql_and_params(before, app_name)
+        if table_name == self._user_state_table:
+            return self._build_delete_idle_user_states_sql_and_params(before, app_name)
+        return self._build_delete_idle_sessions_sql_and_params(before, app_name)
+
+    def _upsert_app_state_sql_and_params(self, app_name: str, state: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        return self._build_upsert_app_state_sql_and_params(app_name, state)
+
+    def _upsert_user_state_sql_and_params(
+        self, app_name: str, user_id: str, state: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_upsert_user_state_sql_and_params(app_name, user_id, state)
+
+    def _get_metadata_sql_and_params(self, key: str) -> tuple[str, dict[str, Any]]:
+        return self._build_get_metadata_sql_and_params(key)
+
+    def _set_metadata_sql_and_params(self, key: str, value: str) -> tuple[str, dict[str, Any]]:
+        return self._build_set_metadata_sql_and_params(key, value)
+
+
+class BigQuerySyncADKStore(_BigQueryADKSessionMixin, AdapterSyncADKStore):
     """BigQuery synchronous ADK store using partitioned/clustered tables and GoogleSQL ``MERGE``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer")
+    __slots__ = ()
 
     def __init__(self, config: BigQuerySyncConfig, *, read_config: BigQuerySyncConfig | None = None) -> None:
         """Initialize the synchronous BigQuery ADK store."""
@@ -863,51 +927,6 @@ class BigQuerySyncADKStore(_BigQueryADKSessionMixin, BaseSyncADKStore["BigQueryS
                 return None
             raise
 
-    def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Update JSON state and ``update_time`` for an existing ADK session."""
-        sql, params = self._build_update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-
-    def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List ADK sessions filtered by application and optional user."""
-        built = self._build_list_sessions_sql_and_params(
-            app_name, user_id, order_by=order_by, descending=descending, limit=limit, offset=offset
-        )
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, params)
-            return [_row_to_stored_session(dict(row), deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete a session and its associated events."""
-        events_sql, sessions_sql, params = self._build_delete_session_sqls_and_params(app_name, user_id, session_id)
-        with self._config.provide_session() as driver:
-            driver.execute(events_sql, params)
-            driver.execute(sessions_sql, params)
-
-    def append_event(self, event_record: StoredEvent) -> None:
-        """Append a single ADK event row."""
-        sql, params = self._build_append_event_sql_and_params(event_record)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-
     def append_event_and_update_state(
         self,
         event_record: StoredEvent,
@@ -965,81 +984,15 @@ class BigQuerySyncADKStore(_BigQueryADKSessionMixin, BaseSyncADKStore["BigQueryS
         """Load shared application-scoped ADK state."""
         return self._read_app_state(app_name, primary=False)
 
-    def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Upsert shared application-scoped ADK state using GoogleSQL ``MERGE``."""
-        sql, params = self._build_upsert_app_state_sql_and_params(app_name, state)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-
     def get_user_state(self, app_name: str, user_id: str) -> dict[str, Any] | None:
         """Load user-scoped ADK state for an application."""
         return self._read_user_state(app_name, user_id, primary=False)
 
-    def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Upsert user-scoped ADK state using GoogleSQL ``MERGE``."""
-        sql, params = self._build_upsert_user_state_sql_and_params(app_name, user_id, state)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
 
-    def get_metadata(self, key: str) -> str | None:
-        """Retrieve a scalar ADK store metadata value."""
-        sql, params = self._build_get_metadata_sql_and_params(key)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, params)
-            return str(row["value"]) if row is not None and row.get("value") is not None else None
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return None
-            raise
-
-    def set_metadata(self, key: str, value: str) -> None:
-        """Persist a scalar ADK store metadata value using ``MERGE``."""
-        sql, params = self._build_set_metadata_sql_and_params(key, value)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-
-    def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete ADK events older than ``before``."""
-        sql, params = self._build_delete_expired_events_sql_and_params(before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, params)
-            return int(getattr(res, "rows_affected", 0) or getattr(res, "num_rows", 0) or 0)
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
-
-    def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete ADK sessions inactive since ``updated_before``."""
-        sql, params = self._build_delete_idle_sessions_sql_and_params(updated_before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, params)
-            return int(getattr(res, "rows_affected", 0) or getattr(res, "num_rows", 0) or 0)
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
-
-    def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete user state rows inactive since ``updated_before``."""
-        sql, params = self._build_delete_idle_user_states_sql_and_params(updated_before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, params)
-            return int(getattr(res, "rows_affected", 0) or getattr(res, "num_rows", 0) or 0)
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
-
-
-class BigQueryAsyncADKStore(_BigQueryADKSessionMixin, BaseAsyncADKStore["BigQueryAsyncConfig"]):
+class BigQueryAsyncADKStore(_BigQueryADKSessionMixin, AdapterAsyncADKStore):
     """BigQuery asynchronous ADK store using partitioned/clustered tables and GoogleSQL ``MERGE``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer")
+    __slots__ = ()
 
     def __init__(self, config: BigQueryAsyncConfig, *, read_config: BigQueryAsyncConfig | None = None) -> None:
         """Initialize the asynchronous BigQuery ADK store."""
@@ -1177,51 +1130,6 @@ class BigQueryAsyncADKStore(_BigQueryADKSessionMixin, BaseAsyncADKStore["BigQuer
                 return None
             raise
 
-    async def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Update JSON session state asynchronously."""
-        sql, params = self._build_update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-
-    async def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List ADK sessions asynchronously."""
-        built = self._build_list_sessions_sql_and_params(
-            app_name, user_id, order_by=order_by, descending=descending, limit=limit, offset=offset
-        )
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, params)
-            return [_row_to_stored_session(dict(row), deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    async def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete a session and its events asynchronously."""
-        events_sql, sessions_sql, params = self._build_delete_session_sqls_and_params(app_name, user_id, session_id)
-        async with self._config.provide_session() as driver:
-            await driver.execute(events_sql, params)
-            await driver.execute(sessions_sql, params)
-
-    async def append_event(self, event_record: StoredEvent) -> None:
-        """Append an ADK event row asynchronously."""
-        sql, params = self._build_append_event_sql_and_params(event_record)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-
     async def append_event_and_update_state(
         self,
         event_record: StoredEvent,
@@ -1281,75 +1189,9 @@ class BigQueryAsyncADKStore(_BigQueryADKSessionMixin, BaseAsyncADKStore["BigQuer
         """Load shared application state asynchronously."""
         return await self._read_app_state(app_name, primary=False)
 
-    async def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Upsert shared application state asynchronously using ``MERGE``."""
-        sql, params = self._build_upsert_app_state_sql_and_params(app_name, state)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-
     async def get_user_state(self, app_name: str, user_id: str) -> dict[str, Any] | None:
         """Load user-scoped ADK state asynchronously."""
         return await self._read_user_state(app_name, user_id, primary=False)
-
-    async def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Upsert user-scoped ADK state asynchronously using ``MERGE``."""
-        sql, params = self._build_upsert_user_state_sql_and_params(app_name, user_id, state)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-
-    async def get_metadata(self, key: str) -> str | None:
-        """Retrieve a scalar ADK store metadata value asynchronously."""
-        sql, params = self._build_get_metadata_sql_and_params(key)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, params)
-            return str(row["value"]) if row is not None and row.get("value") is not None else None
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return None
-            raise
-
-    async def set_metadata(self, key: str, value: str) -> None:
-        """Persist a scalar ADK store metadata value asynchronously using ``MERGE``."""
-        sql, params = self._build_set_metadata_sql_and_params(key, value)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-
-    async def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete expired ADK events asynchronously."""
-        sql, params = self._build_delete_expired_events_sql_and_params(before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, params)
-            return int(getattr(res, "rows_affected", 0) or getattr(res, "num_rows", 0) or 0)
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete idle ADK sessions asynchronously."""
-        sql, params = self._build_delete_idle_sessions_sql_and_params(updated_before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, params)
-            return int(getattr(res, "rows_affected", 0) or getattr(res, "num_rows", 0) or 0)
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete idle user state rows asynchronously."""
-        sql, params = self._build_delete_idle_user_states_sql_and_params(updated_before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, params)
-            return int(getattr(res, "rows_affected", 0) or getattr(res, "num_rows", 0) or 0)
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
 
 
 def _memory_ddl_statements(config: Any, memory_table: str, owner_id_ddl: str | None, *, use_fts: bool) -> list[str]:
@@ -1413,6 +1255,9 @@ class _BigQueryADKMemoryMixin:
     """Shared SQL generation for BigQuery ``VECTOR_SEARCH`` and ``SEARCH`` ADK memory stores."""
 
     __slots__ = ()
+
+    if TYPE_CHECKING:
+        _json_deserializer: Any
 
     _max_table_name_parts: ClassVar[int] = 3
     adapter_name: ClassVar[str | None] = "vertebra_bigquery"
@@ -1640,11 +1485,30 @@ class _BigQueryADKMemoryMixin:
         part_filter = _partition_filter_clause("timestamp", require_filter=require_filter)
         return f"DELETE FROM {table_ref} WHERE {' AND '.join(clauses)}{part_filter}", params
 
+    _commit_after_write = False
+    _unpack_params = False
 
-class BigQuerySyncADKMemoryStore(_BigQueryADKMemoryMixin, _BaseSyncADKMemoryStore["BigQuerySyncConfig"]):
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_bigquery_table_missing(exc)
+
+    def _decode_memory_row(self, row: Any) -> StoredMemory:
+        return _row_to_stored_memory(row, deserializer=self._json_deserializer)
+
+    def _delete_by_session_sql_and_params(
+        self, session_id: str, app_name: str, user_id: str
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_delete_by_session_sql_and_params(session_id, app_name, user_id)
+
+    def _delete_older_than_sql_and_params(
+        self, days: int, app_name: str | None, scope: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_delete_older_than_sql_and_params(days, app_name, scope)
+
+
+class BigQuerySyncADKMemoryStore(_BigQueryADKMemoryMixin, AdapterSyncADKMemoryStore):
     """BigQuery synchronous ADK memory store with ``VECTOR_SEARCH`` and ``SEARCH`` support."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer")
+    __slots__ = ()
 
     def __init__(self, config: BigQuerySyncConfig, *, read_config: BigQuerySyncConfig | None = None) -> None:
         """Initialize the synchronous BigQuery ADK memory store."""
@@ -1653,14 +1517,6 @@ class BigQuerySyncADKMemoryStore(_BigQueryADKMemoryMixin, _BaseSyncADKMemoryStor
 
     def _memory_table_ddl(self) -> list[str]:
         return self._build_memory_table_ddl()
-
-    def create_tables(self) -> None:
-        """Create the BigQuery memory table and optional search index if enabled."""
-        if not self._enabled:
-            return
-        with self._config.provide_session() as driver:
-            for stmt in self._memory_table_ddl():
-                driver.execute(stmt)
 
     def insert_memory_entries(self, entries: list[StoredMemory], owner_id: object | None = None) -> int:
         """Insert memory records using ``MERGE`` deduplication on ``id``."""
@@ -1675,58 +1531,11 @@ class BigQuerySyncADKMemoryStore(_BigQueryADKMemoryMixin, _BaseSyncADKMemoryStor
                 inserted += int(affected) if isinstance(affected, int) and affected > 0 else 1
         return inserted
 
-    def search_entries(
-        self,
-        query: str,
-        app_name: str,
-        user_id: str,
-        limit: int | None = None,
-        scope_filter: Literal["all", "user", "app"] = "all",
-        embedding: Sequence[float] | None = None,
-    ) -> list[StoredMemory]:
-        """Search ADK memory entries via GoogleSQL ``VECTOR_SEARCH``, ``SEARCH``, or ``LIKE``."""
-        built = self._build_search_sql_and_params(query, app_name, user_id, limit, scope_filter, embedding)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, params)
-            return [_row_to_stored_memory(dict(row), deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
 
-    def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete memory entries associated with ``session_id`` owned by ``app_name`` and ``user_id``."""
-        sql, params = self._build_delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, params)
-            return int(getattr(res, "rows_affected", 0) or getattr(res, "num_rows", 0) or 0)
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
-
-    def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete memory entries inserted more than ``days`` ago."""
-        sql, params = self._build_delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, params)
-            return int(getattr(res, "rows_affected", 0) or getattr(res, "num_rows", 0) or 0)
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
-
-
-class BigQueryAsyncADKMemoryStore(_BigQueryADKMemoryMixin, _BaseAsyncADKMemoryStore["BigQueryAsyncConfig"]):
+class BigQueryAsyncADKMemoryStore(_BigQueryADKMemoryMixin, AdapterAsyncADKMemoryStore):
     """BigQuery asynchronous ADK memory store with ``VECTOR_SEARCH`` and ``SEARCH`` support."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer")
+    __slots__ = ()
 
     def __init__(self, config: BigQueryAsyncConfig, *, read_config: BigQueryAsyncConfig | None = None) -> None:
         """Initialize the asynchronous BigQuery ADK memory store."""
@@ -1735,15 +1544,6 @@ class BigQueryAsyncADKMemoryStore(_BigQueryADKMemoryMixin, _BaseAsyncADKMemorySt
 
     async def _memory_table_ddl(self) -> list[str]:
         return self._build_memory_table_ddl()
-
-    async def create_tables(self) -> None:
-        """Create the BigQuery memory table and optional search index asynchronously."""
-        if not self._enabled:
-            return
-        ddls = await self._memory_table_ddl()
-        async with self._config.provide_session() as driver:
-            for stmt in ddls:
-                await driver.execute(stmt)
 
     async def insert_memory_entries(self, entries: list[StoredMemory], owner_id: object | None = None) -> int:
         """Insert memory records asynchronously using ``MERGE`` deduplication on ``id``."""
@@ -1757,53 +1557,6 @@ class BigQueryAsyncADKMemoryStore(_BigQueryADKMemoryMixin, _BaseAsyncADKMemorySt
                 affected = getattr(res, "rows_affected", None)
                 inserted += int(affected) if isinstance(affected, int) and affected > 0 else 1
         return inserted
-
-    async def search_entries(
-        self,
-        query: str,
-        app_name: str,
-        user_id: str,
-        limit: int | None = None,
-        scope_filter: Literal["all", "user", "app"] = "all",
-        embedding: Sequence[float] | None = None,
-    ) -> list[StoredMemory]:
-        """Search ADK memory entries asynchronously via GoogleSQL ``VECTOR_SEARCH``, ``SEARCH``, or ``LIKE``."""
-        built = self._build_search_sql_and_params(query, app_name, user_id, limit, scope_filter, embedding)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, params)
-            return [_row_to_stored_memory(dict(row), deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    async def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete memory entries associated with ``session_id`` owned by ``app_name`` and ``user_id``."""
-        sql, params = self._build_delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, params)
-            return int(getattr(res, "rows_affected", 0) or getattr(res, "num_rows", 0) or 0)
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete aged memory entries asynchronously."""
-        sql, params = self._build_delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, params)
-            return int(getattr(res, "rows_affected", 0) or getattr(res, "num_rows", 0) or 0)
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
 
 
 def _artifact_ddl(config: Any, artifact_table: str) -> str:
@@ -1853,6 +1606,9 @@ class _BigQueryADKArtifactMixin:
     """Shared ObjectRef->ArtifactReference and ObjectStoreBackend wiring for BigQuery ADK artifacts."""
 
     __slots__ = ()
+
+    if TYPE_CHECKING:
+        _json_deserializer: Any
 
     adapter_name: ClassVar[str | None] = "vertebra_bigquery"
     extension_config_options: ClassVar[frozenset[str]] = _BIGQUERY_ADK_EXTENSION_OPTIONS
@@ -2014,11 +1770,50 @@ class _BigQueryADKArtifactMixin:
         delete_sql = f"DELETE FROM {table_ref} WHERE {where}"
         return select_sql, delete_sql, params
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_bigquery_table_missing(exc)
 
-class BigQuerySyncADKArtifactStore(_BigQueryADKArtifactMixin, _BaseSyncADKArtifactStore["BigQuerySyncConfig"]):
+    def _insert_artifact_sql_and_params(self, record: StoredArtifact) -> tuple[str, dict[str, Any]]:
+        return self._build_insert_artifact_sql_and_params(record)
+
+    def _get_artifact_sql_and_params(
+        self, app_name: str, user_id: str, filename: str, session_id: str | None, version: int | None
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_get_artifact_sql_and_params(app_name, user_id, filename, session_id, version)
+
+    def _list_artifact_keys_sql_and_params(
+        self, app_name: str, user_id: str, session_id: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_list_artifact_keys_sql_and_params(app_name, user_id, session_id)
+
+    def _list_artifact_versions_sql_and_params(
+        self, app_name: str, user_id: str, filename: str, session_id: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
+
+    def _delete_artifact_sql_and_params(
+        self, app_name: str, user_id: str, filename: str, session_id: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
+
+    def _get_next_version_sql_and_params(
+        self, app_name: str, user_id: str, filename: str, session_id: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_get_next_version_sql_and_params(app_name, user_id, filename, session_id)
+
+    def _delete_older_than_sqls_and_params(
+        self, before: datetime, app_name: str | None
+    ) -> tuple[str, str, dict[str, Any]]:
+        return self._build_delete_older_than_artifacts_sql_and_params(before, app_name)
+
+    def _decode_artifact_row(self, row: Any) -> StoredArtifact:
+        return _row_to_stored_artifact(dict(row), deserializer=self._json_deserializer)
+
+
+class BigQuerySyncADKArtifactStore(_BigQueryADKArtifactMixin, CloudSyncADKArtifactStore):
     """BigQuery synchronous ADK artifact metadata store bridged to ``ArtifactReference``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer", "_storage_backend")
+    __slots__ = ()
 
     def __init__(
         self,
@@ -2032,176 +1827,11 @@ class BigQuerySyncADKArtifactStore(_BigQueryADKArtifactMixin, _BaseSyncADKArtifa
         self._json_serializer, self._json_deserializer = _resolve_json_codecs(config)
         self._storage_backend = self._init_storage(config, storage_backend)
 
-    @property
-    def storage_backend(self) -> ObjectStoreBackend | None:
-        """Return the configured object storage backend, if any."""
-        return self._storage_backend
-
     def create_table(self) -> None:
         """Create the BigQuery artifact metadata table if missing."""
         ddl = _artifact_ddl(self._config, self._artifact_table)
         with self._config.provide_session() as driver:
             driver.execute(ddl)
-
-    def insert_artifact(self, record: StoredArtifact) -> None:
-        """Persist a ``StoredArtifact`` version metadata row."""
-        sql, params = self._build_insert_artifact_sql_and_params(record)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, params)
-
-    def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch metadata for the requested or latest artifact version."""
-        sql, params = self._build_get_artifact_sql_and_params(app_name, user_id, filename, session_id, version)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, params)
-            return _row_to_stored_artifact(dict(row), deserializer=self._json_deserializer) if row is not None else None
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return None
-            raise
-
-    def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames within user or session+user scope."""
-        sql, params = self._build_list_artifact_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, params)
-            return [str(row["filename"]) for row in rows if row.get("filename") is not None]
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    def list_artifact_versions(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """List all artifact version rows ordered ascending."""
-        sql, params = self._build_list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, params)
-            return [_row_to_stored_artifact(dict(row), deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    def delete_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete all metadata rows for an artifact and return the removed records."""
-        existing = self.list_artifact_versions(app_name, user_id, filename, session_id)
-        sql, params = self._build_delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._config.provide_session() as driver:
-                driver.execute(sql, params)
-            return existing
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    def get_next_version(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> int:
-        """Compute the next zero-based integer artifact version."""
-        sql, params = self._build_get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, params)
-            max_ver = int(row.get("max_ver", -1)) if row is not None and row.get("max_ver") is not None else -1
-            return max_ver + 1
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
-
-    def delete_artifacts_older_than(
-        self,
-        before: datetime,
-        app_name: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete artifact metadata rows created before ``before`` and return them."""
-        select_sql, delete_sql, params = self._build_delete_older_than_artifacts_sql_and_params(before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                rows = [dict(row) for row in driver.select(select_sql, params)]
-                driver.execute(delete_sql, params)
-            return [_row_to_stored_artifact(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    def save_artifact_object(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        data: bytes,
-        *,
-        session_id: str | None = None,
-        mime_type: str = "application/octet-stream",
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> ArtifactReference:
-        """Write binary payload to ``storage_backend``, record SQL metadata, and return ``ArtifactReference``."""
-        version = self.get_next_version(app_name, user_id, filename, session_id)
-        key = self._object_key(app_name, user_id, filename, session_id, version)
-        if self._storage_backend is not None:
-            self._storage_backend.write_bytes_sync(key, data)
-            base_uri = str(getattr(self._storage_backend, "store_uri", "") or "").rstrip("/")
-            canonical_uri = f"{base_uri}/{key}" if base_uri else key
-        else:
-            canonical_uri = key
-        now = datetime.now(UTC)
-        record = cast(
-            "StoredArtifact",
-            {
-                "app_name": app_name,
-                "user_id": user_id,
-                "session_id": session_id,
-                "filename": filename,
-                "version": version,
-                "mime_type": mime_type,
-                "canonical_uri": canonical_uri,
-                "custom_metadata": custom_metadata,
-                "created_at": now,
-            },
-        )
-        self.insert_artifact(record)
-        return self._stored_artifact_to_ref(record, size=len(data))
-
-    def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Return a storage-neutral ``ArtifactReference`` for a persisted artifact."""
-        record = self.get_artifact(app_name, user_id, filename, session_id=session_id, version=version)
-        return self._stored_artifact_to_ref(record) if record is not None else None
 
     def list_object_table_references(
         self,
@@ -2226,10 +1856,10 @@ class BigQuerySyncADKArtifactStore(_BigQueryADKArtifactMixin, _BaseSyncADKArtifa
         return [self.to_artifact_reference(ref) for ref in refs]
 
 
-class BigQueryAsyncADKArtifactStore(_BigQueryADKArtifactMixin, _BaseAsyncADKArtifactStore["BigQueryAsyncConfig"]):
+class BigQueryAsyncADKArtifactStore(_BigQueryADKArtifactMixin, CloudAsyncADKArtifactStore):
     """BigQuery asynchronous ADK artifact metadata store bridged to ``ArtifactReference``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer", "_storage_backend")
+    __slots__ = ()
 
     def __init__(
         self,
@@ -2243,177 +1873,11 @@ class BigQueryAsyncADKArtifactStore(_BigQueryADKArtifactMixin, _BaseAsyncADKArti
         self._json_serializer, self._json_deserializer = _resolve_json_codecs(config)
         self._storage_backend = self._init_storage(config, storage_backend)
 
-    @property
-    def storage_backend(self) -> ObjectStoreBackend | None:
-        """Return the configured object storage backend, if any."""
-        return self._storage_backend
-
     async def create_table(self) -> None:
         """Create the BigQuery artifact metadata table asynchronously."""
         ddl = _artifact_ddl(self._config, self._artifact_table)
         async with self._config.provide_session() as driver:
             await driver.execute(ddl)
-
-    async def insert_artifact(self, record: StoredArtifact) -> None:
-        """Persist a ``StoredArtifact`` version metadata row asynchronously."""
-        sql, params = self._build_insert_artifact_sql_and_params(record)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, params)
-
-    async def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch metadata asynchronously for the requested or latest artifact version."""
-        sql, params = self._build_get_artifact_sql_and_params(app_name, user_id, filename, session_id, version)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, params)
-            return _row_to_stored_artifact(dict(row), deserializer=self._json_deserializer) if row is not None else None
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return None
-            raise
-
-    async def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames asynchronously."""
-        sql, params = self._build_list_artifact_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, params)
-            return [str(row["filename"]) for row in rows if row.get("filename") is not None]
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    async def list_artifact_versions(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """List all artifact version rows asynchronously."""
-        sql, params = self._build_list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, params)
-            return [_row_to_stored_artifact(dict(row), deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    async def delete_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete all metadata rows for an artifact asynchronously and return them."""
-        existing = await self.list_artifact_versions(app_name, user_id, filename, session_id)
-        sql, params = self._build_delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._config.provide_session() as driver:
-                await driver.execute(sql, params)
-            return existing
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    async def get_next_version(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> int:
-        """Compute the next zero-based integer artifact version asynchronously."""
-        sql, params = self._build_get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, params)
-            max_ver = int(row.get("max_ver", -1)) if row is not None and row.get("max_ver") is not None else -1
-            return max_ver + 1
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_artifacts_older_than(
-        self,
-        before: datetime,
-        app_name: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete aged artifact metadata rows asynchronously and return them."""
-        select_sql, delete_sql, params = self._build_delete_older_than_artifacts_sql_and_params(before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                raw_rows = await driver.select(select_sql, params)
-                rows = [dict(row) for row in raw_rows]
-                await driver.execute(delete_sql, params)
-            return [_row_to_stored_artifact(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_bigquery_table_missing(exc):
-                return []
-            raise
-
-    async def save_artifact_object(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        data: bytes,
-        *,
-        session_id: str | None = None,
-        mime_type: str = "application/octet-stream",
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> ArtifactReference:
-        """Write binary payload to ``storage_backend``, record metadata, and return ``ArtifactReference``."""
-        version = await self.get_next_version(app_name, user_id, filename, session_id)
-        key = self._object_key(app_name, user_id, filename, session_id, version)
-        if self._storage_backend is not None:
-            await self._storage_backend.write_bytes_async(key, data)
-            base_uri = str(getattr(self._storage_backend, "store_uri", "") or "").rstrip("/")
-            canonical_uri = f"{base_uri}/{key}" if base_uri else key
-        else:
-            canonical_uri = key
-        now = datetime.now(UTC)
-        record = cast(
-            "StoredArtifact",
-            {
-                "app_name": app_name,
-                "user_id": user_id,
-                "session_id": session_id,
-                "filename": filename,
-                "version": version,
-                "mime_type": mime_type,
-                "canonical_uri": canonical_uri,
-                "custom_metadata": custom_metadata,
-                "created_at": now,
-            },
-        )
-        await self.insert_artifact(record)
-        return self._stored_artifact_to_ref(record, size=len(data))
-
-    async def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Return a storage-neutral ``ArtifactReference`` asynchronously."""
-        record = await self.get_artifact(app_name, user_id, filename, session_id=session_id, version=version)
-        return self._stored_artifact_to_ref(record) if record is not None else None
 
     async def list_object_table_references(
         self,

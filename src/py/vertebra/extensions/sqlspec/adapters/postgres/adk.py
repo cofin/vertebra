@@ -8,9 +8,23 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Literal, NotRequired, cast
 
 from sqlspec.config import ADKConfig
-from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, StoredEvent, StoredSession
+from sqlspec.extensions.adk import StoredEvent, StoredSession
 from sqlspec.extensions.adk.store import normalize_session_list_options
 
+from vertebra.extensions.sqlspec._adk import (
+    AdapterAsyncADKArtifactStore,
+    AdapterAsyncADKMemoryStore,
+    AdapterAsyncADKStore,
+    AdapterSyncADKArtifactStore,
+    AdapterSyncADKMemoryStore,
+    AdapterSyncADKStore,
+    StoredArtifact,
+    StoredMemory,
+    adk_settings,
+    is_renewal_requested,
+    merge_scoped_state,
+    validate_event_scope,
+)
 from vertebra.extensions.sqlspec.adapters.postgres.core import (
     POSTGRES_JSON_FALLBACK,
     is_pg_table_missing,
@@ -28,28 +42,12 @@ from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
-    from sqlspec.extensions.adk import SessionOrderBy, StoredMemory
-    from sqlspec.extensions.adk.artifact import StoredArtifact
-    from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore as _BaseAsyncADKArtifactStore
-    from sqlspec.extensions.adk.artifact.store import BaseSyncADKArtifactStore as _BaseSyncADKArtifactStore
-    from sqlspec.extensions.adk.converters import merge_scoped_state
-    from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore as _BaseAsyncADKMemoryStore
-    from sqlspec.extensions.adk.memory.store import BaseSyncADKMemoryStore as _BaseSyncADKMemoryStore
+    from sqlspec.extensions.adk import SessionOrderBy
 
     from vertebra.extensions.sqlspec.adapters.postgres.config import PostgresAsyncConfig, PostgresSyncConfig
+
 else:
-    _memory_store_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
-    _artifact_store_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="google-adk", extra="adk")
-    _converters_mod = ensure_module("sqlspec.extensions.adk.converters", package="google-adk", extra="adk")
-    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact", package="google-adk", extra="adk")
-    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory", package="google-adk", extra="adk")
-    _BaseAsyncADKMemoryStore = _memory_store_mod.BaseAsyncADKMemoryStore
-    _BaseSyncADKMemoryStore = _memory_store_mod.BaseSyncADKMemoryStore
-    _BaseAsyncADKArtifactStore = _artifact_store_mod.BaseAsyncADKArtifactStore
-    _BaseSyncADKArtifactStore = _artifact_store_mod.BaseSyncADKArtifactStore
-    merge_scoped_state = _converters_mod.merge_scoped_state
-    StoredArtifact = _artifact_types_mod.StoredArtifact
-    StoredMemory = _memory_types_mod.StoredMemory
+    ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
 
 __all__ = (
     "PostgresADKConfig",
@@ -112,21 +110,6 @@ class PostgresADKConfig(ADKConfig, total=False):
 
     scann_quantizer: NotRequired[str]
     """Quantization method for ScaNN index (``'SQ8'``, ``'FP32'``, ``'AH'``)."""
-
-
-def _adk_settings(config: Any) -> dict[str, Any]:
-    """Extract ``extension_config['adk']`` as a mutable dictionary."""
-    ext = getattr(config, "extension_config", {})
-    if not isinstance(ext, Mapping):
-        return {}
-    adk = ext.get("adk", {})
-    return dict(adk) if isinstance(adk, Mapping) else {}
-
-
-def _resolve_json_codecs(config: Any) -> tuple[Any, Any]:
-    """Resolve optional JSON serializer/deserializer hooks from driver features."""
-    features = getattr(config, "driver_features", {}) or {}
-    return features.get("json_serializer"), features.get("json_deserializer")
 
 
 def _decode_json_dict(raw: Any, *, deserializer: Any = None) -> dict[str, Any]:
@@ -494,16 +477,16 @@ class _PostgresADKSessionSQLMixin:
         _user_state_table: str
 
     def _build_sessions_ddl(self) -> str:
-        return _sessions_ddl(self._session_table, self._owner_id_column_ddl, _adk_settings(self._config))
+        return _sessions_ddl(self._session_table, self._owner_id_column_ddl, adk_settings(self._config))
 
     def _build_events_ddl(self) -> str:
-        return _events_ddl(self._events_table, self._session_table, _adk_settings(self._config))
+        return _events_ddl(self._events_table, self._session_table, adk_settings(self._config))
 
     def _build_app_states_ddl(self) -> str:
-        return _app_states_ddl(self._app_state_table, _adk_settings(self._config))
+        return _app_states_ddl(self._app_state_table, adk_settings(self._config))
 
     def _build_user_states_ddl(self) -> str:
-        return _user_states_ddl(self._user_state_table, _adk_settings(self._config))
+        return _user_states_ddl(self._user_state_table, adk_settings(self._config))
 
     def _build_metadata_ddl(self) -> str:
         return _metadata_ddl(self._metadata_table)
@@ -764,46 +747,50 @@ class _PostgresADKSessionSQLMixin:
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
         )
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_pg_table_missing(exc)
 
-class PostgresSyncADKStore(_PostgresADKSessionSQLMixin, BaseSyncADKStore["PostgresSyncConfig"]):
+    def _decode_session_row(
+        self,
+        row: Any,
+        *,
+        app_state: dict[str, Any] | None = None,
+        user_state: dict[str, Any] | None = None,
+        merge_scopes: bool = False,
+    ) -> StoredSession:
+        return _row_to_stored_session(
+            row,
+            deserializer=self._json_deserializer,
+            app_state=app_state,
+            user_state=user_state,
+            merge_scopes=merge_scopes,
+        )
+
+    def _decode_event_row(self, row: Any) -> StoredEvent:
+        return _row_to_stored_event(row, deserializer=self._json_deserializer)
+
+    def _delete_session_sqls_and_params(
+        self, app_name: str, user_id: str, session_id: str
+    ) -> tuple[tuple[str, tuple[str, str, str]]]:
+        return ((self._delete_session_sql(), (app_name, user_id, session_id)),)
+
+    def _get_metadata_sql_and_params(self, key: str) -> tuple[str, tuple[str]]:
+        return self._get_metadata_sql(), (key,)
+
+    def _set_metadata_sql_and_params(self, key: str, value: str) -> tuple[str, tuple[str, str]]:
+        return self._set_metadata_sql(), (key, value)
+
+
+class PostgresSyncADKStore(_PostgresADKSessionSQLMixin, AdapterSyncADKStore):
     """Synchronous PostgreSQL ADK session and event store backed by ``PostgresSyncConfig``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer")
+    __slots__ = ()
 
     extension_config_options = _POSTGRES_ADK_EXTENSION_OPTIONS
 
     def __init__(self, config: PostgresSyncConfig, *, read_config: PostgresSyncConfig | None = None) -> None:
         """Initialize the synchronous PostgreSQL ADK session store."""
         super().__init__(config, read_config=read_config)
-        self._json_serializer, self._json_deserializer = _resolve_json_codecs(config)
-
-    def _sessions_table_ddl(self) -> str:
-        return self._build_sessions_ddl()
-
-    def _events_table_ddl(self) -> str:
-        return self._build_events_ddl()
-
-    def _app_states_table_ddl(self) -> str:
-        return self._build_app_states_ddl()
-
-    def _user_states_table_ddl(self) -> str:
-        return self._build_user_states_ddl()
-
-    def _metadata_table_ddl(self) -> str:
-        return self._build_metadata_ddl()
-
-    def create_tables(self) -> None:
-        """Create ADK sessions, events, app state, user state, and metadata tables idempotently."""
-        if not self.create_schema_enabled:
-            self.reconcile_schema()
-            return
-        with self._config.provide_session() as driver:
-            driver.execute_script(self._sessions_table_ddl())
-            driver.execute_script(self._events_table_ddl())
-            driver.execute_script(self._app_states_table_ddl())
-            driver.execute_script(self._user_states_table_ddl())
-            driver.execute_script(self._metadata_table_ddl())
-            driver.commit()
 
     def _select_state_with_driver(
         self,
@@ -896,7 +883,7 @@ class PostgresSyncADKStore(_PostgresADKSessionSQLMixin, BaseSyncADKStore["Postgr
         self, app_name: str, user_id: str, session_id: str, *, renew_for: int | timedelta | None = None
     ) -> StoredSession | None:
         """Fetch an ADK session by composite key, sliding ``update_time`` if requested."""
-        should_touch = self._is_renewal_requested(renew_for)
+        should_touch = is_renewal_requested(renew_for)
         sql = self._get_session_sql(touch=should_touch)
         try:
             with self._provide_replica_session(primary=renew_for is not None) as driver:
@@ -911,59 +898,6 @@ class PostgresSyncADKStore(_PostgresADKSessionSQLMixin, BaseSyncADKStore["Postgr
                 return None
             raise
 
-    def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Update JSONB session state."""
-        sql, params = self._update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List ADK sessions with validated keyset/offset sorting."""
-        built = self._list_sessions_sql_and_params(
-            app_name, user_id, order_by=order_by, descending=descending, limit=limit, offset=offset
-        )
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-            return [_row_to_stored_session(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
-
-    def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete an ADK session row (cascading event deletions via FK)."""
-        sql = self._delete_session_sql()
-        with self._config.provide_session() as driver:
-            driver.execute(sql, app_name, user_id, session_id)
-            driver.commit()
-
-    def append_event(self, event_record: StoredEvent) -> None:
-        """Append a single ADK event JSONB row after verifying session existence."""
-        sql, params = self._append_event_sql_and_params(event_record)
-        with self._config.provide_session() as driver:
-            res = driver.execute(sql, *params)
-            driver.commit()
-        if int(getattr(res, "rows_affected", 0) or 0) == 0:
-            msg = (
-                f"Session {event_record['session_id']!r} not found "
-                f"for app={event_record['app_name']!r}, user={event_record['user_id']!r}"
-            )
-            raise ValueError(msg)
-
     def append_event_and_update_state(
         self,
         event_record: StoredEvent,
@@ -976,13 +910,7 @@ class PostgresSyncADKStore(_PostgresADKSessionSQLMixin, BaseSyncADKStore["Postgr
         user_state_delta: dict[str, Any] | None = None,
     ) -> StoredSession:
         """Atomically append an event, update session state, and apply scoped deltas."""
-        if (event_record["app_name"], event_record["user_id"], event_record["session_id"]) != (
-            app_name,
-            user_id,
-            session_id,
-        ):
-            msg = "event_record scope does not match target session arguments."
-            raise ValueError(msg)
+        validate_event_scope(event_record, app_name, user_id, session_id)
         update_sql, update_params = self._append_event_update_sql_and_params(app_name, user_id, session_id, state)
         insert_sql, insert_params = self._insert_event_sql_and_params(event_record)
         with self._config.provide_session() as driver:
@@ -1014,70 +942,6 @@ class PostgresSyncADKStore(_PostgresADKSessionSQLMixin, BaseSyncADKStore["Postgr
             merge_scopes=True,
         )
 
-    def get_events(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[StoredEvent]:
-        """Retrieve ADK events for a session ordered chronologically."""
-        if limit == 0:
-            return []
-        sql, params = self._get_events_sql_and_params(app_name, user_id, session_id, after_timestamp, limit)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-            if limit is not None:
-                rows = list(reversed(rows))
-            return [_row_to_stored_event(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
-
-    def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete events older than ``before``, optionally restricted to one app."""
-        sql, params = self._delete_before_sql_and_params(self._events_table, "timestamp", before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return 0
-            raise
-
-    def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete user state rows whose ``update_time`` is older than ``updated_before``."""
-        sql, params = self._delete_before_sql_and_params(
-            self._user_state_table, "update_time", updated_before, app_name
-        )
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return 0
-            raise
-
-    def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete sessions whose ``update_time`` is older than ``updated_before``."""
-        sql, params = self._delete_before_sql_and_params(self._session_table, "update_time", updated_before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return 0
-            raise
-
     def get_app_state(self, app_name: str) -> dict[str, Any] | None:
         """Fetch app-scoped JSONB state for ``app_name``."""
         with self._config.provide_session() as driver:
@@ -1090,77 +954,17 @@ class PostgresSyncADKStore(_PostgresADKSessionSQLMixin, BaseSyncADKStore["Postgr
                 driver, self._user_state_table, ("app_name", "user_id"), (app_name, user_id)
             )
 
-    def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Upsert app-scoped ADK state via PostgreSQL ``ON CONFLICT``."""
-        sql, params = self._upsert_app_state_sql_and_params(app_name, state)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
 
-    def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Upsert user-scoped ADK state via PostgreSQL ``ON CONFLICT``."""
-        sql, params = self._upsert_user_state_sql_and_params(app_name, user_id, state)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def get_metadata(self, key: str) -> str | None:
-        """Return a metadata value from ``adk_internal_metadata`` or ``None`` if absent."""
-        try:
-            with self._config.provide_session() as driver:
-                row = driver.select_one_or_none(self._get_metadata_sql(), key)
-            return str(pg_row_value(row, "value", 0)) if row is not None else None
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return None
-            raise
-
-    def set_metadata(self, key: str, value: str) -> None:
-        """Upsert a metadata key-value entry via PostgreSQL ``ON CONFLICT``."""
-        with self._config.provide_session() as driver:
-            driver.execute(self._set_metadata_sql(), key, value)
-            driver.commit()
-
-
-class PostgresAsyncADKStore(_PostgresADKSessionSQLMixin, BaseAsyncADKStore["PostgresAsyncConfig"]):
+class PostgresAsyncADKStore(_PostgresADKSessionSQLMixin, AdapterAsyncADKStore):
     """Asynchronous PostgreSQL ADK session and event store backed by ``PostgresAsyncConfig``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer")
+    __slots__ = ()
 
     extension_config_options = _POSTGRES_ADK_EXTENSION_OPTIONS
 
     def __init__(self, config: PostgresAsyncConfig, *, read_config: PostgresAsyncConfig | None = None) -> None:
         """Initialize the asynchronous PostgreSQL ADK session store."""
         super().__init__(config, read_config=read_config)
-        self._json_serializer, self._json_deserializer = _resolve_json_codecs(config)
-
-    async def _sessions_table_ddl(self) -> str:
-        return self._build_sessions_ddl()
-
-    async def _events_table_ddl(self) -> str:
-        return self._build_events_ddl()
-
-    async def _app_states_table_ddl(self) -> str:
-        return self._build_app_states_ddl()
-
-    async def _user_states_table_ddl(self) -> str:
-        return self._build_user_states_ddl()
-
-    async def _metadata_table_ddl(self) -> str:
-        return self._build_metadata_ddl()
-
-    async def create_tables(self) -> None:
-        """Create ADK session, event, state, and metadata tables asynchronously."""
-        if not self.create_schema_enabled:
-            await self.reconcile_schema()
-            return
-        async with self._config.provide_session() as driver:
-            await driver.execute_script(await self._sessions_table_ddl())
-            await driver.execute_script(await self._events_table_ddl())
-            await driver.execute_script(await self._app_states_table_ddl())
-            await driver.execute_script(await self._user_states_table_ddl())
-            await driver.execute_script(await self._metadata_table_ddl())
-            await driver.commit()
 
     async def _select_state_with_driver(
         self,
@@ -1213,7 +1017,7 @@ class PostgresAsyncADKStore(_PostgresADKSessionSQLMixin, BaseAsyncADKStore["Post
         app_state_delta: dict[str, Any] | None = None,
         user_state_delta: dict[str, Any] | None = None,
     ) -> StoredSession:
-        """Asynchronously create a new ADK session and atomically apply scoped state deltas."""
+        """Asynchronously create an ADK session and atomically apply scoped state deltas."""
         insert_sql, insert_params = self._create_session_sql_and_params(session_id, app_name, user_id, state, owner_id)
         async with self._config.provide_session() as driver:
             row = await driver.select_one_or_none(insert_sql, *insert_params)
@@ -1252,8 +1056,8 @@ class PostgresAsyncADKStore(_PostgresADKSessionSQLMixin, BaseAsyncADKStore["Post
     async def get_session(
         self, app_name: str, user_id: str, session_id: str, *, renew_for: int | timedelta | None = None
     ) -> StoredSession | None:
-        """Fetch an ADK session asynchronously, sliding ``update_time`` when requested."""
-        should_touch = self._is_renewal_requested(renew_for)
+        """Asynchronously fetch an ADK session, sliding ``update_time`` if requested."""
+        should_touch = is_renewal_requested(renew_for)
         sql = self._get_session_sql(touch=should_touch)
         try:
             async with self._provide_replica_session(primary=renew_for is not None) as driver:
@@ -1268,59 +1072,6 @@ class PostgresAsyncADKStore(_PostgresADKSessionSQLMixin, BaseAsyncADKStore["Post
                 return None
             raise
 
-    async def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Asynchronously update JSONB session state."""
-        sql, params = self._update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List ADK sessions asynchronously."""
-        built = self._list_sessions_sql_and_params(
-            app_name, user_id, order_by=order_by, descending=descending, limit=limit, offset=offset
-        )
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-            return [_row_to_stored_session(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
-
-    async def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Asynchronously delete an ADK session row."""
-        sql = self._delete_session_sql()
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, app_name, user_id, session_id)
-            await driver.commit()
-
-    async def append_event(self, event_record: StoredEvent) -> None:
-        """Asynchronously append an ADK event row after verifying session existence."""
-        sql, params = self._append_event_sql_and_params(event_record)
-        async with self._config.provide_session() as driver:
-            res = await driver.execute(sql, *params)
-            await driver.commit()
-        if int(getattr(res, "rows_affected", 0) or 0) == 0:
-            msg = (
-                f"Session {event_record['session_id']!r} not found "
-                f"for app={event_record['app_name']!r}, user={event_record['user_id']!r}"
-            )
-            raise ValueError(msg)
-
     async def append_event_and_update_state(
         self,
         event_record: StoredEvent,
@@ -1332,14 +1083,8 @@ class PostgresAsyncADKStore(_PostgresADKSessionSQLMixin, BaseAsyncADKStore["Post
         app_state_delta: dict[str, Any] | None = None,
         user_state_delta: dict[str, Any] | None = None,
     ) -> StoredSession:
-        """Atomically append an event, update session state, and apply scoped deltas asynchronously."""
-        if (event_record["app_name"], event_record["user_id"], event_record["session_id"]) != (
-            app_name,
-            user_id,
-            session_id,
-        ):
-            msg = "event_record scope does not match target session arguments."
-            raise ValueError(msg)
+        """Asynchronously append an event, update session state, and apply scoped deltas."""
+        validate_event_scope(event_record, app_name, user_id, session_id)
         update_sql, update_params = self._append_event_update_sql_and_params(app_name, user_id, session_id, state)
         insert_sql, insert_params = self._insert_event_sql_and_params(event_record)
         async with self._config.provide_session() as driver:
@@ -1371,112 +1116,17 @@ class PostgresAsyncADKStore(_PostgresADKSessionSQLMixin, BaseAsyncADKStore["Post
             merge_scopes=True,
         )
 
-    async def get_events(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[StoredEvent]:
-        """Asynchronously retrieve ADK events for a session."""
-        if limit == 0:
-            return []
-        sql, params = self._get_events_sql_and_params(app_name, user_id, session_id, after_timestamp, limit)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-            if limit is not None:
-                rows = list(reversed(rows))
-            return [_row_to_stored_event(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
-
-    async def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Asynchronously delete events older than ``before``."""
-        sql, params = self._delete_before_sql_and_params(self._events_table, "timestamp", before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Asynchronously delete idle user states older than ``updated_before``."""
-        sql, params = self._delete_before_sql_and_params(
-            self._user_state_table, "update_time", updated_before, app_name
-        )
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Asynchronously delete idle sessions older than ``updated_before``."""
-        sql, params = self._delete_before_sql_and_params(self._session_table, "update_time", updated_before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return 0
-            raise
-
     async def get_app_state(self, app_name: str) -> dict[str, Any] | None:
-        """Asynchronously fetch app-scoped state."""
+        """Asynchronously fetch app-scoped JSONB state for ``app_name``."""
         async with self._config.provide_session() as driver:
             return await self._select_state_with_driver(driver, self._app_state_table, ("app_name",), (app_name,))
 
     async def get_user_state(self, app_name: str, user_id: str) -> dict[str, Any] | None:
-        """Asynchronously fetch user-scoped state."""
+        """Asynchronously fetch user-scoped JSONB state for ``(app_name, user_id)``."""
         async with self._config.provide_session() as driver:
             return await self._select_state_with_driver(
                 driver, self._user_state_table, ("app_name", "user_id"), (app_name, user_id)
             )
-
-    async def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Asynchronously upsert app-scoped ADK state."""
-        sql, params = self._upsert_app_state_sql_and_params(app_name, state)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Asynchronously upsert user-scoped ADK state."""
-        sql, params = self._upsert_user_state_sql_and_params(app_name, user_id, state)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def get_metadata(self, key: str) -> str | None:
-        """Asynchronously fetch a metadata entry."""
-        try:
-            async with self._config.provide_session() as driver:
-                row = await driver.select_one_or_none(self._get_metadata_sql(), key)
-            return str(pg_row_value(row, "value", 0)) if row is not None else None
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return None
-            raise
-
-    async def set_metadata(self, key: str, value: str) -> None:
-        """Asynchronously upsert a metadata entry."""
-        async with self._config.provide_session() as driver:
-            await driver.execute(self._set_metadata_sql(), key, value)
-            await driver.commit()
 
 
 class _PostgresADKMemorySQLMixin:
@@ -1681,189 +1331,35 @@ class _PostgresADKMemorySQLMixin:
         sql = f"DELETE FROM {table_ref} WHERE {' AND '.join(clauses)}"
         return sql, params
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_pg_table_missing(exc)
 
-class PostgresSyncADKMemoryStore(_PostgresADKMemorySQLMixin, _BaseSyncADKMemoryStore["PostgresSyncConfig"]):
+    def _decode_memory_row(self, row: Any) -> StoredMemory:
+        return _row_to_stored_memory(row, deserializer=self._json_deserializer)
+
+
+class PostgresSyncADKMemoryStore(_PostgresADKMemorySQLMixin, AdapterSyncADKMemoryStore):
     """Synchronous PostgreSQL ADK memory store supporting pgvector, BM25, and ``tsvector`` FTS."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer")
+    __slots__ = ()
 
     extension_config_options = _POSTGRES_ADK_EXTENSION_OPTIONS
 
     def __init__(self, config: PostgresSyncConfig, *, read_config: PostgresSyncConfig | None = None) -> None:
         """Initialize synchronous PostgreSQL memory store settings."""
         super().__init__(config, read_config=read_config)
-        self._json_serializer, self._json_deserializer = _resolve_json_codecs(config)
-
-    def _memory_table_ddl(self) -> str:
-        return self._build_memory_table_ddl()
-
-    def create_tables(self) -> None:
-        """Create PostgreSQL memory table and vector/FTS indexes idempotently."""
-        if not self._enabled:
-            return
-        if not self.create_schema_enabled:
-            self.reconcile_schema()
-            return
-        with self._config.provide_session() as driver:
-            driver.execute_script(self._memory_table_ddl())
-            driver.commit()
-
-    def insert_memory_entries(self, entries: list[StoredMemory], owner_id: object | None = None) -> int:
-        """Bulk-insert memory entries with deduplication."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        if not entries:
-            return 0
-        inserted = 0
-        with self._config.provide_session() as driver:
-            for entry in entries:
-                sql, params = self._build_insert_sql_and_params(entry, owner_id)
-                res = driver.execute(sql, *params)
-                inserted += int(getattr(res, "rows_affected", 0) or 0)
-            driver.commit()
-        return inserted
-
-    def search_entries(
-        self,
-        query: str,
-        app_name: str,
-        user_id: str,
-        limit: int | None = None,
-        scope_filter: Literal["all", "user", "app"] = "all",
-        embedding: Sequence[float] | None = None,
-    ) -> list[StoredMemory]:
-        """Search memory entries via hybrid RRF, pgvector cosine distance, FTS, or ILIKE."""
-        built = self._build_search_sql_and_params(query, app_name, user_id, limit, scope_filter, embedding)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-            return [_row_to_stored_memory(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
-
-    def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete all memory entries for ``session_id`` owned by ``app_name`` and ``user_id``."""
-        sql, params = self._delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return 0
-            raise
-
-    def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete memory entries older than ``days`` days filtered optionally by app and scope."""
-        sql, params = self._delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            with self._config.provide_session() as driver:
-                res = driver.execute(sql, *params)
-                driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return 0
-            raise
 
 
-class PostgresAsyncADKMemoryStore(_PostgresADKMemorySQLMixin, _BaseAsyncADKMemoryStore["PostgresAsyncConfig"]):
+class PostgresAsyncADKMemoryStore(_PostgresADKMemorySQLMixin, AdapterAsyncADKMemoryStore):
     """Asynchronous PostgreSQL ADK memory store supporting pgvector, BM25, and ``tsvector`` FTS."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer")
+    __slots__ = ()
 
     extension_config_options = _POSTGRES_ADK_EXTENSION_OPTIONS
 
     def __init__(self, config: PostgresAsyncConfig, *, read_config: PostgresAsyncConfig | None = None) -> None:
         """Initialize asynchronous PostgreSQL memory store settings."""
         super().__init__(config, read_config=read_config)
-        self._json_serializer, self._json_deserializer = _resolve_json_codecs(config)
-
-    async def _memory_table_ddl(self) -> str:
-        return self._build_memory_table_ddl()
-
-    async def create_tables(self) -> None:
-        """Asynchronously create PostgreSQL memory table and indexes idempotently."""
-        if not self._enabled:
-            return
-        if not self.create_schema_enabled:
-            await self.reconcile_schema()
-            return
-        async with self._config.provide_session() as driver:
-            await driver.execute_script(await self._memory_table_ddl())
-            await driver.commit()
-
-    async def insert_memory_entries(self, entries: list[StoredMemory], owner_id: object | None = None) -> int:
-        """Asynchronously bulk-insert memory entries with deduplication."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        if not entries:
-            return 0
-        inserted = 0
-        async with self._config.provide_session() as driver:
-            for entry in entries:
-                sql, params = self._build_insert_sql_and_params(entry, owner_id)
-                res = await driver.execute(sql, *params)
-                inserted += int(getattr(res, "rows_affected", 0) or 0)
-            await driver.commit()
-        return inserted
-
-    async def search_entries(
-        self,
-        query: str,
-        app_name: str,
-        user_id: str,
-        limit: int | None = None,
-        scope_filter: Literal["all", "user", "app"] = "all",
-        embedding: Sequence[float] | None = None,
-    ) -> list[StoredMemory]:
-        """Asynchronously search memory entries via hybrid RRF, pgvector cosine distance, FTS, or ILIKE."""
-        built = self._build_search_sql_and_params(query, app_name, user_id, limit, scope_filter, embedding)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-            return [_row_to_stored_memory(row, deserializer=self._json_deserializer) for row in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
-
-    async def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Asynchronously delete all memory entries for ``session_id`` owned by ``app_name`` and ``user_id``."""
-        sql, params = self._delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Asynchronously delete memory entries older than ``days`` days."""
-        sql, params = self._delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            async with self._config.provide_session() as driver:
-                res = await driver.execute(sql, *params)
-                await driver.commit()
-                return int(getattr(res, "rows_affected", 0) or 0)
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return 0
-            raise
 
 
 class _PostgresADKArtifactSQLMixin:
@@ -1974,7 +1470,7 @@ class _PostgresADKArtifactSQLMixin:
         )
         return sql, (app_name, user_id, sess_val, filename)
 
-    def _list_keys_sql_and_params(
+    def _list_artifact_keys_sql_and_params(
         self,
         app_name: str,
         user_id: str,
@@ -1993,7 +1489,7 @@ class _PostgresADKArtifactSQLMixin:
         )
         return sql, (app_name, user_id)
 
-    def _list_versions_sql_and_params(
+    def _list_artifact_versions_sql_and_params(
         self,
         app_name: str,
         user_id: str,
@@ -2051,288 +1547,31 @@ class _PostgresADKArtifactSQLMixin:
         delete_sql = f"DELETE FROM {table_ref} WHERE created_at < $1"
         return select_sql, delete_sql, (cutoff,)
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_pg_table_missing(exc)
 
-class PostgresSyncADKArtifactStore(_PostgresADKArtifactSQLMixin, _BaseSyncADKArtifactStore["PostgresSyncConfig"]):
+    def _decode_artifact_row(self, row: Any) -> StoredArtifact:
+        return _row_to_stored_artifact(row, deserializer=self._json_deserializer)
+
+    def _decode_artifact_ref_row(self, row: Any) -> ArtifactReference:
+        return _row_to_artifact_reference(row)
+
+
+class PostgresSyncADKArtifactStore(_PostgresADKArtifactSQLMixin, AdapterSyncADKArtifactStore):
     """Synchronous PostgreSQL ADK artifact metadata store returning ``ArtifactReference``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer")
+    __slots__ = ()
 
     def __init__(self, config: PostgresSyncConfig, *, read_config: PostgresSyncConfig | None = None) -> None:
         """Initialize the synchronous PostgreSQL ADK artifact store."""
         super().__init__(config, read_config=read_config)
-        self._json_serializer, self._json_deserializer = _resolve_json_codecs(config)
-
-    def create_table(self) -> None:
-        """Create the ADK artifact metadata table in PostgreSQL."""
-        with self._config.provide_session() as driver:
-            driver.execute_script(self._build_artifact_table_ddl())
-            driver.commit()
-
-    def insert_artifact(self, record: StoredArtifact) -> None:
-        """Upsert an ADK artifact metadata entry using ``$1..$N`` binds."""
-        sql, params = self._insert_artifact_sql_and_params(record)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def insert_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        reference: ArtifactReference,
-        *,
-        session_id: str | None = None,
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Persist a ``vertebra.storage.ArtifactReference`` record into the artifact metadata table."""
-        sql, params = self._insert_artifact_ref_sql_and_params(
-            app_name, user_id, filename, reference, session_id, custom_metadata
-        )
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch an ADK artifact metadata dictionary by key and optional version."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=False
-        )
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, *params)
-            return _row_to_stored_artifact(row, deserializer=self._json_deserializer) if row is not None else None
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return None
-            raise
-
-    def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        *,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Retrieve stored object metadata as a ``vertebra.storage.ArtifactReference``."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=True
-        )
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, *params)
-            return _row_to_artifact_reference(row) if row is not None else None
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return None
-            raise
-
-    def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """Return distinct sorted filenames stored under an app/user/session scope."""
-        sql, params = self._list_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-            return [str(pg_row_value(r, "filename", 0)) for r in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
-
-    def list_artifact_versions(
-        self, app_name: str, user_id: str, filename: str, session_id: str | None = None
-    ) -> list[StoredArtifact]:
-        """Return ascending ``StoredArtifact`` versions for a filename."""
-        sql, params = self._list_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-            return [_row_to_stored_artifact(r, deserializer=self._json_deserializer) for r in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
-
-    def delete_artifact(
-        self, app_name: str, user_id: str, filename: str, session_id: str | None = None
-    ) -> list[StoredArtifact]:
-        """Delete all stored versions of an artifact and return removed records."""
-        existing = self.list_artifact_versions(app_name, user_id, filename, session_id=session_id)
-        sql, params = self._delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
-        return existing
-
-    def get_next_version(self, app_name: str, user_id: str, filename: str, session_id: str | None = None) -> int:
-        """Return the next sequential artifact version (``MAX(version) + 1`` or ``0``)."""
-        sql, params = self._get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        with self._config.provide_session() as driver:
-            val = driver.select_value_or_none(sql, *params)
-        return 0 if val is None else int(val) + 1
-
-    def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Delete artifact rows older than ``before`` and return the removed records."""
-        select_sql, delete_sql, params = self._delete_older_than_sqls_and_params(before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                rows = driver.select(select_sql, *params)
-                driver.execute(delete_sql, *params)
-                driver.commit()
-            return [_row_to_stored_artifact(r, deserializer=self._json_deserializer) for r in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
 
 
-class PostgresAsyncADKArtifactStore(_PostgresADKArtifactSQLMixin, _BaseAsyncADKArtifactStore["PostgresAsyncConfig"]):
+class PostgresAsyncADKArtifactStore(_PostgresADKArtifactSQLMixin, AdapterAsyncADKArtifactStore):
     """Asynchronous PostgreSQL ADK artifact metadata store returning ``ArtifactReference``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer")
+    __slots__ = ()
 
     def __init__(self, config: PostgresAsyncConfig, *, read_config: PostgresAsyncConfig | None = None) -> None:
         """Initialize the asynchronous PostgreSQL ADK artifact store."""
         super().__init__(config, read_config=read_config)
-        self._json_serializer, self._json_deserializer = _resolve_json_codecs(config)
-
-    async def create_table(self) -> None:
-        """Asynchronously create the ADK artifact metadata table."""
-        async with self._config.provide_session() as driver:
-            await driver.execute_script(self._build_artifact_table_ddl())
-            await driver.commit()
-
-    async def insert_artifact(self, record: StoredArtifact) -> None:
-        """Asynchronously upsert an ADK artifact metadata record."""
-        sql, params = self._insert_artifact_sql_and_params(record)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def insert_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        reference: ArtifactReference,
-        *,
-        session_id: str | None = None,
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Asynchronously store a ``vertebra.storage.ArtifactReference`` record."""
-        sql, params = self._insert_artifact_ref_sql_and_params(
-            app_name, user_id, filename, reference, session_id, custom_metadata
-        )
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Asynchronously fetch an ADK artifact record."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=False
-        )
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, *params)
-            return _row_to_stored_artifact(row, deserializer=self._json_deserializer) if row is not None else None
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return None
-            raise
-
-    async def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        *,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Asynchronously retrieve stored object metadata as ``ArtifactReference``."""
-        sql, params = self._get_artifact_sql_and_params(
-            app_name, user_id, filename, session_id, version, include_ref_cols=True
-        )
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, *params)
-            return _row_to_artifact_reference(row) if row is not None else None
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return None
-            raise
-
-    async def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """Asynchronously list distinct artifact filenames."""
-        sql, params = self._list_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-            return [str(pg_row_value(r, "filename", 0)) for r in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
-
-    async def list_artifact_versions(
-        self, app_name: str, user_id: str, filename: str, session_id: str | None = None
-    ) -> list[StoredArtifact]:
-        """Asynchronously list stored ``StoredArtifact`` versions for an artifact."""
-        sql, params = self._list_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-            return [_row_to_stored_artifact(r, deserializer=self._json_deserializer) for r in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise
-
-    async def delete_artifact(
-        self, app_name: str, user_id: str, filename: str, session_id: str | None = None
-    ) -> list[StoredArtifact]:
-        """Asynchronously delete all stored versions of an artifact and return removed records."""
-        existing = await self.list_artifact_versions(app_name, user_id, filename, session_id=session_id)
-        sql, params = self._delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-        return existing
-
-    async def get_next_version(self, app_name: str, user_id: str, filename: str, session_id: str | None = None) -> int:
-        """Asynchronously compute the next sequential artifact version."""
-        sql, params = self._get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        async with self._config.provide_session() as driver:
-            val = await driver.select_value_or_none(sql, *params)
-        return 0 if val is None else int(val) + 1
-
-    async def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Asynchronously delete artifact metadata rows older than ``before`` and return removed records."""
-        select_sql, delete_sql, params = self._delete_older_than_sqls_and_params(before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                rows = await driver.select(select_sql, *params)
-                await driver.execute(delete_sql, *params)
-                await driver.commit()
-            return [_row_to_stored_artifact(r, deserializer=self._json_deserializer) for r in rows]
-        except Exception as exc:
-            if is_pg_table_missing(exc):
-                return []
-            raise

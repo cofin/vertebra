@@ -7,15 +7,13 @@ from collections.abc import Awaitable, Buffer, Callable
 from contextlib import suppress
 from typing import Any, Protocol, cast
 
-from vertebra._vertebra import ArrowCursor as RustArrowCursor
-from vertebra.db.arrow import ArrowCursor
 from vertebra.server._fastpath_core import (
     BODYLESS_HTTP_METHODS,
     get_attached_fastpath,
     resolve_fastpath_provider,
+    serialize_fastpath_special_result,
     set_attached_fastpath,
 )
-from vertebra.storage._streaming import StreamingStorageResponse
 from vertebra.typing import VertebraError
 from vertebra.utils.type_guards import is_coroutine_callable
 
@@ -64,29 +62,6 @@ class PayloadTooLargeError(VertebraError):
     def __init__(self, limit: int) -> None:
         self.max_body_size = limit
         super().__init__(f"Request payload exceeds limit of {limit} bytes")
-
-
-def serialize_fastpath_special_result(
-    result: Any,
-    *,
-    default_status: int = 200,
-) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
-    """Serialize `ArrowCursor` or `StreamingStorageResponse` directly without JSON encoding."""
-    if result is None:
-        return None
-    if isinstance(result, ArrowCursor | RustArrowCursor):
-        raw_arrow: memoryview = result.buffer_view()
-        return (
-            default_status,
-            [
-                (b"content-type", ARROW_STREAM_MEDIA_TYPE),
-                (b"content-length", str(len(raw_arrow)).encode("ascii")),
-            ],
-            raw_arrow,
-        )
-    if isinstance(result, StreamingStorageResponse):
-        return result.to_fastpath_tuple()
-    return None
 
 
 def resolve_relative_path(scope: Any, mount_prefix: str = "") -> str:

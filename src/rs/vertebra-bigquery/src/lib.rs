@@ -32,11 +32,7 @@ use crate::errors::bigquery_error_to_py;
 
 pub(crate) const BIGQUERY_COMPLETION_DRAINER_ATTR: &str = "_vertebra_bigquery_completion_drainer";
 
-/// Whether this build targets free-threaded Python (3.14t+).
-#[cfg(Py_GIL_DISABLED)]
-pub const FREE_THREADED: bool = true;
-#[cfg(not(Py_GIL_DISABLED))]
-pub const FREE_THREADED: bool = false;
+pub use vertebra_db::py_broker::FREE_THREADED;
 
 pub(crate) fn cell_to_py(py: Python<'_>, cell: &BigQueryCellValue) -> PyResult<Py<PyAny>> {
     match cell {

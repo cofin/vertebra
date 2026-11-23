@@ -916,114 +916,66 @@ class _StubSyncOracleClient:
         )
 
 
+def _proxy_attr(name: str, *, writable: bool = False) -> property:
+    """Return a property forwarding reads (and optionally writes) to ``self._sync.<name>``."""
+
+    def _get(self: Any) -> Any:
+        return getattr(self._sync, name)
+
+    if writable:
+
+        def _set(self: Any, value: Any) -> None:
+            setattr(self._sync, name, value)
+
+        return property(_get, _set)
+    return property(_get)
+
+
+def _proxy_async(name: str, *, yield_loop: bool = True, return_self: bool = False) -> Any:
+    """Return an async method forwarding calls to ``self._sync.<name>(*args, **kwargs)``."""
+
+    async def _method(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if yield_loop:
+            await asyncio.sleep(0)
+        result = getattr(self._sync, name)(*args, **kwargs)
+        return self if return_self else result
+
+    _method.__name__ = name
+    return _method
+
+
+def _proxy_sync(name: str) -> Any:
+    """Return a sync method forwarding calls to ``self._sync.<name>(*args, **kwargs)``."""
+
+    def _method(self: Any, *args: Any, **kwargs: Any) -> Any:
+        return getattr(self._sync, name)(*args, **kwargs)
+
+    _method.__name__ = name
+    return _method
+
+
 class _StubAsyncOracleCursor:
     """Protocol double matching `_oracle.AsyncOracleCursor` for offline async driver tests."""
 
-    def __init__(
-        self,
-        sync_cursor: _StubSyncOracleCursor,
-    ) -> None:
+    def __init__(self, sync_cursor: _StubSyncOracleCursor) -> None:
         self._sync = sync_cursor
 
-    @property
-    def arraysize(self) -> int:
-        """Return the cursor fetch array size."""
-        return self._sync.arraysize
-
-    @arraysize.setter
-    def arraysize(self, value: int) -> None:
-        self._sync.arraysize = value
-
-    @property
-    def description(self) -> tuple[tuple[str, str, None, None, None, None, None], ...] | None:
-        """Return PEP 249 column metadata tuples."""
-        return self._sync.description
-
-    @property
-    def rowcount(self) -> int:
-        """Return affected row count."""
-        return self._sync.rowcount
-
-    @property
-    def lastrowid(self) -> str | None:
-        """Return last inserted ROWID when available."""
-        return self._sync.lastrowid
-
-    @property
-    def touches_session_context(self) -> bool:
-        """Return whether the executed SQL modified session context."""
-        return self._sync.touches_session_context
-
-    @property
-    def out_binds(self) -> dict[str, Any] | tuple[Any, ...] | None:
-        """Return coerced OUT bind values."""
-        return self._sync.out_binds
-
-    @property
-    def closed(self) -> bool:
-        """Return whether the cursor has been closed."""
-        return self._sync.closed
-
-    @property
-    def lazy_begin(self) -> bool:
-        """Return whether the cursor was created with lazy_begin=True."""
-        return self._sync.lazy_begin
-
-    @property
-    def options(self) -> dict[str, Any]:
-        """Return the cursor feature options."""
-        return self._sync.options
-
-    def var(
-        self,
-        type_code: Any,
-        size: int = 0,
-        arraysize: int = 1,
-        outconverter: Callable[[Any], Any] | None = None,
-    ) -> _oracle.OracleOutBindVar:
-        """Create an `OracleOutBindVar` placeholder."""
-        return self._sync.var(type_code, size=size, arraysize=arraysize, outconverter=outconverter)
-
-    async def execute(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = (),
-        *,
-        out_binds: Mapping[str, str] | Sequence[str] | None = None,
-    ) -> _StubAsyncOracleCursor:
-        """Execute SQL asynchronously against the owning stub client."""
-        await asyncio.sleep(0)
-        self._sync.execute(sql, params, out_binds=out_binds)
-        return self
-
-    async def executemany(
-        self,
-        sql: str,
-        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
-    ) -> _StubAsyncOracleCursor:
-        """Execute a DML batch asynchronously against the owning stub client."""
-        await asyncio.sleep(0)
-        self._sync.executemany(sql, seq_of_params)
-        return self
-
-    async def fetchone(self) -> tuple[Any, ...] | None:
-        """Return the next buffered row or `None`."""
-        await asyncio.sleep(0)
-        return self._sync.fetchone()
-
-    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
-        """Return up to `size` buffered rows."""
-        await asyncio.sleep(0)
-        return self._sync.fetchmany(size)
-
-    async def fetchall(self) -> list[tuple[Any, ...]]:
-        """Return all remaining buffered rows."""
-        await asyncio.sleep(0)
-        return self._sync.fetchall()
-
-    async def close(self) -> None:
-        """Close the cursor idempotently."""
-        self._sync.close()
+    arraysize: Any = _proxy_attr("arraysize", writable=True)
+    description: Any = _proxy_attr("description")
+    rowcount: Any = _proxy_attr("rowcount")
+    lastrowid: Any = _proxy_attr("lastrowid")
+    touches_session_context: Any = _proxy_attr("touches_session_context")
+    out_binds: Any = _proxy_attr("out_binds")
+    closed: Any = _proxy_attr("closed")
+    lazy_begin: Any = _proxy_attr("lazy_begin")
+    options: Any = _proxy_attr("options")
+    var: Any = _proxy_sync("var")
+    execute: Any = _proxy_async("execute", return_self=True)
+    executemany: Any = _proxy_async("executemany", return_self=True)
+    fetchone: Any = _proxy_async("fetchone")
+    fetchmany: Any = _proxy_async("fetchmany")
+    fetchall: Any = _proxy_async("fetchall")
+    close: Any = _proxy_async("close", yield_loop=False)
 
 
 class _StubAsyncOracleClient:
@@ -1037,118 +989,52 @@ class _StubAsyncOracleClient:
         connection_tag: str | None = None,
         listener_fail_modes: Sequence[str | None] = (),
     ) -> None:
-        self._sync = _StubSyncOracleClient(
-            cclass=cclass,
-            purity=purity,
-            connection_tag=connection_tag,
-        )
+        self._sync = _StubSyncOracleClient(cclass=cclass, purity=purity, connection_tag=connection_tag)
         self._listener_fail_modes: deque[str | None] = deque(listener_fail_modes)
         self.created_listeners: list[_StubAsyncListener] = []
 
-    @property
-    def closed(self) -> bool:
-        """Return `True` when the session is closed."""
-        return self._sync.closed
+    closed: Any = _proxy_attr("closed")
+    in_transaction: Any = _proxy_attr("in_transaction")
+    cclass: Any = _proxy_attr("cclass")
+    purity: Any = _proxy_attr("purity", writable=True)
+    connection_tag: Any = _proxy_attr("connection_tag", writable=True)
+    tag_matched: Any = _proxy_attr("tag_matched", writable=True)
+    calls: Any = _proxy_attr("calls")
+    queued_results: Any = _proxy_attr("queued_results")
+    queued_arrow: Any = _proxy_attr("queued_arrow")
+    queued_pipeline: Any = _proxy_attr("queued_pipeline")
+    aq_queues: Any = _proxy_attr("aq_queues")
+    pending_session_attrs: Any = _proxy_attr("pending_session_attrs")
+    active_session_attrs: Any = _proxy_attr("active_session_attrs")
+    last_piggyback_frame: Any = _proxy_attr("last_piggyback_frame")
+    attach_lease_calls: Any = _proxy_attr("attach_lease_calls")
+    release_lease_calls: Any = _proxy_attr("release_lease_calls")
+    cursor_calls: Any = _proxy_attr("cursor_calls")
 
-    @property
-    def in_transaction(self) -> bool:
-        """Return `True` when a transaction is open."""
-        return self._sync.in_transaction
+    attach_lease: Any = _proxy_sync("attach_lease")
+    release_lease: Any = _proxy_sync("release_lease")
+    set_session_attrs: Any = _proxy_sync("set_session_attrs")
+    cancel: Any = _proxy_sync("cancel")
 
-    @property
-    def cclass(self) -> str | None:
-        """Return the configured DRCP connection class."""
-        return self._sync.cclass
+    connect: Any = _proxy_async("connect", yield_loop=False)
+    ping: Any = _proxy_async("ping", yield_loop=False)
+    close: Any = _proxy_async("close", yield_loop=False)
+    begin: Any = _proxy_async("begin", yield_loop=False)
+    commit: Any = _proxy_async("commit", yield_loop=False)
+    rollback: Any = _proxy_async("rollback", yield_loop=False)
+    savepoint: Any = _proxy_async("savepoint", yield_loop=False)
+    rollback_to_savepoint: Any = _proxy_async("rollback_to_savepoint", yield_loop=False)
 
-    @property
-    def purity(self) -> str:
-        """Return the session DRCP purity."""
-        return self._sync.purity
-
-    @purity.setter
-    def purity(self, value: str) -> None:
-        self._sync.purity = value
-
-    @property
-    def connection_tag(self) -> str | None:
-        """Return the session DRCP connection tag."""
-        return self._sync.connection_tag
-
-    @connection_tag.setter
-    def connection_tag(self, value: str | None) -> None:
-        self._sync.connection_tag = value
-
-    @property
-    def tag_matched(self) -> bool:
-        """Return whether checkout matched a pooled tag."""
-        return self._sync.tag_matched
-
-    @tag_matched.setter
-    def tag_matched(self, value: bool) -> None:
-        self._sync.tag_matched = value
-
-    @property
-    def calls(self) -> list[tuple[Any, ...]]:
-        """Return recorded client operations."""
-        return self._sync.calls
-
-    @property
-    def queued_results(self) -> deque[_oracle.OracleQueryResult | BaseException]:
-        """Return queued `OracleQueryResult` fixtures."""
-        return self._sync.queued_results
-
-    @property
-    def queued_arrow(self) -> deque[tuple[Sequence[tuple[Any, ...]], Sequence[str]]]:
-        """Return queued `ArrowCursor` row/column fixtures."""
-        return self._sync.queued_arrow
-
-    @property
-    def queued_pipeline(self) -> deque[list[_oracle.OraclePipelineOutcome]]:
-        """Return queued pipeline outcome lists."""
-        return self._sync.queued_pipeline
-
-    @property
-    def aq_queues(self) -> dict[str, deque[_oracle.OracleNotification]]:
-        """Return the in-process AQ notification queue store."""
-        return self._sync.aq_queues
-
-    @property
-    def pending_session_attrs(self) -> dict[str, str | None] | None:
-        """Return staged TTC session attributes."""
-        return self._sync.pending_session_attrs
-
-    @property
-    def active_session_attrs(self) -> dict[str, str | None]:
-        """Return active TTC session attributes."""
-        return self._sync.active_session_attrs
-
-    @property
-    def last_piggyback_frame(self) -> bytes | None:
-        """Return the last encoded TTC piggyback frame."""
-        return self._sync.last_piggyback_frame
-
-    @property
-    def attach_lease_calls(self) -> int:
-        """Return the number of `attach_lease()` calls on this stub client."""
-        return self._sync.attach_lease_calls
-
-    @property
-    def release_lease_calls(self) -> int:
-        """Return the number of `release_lease()` calls on this stub client."""
-        return self._sync.release_lease_calls
-
-    @property
-    def cursor_calls(self) -> list[dict[str, Any]]:
-        """Return recorded `cursor()` option dicts."""
-        return self._sync.cursor_calls
-
-    def attach_lease(self, release: Callable[[], None]) -> None:
-        """Attach a checkout lease releaser to this stub client."""
-        self._sync.attach_lease(release)
-
-    def release_lease(self) -> None:
-        """Release any attached checkout lease idempotently."""
-        self._sync.release_lease()
+    fetch_rows: Any = _proxy_async("fetch_rows")
+    fetch_dicts: Any = _proxy_async("fetch_dicts")
+    fetch_value: Any = _proxy_async("fetch_value")
+    execute_dml: Any = _proxy_async("execute_dml")
+    query: Any = _proxy_async("query")
+    execute: Any = _proxy_async("execute")
+    execute_many: Any = _proxy_async("execute_many")
+    query_arrow: Any = _proxy_async("query_arrow")
+    execute_pipeline_batch: Any = _proxy_async("execute_pipeline_batch")
+    enqueue_notification: Any = _proxy_async("enqueue_notification")
 
     def cursor(
         self,
@@ -1160,250 +1046,14 @@ class _StubAsyncOracleClient:
         lazy_begin: bool = False,
     ) -> _StubAsyncOracleCursor:
         """Create a `_StubAsyncOracleCursor` bound to this stub client."""
-        sync_cur = self._sync.cursor(
-            enable_uuid_binary=enable_uuid_binary,
-            fetch_decimals=fetch_decimals,
-            vector_return_format=vector_return_format,
-            enable_lowercase_column_names=enable_lowercase_column_names,
-            lazy_begin=lazy_begin,
-        )
-        return _StubAsyncOracleCursor(sync_cur)
-
-    async def fetch_rows(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = (),
-        *,
-        out_binds: Mapping[str, str] | Sequence[str] | None = None,
-        enable_uuid_binary: bool = True,
-        fetch_decimals: bool = False,
-        vector_return_format: str = "list",
-        enable_lowercase_column_names: bool = True,
-    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-        """Awaitable `fetch_rows()` forwarding to the underlying sync stub client."""
-        await asyncio.sleep(0)
-        return self._sync.fetch_rows(
-            sql,
-            params,
-            out_binds=out_binds,
-            enable_uuid_binary=enable_uuid_binary,
-            fetch_decimals=fetch_decimals,
-            vector_return_format=vector_return_format,
-            enable_lowercase_column_names=enable_lowercase_column_names,
-        )
-
-    async def fetch_dicts(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = (),
-        *,
-        out_binds: Mapping[str, str] | Sequence[str] | None = None,
-        enable_uuid_binary: bool = True,
-        fetch_decimals: bool = False,
-        vector_return_format: str = "list",
-        enable_lowercase_column_names: bool = True,
-    ) -> list[dict[str, Any]]:
-        """Awaitable `fetch_dicts()` forwarding to the underlying sync stub client."""
-        await asyncio.sleep(0)
-        return self._sync.fetch_dicts(
-            sql,
-            params,
-            out_binds=out_binds,
-            enable_uuid_binary=enable_uuid_binary,
-            fetch_decimals=fetch_decimals,
-            vector_return_format=vector_return_format,
-            enable_lowercase_column_names=enable_lowercase_column_names,
-        )
-
-    async def fetch_value(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = (),
-        *,
-        out_binds: Mapping[str, str] | Sequence[str] | None = None,
-        enable_uuid_binary: bool = True,
-        fetch_decimals: bool = False,
-        vector_return_format: str = "list",
-        enable_lowercase_column_names: bool = True,
-    ) -> Any:
-        """Awaitable `fetch_value()` forwarding to the underlying sync stub client."""
-        await asyncio.sleep(0)
-        return self._sync.fetch_value(
-            sql,
-            params,
-            out_binds=out_binds,
-            enable_uuid_binary=enable_uuid_binary,
-            fetch_decimals=fetch_decimals,
-            vector_return_format=vector_return_format,
-            enable_lowercase_column_names=enable_lowercase_column_names,
-        )
-
-    async def execute_dml(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = (),
-        *,
-        out_binds: Mapping[str, str] | Sequence[str] | None = None,
-        enable_uuid_binary: bool = True,
-        fetch_decimals: bool = False,
-        vector_return_format: str = "list",
-        enable_lowercase_column_names: bool = True,
-    ) -> tuple[int, str | None, dict[str, Any] | tuple[Any, ...] | None, bool]:
-        """Awaitable `execute_dml()` forwarding to the underlying sync stub client."""
-        await asyncio.sleep(0)
-        return self._sync.execute_dml(
-            sql,
-            params,
-            out_binds=out_binds,
-            enable_uuid_binary=enable_uuid_binary,
-            fetch_decimals=fetch_decimals,
-            vector_return_format=vector_return_format,
-            enable_lowercase_column_names=enable_lowercase_column_names,
-        )
-
-    def set_session_attrs(
-        self,
-        *,
-        client_identifier: str | None = None,
-        module: str | None = None,
-        action: str | None = None,
-        ecid: str | None = None,
-    ) -> None:
-        """Coalesce session attributes onto the underlying sync recorder."""
-        self._sync.set_session_attrs(
-            client_identifier=client_identifier,
-            module=module,
-            action=action,
-            ecid=ecid,
-        )
-
-    def cancel(self) -> None:
-        """Record an out-of-band cancellation signal."""
-        self._sync.cancel()
-
-    async def connect(self) -> None:
-        """Awaitable `connect()` forwarding to sync recorder."""
-        self._sync.connect()
-
-    async def ping(self) -> None:
-        """Awaitable `ping()` forwarding to sync recorder."""
-        self._sync.ping()
-
-    async def close(self) -> None:
-        """Awaitable `close()` forwarding to sync recorder."""
-        self._sync.close()
-
-    async def begin(self) -> None:
-        """Awaitable `begin()` forwarding to sync recorder."""
-        self._sync.begin()
-
-    async def commit(self) -> None:
-        """Awaitable `commit()` forwarding to sync recorder."""
-        self._sync.commit()
-
-    async def rollback(self) -> None:
-        """Awaitable `rollback()` forwarding to sync recorder."""
-        self._sync.rollback()
-
-    async def savepoint(self, name: str) -> None:
-        """Awaitable `savepoint()` forwarding to sync recorder."""
-        self._sync.savepoint(name)
-
-    async def rollback_to_savepoint(self, name: str) -> None:
-        """Awaitable `rollback_to_savepoint()` forwarding to sync recorder."""
-        self._sync.rollback_to_savepoint(name)
-
-    async def query(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        out_binds: Any = None,
-        fetch_decimals: bool = False,
-        enable_lowercase_column_names: bool | None = None,
-    ) -> _oracle.OracleQueryResult:
-        """Awaitable `query()` yielding once to exercise task scheduling."""
-        await asyncio.sleep(0)
-        return self._sync.query(
-            sql,
-            params,
-            out_binds=out_binds,
-            fetch_decimals=fetch_decimals,
-            enable_lowercase_column_names=enable_lowercase_column_names,
-        )
-
-    async def execute(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        out_binds: Any = None,
-        fetch_decimals: bool = False,
-        enable_lowercase_column_names: bool | None = None,
-    ) -> _oracle.OracleQueryResult:
-        """Awaitable `execute()` yielding once to exercise task scheduling."""
-        await asyncio.sleep(0)
-        return self._sync.execute(
-            sql,
-            params,
-            out_binds=out_binds,
-            fetch_decimals=fetch_decimals,
-            enable_lowercase_column_names=enable_lowercase_column_names,
-        )
-
-    async def execute_many(
-        self,
-        sql: str,
-        params_seq: Sequence[Sequence[Any] | Mapping[str, Any]],
-    ) -> int:
-        """Awaitable `execute_many()` forwarding to sync recorder."""
-        await asyncio.sleep(0)
-        return self._sync.execute_many(sql, params_seq)
-
-    async def query_arrow(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        batch_size: int = 8192,
-        force_shm: bool | None = None,
-        enable_lowercase_column_names: bool | None = None,
-    ) -> ArrowCursor:
-        """Awaitable `query_arrow()` forwarding to sync recorder."""
-        await asyncio.sleep(0)
-        return self._sync.query_arrow(
-            sql,
-            params,
-            batch_size=batch_size,
-            force_shm=force_shm,
-            enable_lowercase_column_names=enable_lowercase_column_names,
-        )
-
-    async def execute_pipeline_batch(
-        self,
-        operations: Sequence[tuple[Any, ...]],
-        *,
-        continue_on_error: bool = False,
-    ) -> list[_oracle.OraclePipelineOutcome]:
-        """Awaitable `execute_pipeline_batch()` forwarding to sync recorder."""
-        await asyncio.sleep(0)
-        return self._sync.execute_pipeline_batch(operations, continue_on_error=continue_on_error)
-
-    async def enqueue_notification(
-        self,
-        *,
-        queue_name: str,
-        payload: bytes,
-        consumer_name: str | None = None,
-        correlation_id: str | None = None,
-    ) -> bytes:
-        """Awaitable `enqueue_notification()` forwarding to sync recorder."""
-        await asyncio.sleep(0)
-        return self._sync.enqueue_notification(
-            queue_name=queue_name,
-            payload=payload,
-            consumer_name=consumer_name,
-            correlation_id=correlation_id,
+        return _StubAsyncOracleCursor(
+            self._sync.cursor(
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+                lazy_begin=lazy_begin,
+            )
         )
 
     async def open_listener(

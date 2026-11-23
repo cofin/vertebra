@@ -148,7 +148,54 @@ def _unwrap_typed_value(bound: Any) -> Any:
     return bound
 
 
-class ProxySyncDriver(SyncDriverAdapterBase):
+class _BaseProxyDriverMixin:
+    """Shared broker RPC framing and response helpers for sync and async proxy drivers."""
+
+    __slots__ = ()
+
+    def _build_rpc_request(
+        self,
+        op: str,
+        *,
+        slot_idx: int | None = None,
+        generation: int | None = None,
+        in_tx: bool | None = None,
+        **extra: Any,
+    ) -> BrokerRpcRequest:
+        driver = cast("Any", self)
+        return BrokerRpcRequest(
+            request_id=driver._next_request_id(),
+            op=op,
+            pool_name=driver.pool_name,
+            worker_pid=driver.worker_pid,
+            slot_idx=driver.slot_idx if slot_idx is None else slot_idx,
+            generation=driver.generation if generation is None else generation,
+            in_tx=driver._in_tx if in_tx is None else in_tx,
+            **extra,
+        )
+
+    @property
+    def in_transaction(self) -> bool:
+        """Return True when the driver has an active transaction pinned to its lease."""
+        return bool(cast("Any", self)._in_tx)
+
+    @property
+    def is_leased(self) -> bool:
+        """Return True when the driver holds an active broker lease."""
+        return bool(cast("Any", self)._leased)
+
+    @property
+    def data_dictionary(self) -> Any:
+        """Return optional metadata dictionary (not exposed over RPC proxy)."""
+        return None
+
+    @staticmethod
+    def _raise_for_error(response: BrokerRpcResponse) -> None:
+        """Raise typed exception when response.ok is False."""
+        _raise_for_error(response)
+
+
+class ProxySyncDriver(_BaseProxyDriverMixin, SyncDriverAdapterBase):
     """Synchronous SQLSpec proxy driver executing queries through SQLSpecSyncProvider and SHM leases."""
 
     __slots__ = (
@@ -227,21 +274,6 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         self._transaction_depth: int = 0
         self._request_seq: int = 0
 
-    @property
-    def in_transaction(self) -> bool:
-        """Return True when the driver has an active transaction pinned to its lease."""
-        return self._in_tx
-
-    @property
-    def is_leased(self) -> bool:
-        """Return True when the driver holds an active broker lease."""
-        return self._leased
-
-    @property
-    def data_dictionary(self) -> Any:
-        """Return optional metadata dictionary (not exposed over RPC proxy)."""
-        return None
-
     def acquire_lease(self) -> tuple[int, int]:
         """Acquire a connection lease and pin an upstream session in SQLSpecSyncProvider."""
         if self._leased:
@@ -256,14 +288,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
 
         try:
             resp = self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="acquire",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=slot_idx,
-                    generation=generation,
-                ),
+                self._build_rpc_request("acquire", slot_idx=slot_idx, generation=generation, in_tx=False),
                 record_last=False,
             )
             self._raise_for_error(resp)
@@ -292,15 +317,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         self._broker_lease = None
         try:
             rel_resp = self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="release",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    in_tx=was_in_tx,
-                ),
+                self._build_rpc_request("release", in_tx=was_in_tx),
                 record_last=False,
             )
             self._raise_for_error(rel_resp)
@@ -322,17 +339,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
     def begin(self) -> None:
         """Begin a transaction pinned to the current connection lease."""
         self.acquire_lease()
-        resp = self._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._next_request_id(),
-                op="begin",
-                pool_name=self.pool_name,
-                worker_pid=self.worker_pid,
-                slot_idx=self.slot_idx,
-                generation=self.generation,
-                in_tx=self._in_tx,
-            )
-        )
+        resp = self._send_rpc(self._build_rpc_request("begin"))
         self._raise_for_error(resp)
         self._in_tx = True
         if self._transaction_depth == 0:
@@ -341,17 +348,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
     def commit(self) -> None:
         """Commit the active pinned transaction."""
         try:
-            resp = self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="commit",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    in_tx=self._in_tx,
-                )
-            )
+            resp = self._send_rpc(self._build_rpc_request("commit"))
             self._raise_for_error(resp)
             self._in_tx = False
             self._transaction_depth = 0
@@ -365,17 +362,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             self._transaction_depth = 0
             return
         try:
-            resp = self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="rollback",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    in_tx=self._in_tx,
-                )
-            )
+            resp = self._send_rpc(self._build_rpc_request("rollback"))
             self._raise_for_error(resp)
             self._in_tx = False
             self._transaction_depth = 0
@@ -388,19 +375,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         with self._operation_lease():
             compiled_sql, compiled_params, prepared = self._compile_statement(statement)
             if prepared.returns_rows():
-                resp = self._send_rpc(
-                    BrokerRpcRequest(
-                        request_id=self._next_request_id(),
-                        op="select",
-                        pool_name=self.pool_name,
-                        worker_pid=self.worker_pid,
-                        slot_idx=self.slot_idx,
-                        generation=self.generation,
-                        sql=compiled_sql,
-                        params=compiled_params,
-                        in_tx=self._in_tx,
-                    )
-                )
+                resp = self._send_rpc(self._build_rpc_request("select", sql=compiled_sql, params=compiled_params))
                 self._raise_for_error(resp)
                 dict_rows, columns = self._unpack_select_rows(resp)
                 return self.create_execution_result(
@@ -410,19 +385,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                     data_row_count=len(dict_rows),
                     is_select_result=True,
                 )
-            resp = self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="execute",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    sql=compiled_sql,
-                    params=compiled_params,
-                    in_tx=self._in_tx,
-                )
-            )
+            resp = self._send_rpc(self._build_rpc_request("execute", sql=compiled_sql, params=compiled_params))
             self._raise_for_error(resp)
             return self.create_execution_result(cursor, rowcount_override=int(resp.rowcount))
 
@@ -446,17 +409,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                 for item in unwrapped_sets
             ]
             resp = self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="execute_many",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    sql=compiled_sql,
-                    many_params=normalized_many,
-                    in_tx=self._in_tx,
-                )
+                self._build_rpc_request("execute_many", sql=compiled_sql, many_params=normalized_many)
             )
             self._raise_for_error(resp)
             return self.create_execution_result(cursor, rowcount_override=int(resp.rowcount), is_many_result=True)
@@ -599,19 +552,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                 statement_config=effective_cfg,
                 kwargs=kwargs,
             )
-            resp = self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="select_to_arrow",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    sql=compiled_sql,
-                    params=compiled_params,
-                    in_tx=self._in_tx,
-                )
-            )
+            resp = self._send_rpc(self._build_rpc_request("select_to_arrow", sql=compiled_sql, params=compiled_params))
             self._raise_for_error(resp)
             if native_only and not resp.is_arrow_shm:
                 msg = f"Adapter '{type(self).__name__}' did not return native SHM Arrow results when native_only=True."
@@ -828,17 +769,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             )
             is_query = prepared.returns_rows()
             resp = self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="select" if is_query else "execute",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    sql=compiled_sql,
-                    params=compiled_params,
-                    in_tx=self._in_tx,
-                )
+                self._build_rpc_request("select" if is_query else "execute", sql=compiled_sql, params=compiled_params)
             )
             self._raise_for_error(resp)
             if is_query:
@@ -940,17 +871,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         return resp
 
     def _send_tx_rpc(self, op: str, *, next_in_tx: bool) -> None:
-        resp = self._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._next_request_id(),
-                op=op,
-                pool_name=self.pool_name,
-                worker_pid=self.worker_pid,
-                slot_idx=self.slot_idx,
-                generation=self.generation,
-                in_tx=self._in_tx,
-            )
-        )
+        resp = self._send_rpc(self._build_rpc_request(op))
         self._raise_for_error(resp)
         self._in_tx = next_in_tx
         self._transaction_depth = 1 if next_in_tx else 0
@@ -961,16 +882,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             return
         try:
             self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="arrow_release",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    in_tx=self._in_tx,
-                    arrow_shm_name=shm_name,
-                ),
+                self._build_rpc_request("arrow_release", arrow_shm_name=shm_name),
                 record_last=False,
             )
         finally:
@@ -1070,13 +982,8 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         col_names = list(columns) if columns else [f"c{idx}" for idx in range(len(first))]
         return [dict(r) if isinstance(r, dict) else dict(zip(col_names, r, strict=False)) for r in rows]
 
-    @staticmethod
-    def _raise_for_error(response: BrokerRpcResponse) -> None:
-        """Raise typed exception when response.ok is False."""
-        _raise_for_error(response)
 
-
-class ProxyAsyncDriver(AsyncDriverAdapterBase):
+class ProxyAsyncDriver(_BaseProxyDriverMixin, AsyncDriverAdapterBase):
     """Asynchronous SQLSpec proxy driver executing queries through SQLSpecAsyncProvider and SHM leases."""
 
     __slots__ = (
@@ -1157,21 +1064,6 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         self._transaction_depth: int = 0
         self._request_seq: int = 0
 
-    @property
-    def in_transaction(self) -> bool:
-        """Return True when the driver has an active transaction pinned to its lease."""
-        return self._in_tx
-
-    @property
-    def is_leased(self) -> bool:
-        """Return True when the driver holds an active broker lease."""
-        return self._leased
-
-    @property
-    def data_dictionary(self) -> Any:
-        """Return optional metadata dictionary (not exposed over RPC proxy)."""
-        return None
-
     async def acquire_lease(self) -> tuple[int, int]:
         """Acquire a connection lease asynchronously and pin an upstream session."""
         if self._leased:
@@ -1186,14 +1078,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
 
         try:
             resp = await self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="acquire",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=slot_idx,
-                    generation=generation,
-                ),
+                self._build_rpc_request("acquire", slot_idx=slot_idx, generation=generation, in_tx=False),
                 record_last=False,
             )
             ProxySyncDriver._raise_for_error(resp)
@@ -1226,15 +1111,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         self._broker_lease = None
         try:
             rel_resp = await self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="release",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    in_tx=was_in_tx,
-                ),
+                self._build_rpc_request("release", in_tx=was_in_tx),
                 record_last=False,
             )
             ProxySyncDriver._raise_for_error(rel_resp)
@@ -1256,17 +1133,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
     async def begin(self) -> None:
         """Begin a transaction pinned to the current connection lease."""
         await self.acquire_lease()
-        resp = await self._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._next_request_id(),
-                op="begin",
-                pool_name=self.pool_name,
-                worker_pid=self.worker_pid,
-                slot_idx=self.slot_idx,
-                generation=self.generation,
-                in_tx=self._in_tx,
-            )
-        )
+        resp = await self._send_rpc(self._build_rpc_request("begin"))
         ProxySyncDriver._raise_for_error(resp)
         self._in_tx = True
         if self._transaction_depth == 0:
@@ -1275,17 +1142,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
     async def commit(self) -> None:
         """Commit the active pinned transaction."""
         try:
-            resp = await self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="commit",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    in_tx=self._in_tx,
-                )
-            )
+            resp = await self._send_rpc(self._build_rpc_request("commit"))
             ProxySyncDriver._raise_for_error(resp)
             self._in_tx = False
             self._transaction_depth = 0
@@ -1299,17 +1156,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
             self._transaction_depth = 0
             return
         try:
-            resp = await self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="rollback",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    in_tx=self._in_tx,
-                )
-            )
+            resp = await self._send_rpc(self._build_rpc_request("rollback"))
             ProxySyncDriver._raise_for_error(resp)
             self._in_tx = False
             self._transaction_depth = 0
@@ -1322,19 +1169,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         async with self._operation_lease():
             compiled_sql, compiled_params, prepared = self._compile_statement(statement)
             if prepared.returns_rows():
-                resp = await self._send_rpc(
-                    BrokerRpcRequest(
-                        request_id=self._next_request_id(),
-                        op="select",
-                        pool_name=self.pool_name,
-                        worker_pid=self.worker_pid,
-                        slot_idx=self.slot_idx,
-                        generation=self.generation,
-                        sql=compiled_sql,
-                        params=compiled_params,
-                        in_tx=self._in_tx,
-                    )
-                )
+                resp = await self._send_rpc(self._build_rpc_request("select", sql=compiled_sql, params=compiled_params))
                 ProxySyncDriver._raise_for_error(resp)
                 dict_rows, columns = await self._unpack_select_rows(resp)
                 return self.create_execution_result(
@@ -1344,19 +1179,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                     data_row_count=len(dict_rows),
                     is_select_result=True,
                 )
-            resp = await self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="execute",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    sql=compiled_sql,
-                    params=compiled_params,
-                    in_tx=self._in_tx,
-                )
-            )
+            resp = await self._send_rpc(self._build_rpc_request("execute", sql=compiled_sql, params=compiled_params))
             ProxySyncDriver._raise_for_error(resp)
             return self.create_execution_result(cursor, rowcount_override=int(resp.rowcount))
 
@@ -1380,17 +1203,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                 for item in unwrapped_sets
             ]
             resp = await self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="execute_many",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    sql=compiled_sql,
-                    many_params=normalized_many,
-                    in_tx=self._in_tx,
-                )
+                self._build_rpc_request("execute_many", sql=compiled_sql, many_params=normalized_many)
             )
             self._raise_for_error(resp)
             return self.create_execution_result(cursor, rowcount_override=int(resp.rowcount), is_many_result=True)
@@ -1442,11 +1255,6 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         """Return `None` so cached `INSERT` paths stay aligned with async broker `dispatch_execute`."""
         _ = cursor
         return None
-
-    @staticmethod
-    def _raise_for_error(response: BrokerRpcResponse) -> None:
-        """Raise typed exception when response.ok is False."""
-        _raise_for_error(response)
 
     async def execute_stack(
         self,
@@ -1539,17 +1347,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                 kwargs=kwargs,
             )
             resp = await self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="select_to_arrow",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    sql=compiled_sql,
-                    params=compiled_params,
-                    in_tx=self._in_tx,
-                )
+                self._build_rpc_request("select_to_arrow", sql=compiled_sql, params=compiled_params)
             )
             ProxySyncDriver._raise_for_error(resp)
             if native_only and not resp.is_arrow_shm:
@@ -1683,17 +1481,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
             )
             is_query = prepared.returns_rows()
             resp = await self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="select" if is_query else "execute",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    sql=compiled_sql,
-                    params=compiled_params,
-                    in_tx=self._in_tx,
-                )
+                self._build_rpc_request("select" if is_query else "execute", sql=compiled_sql, params=compiled_params)
             )
             ProxySyncDriver._raise_for_error(resp)
             if is_query:
@@ -1762,17 +1550,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         return resp
 
     async def _send_tx_rpc_async(self, op: str, *, next_in_tx: bool) -> None:
-        resp = await self._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._next_request_id(),
-                op=op,
-                pool_name=self.pool_name,
-                worker_pid=self.worker_pid,
-                slot_idx=self.slot_idx,
-                generation=self.generation,
-                in_tx=self._in_tx,
-            )
-        )
+        resp = await self._send_rpc(self._build_rpc_request(op))
         ProxySyncDriver._raise_for_error(resp)
         self._in_tx = next_in_tx
         self._transaction_depth = 1 if next_in_tx else 0
@@ -1783,16 +1561,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
             return
         try:
             await self._send_rpc(
-                BrokerRpcRequest(
-                    request_id=self._next_request_id(),
-                    op="arrow_release",
-                    pool_name=self.pool_name,
-                    worker_pid=self.worker_pid,
-                    slot_idx=self.slot_idx,
-                    generation=self.generation,
-                    in_tx=self._in_tx,
-                    arrow_shm_name=shm_name,
-                ),
+                self._build_rpc_request("arrow_release", arrow_shm_name=shm_name),
                 record_last=False,
             )
         finally:
@@ -1989,17 +1758,8 @@ class _BrokerChunkSyncRowSource:
             self._auto_acquired = True
         compiled_sql, compiled_params, _ = self._driver._compile_statement(self._statement)
         resp = self._driver._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._driver._next_request_id(),
-                op="stream_open",
-                pool_name=self._driver.pool_name,
-                worker_pid=self._driver.worker_pid,
-                slot_idx=self._driver.slot_idx,
-                generation=self._driver.generation,
-                sql=compiled_sql,
-                params=compiled_params,
-                in_tx=self._driver._in_tx,
-                chunk_rows=self._chunk_size,
+            self._driver._build_rpc_request(
+                "stream_open", sql=compiled_sql, params=compiled_params, chunk_rows=self._chunk_size
             )
         )
         _raise_for_error(resp)
@@ -2018,17 +1778,7 @@ class _BrokerChunkSyncRowSource:
         if not self._has_more or not self._stream_id:
             return []
         resp = self._driver._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._driver._next_request_id(),
-                op="stream_fetch",
-                pool_name=self._driver.pool_name,
-                worker_pid=self._driver.worker_pid,
-                slot_idx=self._driver.slot_idx,
-                generation=self._driver.generation,
-                in_tx=self._driver._in_tx,
-                stream_id=self._stream_id,
-                chunk_rows=self._chunk_size,
-            )
+            self._driver._build_rpc_request("stream_fetch", stream_id=self._stream_id, chunk_rows=self._chunk_size)
         )
         _raise_for_error(resp)
         self._has_more = bool(resp.has_more)
@@ -2049,16 +1799,7 @@ class _BrokerChunkSyncRowSource:
         try:
             if stream_id:
                 resp = self._driver._send_rpc(
-                    BrokerRpcRequest(
-                        request_id=self._driver._next_request_id(),
-                        op="stream_close",
-                        pool_name=self._driver.pool_name,
-                        worker_pid=self._driver.worker_pid,
-                        slot_idx=self._driver.slot_idx,
-                        generation=self._driver.generation,
-                        in_tx=self._driver._in_tx,
-                        stream_id=stream_id,
-                    ),
+                    self._driver._build_rpc_request("stream_close", stream_id=stream_id),
                     record_last=False,
                 )
                 _raise_for_error(resp)
@@ -2099,17 +1840,8 @@ class _BrokerChunkAsyncRowSource:
             self._auto_acquired = True
         compiled_sql, compiled_params, _ = self._driver._compile_statement(self._statement)
         resp = await self._driver._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._driver._next_request_id(),
-                op="stream_open",
-                pool_name=self._driver.pool_name,
-                worker_pid=self._driver.worker_pid,
-                slot_idx=self._driver.slot_idx,
-                generation=self._driver.generation,
-                sql=compiled_sql,
-                params=compiled_params,
-                in_tx=self._driver._in_tx,
-                chunk_rows=self._chunk_size,
+            self._driver._build_rpc_request(
+                "stream_open", sql=compiled_sql, params=compiled_params, chunk_rows=self._chunk_size
             )
         )
         _raise_for_error(resp)
@@ -2128,17 +1860,7 @@ class _BrokerChunkAsyncRowSource:
         if not self._has_more or not self._stream_id:
             return []
         resp = await self._driver._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._driver._next_request_id(),
-                op="stream_fetch",
-                pool_name=self._driver.pool_name,
-                worker_pid=self._driver.worker_pid,
-                slot_idx=self._driver.slot_idx,
-                generation=self._driver.generation,
-                in_tx=self._driver._in_tx,
-                stream_id=self._stream_id,
-                chunk_rows=self._chunk_size,
-            )
+            self._driver._build_rpc_request("stream_fetch", stream_id=self._stream_id, chunk_rows=self._chunk_size)
         )
         _raise_for_error(resp)
         self._has_more = bool(resp.has_more)
@@ -2159,16 +1881,7 @@ class _BrokerChunkAsyncRowSource:
         try:
             if stream_id:
                 resp = await self._driver._send_rpc(
-                    BrokerRpcRequest(
-                        request_id=self._driver._next_request_id(),
-                        op="stream_close",
-                        pool_name=self._driver.pool_name,
-                        worker_pid=self._driver.worker_pid,
-                        slot_idx=self._driver.slot_idx,
-                        generation=self._driver.generation,
-                        in_tx=self._driver._in_tx,
-                        stream_id=stream_id,
-                    ),
+                    self._driver._build_rpc_request("stream_close", stream_id=stream_id),
                     record_last=False,
                 )
                 _raise_for_error(resp)

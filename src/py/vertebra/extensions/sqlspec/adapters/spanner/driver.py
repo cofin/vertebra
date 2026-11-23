@@ -189,7 +189,84 @@ class _DriverDialectDescriptor:
         instance._dialect_value = str(value)
 
 
-class SpannerSyncDriver(BaseSyncDriver):
+class _SpannerDriverMixin:
+    """Shared dialect helpers inherited by synchronous and asynchronous drivers."""
+
+    __slots__ = ()
+
+    if TYPE_CHECKING:
+        native_driver: Any
+        driver_features: dict[str, Any]
+        _staleness: StalenessBound | None
+        _active_snapshot: Any
+        _read_only: bool
+        _in_transaction: bool
+        _spanner_dialect: Literal["googlesql", "spangres"]
+        _cached_fetch_rows: Callable[..., Any]
+        _cached_run_dml: Callable[..., Any]
+
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
+        """Build the default GoogleSQL Spanner ``StatementConfig``."""
+        return default_statement_config()
+
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the session-aware callables the cache-hit executor calls, or `None` to register no executor."""
+        if not callable(getattr(self.native_driver, "cursor", None)):
+            return None
+        return self._cached_fetch_rows, self._cached_run_dml
+
+    def _map_exception(self, exc: BaseException) -> Exception | None:
+        return map_spanner_exception(exc)
+
+    def _cursor_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        staleness = (
+            self._staleness if self._staleness is not None else getattr(self._active_snapshot, "staleness", None)
+        )
+        if staleness is not None:
+            kwargs["staleness"] = staleness
+        features = self.driver_features or {}
+        request_tag = features.get("request_tag")
+        if request_tag is not None:
+            kwargs["request_tag"] = request_tag
+        transaction_tag = features.get("transaction_tag")
+        if transaction_tag is not None:
+            kwargs["transaction_tag"] = transaction_tag
+        return kwargs
+
+    def _require_writable(self, action: str) -> None:
+        if self._read_only:
+            msg = f"Cannot execute {action} inside a read-only Spanner snapshot session"
+            raise ImproperConfigurationError(msg)
+
+    @property
+    def in_transaction(self) -> bool:
+        """Return whether this session is bound to an active ``ReadWrite`` transaction."""
+        return self._in_transaction
+
+    @property
+    def is_read_only(self) -> bool:
+        """Return whether this session is bound to a lock-free ``ReadOnly`` snapshot."""
+        return self._read_only
+
+    @property
+    def spanner_dialect(self) -> Literal["googlesql", "spangres"]:
+        """Return the internal Spanner dialect literal for native Rust client calls."""
+        return self._spanner_dialect
+
+    @property
+    def staleness(self) -> StalenessBound | None:
+        """Return the ``StalenessBound`` configured on this snapshot session, if any."""
+        return self._staleness
+
+    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
+        """Return `None` so cached `INSERT` paths stay aligned with Spanner `dispatch_execute`."""
+        _ = cursor
+        return None
+
+
+class SpannerSyncDriver(_SpannerDriverMixin, BaseSyncDriver):
     """Cloud Spanner synchronous SQLSpec driver supporting GoogleSQL and Spangres."""
 
     __slots__ = (
@@ -212,11 +289,6 @@ class SpannerSyncDriver(BaseSyncDriver):
         "max_partitions",
         "staleness",
     )
-
-    @classmethod
-    def _default_statement_config(cls) -> StatementConfig:
-        """Build the default GoogleSQL Spanner ``StatementConfig``."""
-        return default_statement_config()
 
     def __init__(
         self,
@@ -262,26 +334,6 @@ class SpannerSyncDriver(BaseSyncDriver):
         return self.connection
 
     @property
-    def spanner_dialect(self) -> Literal["googlesql", "spangres"]:
-        """Return the internal Spanner dialect literal for native Rust client calls."""
-        return self._spanner_dialect
-
-    @property
-    def is_read_only(self) -> bool:
-        """Return whether this session is bound to a lock-free ``ReadOnly`` snapshot."""
-        return self._read_only
-
-    @property
-    def in_transaction(self) -> bool:
-        """Return whether this session is bound to an active ``ReadWrite`` transaction."""
-        return self._in_transaction
-
-    @property
-    def staleness(self) -> StalenessBound | None:
-        """Return the ``StalenessBound`` configured on this snapshot session, if any."""
-        return self._staleness
-
-    @property
     def data_dictionary(self) -> SpannerSyncDataDictionary:
         """Return the Spanner synchronous data dictionary."""
         return self._data_dictionary
@@ -289,12 +341,6 @@ class SpannerSyncDriver(BaseSyncDriver):
     def _cache_hit_owner(self) -> type[BaseSyncDriver]:
         """Return `SpannerSyncDriver` because it overrides `with_cursor` and `resolve_last_inserted_id`."""
         return SpannerSyncDriver
-
-    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
-        """Return the session-aware callables the cache-hit executor calls, or `None` to register no executor."""
-        if not callable(getattr(self.native_driver, "cursor", None)):
-            return None
-        return self._cached_fetch_rows, self._cached_run_dml
 
     def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Run a cached row-returning statement on a session-configured cursor and return `(rows, names)`."""
@@ -321,25 +367,6 @@ class SpannerSyncDriver(BaseSyncDriver):
         finally:
             cursor.close()
 
-    def _map_exception(self, exc: BaseException) -> Exception | None:
-        return map_spanner_exception(exc)
-
-    def _cursor_kwargs(self) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {}
-        staleness = (
-            self._staleness if self._staleness is not None else getattr(self._active_snapshot, "staleness", None)
-        )
-        if staleness is not None:
-            kwargs["staleness"] = staleness
-        features = self.driver_features or {}
-        request_tag = features.get("request_tag")
-        if request_tag is not None:
-            kwargs["request_tag"] = request_tag
-        transaction_tag = features.get("transaction_tag")
-        if transaction_tag is not None:
-            kwargs["transaction_tag"] = transaction_tag
-        return kwargs
-
     @contextmanager
     def with_cursor(self, connection: Any) -> Iterator[Any]:
         """Yield a native Spanner cursor configured with session staleness and tags, closing on exit."""
@@ -348,16 +375,6 @@ class SpannerSyncDriver(BaseSyncDriver):
             yield cursor
         finally:
             cursor.close()
-
-    def _require_writable(self, action: str) -> None:
-        if self._read_only:
-            msg = f"Cannot execute {action} inside a read-only Spanner snapshot session"
-            raise ImproperConfigurationError(msg)
-
-    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
-        """Return `None` so cached `INSERT` paths stay aligned with Spanner `dispatch_execute`."""
-        _ = cursor
-        return None
 
     def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a compiled query, DML, or DDL statement through the native cursor."""
@@ -769,7 +786,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         raise NotSupportedError(msg)
 
 
-class SpannerAsyncDriver(BaseAsyncDriver):
+class SpannerAsyncDriver(_SpannerDriverMixin, BaseAsyncDriver):
     """Cloud Spanner asynchronous SQLSpec driver supporting GoogleSQL and Spangres."""
 
     __slots__ = (
@@ -792,11 +809,6 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         "max_partitions",
         "staleness",
     )
-
-    @classmethod
-    def _default_statement_config(cls) -> StatementConfig:
-        """Build the default GoogleSQL Spanner ``StatementConfig``."""
-        return default_statement_config()
 
     def __init__(
         self,
@@ -842,26 +854,6 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         return self.connection
 
     @property
-    def spanner_dialect(self) -> Literal["googlesql", "spangres"]:
-        """Return the internal Spanner dialect literal for native Rust client calls."""
-        return self._spanner_dialect
-
-    @property
-    def is_read_only(self) -> bool:
-        """Return whether this session is bound to a lock-free ``ReadOnly`` snapshot."""
-        return self._read_only
-
-    @property
-    def in_transaction(self) -> bool:
-        """Return whether this session is bound to an active ``ReadWrite`` transaction."""
-        return self._in_transaction
-
-    @property
-    def staleness(self) -> StalenessBound | None:
-        """Return the ``StalenessBound`` configured on this snapshot session, if any."""
-        return self._staleness
-
-    @property
     def data_dictionary(self) -> SpannerAsyncDataDictionary:
         """Return the Spanner asynchronous data dictionary."""
         return self._data_dictionary
@@ -869,12 +861,6 @@ class SpannerAsyncDriver(BaseAsyncDriver):
     def _cache_hit_owner(self) -> type[BaseAsyncDriver]:
         """Return `SpannerAsyncDriver` because it overrides `with_cursor` and `resolve_last_inserted_id`."""
         return SpannerAsyncDriver
-
-    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
-        """Return the session-aware callables the cache-hit executor calls, or `None` to register no executor."""
-        if not callable(getattr(self.native_driver, "cursor", None)):
-            return None
-        return self._cached_fetch_rows, self._cached_run_dml
 
     async def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Run a cached row-returning statement on a session-configured cursor and return `(rows, names)`."""
@@ -901,25 +887,6 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         finally:
             await cursor.close()
 
-    def _map_exception(self, exc: BaseException) -> Exception | None:
-        return map_spanner_exception(exc)
-
-    def _cursor_kwargs(self) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {}
-        staleness = (
-            self._staleness if self._staleness is not None else getattr(self._active_snapshot, "staleness", None)
-        )
-        if staleness is not None:
-            kwargs["staleness"] = staleness
-        features = self.driver_features or {}
-        request_tag = features.get("request_tag")
-        if request_tag is not None:
-            kwargs["request_tag"] = request_tag
-        transaction_tag = features.get("transaction_tag")
-        if transaction_tag is not None:
-            kwargs["transaction_tag"] = transaction_tag
-        return kwargs
-
     @asynccontextmanager
     async def with_cursor(self, connection: Any) -> AsyncIterator[Any]:
         """Yield an async native Spanner cursor configured with session staleness and tags, closing on exit."""
@@ -937,16 +904,6 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             yield cursor
         finally:
             await cursor.close()
-
-    def _require_writable(self, action: str) -> None:
-        if self._read_only:
-            msg = f"Cannot execute {action} inside a read-only Spanner snapshot session"
-            raise ImproperConfigurationError(msg)
-
-    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
-        """Return `None` so async cached `INSERT` paths stay aligned with Spanner `dispatch_execute`."""
-        _ = cursor
-        return None
 
     async def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Asynchronously execute a compiled query, DML, or DDL statement through the native cursor."""

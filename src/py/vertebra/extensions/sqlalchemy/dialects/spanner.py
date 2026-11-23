@@ -8,24 +8,18 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 from sqlalchemy import exc
 from sqlalchemy.dialects.postgresql.base import PGDialect
 from sqlalchemy.engine.interfaces import IsolationLevel
-from sqlalchemy.pool import NullPool
 
 from vertebra.db.dbapi import NotSupportedError as DbapiNotSupportedError
 from vertebra.extensions.sqlalchemy.dialects._base import (
     _DISCONNECT_SQLSTATES,
-    _NON_DISCONNECT_SQLSTATES,
+    _GCP_DISCONNECT_PHRASES,
     _AsyncDialectMixin,
-    _extract_sqlstate,
-    _extract_vendor_code,
-    _is_disconnect_common,
     _SyncDialectMixin,
 )
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from sqlalchemy.engine.default import DefaultDialect as _BaseSpannerDialect
-    from sqlalchemy.engine.url import URL
-    from sqlalchemy.pool import Pool
 else:
     _BaseSpannerDialect = ensure_module(
         "google.cloud.sqlalchemy_spanner",
@@ -43,61 +37,20 @@ __all__ = (
 
 _GRPC_UNAVAILABLE_CODE = 14
 _SPANNER_ISOLATION_LEVELS: frozenset[str] = frozenset({"SERIALIZABLE", "REPEATABLE READ"})
-_SPANNER_DISCONNECT_PHRASES: tuple[str, ...] = (
-    "unavailable",
-    "channel closed",
-    "closed channel",
-    "channel is closed",
-    "transport is closing",
-    "goaway",
-    "reset by peer",
-)
 
 
-def _is_grpc_unavailable(exc_obj: BaseException) -> bool:
-    for candidate in (exc_obj, getattr(exc_obj, "__cause__", None)):
-        if candidate is None:
-            continue
-        code = getattr(candidate, "code", None)
-        if getattr(code, "name", None) == "UNAVAILABLE":
-            return True
-    return _extract_vendor_code(exc_obj) == _GRPC_UNAVAILABLE_CODE
+class _SpannerCommonDisconnectMixin:
+    """Declarative disconnect and pool-class defaults shared by Spanner and Spangres dialects."""
+
+    _disconnect_sqlstates = _DISCONNECT_SQLSTATES
+    _extra_disconnect_phrases = _GCP_DISCONNECT_PHRASES
+    _check_connection_closed = True
+    _check_grpc_unavailable = True
+    _guard_parent_dbapi = True
+    _use_null_pool_when_unbrokered = True
 
 
-def _wants_broker_pool(url: URL) -> bool:
-    query: dict[str, Any] = dict(url.query) if url.query else {}
-    if query.get("shm_broker") in {"true", "1", "yes"}:
-        return False
-    return query.get("broker") in {"true", "1", "yes"} or query.get("broker_pool") in {"true", "1", "yes"}
-
-
-def _check_spanner_disconnect(
-    dialect_obj: Any,
-    e: Exception,
-    connection: Any,
-    cursor: Any,
-    parent_fn: Any,
-) -> bool:
-    try:
-        sqlstate = _extract_sqlstate(e)
-        if sqlstate in _NON_DISCONNECT_SQLSTATES or type(e).__name__ == "SerializationFailure":
-            return False
-        if sqlstate is not None and (sqlstate.startswith("08") or sqlstate in _DISCONNECT_SQLSTATES):
-            return True
-        if getattr(connection, "closed", False) or getattr(getattr(connection, "_connection", None), "closed", False):
-            return True
-        if _is_grpc_unavailable(e):
-            return True
-        msg = str(e).lower()
-        if any(phrase in msg for phrase in _SPANNER_DISCONNECT_PHRASES):
-            return True
-        guarded_parent = parent_fn if callable(parent_fn) and getattr(dialect_obj, "dbapi", None) is not None else None
-        return _is_disconnect_common(e, connection, cursor, guarded_parent)
-    except Exception:
-        return False
-
-
-class _SpannerDialectMixin:
+class _SpannerDialectMixin(_SpannerCommonDisconnectMixin):
     """Shared SQLAlchemy 2.1 dialect behavior for Cloud Spanner GoogleSQL (+vtb / +vtb_async)."""
 
     _json_serializer: Any
@@ -170,12 +123,8 @@ class _SpannerDialectMixin:
             raise exc.ArgumentError(msg)
         dbapi_connection.autocommit = False
 
-    def is_disconnect(self, e: Exception, connection: Any = None, cursor: Any = None) -> bool:
-        """Return True for SQLSTATE 08*, gRPC UNAVAILABLE, or closed-channel errors, never raising."""
-        return _check_spanner_disconnect(self, e, connection, cursor, getattr(super(), "is_disconnect", None))
 
-
-class _SpangresDialectMixin:
+class _SpangresDialectMixin(_SpannerCommonDisconnectMixin):
     """Shared SQLAlchemy 2.1 dialect behavior for Cloud Spanner PostgreSQL interface (Spangres)."""
 
     supports_twophase = False
@@ -259,10 +208,6 @@ class _SpangresDialectMixin:
         _ = connection
         self._twophase_unsupported()
 
-    def is_disconnect(self, e: Exception, connection: Any = None, cursor: Any = None) -> bool:
-        """Return True for SQLSTATE 08*/57P01-57P03, gRPC UNAVAILABLE, or closed connections."""
-        return _check_spanner_disconnect(self, e, connection, cursor, getattr(super(), "is_disconnect", None))
-
 
 class SyncSpannerDialect(_SpannerDialectMixin, _SyncDialectMixin, _BaseSpannerDialect):
     """SQLAlchemy 2.1 synchronous dialect for Cloud Spanner GoogleSQL (+vtb / +vertebra)."""
@@ -274,13 +219,6 @@ class SyncSpannerDialect(_SpannerDialectMixin, _SyncDialectMixin, _BaseSpannerDi
     supports_statement_cache = True
     supports_native_jsonb = False
     positional = False
-
-    @classmethod
-    def get_pool_class(cls, url: URL) -> type[Pool]:
-        """Return BrokerPool when ?broker=true is enabled, otherwise NullPool."""
-        if _wants_broker_pool(url):
-            return _SyncDialectMixin.get_pool_class(url)
-        return NullPool
 
 
 class AsyncSpannerDialect(_SpannerDialectMixin, _AsyncDialectMixin, _BaseSpannerDialect):
@@ -295,13 +233,6 @@ class AsyncSpannerDialect(_SpannerDialectMixin, _AsyncDialectMixin, _BaseSpanner
     supports_native_jsonb = False
     positional = False
 
-    @classmethod
-    def get_pool_class(cls, url: URL) -> type[Pool]:
-        """Return AsyncBrokerPool when ?broker=true is enabled, otherwise NullPool."""
-        if _wants_broker_pool(url):
-            return _AsyncDialectMixin.get_pool_class(url)
-        return NullPool
-
 
 class SyncSpangresDialect(_SpangresDialectMixin, _SyncDialectMixin, PGDialect):
     """SQLAlchemy 2.1 synchronous dialect for Spanner Spangres (+vtb / +vertebra)."""
@@ -313,13 +244,6 @@ class SyncSpangresDialect(_SpangresDialectMixin, _SyncDialectMixin, PGDialect):
     positional = True
     supports_statement_cache = True
     supports_native_jsonb = True
-
-    @classmethod
-    def get_pool_class(cls, url: URL) -> type[Pool]:
-        """Return BrokerPool when ?broker=true is enabled, otherwise NullPool."""
-        if _wants_broker_pool(url):
-            return _SyncDialectMixin.get_pool_class(url)
-        return NullPool
 
 
 class AsyncSpangresDialect(_SpangresDialectMixin, _AsyncDialectMixin, PGDialect):
@@ -333,10 +257,3 @@ class AsyncSpangresDialect(_SpangresDialectMixin, _AsyncDialectMixin, PGDialect)
     positional = True
     supports_statement_cache = True
     supports_native_jsonb = True
-
-    @classmethod
-    def get_pool_class(cls, url: URL) -> type[Pool]:
-        """Return AsyncBrokerPool when ?broker=true is enabled, otherwise NullPool."""
-        if _wants_broker_pool(url):
-            return _AsyncDialectMixin.get_pool_class(url)
-        return NullPool

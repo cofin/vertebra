@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-import socket
-import ssl
 from collections.abc import Callable
 from typing import Any, Final
 from urllib.parse import quote
 
 from vertebra._vertebra import AzureEntraDialer
 from vertebra.db.dialer._base import (
+    _AsyncTokenDialerMixin,
+    _BaseTokenDialerMixin,
+    _SyncTokenDialerMixin,
     build_verify_full_tls_context,
     format_dialer_url_host,
     validate_dialer_non_empty,
@@ -40,7 +40,7 @@ __all__ = (
 )
 
 
-class _BaseAzureEntraDialer:
+class _BaseAzureEntraDialer(_BaseTokenDialerMixin):
     """Shared Azure database endpoint metadata, `verify-full` TLS context, and Entra token provider wrapper."""
 
     __slots__ = (
@@ -52,6 +52,9 @@ class _BaseAzureEntraDialer:
         "_token_provider",
         "_username",
     )
+
+    _native: AzureEntraDialer
+    _token_provider: DatabaseTokenProvider
 
     def __init__(
         self,
@@ -166,16 +169,6 @@ class _BaseAzureEntraDialer:
         return self._native
 
     @property
-    def endpoint_host(self) -> str:
-        """Return the normalized Azure database hostname."""
-        return self._native.endpoint_host
-
-    @property
-    def port(self) -> int:
-        """Return the resolved Azure database server port (`5432`, `3306`, or `1433`)."""
-        return self._native.port
-
-    @property
     def engine(self) -> str:
         """Return the canonical Azure database engine (`'postgres'`, `'mysql'`, or `'mssql'`)."""
         return self._native.engine
@@ -196,32 +189,14 @@ class _BaseAzureEntraDialer:
         return self._username
 
     @property
-    def database(self) -> str:
-        """Return the default database name used by `connection_kwargs()`."""
-        return self._database
-
-    @property
     def ca_pem(self) -> str | None:
         """Return the custom Root CA PEM override, or `None` when using system WebPKI roots."""
         return self._ca_pem
 
     @property
-    def ssl_context(self) -> ssl.SSLContext:
-        """Return the cached `verify-full` client `ssl.SSLContext`."""
-        return self._ssl_context
-
-    @property
     def token_provider(self) -> DatabaseTokenProvider:
         """Return the `DatabaseTokenProvider` acquiring Microsoft Entra ID database tokens."""
         return self._token_provider
-
-    def build_tls_context(self, *, ca_pem: str | None = None) -> ssl.SSLContext:
-        """Construct a fresh `verify-full` `ssl.SSLContext` using WebPKI roots or `ca_pem`."""
-        return build_verify_full_tls_context(self._ca_pem if ca_pem is None else ca_pem)
-
-    def invalidate_token(self) -> None:
-        """Clear any cached Azure Entra ID token snapshot."""
-        self._token_provider.invalidate()
 
     def connection_kwargs(self, *, database: str | None = None, **overrides: Any) -> dict[str, Any]:
         """Return driver-ready `PostgreSQLConfig`, `MySQLConfig`, or `MSSQLConfig` keyword arguments."""
@@ -272,98 +247,13 @@ class _BaseAzureEntraDialer:
         return kwargs
 
 
-class SyncAzureEntraDialer(_BaseAzureEntraDialer):
+class SyncAzureEntraDialer(_SyncTokenDialerMixin, _BaseAzureEntraDialer):
     """Synchronous Microsoft Azure Entra ID `verify-full` TLS and OAuth2 database dialer."""
 
     __slots__ = ()
 
-    def resolve_token(self, *, force_refresh: bool = False) -> str:
-        """Synchronously return a cached or freshly acquired Azure Entra ID database token."""
-        return self._token_provider.resolve_sync(force_refresh=force_refresh)
 
-    def connect(
-        self,
-        host: str | None = None,
-        *,
-        port: int | None = None,
-        server_hostname: str | None = None,
-        ssl_context: ssl.SSLContext | None = None,
-        timeout: float = 10.0,
-    ) -> ssl.SSLSocket:
-        """Establish a synchronous `verify-full` TLS socket to the Azure database endpoint."""
-        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
-        target_port = self.port if port is None else validate_dialer_port(port)
-        tls_hostname = (
-            self.endpoint_host
-            if server_hostname is None
-            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
-        )
-        ctx = self._ssl_context if ssl_context is None else ssl_context
-        raw_sock = socket.create_connection((target_host, target_port), timeout=timeout)
-        try:
-            return ctx.wrap_socket(raw_sock, server_hostname=tls_hostname)
-        except BaseException:
-            raw_sock.close()
-            raise
-
-    def close(self) -> None:
-        """Clear cached Entra ID token state."""
-        self.invalidate_token()
-
-    def __call__(
-        self,
-        host: str | None = None,
-        *,
-        port: int | None = None,
-        server_hostname: str | None = None,
-        ssl_context: ssl.SSLContext | None = None,
-        timeout: float = 10.0,
-    ) -> ssl.SSLSocket:
-        """Callable dialer entrypoint returning a verified synchronous TLS socket."""
-        return self.connect(
-            host,
-            port=port,
-            server_hostname=server_hostname,
-            ssl_context=ssl_context,
-            timeout=timeout,
-        )
-
-
-class AsyncAzureEntraDialer(_BaseAzureEntraDialer):
+class AsyncAzureEntraDialer(_AsyncTokenDialerMixin, _BaseAzureEntraDialer):
     """Asynchronous Microsoft Azure Entra ID `verify-full` TLS and OAuth2 database dialer."""
 
     __slots__ = ()
-
-    async def resolve_token(self, *, force_refresh: bool = False) -> str:
-        """Asynchronously return a cached or freshly acquired Azure Entra ID token without blocking the loop."""
-        return await self._token_provider.resolve_async(force_refresh=force_refresh)
-
-    async def connect(
-        self,
-        host: str | None = None,
-        *,
-        port: int | None = None,
-        server_hostname: str | None = None,
-        ssl_context: ssl.SSLContext | None = None,
-        timeout: float = 10.0,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Establish an asynchronous `verify-full` TLS stream pair to the Azure database endpoint."""
-        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
-        target_port = self.port if port is None else validate_dialer_port(port)
-        tls_hostname = (
-            self.endpoint_host
-            if server_hostname is None
-            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
-        )
-        ctx = self._ssl_context if ssl_context is None else ssl_context
-        async with asyncio.timeout(timeout):
-            return await asyncio.open_connection(
-                target_host,
-                target_port,
-                ssl=ctx,
-                server_hostname=tls_hostname,
-            )
-
-    async def close(self) -> None:
-        """Clear cached Entra ID token state."""
-        self.invalidate_token()

@@ -1,15 +1,42 @@
-//! Integration tests for vertebra-redis configuration, error mapping, codec, and topologies.
+//! Integration tests for `vertebra-redis` configuration, error mapping, caching, and topologies.
 
 extern crate _redis as vertebra_redis;
 
-use redis::{ServerErrorKind, Value};
-use vertebra_redis::caching::ClientLruCache;
-use vertebra_redis::client_core::RedisCoreClient;
-use vertebra_redis::config::{RedisClientConfig, RedisTopologyMode, normalize_redis_url};
-use vertebra_redis::errors::{RedisDriverError, classify_redis_error};
-use vertebra_redis::topology::{
-    ClusterRedirectAction, ClusterSlotMap, check_cluster_redirect, parse_sentinel_master_addr,
-};
+use std::sync::Arc;
+
+use bytes::Bytes;
+use vertebra_redis::client::RespEngine;
+use vertebra_redis::cluster::ClusterTopology;
+use vertebra_redis::codec::RespValue;
+use vertebra_redis::config::{RedisTopologyMode, RespConfig, normalize_redis_url};
+use vertebra_redis::error::{RespErrorKind, classify_server_error};
+use vertebra_redis::sentinel::parse_get_master_addr_reply;
+use vertebra_redis::tracking::TrackingCache;
+
+fn build_cfg(
+    url: &str,
+    topology: RedisTopologyMode,
+) -> Result<RespConfig, vertebra_redis::error::RespError> {
+    RespConfig::build_redis(
+        url,
+        None,
+        None,
+        "vertebra".to_string(),
+        3,
+        topology,
+        None,
+        Vec::new(),
+        Vec::new(),
+        5,
+        false,
+        Vec::new(),
+        4096,
+        None,
+        false,
+        None,
+        32,
+    )
+}
 
 #[test]
 fn test_url_normalization() {
@@ -27,189 +54,139 @@ fn test_url_normalization() {
             .starts_with("redis+unix:")
     );
 
-    // Rejection of valkey:// and valkeys://
     let err_valkey = normalize_redis_url("valkey://127.0.0.1:6379").unwrap_err();
-    assert!(err_valkey.message().contains("vertebra._valkey"));
+    assert!(err_valkey.message.contains("vertebra._valkey"));
 
     let err_valkeys = normalize_redis_url("valkeys://127.0.0.1:6379").unwrap_err();
-    assert!(err_valkeys.message().contains("vertebra._valkey"));
+    assert!(err_valkeys.message.contains("vertebra._valkey"));
 
-    // Rejection of memory://
     let err_mem = normalize_redis_url("memory://").unwrap_err();
-    assert!(err_mem.message().contains("In-memory scheme"));
+    assert!(err_mem.message.contains("In-memory scheme"));
 
-    // Rejection of invalid scheme
     let err_http = normalize_redis_url("http://127.0.0.1:6379").unwrap_err();
-    assert!(err_http.message().contains("Unsupported Redis URL scheme"));
+    assert!(err_http.message.contains("Unsupported Redis URL scheme"));
 }
 
 #[test]
 fn test_topology_validation() {
-    let mut cfg = RedisClientConfig::new("unix:///var/run/redis.sock").unwrap();
-    assert!(cfg.validate().is_ok());
+    assert!(build_cfg("unix:///var/run/redis.sock", RedisTopologyMode::Standalone).is_ok());
 
-    cfg.topology = RedisTopologyMode::Cluster;
-    let err = cfg.validate().unwrap_err();
+    let err = build_cfg("unix:///var/run/redis.sock", RedisTopologyMode::Cluster).unwrap_err();
     assert!(
-        err.message()
+        err.message
             .contains("Unix domain socket URLs cannot be used with cluster")
     );
 
-    cfg.topology = RedisTopologyMode::Sentinel;
-    let err2 = cfg.validate().unwrap_err();
+    let err2 = build_cfg("unix:///var/run/redis.sock", RedisTopologyMode::Sentinel).unwrap_err();
     assert!(
-        err2.message()
+        err2.message
             .contains("Unix domain socket URLs cannot be used with cluster or sentinel")
     );
 }
 
 #[test]
 fn test_error_classification() {
-    let noauth_err = redis::RedisError::from((
-        redis::ErrorKind::Server(ServerErrorKind::ResponseError),
-        "NOAUTH Authentication required.",
-    ));
-    let classified = classify_redis_error(&noauth_err);
-    assert!(matches!(classified, RedisDriverError::Programming { .. }));
-    assert!(!classified.is_transient());
-
-    let wrongpass_err = redis::RedisError::from((
-        redis::ErrorKind::Server(ServerErrorKind::ResponseError),
-        "WRONGPASS invalid username-password pair",
-    ));
-    let classified_wp = classify_redis_error(&wrongpass_err);
-    assert!(matches!(
-        classified_wp,
-        RedisDriverError::Programming { .. }
-    ));
-    assert!(!classified_wp.is_transient());
-
-    let crossslot_err = redis::RedisError::from((
-        redis::ErrorKind::Server(ServerErrorKind::ResponseError),
-        "CROSSSLOT Keys in request don't hash to the same slot",
-    ));
-    let classified_cs = classify_redis_error(&crossslot_err);
-    assert!(matches!(
-        classified_cs,
-        RedisDriverError::Programming { .. }
-    ));
-    assert!(!classified_cs.is_transient());
-
-    let loading_err = redis::RedisError::from((
-        redis::ErrorKind::Server(ServerErrorKind::ResponseError),
-        "LOADING Redis is loading the dataset in memory",
-    ));
-    let classified_loading = classify_redis_error(&loading_err);
-    assert!(matches!(
-        classified_loading,
-        RedisDriverError::Operational { .. }
-    ));
-    assert!(classified_loading.is_transient());
-
-    let clusterdown_err = redis::RedisError::from((
-        redis::ErrorKind::Server(ServerErrorKind::ResponseError),
-        "CLUSTERDOWN The cluster is down",
-    ));
-    let classified_cd = classify_redis_error(&clusterdown_err);
-    assert!(matches!(
-        classified_cd,
-        RedisDriverError::Operational { .. }
-    ));
-    assert!(classified_cd.is_transient());
-
-    let noscript_err = redis::RedisError::from((
-        redis::ErrorKind::Server(ServerErrorKind::ResponseError),
-        "NOSCRIPT No matching script. Please use EVAL.",
-    ));
-    let classified_ns = classify_redis_error(&noscript_err);
-    assert!(matches!(
-        classified_ns,
-        RedisDriverError::Programming { .. }
-    ));
-    assert!(!classified_ns.is_transient());
+    let cases = [
+        ("NOAUTH Authentication required.", true, false),
+        ("WRONGPASS invalid username-password pair", true, false),
+        (
+            "CROSSSLOT Keys in request don't hash to the same slot",
+            false,
+            false,
+        ),
+        ("LOADING Redis is loading the dataset in memory", true, true),
+        ("CLUSTERDOWN The cluster is down", true, true),
+        (
+            "NOSCRIPT No matching script. Please use EVAL.",
+            false,
+            false,
+        ),
+    ];
+    for (msg, expect_operational, expect_transient) in cases {
+        let kind = classify_server_error(msg);
+        assert_eq!(kind.is_transient(), expect_transient, "msg={msg}");
+        if expect_operational {
+            assert!(
+                matches!(kind, RespErrorKind::Operational { .. }),
+                "msg={msg} got {kind:?}"
+            );
+        } else {
+            assert!(
+                matches!(kind, RespErrorKind::Programming),
+                "msg={msg} got {kind:?}"
+            );
+        }
+    }
 }
 
 #[test]
 fn test_client_lru_caching() {
-    let cache = ClientLruCache::new(2);
-    cache.put("k1".to_string(), b"val1".to_vec(), None);
-    cache.put("k2".to_string(), b"val2".to_vec(), None);
+    let cache = TrackingCache::new(2, None);
+    cache.insert(Bytes::from_static(b"k1"), Bytes::from_static(b"val1"));
+    cache.insert(Bytes::from_static(b"k2"), Bytes::from_static(b"val2"));
 
-    assert_eq!(cache.get("k1"), Some(b"val1".to_vec()));
-    assert_eq!(cache.get("k2"), Some(b"val2".to_vec()));
+    assert_eq!(cache.get(b"k1"), Some(Bytes::from_static(b"val1")));
+    assert_eq!(cache.get(b"k2"), Some(Bytes::from_static(b"val2")));
 
-    // Exceed capacity: k3 should evict oldest accessed
-    cache.put("k3".to_string(), b"val3".to_vec(), None);
-    assert_eq!(cache.get("k3"), Some(b"val3".to_vec()));
+    cache.insert(Bytes::from_static(b"k3"), Bytes::from_static(b"val3"));
+    assert_eq!(cache.get(b"k3"), Some(Bytes::from_static(b"val3")));
 
-    // Invalidation
-    cache.invalidate_keys(&["k2".to_string()]);
-    assert_eq!(cache.get("k2"), None);
+    cache.invalidate_key(Some(b"k2"));
+    assert_eq!(cache.get(b"k2"), None);
     assert_eq!(cache.drain_invalidations(), vec!["k2".to_string()]);
 
-    // Flush all
-    cache.put("k4".to_string(), b"val4".to_vec(), None);
-    cache.invalidate_all();
-    assert_eq!(cache.get("k4"), None);
+    cache.insert(Bytes::from_static(b"k4"), Bytes::from_static(b"val4"));
+    cache.invalidate_key(None);
+    assert_eq!(cache.get(b"k4"), None);
     assert!(!cache.drain_invalidations().is_empty());
 }
 
 #[test]
 fn test_cluster_redirect_parsing() {
-    let moved = check_cluster_redirect("MOVED 1234 10.0.0.1:6379");
+    let moved = vertebra_resp::parse_cluster_redirect("MOVED 1234 10.0.0.1:6379");
     assert_eq!(
         moved,
-        Some(ClusterRedirectAction::Moved {
-            slot: 1234,
-            host: "10.0.0.1".to_string(),
-            port: 6379,
-        })
+        Some(("MOVED".to_string(), 1234, "10.0.0.1".to_string(), 6379))
     );
 
-    let ask = check_cluster_redirect("ASK 5678 10.0.0.2:6379");
+    let ask = vertebra_resp::parse_cluster_redirect("ASK 5678 10.0.0.2:6379");
     assert_eq!(
         ask,
-        Some(ClusterRedirectAction::Ask {
-            slot: 5678,
-            host: "10.0.0.2".to_string(),
-            port: 6379,
-        })
+        Some(("ASK".to_string(), 5678, "10.0.0.2".to_string(), 6379))
     );
 
-    let slot_map = ClusterSlotMap::new();
-    slot_map.update_slot(1234, "10.0.0.1".to_string(), 6379);
-    assert_eq!(
-        slot_map.get_slot_node(1234),
-        Some(("10.0.0.1".to_string(), 6379))
-    );
-    assert_eq!(slot_map.get_slot_node(9999), None);
+    let mut topo = ClusterTopology::empty();
+    topo.update_moved_slot(1234, "10.0.0.1", 6379);
+    let slot_map = topo.slot_map();
+    assert_eq!(slot_map.get(&1234), Some(&("10.0.0.1".to_string(), 6379)));
+    assert_eq!(slot_map.get(&9999), None);
 }
 
 #[test]
 fn test_sentinel_parsing() {
-    let response = Value::Array(vec![
-        Value::BulkString(b"192.168.1.100".to_vec()),
-        Value::Int(6379),
+    let response = RespValue::Array(vec![
+        RespValue::BulkString(Bytes::from_static(b"192.168.1.100")),
+        RespValue::Integer(6379),
     ]);
-    let (host, port) = parse_sentinel_master_addr(&response).unwrap();
+    let (host, port) = parse_get_master_addr_reply(&response).unwrap();
     assert_eq!(host, "192.168.1.100");
     assert_eq!(port, 6379);
 }
 
 #[test]
 fn test_lazy_client_creation_and_close() {
-    let cfg = RedisClientConfig::new("redis://127.0.0.1:6379/0").unwrap();
-    let client = RedisCoreClient::new(cfg).unwrap();
-    assert!(!client.is_closed());
-    client.close();
-    assert!(client.is_closed());
+    let cfg = build_cfg("redis://127.0.0.1:6379/0", RedisTopologyMode::Standalone).unwrap();
+    let engine = RespEngine::new(Arc::new(cfg));
+    assert!(!engine.is_closed());
+    engine.close_sync();
+    assert!(engine.is_closed());
 }
 
 #[test]
 fn test_client_lru_invalidations_capped_at_4096() {
-    let cache = ClientLruCache::new(16);
-    let keys: Vec<String> = (0..5000).map(|i| format!("inv:{i}")).collect();
-    cache.invalidate_keys(&keys);
+    let cache = TrackingCache::new(16, None);
+    let keys: Vec<Vec<u8>> = (0..5000).map(|i| format!("inv:{i}").into_bytes()).collect();
+    cache.invalidate_keys(Some(&keys));
     let drained = cache.drain_invalidations();
     assert_eq!(drained.len(), 4096);
     assert_eq!(drained.first().map(String::as_str), Some("inv:904"));
@@ -218,11 +195,9 @@ fn test_client_lru_invalidations_capped_at_4096() {
 
 #[tokio::test]
 async fn test_client_tracking_handshake_sentinel_blocking_xreadgroup_and_close() {
-    use std::sync::Arc;
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use vertebra_redis::streams;
 
     let commands_seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -255,7 +230,6 @@ async fn test_client_tracking_handshake_sentinel_blocking_xreadgroup_and_close()
         Some(parts)
     }
 
-    // Mock Redis Master speaking minimal RESP3 (handling pipelined handshake frames).
     let master_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let master_port = master_listener.local_addr().unwrap().port();
     let seen_clone = Arc::clone(&commands_seen);
@@ -280,9 +254,10 @@ async fn test_client_tracking_handshake_sentinel_blocking_xreadgroup_and_close()
                             let _ = sock
                                 .write_all(b"%2\r\n+server\r\n+redis\r\n+proto\r\n:3\r\n")
                                 .await;
+                        } else if op == "ROLE" {
+                            let _ = sock.write_all(b"*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n").await;
                         } else if op == "XREADGROUP" {
-                            // Sleep 1600ms (> old 1500ms ConnectionManager timeout) before replying!
-                            tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                             let _ = sock.write_all(b"_\r\n").await;
                         } else if op == "GET" {
                             let _ = sock.write_all(b"$5\r\nhello\r\n").await;
@@ -295,7 +270,6 @@ async fn test_client_tracking_handshake_sentinel_blocking_xreadgroup_and_close()
         }
     });
 
-    // Mock Sentinel returning `[127.0.0.1, master_port]` to `SENTINEL get-master-addr-by-name`.
     let sentinel_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let sentinel_port = sentinel_listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -334,18 +308,32 @@ async fn test_client_tracking_handshake_sentinel_blocking_xreadgroup_and_close()
         }
     });
 
-    let mut cfg = RedisClientConfig::new(&format!("redis://127.0.0.1:{sentinel_port}/0")).unwrap();
-    cfg.topology = RedisTopologyMode::Sentinel;
-    cfg.sentinel_master_name = Some("mymaster".to_string());
-    cfg.sentinel_nodes = vec![("127.0.0.1".to_string(), sentinel_port)];
-    cfg.enable_client_side_caching = true;
-    cfg.client_tracking_prefixes = vec!["user:".to_string()];
+    let cfg = RespConfig::build_redis(
+        &format!("redis://127.0.0.1:{sentinel_port}/0"),
+        None,
+        None,
+        "vertebra".to_string(),
+        3,
+        RedisTopologyMode::Sentinel,
+        Some("mymaster".to_string()),
+        vec![("127.0.0.1".to_string(), sentinel_port)],
+        Vec::new(),
+        5,
+        true,
+        vec!["user:".to_string()],
+        4096,
+        None,
+        false,
+        None,
+        32,
+    )
+    .unwrap();
 
-    let client = RedisCoreClient::new(cfg).unwrap();
-    let val = client.get(b"user:1").await.unwrap();
+    let engine = RespEngine::new(Arc::new(cfg));
+    let val = engine.get_bytes(b"user:1".to_vec()).await.unwrap();
     assert_eq!(val.as_deref(), Some(&b"hello"[..]));
-    assert!(client.is_caching_active());
-    assert!(client.has_active_connection());
+    assert!(engine.is_caching_active());
+    assert!(engine.has_active_connection());
 
     {
         let recorded = commands_seen
@@ -360,21 +348,20 @@ async fn test_client_tracking_handshake_sentinel_blocking_xreadgroup_and_close()
         assert!(recorded.contains("BCAST"), "expected BCAST: {recorded}");
     }
 
-    // Blocking XREADGROUP with block_ms=1700 must not prematurely time out at 1.5s.
-    let xres = streams::xreadgroup(
-        &client,
-        "grp",
-        "c1",
-        &[("mystream".to_string(), ">".to_string())],
-        Some(1),
-        Some(1700),
-    )
-    .await
-    .unwrap();
-    assert_eq!(xres, Value::Nil);
+    let xres = engine
+        .xreadgroup(
+            "grp",
+            "c1",
+            &[(b"mystream".to_vec(), ">".to_string())],
+            Some(1),
+            Some(1700),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(xres, RespValue::Null);
 
-    // close() must drop the stored connection immediately.
-    client.close();
-    assert!(client.is_closed());
-    assert!(!client.has_active_connection());
+    engine.close().await;
+    assert!(engine.is_closed());
+    assert!(!engine.has_active_connection());
 }

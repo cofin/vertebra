@@ -1,5 +1,5 @@
-import { computeBackoffDelay } from "./client/retry";
 import { BoundedKeySet } from "./internal/lru_set";
+import { ReconnectScheduler } from "./internal/reconnect";
 
 export interface WebSocketClientOptions {
   protocols?: string | string[];
@@ -35,16 +35,12 @@ export class WebSocketClient {
   private readonly protocols?: string | string[];
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatTimeoutMs: number;
-  private readonly maxReconnectAttempts: number;
-  private readonly baseDelayMs: number;
-  private readonly maxDelayMs: number;
+  private readonly reconnect: ReconnectScheduler;
 
   private ws: WebSocket | null = null;
   private connected = false;
   private manuallyClosed = false;
   private negotiatedSubprotocol = "";
-  private reconnectAttempts = 0;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatIntervalTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -57,9 +53,11 @@ export class WebSocketClient {
     this.protocols = options.protocols;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
     this.heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
-    this.maxReconnectAttempts = options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
-    this.baseDelayMs = options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
-    this.maxDelayMs = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+    this.reconnect = new ReconnectScheduler(
+      options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS,
+      options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS,
+      options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS,
+    );
   }
 
   /** Return `true` if the WebSocket connection is currently open. */
@@ -134,7 +132,7 @@ export class WebSocketClient {
 
       this.ws.onopen = () => {
         this.connected = true;
-        this.reconnectAttempts = 0;
+        this.reconnect.reset();
         this.negotiatedSubprotocol = this.ws?.protocol ?? "";
         this.startHeartbeat();
         for (const topic of this.subscriptions.keys()) {
@@ -152,30 +150,26 @@ export class WebSocketClient {
         this.connected = false;
         this.stopHeartbeat();
         if (!this.manuallyClosed && event.code !== 1000 && this.subscriptions.size > 0) {
-          this.scheduleReconnect();
+          this.reconnect.schedule(() => this.connect());
         }
       };
 
       this.ws.onerror = () => {};
     } catch {
-      this.scheduleReconnect();
+      this.reconnect.schedule(() => this.connect());
     }
   }
 
   /** Close the WebSocket connection and stop reconnection and heartbeat timers. */
   close(): void {
     this.manuallyClosed = true;
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    this.reconnect.cancel();
     this.stopHeartbeat();
     if (this.ws) {
       this.ws.close(1000);
       this.ws = null;
     }
     this.connected = false;
-    this.reconnectAttempts = 0;
   }
 
   private sendSubscribeFrame(topic: string): void {
@@ -258,15 +252,5 @@ export class WebSocketClient {
       clearTimeout(this.heartbeatTimeoutTimer);
       this.heartbeatTimeoutTimer = null;
     }
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) return;
-    const delay = computeBackoffDelay(this.reconnectAttempts, this.baseDelayMs, this.maxDelayMs);
-    this.reconnectAttempts += 1;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connect();
-    }, delay);
   }
 }

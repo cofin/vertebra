@@ -65,13 +65,15 @@ def _normalize_ttl(expiration_time: int | None) -> float | None:
     return float(expiration_time)
 
 
-class SyncCacheRegion:
-    """Synchronous cache region implementing Advanced Alchemy's ``SyncCacheRegionProtocol``."""
+class _BaseCacheRegion:
+    """Shared expiration configuration across sync and async cache regions."""
 
     __slots__ = ("_expiration_time", "_store")
 
-    def __init__(self, store: SyncCacheStore, *, expiration_time: int = 3600) -> None:
-        """Initialize a synchronous cache region backed by ``store``."""
+    _expiration_time: int
+    _store: Any
+
+    def __init__(self, store: Any, *, expiration_time: int = 3600) -> None:
         self._store = store
         self._expiration_time = expiration_time
 
@@ -87,6 +89,18 @@ class SyncCacheRegion:
         if expiration_time is not None:
             self._expiration_time = expiration_time
         return self
+
+
+class SyncCacheRegion(_BaseCacheRegion):
+    """Synchronous cache region implementing Advanced Alchemy's ``SyncCacheRegionProtocol``."""
+
+    __slots__ = ()
+
+    _store: SyncCacheStore
+
+    def __init__(self, store: SyncCacheStore, *, expiration_time: int = 3600) -> None:
+        """Initialize a synchronous cache region backed by ``store``."""
+        super().__init__(store, expiration_time=expiration_time)
 
     def get(self, key: str, expiration_time: int | None = None) -> object:
         """Fetch and decode ``key``, returning upstream ``NO_VALUE`` on miss."""
@@ -124,28 +138,16 @@ class SyncCacheRegion:
         self._store.clear()
 
 
-class AsyncCacheRegion:
+class AsyncCacheRegion(_BaseCacheRegion):
     """Asynchronous cache region implementing Advanced Alchemy's ``AsyncCacheRegionProtocol``."""
 
-    __slots__ = ("_expiration_time", "_store")
+    __slots__ = ()
+
+    _store: AsyncCacheStore
 
     def __init__(self, store: AsyncCacheStore, *, expiration_time: int = 3600) -> None:
         """Initialize an asynchronous cache region backed by ``store``."""
-        self._store = store
-        self._expiration_time = expiration_time
-
-    def configure(
-        self,
-        backend: str = "",
-        expiration_time: int | None = None,
-        arguments: Mapping[str, object] | None = None,
-        **kwargs: object,
-    ) -> Self:
-        """Update region expiration configuration and return ``self``."""
-        _ = (backend, arguments, kwargs)
-        if expiration_time is not None:
-            self._expiration_time = expiration_time
-        return self
+        super().__init__(store, expiration_time=expiration_time)
 
     async def get(self, key: str, expiration_time: int | None = None) -> object:
         """Asynchronously fetch and decode ``key``, returning upstream ``NO_VALUE`` on miss."""

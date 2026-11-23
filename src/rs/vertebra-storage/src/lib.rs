@@ -103,6 +103,48 @@ fn validate_concurrency(concurrency: i64) -> PyResult<usize> {
     usize::try_from(concurrency).map_err(|_| PyValueError::new_err("concurrency is too large"))
 }
 
+fn meta_to_py(py: Python<'_>, meta: StoredObjectMeta) -> PyResult<Py<PyAny>> {
+    Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any())
+}
+
+fn build_store_engine(
+    py: Python<'_>,
+    url: &str,
+    options: Option<HashMap<String, String>>,
+    token_cache_capsule: Option<&Bound<'_, PyAny>>,
+) -> PyResult<ObjectStoreEngine> {
+    let token_cache = token_cache_capsule
+        .map(extract_token_cache_capsule)
+        .transpose()?;
+    py.detach(|| ObjectStoreEngine::from_url_with_cache(url, options, token_cache))
+        .map_err(to_py_err)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_put_opts(
+    content_type: Option<String>,
+    attributes: Option<HashMap<String, String>>,
+    if_not_exists: bool,
+    if_match: Option<String>,
+    if_none_match: Option<String>,
+    checksum: bool,
+    expected_sha256: Option<String>,
+    expected_crc32c: Option<String>,
+    expected_md5: Option<String>,
+) -> PutConditionalOptions {
+    PutConditionalOptions {
+        if_not_exists,
+        if_match,
+        if_none_match,
+        content_type,
+        attributes: attributes.unwrap_or_default(),
+        checksum,
+        expected_sha256,
+        expected_crc32c,
+        expected_md5,
+    }
+}
+
 fn metas_to_py_list(py: Python<'_>, metas: Vec<StoredObjectMeta>) -> PyResult<Py<PyAny>> {
     let converted: Vec<PyObjectMeta> = metas.into_iter().map(PyObjectMeta::from).collect();
     Ok(converted.into_pyobject(py)?.into_any().unbind())
@@ -627,13 +669,9 @@ impl PySyncObjectStore {
         options: Option<HashMap<String, String>>,
         token_cache_capsule: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let token_cache = token_cache_capsule
-            .map(extract_token_cache_capsule)
-            .transpose()?;
-        let engine = py
-            .detach(|| ObjectStoreEngine::from_url_with_cache(url, options, token_cache))
-            .map_err(to_py_err)?;
-        Ok(Self { engine })
+        Ok(Self {
+            engine: build_store_engine(py, url, options, token_cache_capsule)?,
+        })
     }
 
     #[getter]
@@ -681,20 +719,19 @@ impl PySyncObjectStore {
             && expected_md5.is_none()
             && let Some(res) = self.engine.try_put_memory_sync(path, payload.clone())
         {
-            let meta = res.map_err(to_py_err)?;
-            return Ok(PyObjectMeta::from(meta));
+            return Ok(PyObjectMeta::from(res.map_err(to_py_err)?));
         }
-        let opts = PutConditionalOptions {
+        let opts = make_put_opts(
+            content_type,
+            attributes,
             if_not_exists,
             if_match,
             if_none_match,
-            content_type,
-            attributes: attributes.unwrap_or_default(),
             checksum,
             expected_sha256,
             expected_crc32c,
             expected_md5,
-        };
+        );
         let engine = self.engine.clone();
         let meta = py
             .detach(|| block_on_storage(async move { engine.put_opts(path, payload, opts).await }))
@@ -714,13 +751,17 @@ impl PySyncObjectStore {
         expected_crc32c: Option<String>,
         expected_md5: Option<String>,
     ) -> PyResult<PyObjectMeta> {
-        let opts = PutConditionalOptions {
+        let opts = make_put_opts(
+            None,
+            None,
+            false,
+            None,
+            None,
             checksum,
             expected_sha256,
             expected_crc32c,
             expected_md5,
-            ..Default::default()
-        };
+        );
         let engine = self.engine.clone();
         let meta = py
             .detach(|| {
@@ -815,17 +856,17 @@ impl PySyncObjectStore {
         expected_crc32c: Option<String>,
         expected_md5: Option<String>,
     ) -> PyResult<PySyncMultipartUpload> {
-        let opts = PutConditionalOptions {
+        let opts = make_put_opts(
+            content_type,
+            attributes,
             if_not_exists,
             if_match,
             if_none_match,
-            content_type,
-            attributes: attributes.unwrap_or_default(),
             checksum,
             expected_sha256,
             expected_crc32c,
             expected_md5,
-        };
+        );
         let engine = self.engine.clone();
         let session = py
             .detach(|| block_on_storage(async move { engine.create_multipart(path, opts).await }))
@@ -841,10 +882,10 @@ impl PySyncObjectStore {
         path: &str,
         parts: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyObjectMeta> {
-        let mut chunks = Vec::with_capacity(parts.len());
-        for part in &parts {
-            chunks.push(extract_buffer_bytes(py, part)?);
-        }
+        let chunks = parts
+            .iter()
+            .map(|p| extract_buffer_bytes(py, p))
+            .collect::<PyResult<Vec<_>>>()?;
         let engine = self.engine.clone();
         let meta = py
             .detach(|| block_on_storage(async move { engine.put_multipart(path, chunks).await }))
@@ -862,8 +903,7 @@ impl PySyncObjectStore {
         if expected_sha256.is_none()
             && let Some(res) = self.engine.try_get_memory_sync(path)
         {
-            let data = res.map_err(to_py_err)?;
-            return Ok(PyBytes::new(py, &data));
+            return Ok(PyBytes::new(py, &res.map_err(to_py_err)?));
         }
         let engine = self.engine.clone();
         let data = py
@@ -924,8 +964,7 @@ impl PySyncObjectStore {
         length: u64,
     ) -> PyResult<Bound<'py, PyBytes>> {
         if let Some(res) = self.engine.try_get_range_memory_sync(path, offset, length) {
-            let data = res.map_err(to_py_err)?;
-            return Ok(PyBytes::new(py, &data));
+            return Ok(PyBytes::new(py, &res.map_err(to_py_err)?));
         }
         let engine = self.engine.clone();
         let data = py
@@ -1049,13 +1088,9 @@ impl PyAsyncObjectStore {
         options: Option<HashMap<String, String>>,
         token_cache_capsule: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let token_cache = token_cache_capsule
-            .map(extract_token_cache_capsule)
-            .transpose()?;
-        let engine = py
-            .detach(|| ObjectStoreEngine::from_url_with_cache(url, options, token_cache))
-            .map_err(to_py_err)?;
-        Ok(Self { engine })
+        Ok(Self {
+            engine: build_store_engine(py, url, options, token_cache_capsule)?,
+        })
     }
 
     #[getter]
@@ -1092,22 +1127,22 @@ impl PyAsyncObjectStore {
         expected_md5: Option<String>,
     ) -> PyResult<RustTaskAwaitable> {
         let payload = extract_buffer_bytes(py, data)?;
-        let opts = PutConditionalOptions {
+        let opts = make_put_opts(
+            content_type,
+            attributes,
             if_not_exists,
             if_match,
             if_none_match,
-            content_type,
-            attributes: attributes.unwrap_or_default(),
             checksum,
             expected_sha256,
             expected_crc32c,
             expected_md5,
-        };
+        );
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
             async move { engine.put_opts(&path, payload, opts).await },
-            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
+            meta_to_py,
         )
     }
 
@@ -1123,18 +1158,22 @@ impl PyAsyncObjectStore {
         expected_crc32c: Option<String>,
         expected_md5: Option<String>,
     ) -> PyResult<RustTaskAwaitable> {
-        let opts = PutConditionalOptions {
+        let opts = make_put_opts(
+            None,
+            None,
+            false,
+            None,
+            None,
             checksum,
             expected_sha256,
             expected_crc32c,
             expected_md5,
-            ..Default::default()
-        };
+        );
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
             async move { engine.put_file_opts(&path, &file_path, opts).await },
-            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
+            meta_to_py,
         )
     }
 
@@ -1155,7 +1194,7 @@ impl PyAsyncObjectStore {
                     None => engine.get_file(&path, &file_path).await,
                 }
             },
-            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
+            meta_to_py,
         )
     }
 
@@ -1203,7 +1242,7 @@ impl PyAsyncObjectStore {
         spawn_rust_task(
             py,
             async move { engine.compose(sources, &dst, content_type).await },
-            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
+            meta_to_py,
         )
     }
 
@@ -1223,17 +1262,17 @@ impl PyAsyncObjectStore {
         expected_crc32c: Option<String>,
         expected_md5: Option<String>,
     ) -> PyResult<RustTaskAwaitable> {
-        let opts = PutConditionalOptions {
+        let opts = make_put_opts(
+            content_type,
+            attributes,
             if_not_exists,
             if_match,
             if_none_match,
-            content_type,
-            attributes: attributes.unwrap_or_default(),
             checksum,
             expected_sha256,
             expected_crc32c,
             expected_md5,
-        };
+        );
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -1256,15 +1295,15 @@ impl PyAsyncObjectStore {
         path: String,
         parts: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<RustTaskAwaitable> {
-        let mut chunks = Vec::with_capacity(parts.len());
-        for part in &parts {
-            chunks.push(extract_buffer_bytes(py, part)?);
-        }
+        let chunks = parts
+            .iter()
+            .map(|p| extract_buffer_bytes(py, p))
+            .collect::<PyResult<Vec<_>>>()?;
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
             async move { engine.put_multipart(&path, chunks).await },
-            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
+            meta_to_py,
         )
     }
 
@@ -1336,9 +1375,7 @@ impl PyAsyncObjectStore {
 
     fn head(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
-        spawn_rust_task(py, async move { engine.head(&path).await }, |py, meta| {
-            Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any())
-        })
+        spawn_rust_task(py, async move { engine.head(&path).await }, meta_to_py)
     }
 
     fn exists(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
@@ -1400,11 +1437,7 @@ impl PyAsyncObjectStore {
         spawn_rust_task(
             py,
             async move { engine.list(prefix.as_deref()).await },
-            |py, items| {
-                let converted: Vec<PyObjectMeta> =
-                    items.into_iter().map(PyObjectMeta::from).collect();
-                Ok(converted.into_pyobject(py)?.into_any().unbind())
-            },
+            metas_to_py_list,
         )
     }
 

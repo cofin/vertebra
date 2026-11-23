@@ -74,6 +74,7 @@ jobs:
               - 'src/rs/vertebra-sqlite/**'
               - 'src/rs/vertebra-duckdb/**'
               - 'src/rs/vertebra-redis/**'
+              - 'src/rs/vertebra-resp/**'
               - 'src/rs/vertebra-valkey/**'
               - 'src/rs/vertebra-bigquery/**'
               - 'src/rs/vertebra-spanner/**'

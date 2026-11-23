@@ -2,6 +2,7 @@ import type React from "react";
 import { createContext, use, useCallback, useContext, useMemo, useState, useSyncExternalStore } from "react";
 import { HttpClient } from "../client/client";
 import type { ClientConfig } from "../client/types";
+import { runTrackedMutation } from "../internal/async_runner";
 import { QueryCache, queryCache } from "./cache";
 
 export const ClientContext = createContext<HttpClient | null>(null);
@@ -85,20 +86,15 @@ export function useMutation<TInput = unknown, TOutput = unknown>(method: string,
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  const mutate = async (input?: TInput) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await client.call<TInput, TOutput>(method, path, input);
-      cache.invalidate();
-      return result;
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err : new Error(String(err)));
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  };
+  const mutate = (input?: TInput) =>
+    runTrackedMutation(
+      () => client.call<TInput, TOutput>(method, path, input),
+      (isLoading, err) => {
+        setLoading(isLoading);
+        setError(err);
+      },
+      () => cache.invalidate(),
+    );
 
   return { mutate, loading, error };
 }

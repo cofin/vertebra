@@ -13,8 +13,6 @@ from sqlalchemy.sql import sqltypes
 
 from vertebra.extensions.sqlalchemy.dialects._base import (
     _AsyncDialectMixin,
-    _extract_sqlstate,
-    _is_disconnect_common,
     _SyncDialectMixin,
 )
 from vertebra.extensions.sqlalchemy.types import HalfVector, PgVector, SparseVector
@@ -114,19 +112,8 @@ class _PostgreSQLDialectMixin:
         """Return the current DBAPI connection autocommit setting."""
         return bool(getattr(dbapi_conn, "autocommit", False))
 
-    def is_disconnect(self, e: Exception, connection: Any = None, cursor: Any = None) -> bool:
-        """Return True when SQLSTATE matches 08* or 57P01-57P03, never raising."""
-        try:
-            sqlstate = _extract_sqlstate(e)
-            if sqlstate is not None:
-                if sqlstate in _PG_NON_DISCONNECT_SQLSTATES:
-                    return False
-                if sqlstate.startswith("08") or sqlstate in _PG_DISCONNECT_SQLSTATES:
-                    return True
-            parent_fn = getattr(super(), "is_disconnect", None)
-            return _is_disconnect_common(e, connection, cursor, parent_fn)
-        except Exception:
-            return False
+    _non_disconnect_sqlstates = _PG_NON_DISCONNECT_SQLSTATES
+    _disconnect_sqlstates = _PG_DISCONNECT_SQLSTATES
 
 
 class SyncPostgreSQLDialect(_PostgreSQLDialectMixin, _SyncDialectMixin, PGDialect):
