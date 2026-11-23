@@ -103,11 +103,13 @@ def _default_rust_target(target_platform: str, archflags: str | None, host_arch:
 def _probe_python_shared_info(python_executable: str | Path) -> tuple[bool, str | None, str | None]:
     """Inspect a Python executable to determine shared-library availability via ``sysconfig``."""
     probe_code = (
-        "import json, sysconfig; "
+        "import json, sys, sysconfig; "
         "print(json.dumps({"
         "'enable_shared': sysconfig.get_config_var('ENABLE_SHARED'), "
         "'libdir': sysconfig.get_config_var('LIBDIR'), "
-        "'ldlibrary': sysconfig.get_config_var('LDLIBRARY')"
+        "'ldlibrary': sysconfig.get_config_var('LDLIBRARY'), "
+        "'pythonframework': sysconfig.get_config_var('PYTHONFRAMEWORK'), "
+        "'platform': sys.platform"
         "}))"
     )
     proc = subprocess.run(
@@ -125,10 +127,17 @@ def _probe_python_shared_info(python_executable: str | Path) -> tuple[bool, str 
     enable_shared = payload.get("enable_shared")
     libdir = payload.get("libdir")
     ldlibrary = payload.get("ldlibrary")
+    pythonframework = payload.get("pythonframework")
+    probe_platform = payload.get("platform")
     if isinstance(ldlibrary, str) and ldlibrary.endswith(".a"):
         return False, libdir if isinstance(libdir, str) else None, ldlibrary
     if os.name == "nt":
         return True, libdir if isinstance(libdir, str) else None, ldlibrary if isinstance(ldlibrary, str) else None
+    is_macos_framework = (
+        isinstance(pythonframework, str)
+        and bool(pythonframework.strip())
+        and (probe_platform == "darwin" or (probe_platform is None and sys.platform == "darwin"))
+    )
     is_explicit_shared = (
         enable_shared is True or enable_shared == 1 or str(enable_shared).strip().lower() in {"1", "true"}
     )
@@ -136,7 +145,9 @@ def _probe_python_shared_info(python_executable: str | Path) -> tuple[bool, str 
         enable_shared is False or enable_shared == 0 or str(enable_shared).strip().lower() in {"0", "false"}
     )
     has_shared_path = isinstance(libdir, str) and bool(libdir) and isinstance(ldlibrary, str) and bool(ldlibrary)
-    if is_explicit_static or not has_shared_path:
+    if is_macos_framework and has_shared_path:
+        is_shared = True
+    elif is_explicit_static or not has_shared_path:
         is_shared = False
     elif is_explicit_shared:
         is_shared = True
@@ -273,15 +284,28 @@ class ServerBinaryBuilder:
             )
             raise SystemExit(msg)
 
-        proc = subprocess.run(
+        found = ""
+        stderr_note = ""
+        for find_cmd in (
+            [uv_bin, "python", "find", "--managed-python", self.target.python_request],
             [uv_bin, "python", "find", self.target.python_request],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        found = proc.stdout.strip().splitlines()[0].strip() if proc.returncode == 0 and proc.stdout.strip() else ""
+        ):
+            proc = subprocess.run(
+                find_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            candidate_found = (
+                proc.stdout.strip().splitlines()[0].strip() if proc.returncode == 0 and proc.stdout.strip() else ""
+            )
+            if candidate_found:
+                found = candidate_found
+                break
+            if proc.stderr.strip():
+                stderr_note = proc.stderr.strip()
         if not found:
-            stderr_note = proc.stderr.strip() or f"no interpreter matching {self.target.python_request}"
+            stderr_note = stderr_note or f"no interpreter matching {self.target.python_request}"
             msg = (
                 f"Python interpreter {initial} is static and 'uv python find {self.target.python_request}' "
                 f"failed ({stderr_note}). Install a shared CPython build via 'uv python install {self.target.python_version}'."
@@ -349,7 +373,11 @@ class ServerBinaryBuilder:
             if not dep or dep == target_ref:
                 continue
             dep_name = Path(dep).name
-            if dep_name.startswith("libpython") or f"libpython{self.target.python_version}" in dep:
+            if (
+                dep_name.startswith("libpython")
+                or f"libpython{self.target.python_version}" in dep
+                or (dep_name in {"Python", "PythonT"} and ("Python.framework/" in dep or "PythonT.framework/" in dep))
+            ):
                 commands.append(
                     [
                         "install_name_tool",

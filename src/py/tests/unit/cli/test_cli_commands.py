@@ -640,6 +640,19 @@ def test_embedded_python_runtime_detection_guard_and_env_apply(
     )
     assert supervisor_mod.EmbeddedPythonRuntime.detect().is_shared is False
 
+    monkeypatch.setattr("vertebra.supervisor._supervisor.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "vertebra.supervisor._supervisor.sysconfig.get_config_var",
+        lambda key: {
+            "LIBDIR": "/Library/Frameworks/Python.framework/Versions/3.12/lib",
+            "LDLIBRARY": "Python.framework/Versions/3.12/Python",
+            "ENABLE_SHARED": 0,
+            "PYTHONFRAMEWORK": "Python",
+        }.get(key),
+    )
+    assert supervisor_mod.EmbeddedPythonRuntime.detect().is_shared is True
+    monkeypatch.setattr("vertebra.supervisor._supervisor.sys.platform", "linux")
+
     monkeypatch.setattr("vertebra.supervisor._supervisor.sys.base_prefix", str(tmp_path / "pyhome"))
 
     linux_env: dict[str, str] = {"LD_LIBRARY_PATH": "/existing/lib"}
