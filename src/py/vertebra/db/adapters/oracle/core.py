@@ -174,15 +174,68 @@ class OracleCore:
     @staticmethod
     def parse_tnsnames_ora(contents: str) -> dict[str, str]:
         """Parse a `tnsnames.ora` file into a dictionary mapping aliases to TNS descriptors."""
-        res = _vertebra_mod.parse_tnsnames_ora(contents)
-        return {str(k).upper(): str(v) for k, v in res.items()}
+        native_fn = getattr(_vertebra_mod, "parse_tnsnames_ora", None)
+        if native_fn is not None:
+            res = native_fn(contents)
+            if isinstance(res, dict):
+                return {str(k).upper(): str(v) for k, v in res.items()}
+
+        cleaned_lines: list[str] = []
+        for raw_line in contents.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("\x23"):
+                continue
+            cleaned_lines.append(raw_line)
+        text = "\n".join(cleaned_lines)
+
+        entries: dict[str, str] = {}
+        idx = 0
+        n = len(text)
+        while idx < n:
+            while idx < n and text[idx].isspace():
+                idx += 1
+            if idx >= n:
+                break
+            eq_pos = text.find("=", idx)
+            if eq_pos == -1:
+                break
+            alias_part = text[idx:eq_pos].strip()
+            paren_start = text.find("(", eq_pos + 1)
+            if paren_start == -1:
+                break
+            depth = 0
+            in_quotes = False
+            pos = paren_start
+            while pos < n:
+                ch = text[pos]
+                if ch == '"':
+                    in_quotes = not in_quotes
+                elif not in_quotes:
+                    if ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        depth -= 1
+                        if depth == 0:
+                            pos += 1
+                            break
+                pos += 1
+            descriptor = re.sub(r"\s+", "", text[paren_start:pos])
+            for raw_alias in alias_part.split(","):
+                alias_clean = raw_alias.strip()
+                if alias_clean:
+                    entries[alias_clean.upper()] = descriptor
+                    entries[alias_clean] = descriptor
+            idx = pos
+        return entries
 
     @staticmethod
     def resolve_tns_alias_raw(contents: str, alias: str) -> str | dict[str, Any] | None:
         """Resolve a TNS alias from `tnsnames.ora` contents into a descriptor string or dict."""
-        resolved = _vertebra_mod.resolve_tns_alias(contents, alias)
-        if isinstance(resolved, (str, dict)):
-            return resolved
+        native_fn = getattr(_vertebra_mod, "resolve_tns_alias", None)
+        if native_fn is not None:
+            resolved = native_fn(contents, alias)
+            if resolved is not None and isinstance(resolved, (str, dict)):
+                return resolved
         mapping = OracleCore.parse_tnsnames_ora(contents)
         return mapping.get(alias) or mapping.get(alias.upper())
 
@@ -257,7 +310,26 @@ class OracleCore:
         ecid: str | None = None,
     ) -> bytes:
         """Encode a zero-RTT TTC piggyback frame (`0x11 0x6e`) carrying session tracing attributes."""
-        return bytes(_vertebra_mod.encode_ttc_session_attrs(client_identifier, module, action, ecid))
+        native_fn = getattr(_vertebra_mod, "encode_ttc_session_attrs", None)
+        if native_fn is not None:
+            return bytes(native_fn(client_identifier, module, action, ecid))
+
+        fields: list[tuple[int, bytes]] = []
+        if client_identifier is not None:
+            fields.append((1, client_identifier.encode("utf-8")))
+        if module is not None:
+            fields.append((2, module.encode("utf-8")))
+        if action is not None:
+            fields.append((3, action.encode("utf-8")))
+        if ecid is not None:
+            fields.append((4, ecid.encode("utf-8")))
+
+        out = bytearray([0x11, 0x6E, len(fields)])
+        for attr_id, val_bytes in fields:
+            out.append(attr_id)
+            out.extend(struct.pack(">H", len(val_bytes)))
+            out.extend(val_bytes)
+        return bytes(out)
 
     @staticmethod
     def decode_ttc_session_attrs(payload: bytes | bytearray | memoryview) -> dict[str, str]:
@@ -285,54 +357,111 @@ class OracleCore:
     @staticmethod
     def encode_vector_f32(values: Sequence[float]) -> bytes:
         """Encode a sequence of `float` values into an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame."""
-        return bytes(_vertebra_mod.encode_oracle_vector_f32(values if isinstance(values, list) else list(values)))
+        native_fn = getattr(_vertebra_mod, "encode_oracle_vector_f32", None)
+        if native_fn is not None:
+            val_list = values if isinstance(values, list) else list(values)
+            return bytes(native_fn(val_list))
+        dims = len(values)
+        return OracleCore._encode_vector_header(ORACLE_VECTOR_FMT_F32, dims) + struct.pack(f">{dims}f", *values)
 
     @staticmethod
     def decode_vector_f32(payload: bytes | bytearray | memoryview) -> list[float]:
         """Decode an Oracle 26ai `VECTOR(*, FLOAT32)` binary frame into a list of floats."""
-        try:
-            return list(_vertebra_mod.decode_oracle_vector_f32(bytes(payload)))
-        except ValueError as exc:
-            raise OracleCore._data_error(str(exc)) from exc
+        raw = bytes(payload)
+        native_fn = getattr(_vertebra_mod, "decode_oracle_vector_f32", None)
+        if native_fn is not None:
+            try:
+                return list(native_fn(raw))
+            except ValueError as exc:
+                raise OracleCore._data_error(str(exc)) from exc
+        dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_F32)
+        if len(body) != dims * 4:
+            raise OracleCore._data_error(
+                f"Oracle FLOAT32 VECTOR payload length mismatch: expected {dims * 4}, got {len(body)}",
+            )
+        return list(struct.unpack(f">{dims}f", body))
 
     @staticmethod
     def encode_vector_f64(values: Sequence[float]) -> bytes:
         """Encode a sequence of `float` values into an Oracle 26ai `VECTOR(*, FLOAT64)` binary frame."""
-        return bytes(_vertebra_mod.encode_oracle_vector_f64(values if isinstance(values, list) else list(values)))
+        native_fn = getattr(_vertebra_mod, "encode_oracle_vector_f64", None)
+        if native_fn is not None:
+            val_list = values if isinstance(values, list) else list(values)
+            return bytes(native_fn(val_list))
+        dims = len(values)
+        return OracleCore._encode_vector_header(ORACLE_VECTOR_FMT_F64, dims) + struct.pack(f">{dims}d", *values)
 
     @staticmethod
     def decode_vector_f64(payload: bytes | bytearray | memoryview) -> list[float]:
         """Decode an Oracle 26ai `VECTOR(*, FLOAT64)` binary frame into a list of floats."""
-        try:
-            return list(_vertebra_mod.decode_oracle_vector_f64(bytes(payload)))
-        except ValueError as exc:
-            raise OracleCore._data_error(str(exc)) from exc
+        raw = bytes(payload)
+        native_fn = getattr(_vertebra_mod, "decode_oracle_vector_f64", None)
+        if native_fn is not None:
+            try:
+                return list(native_fn(raw))
+            except ValueError as exc:
+                raise OracleCore._data_error(str(exc)) from exc
+        dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_F64)
+        if len(body) != dims * 8:
+            raise OracleCore._data_error(
+                f"Oracle FLOAT64 VECTOR payload length mismatch: expected {dims * 8}, got {len(body)}",
+            )
+        return list(struct.unpack(f">{dims}d", body))
 
     @staticmethod
     def encode_vector_i8(values: Sequence[int]) -> bytes:
         """Encode a sequence of signed 8-bit integers into an Oracle 26ai `VECTOR(*, INT8)` binary frame."""
-        return bytes(_vertebra_mod.encode_oracle_vector_i8(values if isinstance(values, list) else list(values)))
+        native_fn = getattr(_vertebra_mod, "encode_oracle_vector_i8", None)
+        if native_fn is not None:
+            val_list = values if isinstance(values, list) else list(values)
+            return bytes(native_fn(val_list))
+        dims = len(values)
+        return OracleCore._encode_vector_header(ORACLE_VECTOR_FMT_I8, dims) + struct.pack(f">{dims}b", *values)
 
     @staticmethod
     def decode_vector_i8(payload: bytes | bytearray | memoryview) -> list[int]:
         """Decode an Oracle 26ai `VECTOR(*, INT8)` binary frame into a list of signed 8-bit integers."""
-        try:
-            return list(_vertebra_mod.decode_oracle_vector_i8(bytes(payload)))
-        except ValueError as exc:
-            raise OracleCore._data_error(str(exc)) from exc
+        raw = bytes(payload)
+        native_fn = getattr(_vertebra_mod, "decode_oracle_vector_i8", None)
+        if native_fn is not None:
+            try:
+                return list(native_fn(raw))
+            except ValueError as exc:
+                raise OracleCore._data_error(str(exc)) from exc
+        dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_I8)
+        if len(body) != dims:
+            raise OracleCore._data_error(
+                f"Oracle INT8 VECTOR payload length mismatch: expected {dims}, got {len(body)}",
+            )
+        return list(struct.unpack(f">{dims}b", body))
 
     @staticmethod
     def encode_vector_binary(packed_bits: bytes | Sequence[int]) -> bytes:
         """Encode packed uint8 bytes into an Oracle 26ai `VECTOR(*, BINARY)` binary frame."""
-        return bytes(_vertebra_mod.encode_oracle_vector_binary(bytes(packed_bits)))
+        raw_bits = bytes(packed_bits)
+        native_fn = getattr(_vertebra_mod, "encode_oracle_vector_binary", None)
+        if native_fn is not None:
+            return bytes(native_fn(raw_bits))
+        dims = len(raw_bits) * 8
+        return OracleCore._encode_vector_header(ORACLE_VECTOR_FMT_BINARY, dims) + raw_bits
 
     @staticmethod
     def decode_vector_binary(payload: bytes | bytearray | memoryview) -> bytes:
         """Decode an Oracle 26ai `VECTOR(*, BINARY)` binary frame into packed bytes."""
-        try:
-            return bytes(_vertebra_mod.decode_oracle_vector_binary(bytes(payload)))
-        except ValueError as exc:
-            raise OracleCore._data_error(str(exc)) from exc
+        raw = bytes(payload)
+        native_fn = getattr(_vertebra_mod, "decode_oracle_vector_binary", None)
+        if native_fn is not None:
+            try:
+                return bytes(native_fn(raw))
+            except ValueError as exc:
+                raise OracleCore._data_error(str(exc)) from exc
+        dims, body = OracleCore._decode_vector_header(raw, ORACLE_VECTOR_FMT_BINARY)
+        expected = dims // 8
+        if len(body) != expected:
+            raise OracleCore._data_error(
+                f"Oracle BINARY VECTOR payload length mismatch: expected {expected}, got {len(body)}",
+            )
+        return bytes(body)
 
     @staticmethod
     def encode_vector(
@@ -481,7 +610,10 @@ class OracleCore:
     @staticmethod
     def encode_oson_payload(json_bytes: bytes) -> bytes:
         """Wrap raw UTF-8 JSON bytes with an 8-byte Oracle 26ai `OSON` binary header."""
-        return bytes(_vertebra_mod.encode_oson_payload(json_bytes))
+        native_fn = getattr(_vertebra_mod, "encode_oson_payload", None)
+        if native_fn is not None:
+            return bytes(native_fn(json_bytes))
+        return OSON_MAGIC + b"\x01" + struct.pack(">I", len(json_bytes)) + json_bytes
 
     @staticmethod
     def decode_oson_payload(payload: bytes | bytearray | memoryview) -> bytes:
@@ -489,10 +621,18 @@ class OracleCore:
         raw = bytes(payload)
         if len(raw) < 8 or raw[:3] != OSON_MAGIC or raw[3] != 0x01:
             raise OracleCore._data_error("Invalid Oracle OSON magic/version header (expected \\xff\\x4a\\x5a\\x01)")
-        try:
-            return bytes(_vertebra_mod.decode_oson_payload(raw))
-        except ValueError as exc:
-            raise OracleCore._data_error(str(exc)) from exc
+        native_fn = getattr(_vertebra_mod, "decode_oson_payload", None)
+        if native_fn is not None:
+            try:
+                return bytes(native_fn(raw))
+            except ValueError as exc:
+                raise OracleCore._data_error(str(exc)) from exc
+        length = struct.unpack(">I", raw[4:8])[0]
+        if len(raw) < 8 + length:
+            raise OracleCore._data_error(
+                f"Truncated Oracle OSON payload: expected {length} bytes, got {len(raw) - 8}",
+            )
+        return raw[8 : 8 + length]
 
     @staticmethod
     def encode_oson(value: Any) -> bytes:

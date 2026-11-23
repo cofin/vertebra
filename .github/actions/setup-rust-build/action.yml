@@ -187,3 +187,16 @@ runs:
         cache-bin: false
         cache-on-failure: ${{ inputs.cache-on-failure }}
         save-if: ${{ inputs.save-cache }}
+
+    - name: Drop incomplete bundled DuckDB source trees from the restored cache
+      shell: bash
+      run: |
+        for root in src/rs/target "${CARGO_TARGET_DIR:-}"; do
+          [ -n "$root" ] && [ -d "$root" ] || continue
+          find "$root" -maxdepth 3 -type d -name duckdb-sources -print0 | while IFS= read -r -d '' sources; do
+            for tree in "$sources"/*/; do
+              [ -d "$tree" ] || continue
+              [ -f "$tree/.complete" ] || rm -rf "$tree"
+            done
+          done
+        done
