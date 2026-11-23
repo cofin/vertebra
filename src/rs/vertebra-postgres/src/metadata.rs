@@ -442,6 +442,7 @@ pub(crate) fn resolve_parameter_metadata_from_catalog<P: AsParameterInput>(
 /// Synchronously resolve parameter OIDs when every parameter type is already known in `catalog`.
 ///
 /// Returns `Ok(None)` if any parameter requires a pre-`Parse` catalog discovery round trip.
+#[cfg(unix)]
 pub(crate) fn try_resolve_parameter_metadata_sync(
     catalog: &TypeCatalog,
     params: &[Parameter],

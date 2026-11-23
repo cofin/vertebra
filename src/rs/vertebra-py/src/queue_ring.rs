@@ -1,23 +1,35 @@
 //! Cross-process POSIX shared-memory queue ring and record store.
 
+#[cfg(unix)]
 use core::ptr::NonNull;
+#[cfg(unix)]
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
-use pyo3::exceptions::{PyOSError, PyOverflowError, PyRuntimeError, PyValueError};
-use pyo3::prelude::*;
 #[cfg(unix)]
 use std::ffi::CString;
 #[cfg(unix)]
+use std::time::{Duration, Instant};
+
+use pyo3::exceptions::PyValueError;
+#[cfg(unix)]
+use pyo3::exceptions::{PyOSError, PyOverflowError, PyRuntimeError};
+use pyo3::prelude::*;
+#[cfg(unix)]
 use vertebra_core::sync::{wait_on_address_timeout, wake_all, wake_one};
 
+#[cfg(unix)]
 const RING_MAGIC: u64 = u64::from_le_bytes(*b"VTBQRING");
+#[cfg(unix)]
 const RING_VERSION: u32 = 1;
+#[cfg(unix)]
 const INIT_PENDING: u32 = 0;
+#[cfg(unix)]
 const INIT_READY: u32 = 1;
+#[cfg(unix)]
 const MAX_RECORD_KEY_BYTES: usize = 256;
+#[cfg(unix)]
 const ATTACH_TIMEOUT_MS: u64 = 2000;
 
+#[cfg(unix)]
 #[repr(C, align(64))]
 struct RingHeader {
     magic: AtomicU64,
@@ -34,12 +46,14 @@ struct RingHeader {
     record_hwm: AtomicU64,
 }
 
+#[cfg(unix)]
 #[repr(C)]
 struct RingSlotMeta {
     len: u32,
     _pad: u32,
 }
 
+#[cfg(unix)]
 #[repr(C)]
 struct RecordSlotMeta {
     key_hash: u64,
@@ -50,6 +64,7 @@ struct RecordSlotMeta {
     key: [u8; MAX_RECORD_KEY_BYTES],
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy)]
 struct RingLayout {
     capacity: usize,
@@ -62,6 +77,7 @@ struct RingLayout {
     total_bytes: usize,
 }
 
+#[cfg(unix)]
 impl RingLayout {
     fn compute(capacity: usize, slot_bytes: usize) -> PyResult<Self> {
         if capacity == 0 || slot_bytes == 0 {
@@ -111,14 +127,12 @@ impl RingLayout {
     }
 }
 
+#[cfg(unix)]
 fn os_page_size() -> usize {
-    #[cfg(unix)]
-    {
-        // SAFETY: `sysconf(_SC_PAGESIZE)` queries the OS page size without pointers.
-        let raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        if raw > 0 {
-            return raw as usize;
-        }
+    // SAFETY: `sysconf(_SC_PAGESIZE)` queries the OS page size without pointers.
+    let raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if raw > 0 {
+        return raw as usize;
     }
     4096
 }
@@ -472,6 +486,7 @@ fn open_or_create_ring(shm_path: &str, capacity: usize, slot_bytes: usize) -> Py
 #[pyclass(module = "vertebra._vertebra")]
 pub struct ShmQueueRing {
     name: String,
+    #[cfg(unix)]
     shm_path: String,
     capacity: usize,
     slot_bytes: usize,
@@ -955,9 +970,12 @@ impl ShmQueueRing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::Arc;
+    #[cfg(unix)]
     use std::thread;
 
+    #[cfg(unix)]
     fn unique_name(tag: &str) -> String {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

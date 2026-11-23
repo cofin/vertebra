@@ -6,6 +6,7 @@ import asyncio
 import collections
 import inspect
 import random
+import sys
 import time
 import urllib.parse
 import uuid
@@ -125,6 +126,11 @@ class TaskResultRecord(msgspec.Struct, frozen=True, kw_only=True):
     completed_at: float = 0.0
 
 
+def _default_queue_backend_kind() -> Literal["shm", "memory"]:
+    """Return the platform default queue backend kind (memory on Windows, shm on POSIX)."""
+    return "memory" if sys.platform == "win32" else "shm"
+
+
 class QueueBackendSettings(msgspec.Struct, frozen=True):
     """Declarative configuration settings for QueueService backend initialization."""
 
@@ -140,7 +146,7 @@ class QueueBackendSettings(msgspec.Struct, frozen=True):
         "spanner+spangres",
         "shm",
         "memory",
-    ] = "shm"
+    ] = msgspec.field(default_factory=_default_queue_backend_kind)
     """Queue backend identifier."""
 
     dsn: str | None = None

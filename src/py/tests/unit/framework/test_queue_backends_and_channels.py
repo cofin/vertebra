@@ -42,6 +42,7 @@ from vertebra.db.driver import AsyncQueueStore, QueueEntry, QueueReservation, Sy
 from vertebra.extensions.litestar.queues.backend import StoreQueueBackend, StoreQueueBackendConfig
 from vertebra.extensions.litestar.queues.shm_backend import SHMQueueBackendConfig
 from vertebra.framework.queues import (
+    MemoryQueueBackend,
     OracleQueueBackend,
     OracleQueueExecutor,
     PostgreSQLQueueBackend,
@@ -901,3 +902,25 @@ async def test_async_redis_queue_store_full_lifecycle() -> None:
     assert await store.reset_identity("idem-ar1", expected_job_id="job-ar1") is True
     await store.aclose()
     assert fake_driver._sync.closed is True
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "expected_kind"),
+    [
+        ("linux", "shm"),
+        ("darwin", "shm"),
+        ("win32", "memory"),
+    ],
+)
+def test_queue_backend_settings_default_kind_by_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_name: str,
+    expected_kind: str,
+) -> None:
+    """QueueBackendSettings defaults to memory on Windows and shm on POSIX platforms."""
+    monkeypatch.setattr(sys, "platform", platform_name)
+    settings = QueueBackendSettings()
+    assert settings.kind == expected_kind
+    if platform_name == "win32":
+        service = QueueService()
+        assert isinstance(service.backend, MemoryQueueBackend)

@@ -1,7 +1,9 @@
 //! PyO3 bindings for shared-memory connection broker and statement cache.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+#[cfg(unix)]
+use std::sync::Mutex;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use pyo3::buffer::PyBuffer;

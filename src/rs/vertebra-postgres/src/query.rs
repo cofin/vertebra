@@ -76,6 +76,7 @@ where
 
 /// Parse one complete bounded backend [`Message`] already buffered in `buf`, or return `Ok(None)`
 /// when more socket bytes are needed.
+#[cfg(unix)]
 pub(crate) fn parse_buffered_message(buf: &mut BytesMut) -> Result<Option<Message>, PostgresError> {
     if buf.len() < 5 {
         return Ok(None);

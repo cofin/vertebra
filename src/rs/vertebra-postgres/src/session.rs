@@ -306,6 +306,7 @@ impl ConnectionStream {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn try_write_plain(&self, buf: &[u8]) -> Option<std::io::Result<usize>> {
         match self {
             Self::Transport(s) => s.try_write_plain(buf),
@@ -313,6 +314,7 @@ impl ConnectionStream {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn try_read_buf_plain(&self, buf: &mut BytesMut) -> Option<std::io::Result<usize>> {
         match self {
             Self::Transport(s) => s.try_read_buf_plain(buf),
