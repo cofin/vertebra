@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import io
+import subprocess
 import sys
 import tokenize
 from collections.abc import Mapping, Sequence
@@ -4099,3 +4100,70 @@ async def test_async_dispatch_execute_many_normalizes_bool_and_negative_rowcount
     stmt = SQL("INSERT INTO items (x) VALUES (?)", [[1], [2]], is_many=True)
     result = await adapter.dispatch_execute_many(cursor, stmt)
     assert result.rowcount_override == expected_rowcount
+
+
+def test_sqlspec_core_and_events_do_not_require_adk_or_litestar() -> None:
+    """Verify non-ADK/non-Litestar SQLSpec modules, Oracle/Postgres configs, and event stores import without ADK or Litestar."""
+    script = """
+import importlib
+import sys
+
+sys.modules["google.adk"] = None
+sys.modules["litestar"] = None
+
+modules = [
+    "vertebra.extensions.sqlspec",
+    "vertebra.extensions.sqlspec.plugin",
+    "vertebra.extensions.sqlspec.provider",
+    "vertebra.extensions.sqlspec.proxy",
+    "vertebra.extensions.sqlspec.storage",
+    "vertebra.extensions.sqlspec._driver",
+    "vertebra.extensions.sqlspec._reconcile",
+]
+adapters = ("bigquery", "duckdb", "mssql", "mysql", "oracle", "postgres", "spanner", "sqlite")
+for adapter in adapters:
+    for suffix in ("", ".config", ".driver", ".core", ".data_dictionary", ".events", ".reconcile", "._typing"):
+        modules.append(f"vertebra.extensions.sqlspec.adapters.{adapter}{suffix}")
+
+for mod_name in modules:
+    importlib.import_module(mod_name)
+
+import vertebra.extensions.sqlspec.plugin as plugin_mod
+from vertebra.extensions.sqlspec.adapters.oracle.config import OracleSyncConfig
+from vertebra.extensions.sqlspec.adapters.oracle.events import OracleEventQueueStore
+from vertebra.extensions.sqlspec.adapters.postgres.config import PostgresSyncConfig
+from vertebra.extensions.sqlspec.adapters.postgres.events import PostgresEventQueueStore
+from vertebra.extensions.sqlspec.adapters.sqlite.config import SQLiteSyncConfig
+from vertebra.typing import MissingDependencyError
+
+oracle_idx = OracleEventQueueStore(
+    OracleSyncConfig(dsn="oracle://scott:tiger@localhost:1521/FREEPDB1", share_pool=False)
+).get_companion_indexes()
+assert len(oracle_idx) == 1 and oracle_idx[0].table and oracle_idx[0].ddl
+
+pg_idx = PostgresEventQueueStore(
+    PostgresSyncConfig(dsn="postgresql://localhost:5432/app", share_pool=False)
+).get_companion_indexes()
+assert len(pg_idx) == 1 and pg_idx[0].table and pg_idx[0].ddl
+
+probes = (
+    (lambda: SQLiteSyncConfig.adk_store_class, "vertebra-core[adk]", "google-adk"),
+    (lambda: OracleSyncConfig.adk_store_class, "vertebra-core[adk]", "google-adk"),
+    (lambda: PostgresSyncConfig.adk_store_class, "vertebra-core[adk]", "google-adk"),
+    (lambda: SQLiteSyncConfig.litestar_store_class, "vertebra-core[litestar]", "litestar"),
+    (lambda: OracleSyncConfig.litestar_store_class, "vertebra-core[litestar]", "litestar"),
+    (lambda: PostgresSyncConfig.litestar_store_class, "vertebra-core[litestar]", "litestar"),
+    (lambda: plugin_mod.SQLSpecPlugin, "vertebra-core[litestar]", "litestar"),
+    (lambda: plugin_mod.create_sqlspec_plugin(), "vertebra-core[litestar]", "litestar"),
+)
+for probe, expected_install, expected_pkg in probes:
+    try:
+        probe()
+    except MissingDependencyError as exc:
+        assert exc.install_package == expected_install, (exc.install_package, expected_install)
+        assert expected_pkg in str(exc), str(exc)
+    else:
+        raise AssertionError(f"Expected MissingDependencyError for {expected_install}")
+"""
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr or proc.stdout

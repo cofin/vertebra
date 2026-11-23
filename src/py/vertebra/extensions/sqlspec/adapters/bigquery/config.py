@@ -345,14 +345,20 @@ class BigQuerySyncConfig(
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.bigquery.adk",
         "BigQuerySyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.bigquery.adk",
         "BigQuerySyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.bigquery.adk",
         "BigQuerySyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.bigquery.events",
@@ -361,6 +367,8 @@ class BigQuerySyncConfig(
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.bigquery.litestar",
         "BigQueryLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(
@@ -546,14 +554,20 @@ class BigQueryAsyncConfig(
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.bigquery.adk",
         "BigQueryAsyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.bigquery.adk",
         "BigQueryAsyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.bigquery.adk",
         "BigQueryAsyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.bigquery.events",
@@ -562,6 +576,8 @@ class BigQueryAsyncConfig(
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.bigquery.litestar",
         "BigQueryLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(

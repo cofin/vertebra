@@ -717,14 +717,20 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerConnectionShim, 
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.spanner.adk",
         "SpannerSyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.spanner.adk",
         "SpannerSyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.spanner.adk",
         "SpannerSyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.spanner.events",
@@ -733,6 +739,8 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerConnectionShim, 
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.spanner.litestar",
         "SpannerLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(
@@ -1009,14 +1017,20 @@ class SpannerAsyncConfig(
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.spanner.adk",
         "SpannerAsyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.spanner.adk",
         "SpannerAsyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.spanner.adk",
         "SpannerAsyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.spanner.events",
@@ -1025,6 +1039,8 @@ class SpannerAsyncConfig(
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.spanner.litestar",
         "SpannerLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(

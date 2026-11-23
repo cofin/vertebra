@@ -22,10 +22,10 @@ from sqlspec.extensions.events import (
     encode_notify_payload,
     normalize_event_channel_name,
 )
-from sqlspec.extensions.litestar.store import CompanionIndex
 from sqlspec.migrations.schema import DropStatement, SchemaTarget, metadata_has_index
 
 from vertebra.db.adapters.oracle.notify import AsyncOracleNotificationSource, SyncOracleNotificationSource
+from vertebra.extensions.sqlspec._driver import _build_companion_index
 from vertebra.extensions.sqlspec.adapters.oracle.core import (
     escape_oracle_literal,
     oracle_ensure_utc,
@@ -44,6 +44,8 @@ from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json, encode_json
 
 if TYPE_CHECKING:
+    from sqlspec.extensions.litestar.store import CompanionIndex
+
     from vertebra.extensions.sqlspec.adapters.oracle.config import OracleAsyncConfig, OracleSyncConfig
 
 __all__ = (
@@ -465,7 +467,7 @@ class OracleEventQueueStore(BaseEventQueueStore["OracleSyncConfig | OracleAsyncC
         """Return companion index descriptors for the Oracle event queue table."""
         schema_name, bare_table = self._split_table_name()
         return [
-            CompanionIndex(
+            _build_companion_index(
                 name=self._index_name(),
                 table=bare_table,
                 schema=schema_name,

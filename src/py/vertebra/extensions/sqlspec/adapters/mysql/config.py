@@ -353,14 +353,20 @@ class MySQLSyncConfig(SyncAdapterConfig[MySQLConfig, SyncMySQLDriver, SyncMySQLD
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mysql.adk",
         "MySQLSyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mysql.adk",
         "MySQLSyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mysql.adk",
         "MySQLSyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mysql.events",
@@ -369,6 +375,8 @@ class MySQLSyncConfig(SyncAdapterConfig[MySQLConfig, SyncMySQLDriver, SyncMySQLD
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mysql.litestar",
         "MySQLLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(
@@ -496,14 +504,20 @@ class MySQLAsyncConfig(AsyncAdapterConfig[MySQLConfig, AsyncMySQLDriver, AsyncMy
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mysql.adk",
         "MySQLAsyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mysql.adk",
         "MySQLAsyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mysql.adk",
         "MySQLAsyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mysql.events",
@@ -512,6 +526,8 @@ class MySQLAsyncConfig(AsyncAdapterConfig[MySQLConfig, AsyncMySQLDriver, AsyncMy
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.mysql.litestar",
         "MySQLLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(

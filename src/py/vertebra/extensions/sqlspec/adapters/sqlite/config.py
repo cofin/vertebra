@@ -323,14 +323,20 @@ class SQLiteSyncConfig(SyncAdapterConfig[SQLiteConfig, SyncSQLiteDriver, SyncSQL
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.sqlite.adk",
         "SQLiteSyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.sqlite.adk",
         "SQLiteSyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.sqlite.adk",
         "SQLiteSyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.sqlite.events",
@@ -339,6 +345,8 @@ class SQLiteSyncConfig(SyncAdapterConfig[SQLiteConfig, SyncSQLiteDriver, SyncSQL
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.sqlite.litestar",
         "SQLiteLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(
@@ -462,14 +470,20 @@ class SQLiteAsyncConfig(AsyncAdapterConfig[SQLiteConfig, AsyncSQLiteDriver, Asyn
     adk_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.sqlite.adk",
         "SQLiteAsyncADKStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_memory_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.sqlite.adk",
         "SQLiteAsyncADKMemoryStore",
+        package="google-adk",
+        extra="adk",
     )
     adk_artifact_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.sqlite.adk",
         "SQLiteAsyncADKArtifactStore",
+        package="google-adk",
+        extra="adk",
     )
     events_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.sqlite.events",
@@ -478,6 +492,8 @@ class SQLiteAsyncConfig(AsyncAdapterConfig[SQLiteConfig, AsyncSQLiteDriver, Asyn
     litestar_store_class: ClassVar[Any] = LazyStoreAttr(
         "vertebra.extensions.sqlspec.adapters.sqlite.litestar",
         "SQLiteLitestarStore",
+        package="litestar",
+        extra="litestar",
     )
 
     def __init__(
