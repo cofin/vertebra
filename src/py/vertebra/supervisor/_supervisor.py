@@ -175,6 +175,19 @@ def run_supervisor(
         return _run_with_tui(server_cmd, full_env, shutdown_timeout_ms)
 
     proc = subprocess.Popen(server_cmd, env=full_env)
+    prev_sigterm = None
+    installed_sigterm = False
+    if hasattr(signal, "SIGTERM") and threading.current_thread() is threading.main_thread():
+
+        def _forward_sigterm(signum: int, _frame: object) -> None:
+            if proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    proc.send_signal(signum)
+
+        with contextlib.suppress(OSError, ValueError):
+            prev_sigterm = signal.getsignal(signal.SIGTERM)
+            signal.signal(signal.SIGTERM, _forward_sigterm)
+            installed_sigterm = True
     try:
         return proc.wait()
     except KeyboardInterrupt:
@@ -187,6 +200,10 @@ def run_supervisor(
             logger.warning("Server did not exit after timeout, sending SIGTERM")
             proc.send_signal(signal.SIGTERM)
             return proc.wait(timeout=5)
+    finally:
+        if installed_sigterm and prev_sigterm is not None:
+            with contextlib.suppress(OSError, ValueError):
+                signal.signal(signal.SIGTERM, prev_sigterm)
 
 
 def find_repo_root(start: Path) -> Path | None:

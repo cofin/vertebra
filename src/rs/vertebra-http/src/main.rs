@@ -508,7 +508,7 @@ async fn run_server(
     #[cfg(all(feature = "python", unix))]
     let mut shm_supervisor: Option<tokio::task::JoinHandle<()>> = None;
     #[cfg(feature = "python")]
-    let mut embedded_workers: Option<EmbeddedPythonWorkers> = None;
+    let embedded_workers: Option<EmbeddedPythonWorkers>;
 
     let dispatcher;
 
@@ -576,6 +576,7 @@ async fn run_server(
                 shm_factory = Some(factory);
                 shm_readers = Some(readers);
                 shm_supervisor = Some(supervisor_handle);
+                embedded_workers = None;
             }
 
             #[cfg(not(unix))]

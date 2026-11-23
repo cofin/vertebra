@@ -238,6 +238,7 @@ jobs:
           CIBW_CONTAINER_ENGINE_LINUX: "docker; create_args: -v ${{ runner.temp }}/cibw-cargo/registry:/root/.cargo/registry -v ${{ runner.temp }}/cibw-cargo/git:/root/.cargo/git"
           CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable"
           CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse" CARGO_INCREMENTAL="0"'
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: "delvewheel repair --namespace-pkg vertebra -w {dest_dir} -v {wheel}"
           CIBW_TEST_ENVIRONMENT: "PIP_NO_DEPS=1"
           CIBW_TEST_COMMAND: >-
             python -I -c "import importlib; module = importlib.import_module('${{ matrix.package.module }}');

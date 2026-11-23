@@ -128,6 +128,7 @@ pub struct PoolStats {
 /// Callers must detach via [`LoopReaderSlot::detach_async`] outside any pool lock before
 /// closing or reusing the underlying socket on Tokio.
 pub(crate) trait LoopReaderSlot: std::any::Any + Send + Sync + std::fmt::Debug {
+    #[cfg(unix)]
     fn as_any(&self) -> &dyn std::any::Any;
 
     /// Schedule detaching this reader from its Python event loop and return a oneshot receiver
@@ -302,6 +303,7 @@ impl PostgresPool {
     ///
     /// Returns `Ok(None)` when no fresh idle connection is available so the caller can fall back
     /// to [`PostgresPool::acquire`].
+    #[cfg(unix)]
     pub(crate) fn try_acquire_idle(
         self: &Arc<Self>,
     ) -> Result<Option<PooledConnection>, PostgresError> {
@@ -900,16 +902,19 @@ pub struct PooledConnection {
 
 impl PooledConnection {
     /// Borrow the optional event-loop reader slot attached to this pooled connection.
+    #[cfg(unix)]
     pub(crate) fn loop_reader(&self) -> Option<&dyn LoopReaderSlot> {
         self.loop_reader.as_deref()
     }
 
     /// Take the optional event-loop reader slot off this pooled connection.
+    #[cfg(unix)]
     pub(crate) fn take_loop_reader(&mut self) -> Option<Box<dyn LoopReaderSlot>> {
         self.loop_reader.take()
     }
 
     /// Attach an event-loop reader slot to this pooled connection (detaching any previous one).
+    #[cfg(unix)]
     pub(crate) fn set_loop_reader(&mut self, slot: Box<dyn LoopReaderSlot>) {
         self.loop_reader = Some(slot);
     }

@@ -3,12 +3,17 @@
 //! Creates SPSC ring pairs before spawning Python worker processes.
 //! Each worker inherits the ring FDs and reconstructs its transport from environment variables.
 
-use std::process::{Child, Command};
+use std::process::Child;
+#[cfg(any(unix, test))]
+use std::process::Command;
 use std::sync::Arc;
 
-use tracing::{error, info};
+#[cfg(unix)]
+use tracing::error;
+use tracing::info;
 
 use vertebra_core::broker::ShmLeaseTable;
+#[cfg(unix)]
 use vertebra_core::process;
 use vertebra_core::shm::ShmRegion;
 use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig, RingPairError};

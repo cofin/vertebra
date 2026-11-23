@@ -121,6 +121,7 @@ impl Supervisor {
         }
 
         let mut startup_failure_detected = false;
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut respawned_workers = Vec::new();
 
         {
