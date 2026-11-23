@@ -11,6 +11,7 @@ const MAX_SEGMENT_NAME_BYTES: usize = 256;
 const SLOT_EMPTY: u8 = 0;
 const SLOT_WRITING: u8 = 1;
 const SLOT_ACTIVE: u8 = 2;
+#[cfg(unix)]
 const SLOT_UNLINKING: u8 = 3;
 
 struct OwnedSegmentSlot {

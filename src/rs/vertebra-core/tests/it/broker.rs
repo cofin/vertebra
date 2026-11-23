@@ -185,6 +185,7 @@ fn test_shm_lease_table_cross_process_named_shm() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn test_shm_statement_cache_create_and_attach_persistence() {
     let shm_name = crate::unique_shm_name("/vtb-stmt-test");

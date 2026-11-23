@@ -147,6 +147,8 @@ fn pubsub_publish_bytes(
             );
             return Ok(None);
         }
+        #[cfg(not(unix))]
+        let _ = frame;
         return Ok(None);
     }
 

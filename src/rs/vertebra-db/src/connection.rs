@@ -284,6 +284,18 @@ impl TransportStream {
         matches!(self, Self::TlsTcp(_))
     }
 
+    /// Return `true` when this stream is backed by a Unix domain socket.
+    pub const fn is_unix(&self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(self, Self::Unix(_))
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     /// Return the raw Unix file descriptor when backed by a plain TCP or Unix socket.
     #[cfg(unix)]
     pub fn raw_fd_if_plain(&self) -> Option<RawFd> {
@@ -1713,6 +1725,7 @@ mod tests {
         });
         let opts = ConnectOptions::tcp("127.0.0.1", addr.port());
         let stream = TransportStream::connect(&opts).await.unwrap();
+        assert!(!stream.is_unix());
         stream
             .set_tcp_keepalive(TcpKeepaliveConfig {
                 enabled: true,
@@ -1751,6 +1764,7 @@ mod tests {
             let unix_stream = TransportStream::connect(&ConnectOptions::unix(&sock_path))
                 .await
                 .unwrap();
+            assert!(unix_stream.is_unix());
             assert!(matches!(
                 unix_stream.set_tcp_keepalive(TcpKeepaliveConfig::default()),
                 Err(TransportError::InvalidConfig(_))
