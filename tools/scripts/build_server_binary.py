@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -414,9 +416,78 @@ class ServerBinaryBuilder:
                 "-v",
                 "--exclude",
                 "libpython",
+                "--ignore-missing-dependencies",
                 str(wheel),
             ]
         return []
+
+    def verify_macos_otool_dependencies(
+        self,
+        member_name: str,
+        otool_output: str,
+        *,
+        id_output: str | None = None,
+    ) -> list[str]:
+        """Validate ``otool -L`` dependencies on macOS, rejecting unresolved entries other than ``libpython``.
+
+        Because ``delocate`` checks dependency paths before applying ``--exclude``, repairing a wheel
+        whose ``vertebra-server`` links ``@rpath/libpython*.dylib`` requires ``--ignore-missing-dependencies``.
+        This check ensures every remaining load dependency is a macOS system library/framework, a
+        delocated ``@loader_path``/``@executable_path`` library, the binary's own ``LC_ID_DYLIB``,
+        or the expected external ``@rpath/libpython*.dylib``.
+        """
+        expected_python_ref = f"@rpath/{self.target.libpython_dylib}"
+        self_id: str | None = None
+        if id_output:
+            id_lines = [line.strip() for line in id_output.splitlines()[1:] if line.strip()]
+            if id_lines:
+                self_id = id_lines[0].split(" (", 1)[0].strip()
+
+        disallowed: list[str] = []
+        for raw_line in otool_output.splitlines():
+            if not raw_line.strip() or raw_line.rstrip().endswith(":"):
+                continue
+            dep = raw_line.strip().split(" (", 1)[0].strip()
+            if not dep:
+                continue
+            if self_id is not None and dep == self_id:
+                continue
+            if dep == expected_python_ref:
+                continue
+            if dep.startswith(("/usr/lib/", "/System/Library/", "@loader_path/", "@executable_path/")):
+                continue
+            disallowed.append(dep)
+        if disallowed:
+            joined = ", ".join(disallowed)
+            msg = f"Repaired macOS Mach-O {member_name!r} has disallowed or unresolved dependencies: {joined}"
+            raise RuntimeError(msg)
+        return disallowed
+
+    def verify_macos_wheel_dependencies(self, wheel_path: Path) -> None:
+        """Inspect every Mach-O binary in a repaired macOS wheel with ``otool`` to catch missing libraries."""
+        if self.target.platform != "darwin":
+            return
+        with tempfile.TemporaryDirectory(prefix="vertebra-otool-") as tmp_dir, zipfile.ZipFile(wheel_path) as archive:
+            macho_members = [
+                name
+                for name in archive.namelist()
+                if name == "vertebra/bin/vertebra-server" or name.endswith((".so", ".dylib"))
+            ]
+            for member in sorted(macho_members):
+                extracted = Path(archive.extract(member, path=tmp_dir))
+                libs_proc = subprocess.run(
+                    ["otool", "-L", str(extracted)],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                id_proc = subprocess.run(
+                    ["otool", "-D", str(extracted)],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.verify_macos_otool_dependencies(member, libs_proc.stdout, id_output=id_proc.stdout)
 
     def _resolve_cargo_target_dir(self, env: Mapping[str, str]) -> Path:
         """Resolve the Cargo target directory honoring ``CARGO_TARGET_DIR``."""
@@ -530,9 +601,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "repair":
         args.wheel_dir.mkdir(parents=True, exist_ok=True)
+        existing_wheels = set(args.wheel_dir.glob("*.whl"))
         cmd = builder.repair_command(args.wheel, args.wheel_dir)
         if cmd:
             subprocess.run(cmd, check=True)
+            if target.platform == "darwin":
+                repaired = sorted(set(args.wheel_dir.glob("*.whl")) - existing_wheels)
+                if not repaired:
+                    candidate = args.wheel_dir / args.wheel.name
+                    if candidate.is_file():
+                        repaired = [candidate]
+                for repaired_wheel in repaired:
+                    builder.verify_macos_wheel_dependencies(repaired_wheel)
         else:
             shutil.copy2(args.wheel, args.wheel_dir / args.wheel.name)
         return 0
