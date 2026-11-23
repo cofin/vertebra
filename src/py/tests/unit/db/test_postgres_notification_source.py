@@ -175,6 +175,7 @@ def test_notification_source_end_to_end_publish_subscribe_reuse_and_reconnect() 
 
                     await source.subscribe(["orders", "orders", "audit"])
                     assert source.subscribed_channels == ["orders", "audit"]
+                    assert await listener_sess.wait_for_query_count_async(2, timeout=3.0)
                     assert listener_sess.queries == ['LISTEN "orders"', 'LISTEN "audit"']
 
                     got_event.clear()
@@ -189,6 +190,7 @@ def test_notification_source_end_to_end_publish_subscribe_reuse_and_reconnect() 
 
                     await source.unsubscribe(["orders", "never_seen"])
                     assert source.subscribed_channels == ["audit"]
+                    assert await listener_sess.wait_for_query_count_async(3, timeout=3.0)
                     assert listener_sess.queries[-1] == 'UNLISTEN "orders"'
 
                     await source.publish("orders", "dropped-after-unlisten")
