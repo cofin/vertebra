@@ -10,10 +10,9 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{
-    PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyWeakrefMethods,
-    PyWeakrefReference,
-};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+#[cfg(unix)]
+use pyo3::types::{PyWeakrefMethods, PyWeakrefReference};
 #[cfg(unix)]
 use vertebra_db::CancelHandle;
 #[cfg(unix)]

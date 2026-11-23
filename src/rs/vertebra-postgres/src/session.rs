@@ -6859,7 +6859,7 @@ async fn establish_postgres_connection_with_mode(
             )
         };
 
-    if !matches!(stream, TransportStream::Unix(_)) {
+    if !stream.is_unix() {
         stream
             .set_tcp_keepalive(config.tcp_keepalive())
             .map_err(|e| PostgresError::Transport(e.to_string()))?;

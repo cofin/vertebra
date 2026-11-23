@@ -9,9 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::layout::CacheLine;
 use crate::platform::WaitWord;
+use crate::shm::ShmRegion;
 #[cfg(unix)]
-use crate::shm::NamedAttach;
-use crate::shm::{ShmError, ShmRegion};
+use crate::shm::{NamedAttach, ShmError};
 
 pub const BROKER_MAGIC: u64 = u64::from_le_bytes(*b"VTBBRKR1");
 pub const BROKER_ABI_VERSION: u32 = 2;
@@ -164,6 +164,7 @@ pub struct ShmPartitionEntry {
 const _: () = assert!(std::mem::size_of::<ShmPartitionEntry>() == 64);
 const _: () = assert!(std::mem::align_of::<ShmPartitionEntry>() == 64);
 
+#[cfg(unix)]
 fn map_shm_error(err: ShmError, name: &str) -> BrokerError {
     match err {
         ShmError::InUse { owner_pid } => BrokerError::SegmentInUse { owner_pid },
@@ -191,6 +192,7 @@ fn map_shm_error(err: ShmError, name: &str) -> BrokerError {
     }
 }
 
+#[cfg(unix)]
 fn libc_errno(err: &std::io::Error) -> i32 {
     err.raw_os_error().unwrap_or(5)
 }

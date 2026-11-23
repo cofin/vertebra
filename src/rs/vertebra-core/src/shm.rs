@@ -29,9 +29,11 @@ pub type ShmHandle = RawHandle;
 pub const SHM_INIT_PENDING: u32 = 0;
 /// Shared-memory ownership header state indicating the region is ready for attachers.
 pub const SHM_INIT_READY: u32 = 1;
+#[cfg(unix)]
 const SHM_INIT_REAPING: u32 = 2;
 
 const SHM_OWNER_MAGIC: u64 = u64::from_le_bytes(*b"VTBOWNR1");
+#[cfg(unix)]
 const INIT_WAIT_TIMEOUT_MS: u64 = 2000;
 
 /// Metadata stored in the ownership trailer page of a named POSIX shared-memory segment.
@@ -81,6 +83,7 @@ pub struct ShmRegion {
     ptr: NonNull<u8>,
     len: usize,
     map_ptr: NonNull<u8>,
+    #[cfg_attr(not(unix), allow(dead_code))]
     map_len: usize,
     owner_header_offset: Option<usize>,
     handle: ShmHandle,
@@ -776,6 +779,7 @@ impl ShmRegion {
         Ok(Some(region))
     }
 
+    #[cfg(unix)]
     fn mark_owner_ready(&self) {
         if let Some(off) = self.owner_header_offset {
             // SAFETY: `off` points to `ShmOwnerPage` within `self.map_ptr..self.map_ptr + self.map_len`.

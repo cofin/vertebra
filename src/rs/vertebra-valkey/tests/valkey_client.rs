@@ -27,7 +27,9 @@ use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio_rustls::TlsAcceptor;
 use vertebra_core::gcp_auth::{
     DEFAULT_REFRESH_SKEW_MS, GcpAuthSource as CoreGcpAuthSource, GcpTokenCache,

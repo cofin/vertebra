@@ -23,7 +23,9 @@ use pyo3::types::{PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReference};
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::task::AbortHandle;
 
-use crate::notify::{AsyncCompletionQueue, Notifier};
+use crate::notify::AsyncCompletionQueue;
+#[cfg(unix)]
+use crate::notify::Notifier;
 
 static GET_RUNNING_LOOP: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 

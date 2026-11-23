@@ -37,9 +37,13 @@ fn validate_timeout(timeout: Duration) -> Result<(), AttachError> {
 }
 
 const HANDSHAKE_MAGIC: [u8; 4] = *b"VTBA";
+#[cfg(unix)]
 const HANDSHAKE_VERSION: u16 = 1;
+#[cfg(unix)]
 const MAX_SECRET_BYTES: usize = 256;
+#[cfg(unix)]
 const ACK_STATUS_OK: u8 = 0;
+#[cfg(unix)]
 const ACK_STATUS_REJECTED: u8 = 1;
 
 /// Typed errors returned during authenticated broker Unix domain socket attachment.
@@ -59,17 +63,20 @@ pub enum AttachError {
     UnsupportedPlatform,
 }
 
+#[cfg(unix)]
 #[derive(Clone)]
 struct RedactedSecret {
     bytes: Vec<u8>,
 }
 
+#[cfg(unix)]
 impl fmt::Debug for RedactedSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("\"[REDACTED]\"")
     }
 }
 
+#[cfg(unix)]
 impl RedactedSecret {
     fn new(secret: Vec<u8>) -> Result<Self, AttachError> {
         if secret.is_empty() || secret.len() > MAX_SECRET_BYTES {
@@ -80,7 +87,6 @@ impl RedactedSecret {
         Ok(Self { bytes: secret })
     }
 
-    #[cfg(unix)]
     fn matches_constant_time(&self, candidate: &[u8]) -> bool {
         let expected_hash = Sha256::digest(&self.bytes);
         let candidate_hash = Sha256::digest(candidate);
@@ -644,15 +650,17 @@ pub struct BrokerAttachServer {
     shm_fd: OwnedFd,
     #[cfg(unix)]
     shm_size: u64,
+    #[cfg(unix)]
     secret: RedactedSecret,
 }
 
 impl fmt::Debug for BrokerAttachServer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BrokerAttachServer")
-            .field("socket_path", &self.socket_path)
-            .field("secret", &self.secret)
-            .finish()
+        let mut s = f.debug_struct("BrokerAttachServer");
+        s.field("socket_path", &self.socket_path);
+        #[cfg(unix)]
+        s.field("secret", &self.secret);
+        s.finish()
     }
 }
 
