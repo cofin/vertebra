@@ -15,7 +15,7 @@ import inspect
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, cast
 from urllib.parse import quote, urlencode
 
 import msgspec
@@ -29,6 +29,7 @@ from vertebra._vertebra import (
     gcp_http2_request_sync,
 )
 from vertebra.agent.okf import OkfBundle, OkfDocument
+from vertebra.embeddings._google import GcpTokenCachePort as GcpTokenCachePort
 from vertebra.typing import ImproperConfigurationError, VertebraError
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
@@ -97,18 +98,6 @@ _GRPC_BY_HTTP_STATUS: Final[dict[int, tuple[int, str]]] = {
     503: (14, "UNAVAILABLE"),
     504: (4, "DEADLINE_EXCEEDED"),
 }
-
-
-class GcpTokenCachePort(Protocol):
-    """Structural OAuth access-token cache port accepted by Knowledge Catalog clients."""
-
-    def get_token(self) -> GcpTokenSnapshot | Awaitable[GcpTokenSnapshot]:
-        """Return an OAuth access-token snapshot."""
-        ...
-
-    def invalidate(self, failed_generation: int, /) -> Any:
-        """Invalidate a rejected token generation."""
-        ...
 
 
 SyncHttpTransport = Callable[
@@ -805,6 +794,103 @@ class _BaseKnowledgeCatalogClient:
 
         return ("create", None, target_id)
 
+    def _build_entry_groups_url(self, location: str | None, *, page_size: int | None, page_token: str | None) -> str:
+        parent = self._parent_path(location)
+        query: list[tuple[str, str]] = []
+        if page_size is not None:
+            query.append(("pageSize", str(page_size)))
+        if page_token is not None:
+            query.append(("pageToken", page_token))
+        return self._url(f"{parent}/entryGroups", query)
+
+    @staticmethod
+    def _collect_entry_groups_page(
+        data: Mapping[str, Any], labels: Mapping[str, str] | None, out: list[dict[str, Any]]
+    ) -> str | None:
+        raw_groups = data.get("entryGroups")
+        if isinstance(raw_groups, list):
+            out.extend(item for item in raw_groups if isinstance(item, dict) and _matches_labels(item, labels))
+        next_token = data.get("nextPageToken")
+        return next_token if isinstance(next_token, str) and next_token else None
+
+    def _prepare_create_entry_group(
+        self,
+        entry_group_id: str | None,
+        *,
+        location: str | None,
+        display_name: str | None,
+        description: str | None,
+        labels: Mapping[str, str] | None,
+        validate_only: bool,
+        timeout_ms: int | None,
+    ) -> tuple[str, dict[str, Any], int]:
+        eg_id = entry_group_id if entry_group_id is not None else self._config.entry_group_id
+        validated = _validate_create_entry_group_id(eg_id)
+        parent = self._parent_path(location)
+        query: list[tuple[str, str]] = [("entryGroupId", validated)]
+        if validate_only:
+            query.append(("validateOnly", "true"))
+        body = self._build_entry_group_payload(display_name=display_name, description=description, labels=labels)
+        return (
+            self._url(f"{parent}/entryGroups", query),
+            body,
+            (timeout_ms if timeout_ms is not None else self._config.timeout_ms),
+        )
+
+    def _prepare_list_entries_url(
+        self,
+        entry_group_id: str | None,
+        *,
+        location: str | None,
+        filter_expr: str | None,
+        page_size: int | None,
+        page_token: str | None,
+    ) -> str:
+        eg_path = self._entry_group_path(entry_group_id, location=location, for_create=False)
+        query: list[tuple[str, str]] = []
+        if filter_expr:
+            query.append(("filter", filter_expr))
+        if page_size is not None:
+            query.append(("pageSize", str(page_size)))
+        if page_token is not None:
+            query.append(("pageToken", page_token))
+        return self._url(f"{eg_path}/entries", query)
+
+    @staticmethod
+    def _parse_entries_page(data: Mapping[str, Any]) -> tuple[list[CatalogEntryRecord], str | None]:
+        raw_entries = data.get("entries")
+        records = [
+            CatalogEntryRecord.from_dataplex_dict(item)
+            for item in (raw_entries if isinstance(raw_entries, list) else ())
+            if isinstance(item, Mapping)
+        ]
+        return records, _parse_next_page_token(data)
+
+    @staticmethod
+    def _required_context_labels(entry_group_id: str | None, labels: Mapping[str, str] | None) -> dict[str, str]:
+        if entry_group_id is not None:
+            _validate_create_entry_group_id(entry_group_id)
+        required_labels: dict[str, str] = {"type": "context-set"}
+        if labels:
+            required_labels.update({str(k): str(v) for k, v in labels.items()})
+            required_labels["type"] = "context-set"
+        return required_labels
+
+    @staticmethod
+    def _merge_adopt_labels(existing: Mapping[str, Any], required_labels: Mapping[str, str]) -> dict[str, str]:
+        existing_labels = existing.get("labels")
+        merged = dict(existing_labels) if isinstance(existing_labels, Mapping) else {}
+        merged.update(required_labels)
+        return merged
+
+    @staticmethod
+    def _finalize_operation(current: dict[str, Any]) -> dict[str, Any]:
+        op_error = current.get("error")
+        if isinstance(op_error, Mapping):
+            raise _error_from_rpc_status(op_error, http_status=None, fallback_message="Dataplex operation failed")
+        response = current.get("response")
+        return dict(response) if isinstance(response, Mapping) else current
+
 
 class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
     """Synchronous Google Cloud Dataplex v1 Knowledge Catalog client."""
@@ -891,25 +977,13 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         page_size: int | None = None,
     ) -> list[dict[str, Any]]:
         """List entry groups in `location` and apply optional `labels` filtering client-side."""
-        parent = self._parent_path(location)
         results: list[dict[str, Any]] = []
         page_token: str | None = None
         while True:
-            query: list[tuple[str, str]] = []
-            if page_size is not None:
-                query.append(("pageSize", str(page_size)))
-            if page_token is not None:
-                query.append(("pageToken", page_token))
-            data = self._request_json("GET", self._url(f"{parent}/entryGroups", query))
-            raw_groups = data.get("entryGroups")
-            if isinstance(raw_groups, list):
-                for item in raw_groups:
-                    if isinstance(item, dict) and _matches_labels(item, labels):
-                        results.append(item)
-            next_token = data.get("nextPageToken")
-            if not isinstance(next_token, str) or not next_token:
+            url = self._build_entry_groups_url(location, page_size=page_size, page_token=page_token)
+            page_token = self._collect_entry_groups_page(self._request_json("GET", url), labels, results)
+            if page_token is None:
                 break
-            page_token = next_token
         return results
 
     def create_entry_group(
@@ -924,24 +998,16 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         timeout_ms: int | None = None,
     ) -> dict[str, Any]:
         """Create an RFC-1035 `EntryGroup` and poll the Dataplex LRO until completion."""
-        eg_id = entry_group_id if entry_group_id is not None else self._config.entry_group_id
-        validated = _validate_create_entry_group_id(eg_id)
-        parent = self._parent_path(location)
-        query: list[tuple[str, str]] = [("entryGroupId", validated)]
-        if validate_only:
-            query.append(("validateOnly", "true"))
-        body = self._build_entry_group_payload(
+        url, body, effective_timeout = self._prepare_create_entry_group(
+            entry_group_id,
+            location=location,
             display_name=display_name,
             description=description,
             labels=labels,
+            validate_only=validate_only,
+            timeout_ms=timeout_ms,
         )
-        effective_timeout = timeout_ms if timeout_ms is not None else self._config.timeout_ms
-        operation = self._request_json(
-            "POST",
-            self._url(f"{parent}/entryGroups", query),
-            body=body,
-            timeout_ms=effective_timeout,
-        )
+        operation = self._request_json("POST", url, body=body, timeout_ms=effective_timeout)
         return self._await_operation(operation, timeout_ms=effective_timeout)
 
     def _await_operation(self, operation: dict[str, Any], *, timeout_ms: int) -> dict[str, Any]:
@@ -969,15 +1035,7 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
                 )
             current = self._request_json("GET", self._operation_url(op_name), timeout_ms=timeout_ms)
 
-        op_error = current.get("error")
-        if isinstance(op_error, Mapping):
-            raise _error_from_rpc_status(
-                op_error,
-                http_status=None,
-                fallback_message="Dataplex operation failed",
-            )
-        response = current.get("response")
-        return dict(response) if isinstance(response, Mapping) else current
+        return self._finalize_operation(current)
 
     def _patch_entry_group_labels(
         self,
@@ -1004,12 +1062,7 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         labels: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Return an existing `type=context-set` entry group, adopt an unlabeled one, or create it."""
-        if entry_group_id is not None:
-            _validate_create_entry_group_id(entry_group_id)
-        required_labels: dict[str, str] = {"type": "context-set"}
-        if labels:
-            required_labels.update({str(k): str(v) for k, v in labels.items()})
-            required_labels["type"] = "context-set"
+        required_labels = self._required_context_labels(entry_group_id, labels)
 
         groups = self.list_entry_groups(location=location)
         action, existing, target_id = self._plan_context_set_action(
@@ -1021,9 +1074,7 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         if action == "return" and existing is not None:
             return existing
         if action == "adopt" and existing is not None:
-            existing_labels = existing.get("labels")
-            merged = dict(existing_labels) if isinstance(existing_labels, Mapping) else {}
-            merged.update(required_labels)
+            merged = self._merge_adopt_labels(existing, required_labels)
             return self._patch_entry_group_labels(str(existing["name"]), labels=merged)
 
         _validate_create_entry_group_id(target_id)
@@ -1059,22 +1110,10 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         page_token: str | None = None,
     ) -> tuple[list[CatalogEntryRecord], str | None]:
         """Fetch one page of Dataplex entries, omitting `view` as required on list endpoints."""
-        eg_path = self._entry_group_path(entry_group_id, location=location, for_create=False)
-        query: list[tuple[str, str]] = []
-        if filter_expr:
-            query.append(("filter", filter_expr))
-        if page_size is not None:
-            query.append(("pageSize", str(page_size)))
-        if page_token is not None:
-            query.append(("pageToken", page_token))
-        data = self._request_json("GET", self._url(f"{eg_path}/entries", query))
-        raw_entries = data.get("entries")
-        records = [
-            CatalogEntryRecord.from_dataplex_dict(item)
-            for item in (raw_entries if isinstance(raw_entries, list) else ())
-            if isinstance(item, Mapping)
-        ]
-        return (records, _parse_next_page_token(data))
+        url = self._prepare_list_entries_url(
+            entry_group_id, location=location, filter_expr=filter_expr, page_size=page_size, page_token=page_token
+        )
+        return self._parse_entries_page(self._request_json("GET", url))
 
     def list_entries(
         self,
@@ -1400,25 +1439,13 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         page_size: int | None = None,
     ) -> list[dict[str, Any]]:
         """List entry groups in `location` and apply optional `labels` filtering client-side."""
-        parent = self._parent_path(location)
         results: list[dict[str, Any]] = []
         page_token: str | None = None
         while True:
-            query: list[tuple[str, str]] = []
-            if page_size is not None:
-                query.append(("pageSize", str(page_size)))
-            if page_token is not None:
-                query.append(("pageToken", page_token))
-            data = await self._request_json("GET", self._url(f"{parent}/entryGroups", query))
-            raw_groups = data.get("entryGroups")
-            if isinstance(raw_groups, list):
-                for item in raw_groups:
-                    if isinstance(item, dict) and _matches_labels(item, labels):
-                        results.append(item)
-            next_token = data.get("nextPageToken")
-            if not isinstance(next_token, str) or not next_token:
+            url = self._build_entry_groups_url(location, page_size=page_size, page_token=page_token)
+            page_token = self._collect_entry_groups_page(await self._request_json("GET", url), labels, results)
+            if page_token is None:
                 break
-            page_token = next_token
         return results
 
     async def create_entry_group(
@@ -1433,24 +1460,16 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         timeout_ms: int | None = None,
     ) -> dict[str, Any]:
         """Create an RFC-1035 `EntryGroup` and poll the Dataplex LRO until completion."""
-        eg_id = entry_group_id if entry_group_id is not None else self._config.entry_group_id
-        validated = _validate_create_entry_group_id(eg_id)
-        parent = self._parent_path(location)
-        query: list[tuple[str, str]] = [("entryGroupId", validated)]
-        if validate_only:
-            query.append(("validateOnly", "true"))
-        body = self._build_entry_group_payload(
+        url, body, effective_timeout = self._prepare_create_entry_group(
+            entry_group_id,
+            location=location,
             display_name=display_name,
             description=description,
             labels=labels,
+            validate_only=validate_only,
+            timeout_ms=timeout_ms,
         )
-        effective_timeout = timeout_ms if timeout_ms is not None else self._config.timeout_ms
-        operation = await self._request_json(
-            "POST",
-            self._url(f"{parent}/entryGroups", query),
-            body=body,
-            timeout_ms=effective_timeout,
-        )
+        operation = await self._request_json("POST", url, body=body, timeout_ms=effective_timeout)
         return await self._await_operation(operation, timeout_ms=effective_timeout)
 
     async def _await_operation(self, operation: dict[str, Any], *, timeout_ms: int) -> dict[str, Any]:
@@ -1478,15 +1497,7 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
                 )
             current = await self._request_json("GET", self._operation_url(op_name), timeout_ms=timeout_ms)
 
-        op_error = current.get("error")
-        if isinstance(op_error, Mapping):
-            raise _error_from_rpc_status(
-                op_error,
-                http_status=None,
-                fallback_message="Dataplex operation failed",
-            )
-        response = current.get("response")
-        return dict(response) if isinstance(response, Mapping) else current
+        return self._finalize_operation(current)
 
     async def _patch_entry_group_labels(
         self,
@@ -1513,12 +1524,7 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         labels: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Return an existing `type=context-set` entry group, adopt an unlabeled one, or create it."""
-        if entry_group_id is not None:
-            _validate_create_entry_group_id(entry_group_id)
-        required_labels: dict[str, str] = {"type": "context-set"}
-        if labels:
-            required_labels.update({str(k): str(v) for k, v in labels.items()})
-            required_labels["type"] = "context-set"
+        required_labels = self._required_context_labels(entry_group_id, labels)
 
         groups = await self.list_entry_groups(location=location)
         action, existing, target_id = self._plan_context_set_action(
@@ -1530,9 +1536,7 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         if action == "return" and existing is not None:
             return existing
         if action == "adopt" and existing is not None:
-            existing_labels = existing.get("labels")
-            merged = dict(existing_labels) if isinstance(existing_labels, Mapping) else {}
-            merged.update(required_labels)
+            merged = self._merge_adopt_labels(existing, required_labels)
             return await self._patch_entry_group_labels(str(existing["name"]), labels=merged)
 
         _validate_create_entry_group_id(target_id)
@@ -1568,22 +1572,10 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         page_token: str | None = None,
     ) -> tuple[list[CatalogEntryRecord], str | None]:
         """Fetch one page of Dataplex entries, omitting `view` as required on list endpoints."""
-        eg_path = self._entry_group_path(entry_group_id, location=location, for_create=False)
-        query: list[tuple[str, str]] = []
-        if filter_expr:
-            query.append(("filter", filter_expr))
-        if page_size is not None:
-            query.append(("pageSize", str(page_size)))
-        if page_token is not None:
-            query.append(("pageToken", page_token))
-        data = await self._request_json("GET", self._url(f"{eg_path}/entries", query))
-        raw_entries = data.get("entries")
-        records = [
-            CatalogEntryRecord.from_dataplex_dict(item)
-            for item in (raw_entries if isinstance(raw_entries, list) else ())
-            if isinstance(item, Mapping)
-        ]
-        return (records, _parse_next_page_token(data))
+        url = self._prepare_list_entries_url(
+            entry_group_id, location=location, filter_expr=filter_expr, page_size=page_size, page_token=page_token
+        )
+        return self._parse_entries_page(await self._request_json("GET", url))
 
     async def list_entries(
         self,

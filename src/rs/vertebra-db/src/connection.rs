@@ -34,9 +34,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Install `rustls`' `ring` `CryptoProvider` as the process default if none is installed yet.
-pub fn install_rustls_ring_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
+pub use crate::install_rustls_ring_provider;
 
 /// Transport-layer TLS negotiation and certificate verification policy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

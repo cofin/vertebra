@@ -7,10 +7,21 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, NotRequired, TypedDict, cast
 
 from sqlspec.config import ADKConfig
-from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore, StoredEvent, StoredSession
+from sqlspec.extensions.adk import StoredEvent, StoredSession
 from sqlspec.extensions.adk.store import normalize_session_list_options
 from sqlspec.utils.serializers import from_json, to_json
 
+from vertebra.extensions.sqlspec._adk import (
+    AdapterAsyncADKMemoryStore,
+    AdapterAsyncADKStore,
+    AdapterSyncADKMemoryStore,
+    AdapterSyncADKStore,
+    CloudAsyncADKArtifactStore,
+    CloudSyncADKArtifactStore,
+    StoredArtifact,
+    StoredMemory,
+    merge_scoped_state,
+)
 from vertebra.extensions.sqlspec.adapters.spanner.core import (
     is_spanner_table_missing,
     normalize_spanner_dialect,
@@ -26,26 +37,11 @@ from vertebra.utils.module_loader import ensure_module
 if TYPE_CHECKING:
     from sqlspec.extensions.adk import SessionOrderBy, StoredMemory
     from sqlspec.extensions.adk.artifact import StoredArtifact
-    from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore as _BaseAsyncADKArtifactStore
-    from sqlspec.extensions.adk.artifact.store import BaseSyncADKArtifactStore as _BaseSyncADKArtifactStore
     from sqlspec.extensions.adk.converters import merge_scoped_state
-    from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore as _BaseAsyncADKMemoryStore
-    from sqlspec.extensions.adk.memory.store import BaseSyncADKMemoryStore as _BaseSyncADKMemoryStore
 
     from vertebra.extensions.sqlspec.adapters.spanner.config import SpannerAsyncConfig, SpannerSyncConfig
 else:
-    _memory_store_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
-    _artifact_store_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="google-adk", extra="adk")
-    _converters_mod = ensure_module("sqlspec.extensions.adk.converters", package="google-adk", extra="adk")
-    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact", package="google-adk", extra="adk")
-    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory", package="google-adk", extra="adk")
-    _BaseAsyncADKMemoryStore = _memory_store_mod.BaseAsyncADKMemoryStore
-    _BaseSyncADKMemoryStore = _memory_store_mod.BaseSyncADKMemoryStore
-    _BaseAsyncADKArtifactStore = _artifact_store_mod.BaseAsyncADKArtifactStore
-    _BaseSyncADKArtifactStore = _artifact_store_mod.BaseSyncADKArtifactStore
-    merge_scoped_state = _converters_mod.merge_scoped_state
-    StoredArtifact = _artifact_types_mod.StoredArtifact
-    StoredMemory = _memory_types_mod.StoredMemory
+    ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
 
 type StoredSessionRecord = StoredSession
 type StoredEventRecord = StoredEvent
@@ -591,6 +587,11 @@ class _SpannerADKSessionMixin:
 
     __slots__ = ()
 
+    if TYPE_CHECKING:
+        _json_deserializer: Any
+        _events_table: str
+        _user_state_table: str
+
     adapter_name: ClassVar[str | None] = "vertebra_spanner"
     extension_config_options: ClassVar[frozenset[str]] = _SPANNER_ADK_EXTENSION_OPTIONS
 
@@ -952,6 +953,72 @@ class _SpannerADKSessionMixin:
             msg = "event_record scope does not match target session arguments."
             raise ValueError(msg)
 
+    _commit_after_write = False
+    _unpack_params = False
+    _ignore_missing_on_delete_session = True
+    _write_session_kwargs_map = {"transaction": True}
+    _read_session_kwargs_map = {"transaction": False, "read_only": True}
+
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_spanner_table_missing(exc)
+
+    def _decode_session_row(
+        self,
+        row: Any,
+        *,
+        app_state: dict[str, Any] | None = None,
+        user_state: dict[str, Any] | None = None,
+        merge_scopes: bool = False,
+    ) -> StoredSession:
+        rec = _row_to_stored_session(row, deserializer=self._json_deserializer)
+        if merge_scopes:
+            rec["state"] = merge_scoped_state(rec["state"], app_state, user_state)
+        return rec
+
+    def _update_session_state_sql_and_params(
+        self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]
+    ) -> tuple[str, Any]:
+        return self._build_update_session_state_sql_and_params(app_name, user_id, session_id, state)
+
+    def _list_sessions_sql_and_params(
+        self,
+        app_name: str,
+        user_id: str | None = None,
+        *,
+        order_by: Any = "update_time",
+        descending: bool = True,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> tuple[str, Any] | None:
+        return self._build_list_sessions_sql_and_params(
+            app_name, user_id, order_by=order_by, descending=descending, limit=limit, offset=offset
+        )
+
+    def _delete_session_sqls_and_params(self, app_name: str, user_id: str, session_id: str) -> list[tuple[str, Any]]:
+        events_sql, sessions_sql, params = self._build_delete_session_sqls_and_params(app_name, user_id, session_id)
+        return [(events_sql, params), (sessions_sql, params)]
+
+    def _delete_before_sql_and_params(
+        self, table_name: str, column_name: str, before: datetime, app_name: str | None
+    ) -> tuple[str, Any]:
+        if table_name == self._events_table:
+            return self._build_delete_expired_events_sql_and_params(before, app_name)
+        if table_name == self._user_state_table:
+            return self._build_delete_idle_user_states_sql_and_params(before, app_name)
+        return self._build_delete_idle_sessions_sql_and_params(before, app_name)
+
+    def _upsert_app_state_sql_and_params(self, app_name: str, state: dict[str, Any]) -> tuple[str, Any]:
+        return self._build_upsert_app_state_sql_and_params(app_name, state)
+
+    def _upsert_user_state_sql_and_params(self, app_name: str, user_id: str, state: dict[str, Any]) -> tuple[str, Any]:
+        return self._build_upsert_user_state_sql_and_params(app_name, user_id, state)
+
+    def _get_metadata_sql_and_params(self, key: str) -> tuple[str, Any]:
+        return self._build_get_metadata_sql_and_params(key)
+
+    def _set_metadata_sql_and_params(self, key: str, value: str) -> tuple[str, Any]:
+        return self._build_set_metadata_sql_and_params(key, value)
+
 
 def _extract_session_store_options(config: Any) -> tuple[int, str | None, str | None, int | None]:
     adk = _adk_settings(config)
@@ -965,7 +1032,7 @@ def _extract_session_store_options(config: Any) -> tuple[int, str | None, str | 
     )
 
 
-class SpannerSyncADKStore(_SpannerADKSessionMixin, BaseSyncADKStore["SpannerSyncConfig"]):
+class SpannerSyncADKStore(_SpannerADKSessionMixin, AdapterSyncADKStore):
     """Cloud Spanner synchronous ADK session and event store using lock-free snapshots for reads."""
 
     __slots__ = (
@@ -1132,45 +1199,6 @@ class SpannerSyncADKStore(_SpannerADKSessionMixin, BaseSyncADKStore["SpannerSync
             raise
         return _row_to_stored_session(dict(row), deserializer=self._json_deserializer) if row is not None else None
 
-    def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Update JSON state and ``update_time`` inside a ``ReadWrite`` transaction."""
-        sql, params = self._build_update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        with self._config.provide_session(transaction=True) as driver:
-            driver.execute(sql, params)
-
-    def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List ADK sessions via a lock-free ``ReadOnly`` snapshot."""
-        built = self._build_list_sessions_sql_and_params(
-            app_name, user_id, order_by=order_by, descending=descending, limit=limit, offset=offset
-        )
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                rows = driver.select(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_session(dict(row), deserializer=self._json_deserializer) for row in rows]
-
-    def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete a session and its interleaved events inside a ``ReadWrite`` transaction."""
-        events_sql, sessions_sql, params = self._build_delete_session_sqls_and_params(app_name, user_id, session_id)
-        with self._config.provide_session(transaction=True) as driver:
-            driver.execute(events_sql, params)
-            driver.execute(sessions_sql, params)
-
     def append_event(self, event_record: StoredEvent) -> None:
         """Append an ADK event row inside a ``ReadWrite`` transaction."""
         sql, params = self._build_append_event_sql_and_params(event_record)
@@ -1261,12 +1289,6 @@ class SpannerSyncADKStore(_SpannerADKSessionMixin, BaseSyncADKStore["SpannerSync
             raise
         return _decode_json_dict(row.get("state"), deserializer=self._json_deserializer) if row is not None else None
 
-    def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Upsert application-scoped ADK state inside a ``ReadWrite`` transaction."""
-        sql, params = self._build_upsert_app_state_sql_and_params(app_name, state)
-        with self._config.provide_session(transaction=True) as driver:
-            driver.execute(sql, params)
-
     def get_user_state(self, app_name: str, user_id: str) -> dict[str, Any] | None:
         """Load user-scoped ADK state via a lock-free snapshot."""
         sql, params = self._build_get_user_state_sql_and_params(app_name, user_id)
@@ -1279,50 +1301,8 @@ class SpannerSyncADKStore(_SpannerADKSessionMixin, BaseSyncADKStore["SpannerSync
             raise
         return _decode_json_dict(row.get("state"), deserializer=self._json_deserializer) if row is not None else None
 
-    def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Upsert user-scoped ADK state inside a ``ReadWrite`` transaction."""
-        sql, params = self._build_upsert_user_state_sql_and_params(app_name, user_id, state)
-        with self._config.provide_session(transaction=True) as driver:
-            driver.execute(sql, params)
 
-    def get_metadata(self, key: str) -> str | None:
-        """Retrieve scalar ADK store metadata via a lock-free snapshot."""
-        sql, params = self._build_get_metadata_sql_and_params(key)
-        try:
-            with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                row = driver.select_one_or_none(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return None
-            raise
-        return str(row["value"]) if row is not None and row.get("value") is not None else None
-
-    def set_metadata(self, key: str, value: str) -> None:
-        """Persist scalar ADK store metadata inside a ``ReadWrite`` transaction."""
-        sql, params = self._build_set_metadata_sql_and_params(key, value)
-        with self._config.provide_session(transaction=True) as driver:
-            driver.execute(sql, params)
-
-    def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete ADK events older than ``before``."""
-        sql, params = self._build_delete_expired_events_sql_and_params(before, app_name)
-        with self._config.provide_session(transaction=True) as driver:
-            return _rows_affected_count(driver.execute(sql, params))
-
-    def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete ADK sessions inactive since ``updated_before``."""
-        sql, params = self._build_delete_idle_sessions_sql_and_params(updated_before, app_name)
-        with self._config.provide_session(transaction=True) as driver:
-            return _rows_affected_count(driver.execute(sql, params))
-
-    def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete user state rows inactive since ``updated_before``."""
-        sql, params = self._build_delete_idle_user_states_sql_and_params(updated_before, app_name)
-        with self._config.provide_session(transaction=True) as driver:
-            return _rows_affected_count(driver.execute(sql, params))
-
-
-class SpannerAsyncADKStore(_SpannerADKSessionMixin, BaseAsyncADKStore["SpannerAsyncConfig"]):
+class SpannerAsyncADKStore(_SpannerADKSessionMixin, AdapterAsyncADKStore):
     """Cloud Spanner asynchronous ADK session and event store using lock-free snapshots for reads."""
 
     __slots__ = (
@@ -1486,45 +1466,6 @@ class SpannerAsyncADKStore(_SpannerADKSessionMixin, BaseAsyncADKStore["SpannerAs
             raise
         return _row_to_stored_session(dict(row), deserializer=self._json_deserializer) if row is not None else None
 
-    async def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Update JSON state asynchronously inside a ``ReadWrite`` transaction."""
-        sql, params = self._build_update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        async with self._config.provide_session(transaction=True) as driver:
-            await driver.execute(sql, params)
-
-    async def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List ADK sessions asynchronously via a lock-free ``ReadOnly`` snapshot."""
-        built = self._build_list_sessions_sql_and_params(
-            app_name, user_id, order_by=order_by, descending=descending, limit=limit, offset=offset
-        )
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            async with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                rows = await driver.select(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_session(dict(row), deserializer=self._json_deserializer) for row in rows]
-
-    async def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete a session and its interleaved events asynchronously."""
-        events_sql, sessions_sql, params = self._build_delete_session_sqls_and_params(app_name, user_id, session_id)
-        async with self._config.provide_session(transaction=True) as driver:
-            await driver.execute(events_sql, params)
-            await driver.execute(sessions_sql, params)
-
     async def append_event(self, event_record: StoredEvent) -> None:
         """Append an ADK event row asynchronously."""
         sql, params = self._build_append_event_sql_and_params(event_record)
@@ -1615,12 +1556,6 @@ class SpannerAsyncADKStore(_SpannerADKSessionMixin, BaseAsyncADKStore["SpannerAs
             raise
         return _decode_json_dict(row.get("state"), deserializer=self._json_deserializer) if row is not None else None
 
-    async def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Upsert application-scoped ADK state asynchronously."""
-        sql, params = self._build_upsert_app_state_sql_and_params(app_name, state)
-        async with self._config.provide_session(transaction=True) as driver:
-            await driver.execute(sql, params)
-
     async def get_user_state(self, app_name: str, user_id: str) -> dict[str, Any] | None:
         """Load user-scoped ADK state asynchronously via a lock-free snapshot."""
         sql, params = self._build_get_user_state_sql_and_params(app_name, user_id)
@@ -1632,48 +1567,6 @@ class SpannerAsyncADKStore(_SpannerADKSessionMixin, BaseAsyncADKStore["SpannerAs
                 return None
             raise
         return _decode_json_dict(row.get("state"), deserializer=self._json_deserializer) if row is not None else None
-
-    async def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Upsert user-scoped ADK state asynchronously."""
-        sql, params = self._build_upsert_user_state_sql_and_params(app_name, user_id, state)
-        async with self._config.provide_session(transaction=True) as driver:
-            await driver.execute(sql, params)
-
-    async def get_metadata(self, key: str) -> str | None:
-        """Retrieve scalar ADK store metadata asynchronously via a lock-free snapshot."""
-        sql, params = self._build_get_metadata_sql_and_params(key)
-        try:
-            async with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                row = await driver.select_one_or_none(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return None
-            raise
-        return str(row["value"]) if row is not None and row.get("value") is not None else None
-
-    async def set_metadata(self, key: str, value: str) -> None:
-        """Persist scalar ADK store metadata asynchronously."""
-        sql, params = self._build_set_metadata_sql_and_params(key, value)
-        async with self._config.provide_session(transaction=True) as driver:
-            await driver.execute(sql, params)
-
-    async def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete ADK events older than ``before`` asynchronously."""
-        sql, params = self._build_delete_expired_events_sql_and_params(before, app_name)
-        async with self._config.provide_session(transaction=True) as driver:
-            return _rows_affected_count(await driver.execute(sql, params))
-
-    async def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete ADK sessions inactive since ``updated_before`` asynchronously."""
-        sql, params = self._build_delete_idle_sessions_sql_and_params(updated_before, app_name)
-        async with self._config.provide_session(transaction=True) as driver:
-            return _rows_affected_count(await driver.execute(sql, params))
-
-    async def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete user state rows inactive since ``updated_before`` asynchronously."""
-        sql, params = self._build_delete_idle_user_states_sql_and_params(updated_before, app_name)
-        async with self._config.provide_session(transaction=True) as driver:
-            return _rows_affected_count(await driver.execute(sql, params))
 
 
 def _memory_ddl_statements(
@@ -1825,6 +1718,9 @@ class _SpannerADKMemoryMixin:
     """Shared ScaNN vector, full-text ``TOKENIZE_FULLTEXT``, SQL RRF, and Spanner Graph helpers."""
 
     __slots__ = ()
+
+    if TYPE_CHECKING:
+        _json_deserializer: Any
 
     adapter_name: ClassVar[str | None] = "vertebra_spanner"
     extension_config_options: ClassVar[frozenset[str]] = _SPANNER_ADK_EXTENSION_OPTIONS
@@ -2245,8 +2141,25 @@ class _SpannerADKMemoryMixin:
             params["scope"] = scope
         return f"DELETE FROM {table} WHERE {' AND '.join(clauses)}", params
 
+    _commit_after_write = False
+    _unpack_params = False
+    _write_session_kwargs_map = {"transaction": True}
+    _read_session_kwargs_map = {"transaction": False, "read_only": True}
 
-class SpannerSyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseSyncADKMemoryStore["SpannerSyncConfig"]):
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_spanner_table_missing(exc)
+
+    def _decode_memory_row(self, row: Any) -> StoredMemory:
+        return _row_to_stored_memory(row, deserializer=self._json_deserializer)
+
+    def _delete_by_session_sql_and_params(self, session_id: str, app_name: str, user_id: str) -> tuple[str, Any]:
+        return self._build_delete_by_session_sql_and_params(session_id, app_name, user_id)
+
+    def _delete_older_than_sql_and_params(self, days: int, app_name: str | None, scope: str | None) -> tuple[str, Any]:
+        return self._build_delete_older_than_sql_and_params(days, app_name, scope)
+
+
+class SpannerSyncADKMemoryStore(_SpannerADKMemoryMixin, AdapterSyncADKMemoryStore):
     """Cloud Spanner synchronous ADK memory store with ScaNN, FTS, SQL RRF, and Property Graph support."""
 
     __slots__ = (
@@ -2305,29 +2218,6 @@ class SpannerSyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseSyncADKMemoryStore[
                 inserted += int(affected) if isinstance(affected, int) and affected > 0 else 1
         return inserted
 
-    def search_entries(
-        self,
-        query: str,
-        app_name: str,
-        user_id: str,
-        limit: int | None = None,
-        scope_filter: Literal["all", "user", "app"] = "all",
-        embedding: Sequence[float] | None = None,
-    ) -> list[StoredMemory]:
-        """Search ADK memories via Spanner SQL ScaNN vector search, FTS, simple text, or CTE RRF."""
-        built = self._build_search_sql_and_params(query, app_name, user_id, limit, scope_filter, embedding)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                rows = driver.select(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_memory(dict(row), deserializer=self._json_deserializer) for row in rows]
-
     def hybrid_rrf_search(
         self,
         *,
@@ -2361,30 +2251,8 @@ class SpannerSyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseSyncADKMemoryStore[
             raise
         return [_row_to_stored_memory(dict(row), deserializer=self._json_deserializer) for row in rows]
 
-    def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete memory entries for ``session_id`` owned by ``app_name`` and ``user_id``."""
-        sql, params = self._build_delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            with self._config.provide_session(transaction=True) as driver:
-                return _rows_affected_count(driver.execute(sql, params))
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return 0
-            raise
 
-    def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete memory entries inserted more than ``days`` ago."""
-        sql, params = self._build_delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            with self._config.provide_session(transaction=True) as driver:
-                return _rows_affected_count(driver.execute(sql, params))
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return 0
-            raise
-
-
-class SpannerAsyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseAsyncADKMemoryStore["SpannerAsyncConfig"]):
+class SpannerAsyncADKMemoryStore(_SpannerADKMemoryMixin, AdapterAsyncADKMemoryStore):
     """Cloud Spanner asynchronous ADK memory store with ScaNN, FTS, SQL RRF, and Property Graph support."""
 
     __slots__ = (
@@ -2444,29 +2312,6 @@ class SpannerAsyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseAsyncADKMemoryStor
                 inserted += int(affected) if isinstance(affected, int) and affected > 0 else 1
         return inserted
 
-    async def search_entries(
-        self,
-        query: str,
-        app_name: str,
-        user_id: str,
-        limit: int | None = None,
-        scope_filter: Literal["all", "user", "app"] = "all",
-        embedding: Sequence[float] | None = None,
-    ) -> list[StoredMemory]:
-        """Search ADK memories asynchronously via Spanner SQL ScaNN vector search, FTS, simple text, or CTE RRF."""
-        built = self._build_search_sql_and_params(query, app_name, user_id, limit, scope_filter, embedding)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            async with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                rows = await driver.select(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_memory(dict(row), deserializer=self._json_deserializer) for row in rows]
-
     async def hybrid_rrf_search(
         self,
         *,
@@ -2499,28 +2344,6 @@ class SpannerAsyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseAsyncADKMemoryStor
                 return []
             raise
         return [_row_to_stored_memory(dict(row), deserializer=self._json_deserializer) for row in rows]
-
-    async def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete memory entries for ``session_id`` owned by ``app_name`` and ``user_id`` asynchronously."""
-        sql, params = self._build_delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            async with self._config.provide_session(transaction=True) as driver:
-                return _rows_affected_count(await driver.execute(sql, params))
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete aged memory entries asynchronously."""
-        sql, params = self._build_delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            async with self._config.provide_session(transaction=True) as driver:
-                return _rows_affected_count(await driver.execute(sql, params))
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return 0
-            raise
 
 
 def _artifact_ddl(config: Any, artifact_table: str) -> str:
@@ -2575,6 +2398,9 @@ class _SpannerADKArtifactMixin:
     """Shared ``ArtifactReference``, SQL builder, and ``ObjectStoreBackend`` wiring without BigQuery coupling."""
 
     __slots__ = ()
+
+    if TYPE_CHECKING:
+        _json_deserializer: Any
 
     adapter_name: ClassVar[str | None] = "vertebra_spanner"
 
@@ -2748,11 +2574,51 @@ class _SpannerADKArtifactMixin:
         )
         return select_sql, f"DELETE FROM {table} WHERE {where}", params
 
+    _write_session_kwargs_map = {"transaction": True}
+    _read_session_kwargs_map = {"transaction": False, "read_only": True}
 
-class SpannerSyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseSyncADKArtifactStore["SpannerSyncConfig"]):
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_spanner_table_missing(exc)
+
+    def _insert_artifact_sql_and_params(self, record: StoredArtifact) -> tuple[str, Any]:
+        return self._build_insert_artifact_sql_and_params(record)
+
+    def _get_artifact_sql_and_params(
+        self, app_name: str, user_id: str, filename: str, session_id: str | None, version: int | None
+    ) -> tuple[str, Any]:
+        return self._build_get_artifact_sql_and_params(app_name, user_id, filename, session_id, version)
+
+    def _list_artifact_keys_sql_and_params(
+        self, app_name: str, user_id: str, session_id: str | None
+    ) -> tuple[str, Any]:
+        return self._build_list_artifact_keys_sql_and_params(app_name, user_id, session_id)
+
+    def _list_artifact_versions_sql_and_params(
+        self, app_name: str, user_id: str, filename: str, session_id: str | None
+    ) -> tuple[str, Any]:
+        return self._build_list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
+
+    def _delete_artifact_sql_and_params(
+        self, app_name: str, user_id: str, filename: str, session_id: str | None
+    ) -> tuple[str, Any]:
+        return self._build_delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
+
+    def _get_next_version_sql_and_params(
+        self, app_name: str, user_id: str, filename: str, session_id: str | None
+    ) -> tuple[str, Any]:
+        return self._build_get_next_version_sql_and_params(app_name, user_id, filename, session_id)
+
+    def _delete_older_than_sqls_and_params(self, before: datetime, app_name: str | None) -> tuple[str, str, Any]:
+        return self._build_delete_older_than_sqls_and_params(before, app_name)
+
+    def _decode_artifact_row(self, row: Any) -> StoredArtifact:
+        return _row_to_stored_artifact(dict(row), deserializer=self._json_deserializer)
+
+
+class SpannerSyncADKArtifactStore(_SpannerADKArtifactMixin, CloudSyncADKArtifactStore):
     """Cloud Spanner synchronous ADK artifact metadata store returning ``ArtifactReference``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer", "_storage_backend")
+    __slots__ = ()
 
     def __init__(
         self,
@@ -2765,178 +2631,17 @@ class SpannerSyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseSyncADKArtifact
         self._storage_backend = self._init_storage(config, storage_backend)
         self._json_serializer, self._json_deserializer = _resolve_json_codecs(config)
 
-    @property
-    def storage_backend(self) -> ObjectStoreBackend | None:
-        """Return the configured ``ObjectStoreBackend``, if any."""
-        return self._storage_backend
-
     def create_table(self) -> None:
         """Create the Spanner artifact metadata table inside a writable session."""
         ddl = _artifact_ddl(self._config, self._artifact_table)
         with self._config.provide_session(transaction=False) as driver:
             driver.execute(ddl)
 
-    def insert_artifact(self, record: StoredArtifact) -> None:
-        """Persist an artifact metadata row inside a ``ReadWrite`` transaction."""
-        sql, params = self._build_insert_artifact_sql_and_params(record)
-        with self._config.provide_session(transaction=True) as driver:
-            driver.execute(sql, params)
 
-    def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch artifact version metadata via a lock-free snapshot."""
-        sql, params = self._build_get_artifact_sql_and_params(app_name, user_id, filename, session_id, version)
-        try:
-            with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                row = driver.select_one_or_none(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return None
-            raise
-        return _row_to_stored_artifact(dict(row), deserializer=self._json_deserializer) if row is not None else None
-
-    def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames via a lock-free snapshot."""
-        sql, params = self._build_list_artifact_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                rows = driver.select(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return []
-            raise
-        return [str(row["filename"]) for row in rows if row.get("filename") is not None]
-
-    def list_artifact_versions(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """List all version metadata rows via a lock-free snapshot."""
-        sql, params = self._build_list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                rows = driver.select(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_artifact(dict(row), deserializer=self._json_deserializer) for row in rows]
-
-    def delete_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete all metadata rows for an artifact and return the removed records."""
-        existing = self.list_artifact_versions(app_name, user_id, filename, session_id)
-        sql, params = self._build_delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._config.provide_session(transaction=True) as driver:
-                driver.execute(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return existing
-            raise
-        return existing
-
-    def get_next_version(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> int:
-        """Compute the next zero-based integer artifact version."""
-        sql, params = self._build_get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._provide_replica_session(primary=True, transaction=False, read_only=True) as driver:
-                row = driver.select_one_or_none(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return 0
-            raise
-        max_ver = int(row.get("max_ver", -1)) if row is not None and row.get("max_ver") is not None else -1
-        return max_ver + 1
-
-    def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Delete artifact metadata rows created strictly before ``before``."""
-        select_sql, delete_sql, params = self._build_delete_older_than_sqls_and_params(before, app_name)
-        try:
-            with self._config.provide_session(transaction=True) as driver:
-                rows = [dict(row) for row in driver.select(select_sql, params)]
-                driver.execute(delete_sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_artifact(row, deserializer=self._json_deserializer) for row in rows]
-
-    def save_artifact_object(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        data: bytes,
-        *,
-        session_id: str | None = None,
-        mime_type: str = "application/octet-stream",
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> ArtifactReference:
-        """Write binary payload to ``storage_backend``, record Spanner metadata, and return ``ArtifactReference``."""
-        version = self.get_next_version(app_name, user_id, filename, session_id)
-        key = self._object_key(app_name, user_id, filename, session_id, version)
-        if self._storage_backend is not None:
-            self._storage_backend.write_bytes_sync(key, data)
-            base_uri = str(getattr(self._storage_backend, "store_uri", "") or "").rstrip("/")
-            canonical_uri = f"{base_uri}/{key}" if base_uri else key
-        else:
-            canonical_uri = key
-        now = datetime.now(UTC)
-        record = cast(
-            "StoredArtifact",
-            {
-                "app_name": app_name,
-                "user_id": user_id,
-                "session_id": session_id,
-                "filename": filename,
-                "version": version,
-                "mime_type": mime_type,
-                "canonical_uri": canonical_uri,
-                "custom_metadata": custom_metadata,
-                "created_at": now,
-            },
-        )
-        self.insert_artifact(record)
-        return self._stored_artifact_to_ref(record, size=len(data))
-
-    def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Return a storage-neutral ``ArtifactReference`` for a stored artifact."""
-        record = self.get_artifact(app_name, user_id, filename, session_id=session_id, version=version)
-        return self._stored_artifact_to_ref(dict(record)) if record is not None else None
-
-
-class SpannerAsyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseAsyncADKArtifactStore["SpannerAsyncConfig"]):
+class SpannerAsyncADKArtifactStore(_SpannerADKArtifactMixin, CloudAsyncADKArtifactStore):
     """Cloud Spanner asynchronous ADK artifact metadata store returning ``ArtifactReference``."""
 
-    __slots__ = ("_json_deserializer", "_json_serializer", "_storage_backend")
+    __slots__ = ()
 
     def __init__(
         self,
@@ -2949,170 +2654,8 @@ class SpannerAsyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseAsyncADKArtifa
         self._storage_backend = self._init_storage(config, storage_backend)
         self._json_serializer, self._json_deserializer = _resolve_json_codecs(config)
 
-    @property
-    def storage_backend(self) -> ObjectStoreBackend | None:
-        """Return the configured ``ObjectStoreBackend``, if any."""
-        return self._storage_backend
-
     async def create_table(self) -> None:
         """Create the Spanner artifact metadata table asynchronously."""
         ddl = _artifact_ddl(self._config, self._artifact_table)
         async with self._config.provide_session(transaction=False) as driver:
             await driver.execute(ddl)
-
-    async def insert_artifact(self, record: StoredArtifact) -> None:
-        """Persist an artifact metadata row asynchronously."""
-        sql, params = self._build_insert_artifact_sql_and_params(record)
-        async with self._config.provide_session(transaction=True) as driver:
-            await driver.execute(sql, params)
-
-    async def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch artifact version metadata asynchronously via a lock-free snapshot."""
-        sql, params = self._build_get_artifact_sql_and_params(app_name, user_id, filename, session_id, version)
-        try:
-            async with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                row = await driver.select_one_or_none(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return None
-            raise
-        return _row_to_stored_artifact(dict(row), deserializer=self._json_deserializer) if row is not None else None
-
-    async def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames asynchronously via a lock-free snapshot."""
-        sql, params = self._build_list_artifact_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            async with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                rows = await driver.select(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return []
-            raise
-        return [str(row["filename"]) for row in rows if row.get("filename") is not None]
-
-    async def list_artifact_versions(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """List all version metadata rows asynchronously via a lock-free snapshot."""
-        sql, params = self._build_list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._provide_replica_session(primary=False, transaction=False, read_only=True) as driver:
-                rows = await driver.select(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_artifact(dict(row), deserializer=self._json_deserializer) for row in rows]
-
-    async def delete_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete all metadata rows for an artifact asynchronously and return them."""
-        existing = await self.list_artifact_versions(app_name, user_id, filename, session_id)
-        sql, params = self._build_delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._config.provide_session(transaction=True) as driver:
-                await driver.execute(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return existing
-            raise
-        return existing
-
-    async def get_next_version(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> int:
-        """Compute the next zero-based integer artifact version asynchronously."""
-        sql, params = self._build_get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._provide_replica_session(primary=True, transaction=False, read_only=True) as driver:
-                row = await driver.select_one_or_none(sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return 0
-            raise
-        max_ver = int(row.get("max_ver", -1)) if row is not None and row.get("max_ver") is not None else -1
-        return max_ver + 1
-
-    async def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Delete aged artifact metadata rows asynchronously."""
-        select_sql, delete_sql, params = self._build_delete_older_than_sqls_and_params(before, app_name)
-        try:
-            async with self._config.provide_session(transaction=True) as driver:
-                raw_rows = await driver.select(select_sql, params)
-                rows = [dict(row) for row in raw_rows]
-                await driver.execute(delete_sql, params)
-        except Exception as exc:
-            if is_spanner_table_missing(exc):
-                return []
-            raise
-        return [_row_to_stored_artifact(row, deserializer=self._json_deserializer) for row in rows]
-
-    async def save_artifact_object(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        data: bytes,
-        *,
-        session_id: str | None = None,
-        mime_type: str = "application/octet-stream",
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> ArtifactReference:
-        """Write binary payload to ``storage_backend`` and record metadata asynchronously."""
-        version = await self.get_next_version(app_name, user_id, filename, session_id)
-        key = self._object_key(app_name, user_id, filename, session_id, version)
-        if self._storage_backend is not None:
-            await self._storage_backend.write_bytes_async(key, data)
-            base_uri = str(getattr(self._storage_backend, "store_uri", "") or "").rstrip("/")
-            canonical_uri = f"{base_uri}/{key}" if base_uri else key
-        else:
-            canonical_uri = key
-        now = datetime.now(UTC)
-        record = cast(
-            "StoredArtifact",
-            {
-                "app_name": app_name,
-                "user_id": user_id,
-                "session_id": session_id,
-                "filename": filename,
-                "version": version,
-                "mime_type": mime_type,
-                "canonical_uri": canonical_uri,
-                "custom_metadata": custom_metadata,
-                "created_at": now,
-            },
-        )
-        await self.insert_artifact(record)
-        return self._stored_artifact_to_ref(record, size=len(data))
-
-    async def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Return a storage-neutral ``ArtifactReference`` asynchronously."""
-        record = await self.get_artifact(app_name, user_id, filename, session_id=session_id, version=version)
-        return self._stored_artifact_to_ref(dict(record)) if record is not None else None

@@ -11,13 +11,19 @@ from urllib.parse import parse_qsl
 
 import anyio.to_thread
 
+from vertebra.extensions._web.fastpath_base import BUFFERED_RESPONSE_TYPES
+from vertebra.extensions._web.fastpath_base import (
+    get_starlette_request_cls as _get_starlette_request_cls,
+)
+from vertebra.extensions._web.fastpath_base import (
+    preseed_request_body as _preseed_request_body,
+)
 from vertebra.extensions.fastapi.dependencies import (
     CompiledDependantPlan,
     compile_dependant_plan,
     execute_dependant_plan,
 )
 from vertebra.extensions.fastapi.offload import has_non_offloadable_middleware
-from vertebra.extensions.fastapi.responses import MsgspecJSONResponse
 from vertebra.extensions.fastapi.router import (
     RouterTable,
     extract_routes,
@@ -36,7 +42,6 @@ from vertebra.server._fastpath_core import (
     serialize_buffered_response,
     serialize_starlette_http_exception,
 )
-from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 from vertebra.utils.type_guards import (
     is_coroutine_callable,
@@ -51,81 +56,6 @@ __all__ = (
     "compile_fastpath_routes",
     "dispatch_handler_direct",
 )
-
-
-def _build_buffered_response_types() -> frozenset[type]:
-    """Collect exact Starlette, FastAPI, and Vertebra buffered Response classes when installed."""
-    candidates: list[type] = [MsgspecJSONResponse]
-    starlette_mod = import_optional("starlette.responses")
-    if starlette_mod is not None:
-        for name in ("Response", "HTMLResponse", "PlainTextResponse", "JSONResponse", "RedirectResponse"):
-            cls = getattr(starlette_mod, name, None)
-            if isinstance(cls, type):
-                candidates.append(cls)
-    fastapi_mod = import_optional("fastapi.responses")
-    if fastapi_mod is not None:
-        for name in ("ORJSONResponse", "UJSONResponse"):
-            cls = getattr(fastapi_mod, name, None)
-            if isinstance(cls, type):
-                candidates.append(cls)
-    return frozenset(candidates)
-
-
-BUFFERED_RESPONSE_TYPES: frozenset[type] = _build_buffered_response_types()
-
-
-class _FallbackStarletteRequest:
-    """Lightweight Request fallback used when starlette is not installed."""
-
-    __slots__ = ("_body", "_json", "_receive", "_send", "scope")
-
-    def __init__(self, scope: Any, receive: Any = None, send: Any = None) -> None:
-        self.scope = scope
-        self._receive = receive
-        self._send = send
-        self._body: bytes = b""
-        self._json: Any = None
-
-    @property
-    def method(self) -> str:
-        return str(self.scope.get("method", "GET"))
-
-    @property
-    def path_params(self) -> dict[str, Any]:
-        params: dict[str, Any] = self.scope.get("path_params") or {}
-        return params
-
-    @property
-    def query_params(self) -> dict[str, str]:
-        raw = self.scope.get("query_string", b"")
-        text = raw.decode("latin-1") if isinstance(raw, bytes) else str(raw)
-        if not text:
-            return {}
-        return dict(parse_qsl(text, keep_blank_values=True))
-
-    async def body(self) -> bytes:
-        return self._body
-
-    async def json(self) -> Any:
-        if self._json is None:
-            self._json = decode_json(self._body)
-        return self._json
-
-
-def _get_starlette_request_cls() -> Any:
-    req_mod = import_optional("starlette.requests")
-    if req_mod is not None and hasattr(req_mod, "Request"):
-        return req_mod.Request
-    return _FallbackStarletteRequest
-
-
-def _preseed_request_body(scope: Any, request: Any, body: bytes | None = None) -> None:
-    preseed_fn = getattr(scope, "preseed_request_body", None)
-    if callable(preseed_fn):
-        preseed_fn(request, body)
-        return
-    resolved = body if body is not None else b""
-    request._body = resolved
 
 
 class CompiledRoute(CompiledRouteBase, frozen=True, gc=False, kw_only=True):

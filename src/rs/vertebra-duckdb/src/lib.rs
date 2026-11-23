@@ -12,7 +12,7 @@ pub mod errors;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use arrow_array::RecordBatch;
@@ -38,6 +38,8 @@ use vertebra_db::duckdb::DuckdbConfig;
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
+pub use vertebra_db::py_broker::FREE_THREADED;
+use vertebra_db::py_broker::{BrokerPoolRegistry, next_shm_name};
 use vertebra_db::{
     BrokerEngineBackend, BrokerPoolBackend, DbRpcEncodedResponse, DbRpcScalar, PlaceholderStyle,
     decode_dbrpc_request_frame, encode_dbrpc_response_frame, new_broker_engine_pycapsule,
@@ -49,16 +51,9 @@ use crate::cursor::{outcome_to_dicts, outcome_to_dml, outcome_to_rows, outcome_t
 use crate::errors::DuckDBClientError;
 
 const DUCKDB_COMPLETION_DRAINER_ATTR: &str = "_vertebra_duckdb_completion_drainer";
-static ARROW_SHM_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Maximum number of distinct SQL texts whose facts a pool caches before the cache is cleared.
 pub const STATEMENT_FACTS_CAPACITY: usize = 256;
-
-/// Whether this build targets free-threaded Python (3.14t+).
-#[cfg(Py_GIL_DISABLED)]
-pub const FREE_THREADED: bool = true;
-#[cfg(not(Py_GIL_DISABLED))]
-pub const FREE_THREADED: bool = false;
 
 /// Parameter collection accepted by DuckDB statement execution.
 #[derive(Clone, Debug, Default)]
@@ -1671,8 +1666,7 @@ fn serialize_batches_to_shm_payload(
     batches: &[RecordBatch],
 ) -> Result<ShmArrowPayload, DuckDBClientError> {
     let (ipc_buf, total_rows) = serialize_batches_to_ipc_bytes(schema, batches)?;
-    let seq = ARROW_SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let seg_name = format!("/vtb-dd-{:x}-{seq:x}", std::process::id());
+    let seg_name = next_shm_name("/vtb-dd", '-');
     let mut shm_writer = ShmArrowStreamWriter::create(&seg_name, ipc_buf.len() + 64, &[])
         .map_err(DuckDBClientError::ShmArrow)?;
     shm_writer
@@ -1749,8 +1743,7 @@ fn query_arrow_payload_on_conn(
             columns,
         });
     }
-    let seq = ARROW_SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let seg_name = format!("/vtb-dd-{:x}-{seq:x}", std::process::id());
+    let seg_name = next_shm_name("/vtb-dd", '-');
     let mut shm_writer = ShmArrowStreamWriter::create(&seg_name, ipc_buf.len() + 64, &[])
         .map_err(DuckDBClientError::ShmArrow)?;
     shm_writer
@@ -2640,6 +2633,148 @@ impl Drop for CancelOnDropGuard {
     }
 }
 
+fn shm_payloads_to_py_list(py: Python<'_>, payloads: Vec<ShmArrowPayload>) -> PyResult<Py<PyAny>> {
+    let out = PyList::empty(py);
+    for payload in payloads {
+        out.append(construct_py_arrow_cursor(
+            py,
+            &payload.shm_name,
+            payload.byte_len,
+            payload.row_count,
+            payload.region,
+        )?)?;
+    }
+    Ok(out.into_any().unbind())
+}
+
+macro_rules! impl_duckdb_client_pymethods {
+    (
+        $client:ident,
+        $name:literal,
+        $cursor:ident,
+        { $($extra:tt)* }
+    ) => {
+        #[pymethods]
+        impl $client {
+            #[new]
+            #[pyo3(signature = (
+                database = ":memory:",
+                *,
+                read_only = false,
+                max_connections = 4,
+                max_memory_bytes = None,
+                threads = None,
+                temp_directory = None,
+                parquet_metadata_cache = true,
+                httpfs_connection_caching = true,
+                enable_http_metadata_cache = true,
+                config = None,
+                extensions = None,
+                init_statements = None,
+            ))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn new(
+                py: Python<'_>,
+                database: &str,
+                read_only: bool,
+                max_connections: usize,
+                max_memory_bytes: Option<u64>,
+                threads: Option<usize>,
+                temp_directory: Option<String>,
+                parquet_metadata_cache: bool,
+                httpfs_connection_caching: bool,
+                enable_http_metadata_cache: bool,
+                config: Option<HashMap<String, String>>,
+                extensions: Option<Vec<String>>,
+                init_statements: Option<Vec<String>>,
+            ) -> PyResult<Self> {
+                let db_str = database.to_string();
+                let inner = py
+                    .detach(move || {
+                        DuckDBInner::open(
+                            &db_str,
+                            read_only,
+                            max_connections,
+                            max_memory_bytes,
+                            threads,
+                            temp_directory,
+                            parquet_metadata_cache,
+                            httpfs_connection_caching,
+                            enable_http_metadata_cache,
+                            config,
+                            extensions,
+                            init_statements,
+                        )
+                    })
+                    .map_err(|e| e.into_py_err(py))?;
+                Ok(Self { inner })
+            }
+
+            #[getter]
+            pub fn database(&self) -> &str {
+                &self.inner.database
+            }
+
+            #[getter]
+            pub fn read_only(&self) -> bool {
+                self.inner.read_only
+            }
+
+            #[getter]
+            pub fn is_in_memory(&self) -> bool {
+                self.inner.is_in_memory
+            }
+
+            #[getter]
+            pub fn max_connections(&self) -> usize {
+                self.inner.max_connections
+            }
+
+            #[getter]
+            pub fn in_transaction(&self) -> bool {
+                self.inner.in_transaction.load(Ordering::Acquire)
+            }
+
+            #[getter]
+            pub fn closed(&self) -> bool {
+                self.inner.closed.load(Ordering::Acquire)
+            }
+
+            #[getter]
+            pub fn bootstrap_statements(&self) -> Vec<String> {
+                self.inner.bootstrap_statements.clone()
+            }
+
+            pub fn interrupt(&self) {
+                self.inner.interrupt_all();
+            }
+
+            pub fn cancel(&self) {
+                self.inner.interrupt_all();
+            }
+
+            #[pyo3(signature = (*, lazy_begin = false))]
+            pub fn cursor(&self, lazy_begin: bool) -> $cursor {
+                $cursor::new(Arc::clone(&self.inner), lazy_begin)
+            }
+
+            pub fn __repr__(&self) -> String {
+                format!(
+                    "{}(database={:?}, read_only={}, max_connections={}, in_transaction={}, closed={})",
+                    $name,
+                    self.inner.database,
+                    self.inner.read_only,
+                    self.inner.max_connections,
+                    self.in_transaction(),
+                    self.closed()
+                )
+            }
+
+            $($extra)*
+        }
+    };
+}
+
 /// Native synchronous DuckDB 2.0 client executed on the calling thread.
 #[pyclass(frozen, immutable_type)]
 pub struct SyncDuckDBClient {
@@ -2662,97 +2797,7 @@ impl SyncDuckDBClient {
     }
 }
 
-#[pymethods]
-impl SyncDuckDBClient {
-    #[new]
-    #[pyo3(signature = (
-        database = ":memory:",
-        *,
-        read_only = false,
-        max_connections = 4,
-        max_memory_bytes = None,
-        threads = None,
-        temp_directory = None,
-        parquet_metadata_cache = true,
-        httpfs_connection_caching = true,
-        enable_http_metadata_cache = true,
-        config = None,
-        extensions = None,
-        init_statements = None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        py: Python<'_>,
-        database: &str,
-        read_only: bool,
-        max_connections: usize,
-        max_memory_bytes: Option<u64>,
-        threads: Option<usize>,
-        temp_directory: Option<String>,
-        parquet_metadata_cache: bool,
-        httpfs_connection_caching: bool,
-        enable_http_metadata_cache: bool,
-        config: Option<HashMap<String, String>>,
-        extensions: Option<Vec<String>>,
-        init_statements: Option<Vec<String>>,
-    ) -> PyResult<Self> {
-        let db_str = database.to_string();
-        let inner = py
-            .detach(move || {
-                DuckDBInner::open(
-                    &db_str,
-                    read_only,
-                    max_connections,
-                    max_memory_bytes,
-                    threads,
-                    temp_directory,
-                    parquet_metadata_cache,
-                    httpfs_connection_caching,
-                    enable_http_metadata_cache,
-                    config,
-                    extensions,
-                    init_statements,
-                )
-            })
-            .map_err(|e| e.into_py_err(py))?;
-        Ok(Self { inner })
-    }
-
-    #[getter]
-    pub fn database(&self) -> &str {
-        &self.inner.database
-    }
-
-    #[getter]
-    pub fn read_only(&self) -> bool {
-        self.inner.read_only
-    }
-
-    #[getter]
-    pub fn is_in_memory(&self) -> bool {
-        self.inner.is_in_memory
-    }
-
-    #[getter]
-    pub fn max_connections(&self) -> usize {
-        self.inner.max_connections
-    }
-
-    #[getter]
-    pub fn in_transaction(&self) -> bool {
-        self.inner.in_transaction.load(Ordering::Acquire)
-    }
-
-    #[getter]
-    pub fn closed(&self) -> bool {
-        self.inner.closed.load(Ordering::Acquire)
-    }
-
-    #[getter]
-    pub fn bootstrap_statements(&self) -> Vec<String> {
-        self.inner.bootstrap_statements.clone()
-    }
-
+impl_duckdb_client_pymethods!(SyncDuckDBClient, "SyncDuckDBClient", SyncDuckDBCursor, {
     #[pyo3(signature = (sql, parameters=None))]
     pub fn execute(
         &self,
@@ -2826,17 +2871,7 @@ impl SyncDuckDBClient {
                 inner.stream_arrow_shm_batches(sql_owned, bound, batch_size, &cancel_flag)
             })
             .map_err(|e| e.into_py_err(py))?;
-        let out = PyList::empty(py);
-        for payload in payloads {
-            out.append(construct_py_arrow_cursor(
-                py,
-                &payload.shm_name,
-                payload.byte_len,
-                payload.row_count,
-                payload.region,
-            )?)?;
-        }
-        Ok(out.into_any().unbind())
+        shm_payloads_to_py_list(py, payloads)
     }
 
     #[pyo3(signature = (table, source, *, columns=None, create_if_missing=true))]
@@ -2908,14 +2943,6 @@ impl SyncDuckDBClient {
             .map_err(|e| e.into_py_err(py))
     }
 
-    pub fn interrupt(&self) {
-        self.inner.interrupt_all();
-    }
-
-    pub fn cancel(&self) {
-        self.inner.interrupt_all();
-    }
-
     pub fn close(&self, py: Python<'_>) {
         let inner = Arc::clone(&self.inner);
         py.detach(move || inner.close_all());
@@ -2925,11 +2952,6 @@ impl SyncDuckDBClient {
         AsyncDuckDBClient {
             inner: Arc::clone(&self.inner),
         }
-    }
-
-    #[pyo3(signature = (*, lazy_begin = false))]
-    pub fn cursor(&self, lazy_begin: bool) -> SyncDuckDBCursor {
-        SyncDuckDBCursor::new(Arc::clone(&self.inner), lazy_begin)
     }
 
     #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
@@ -2976,17 +2998,6 @@ impl SyncDuckDBClient {
         Ok(outcome_to_dml(&outcome))
     }
 
-    pub fn __repr__(&self) -> String {
-        format!(
-            "SyncDuckDBClient(database={:?}, read_only={}, max_connections={}, in_transaction={}, closed={})",
-            self.inner.database,
-            self.inner.read_only,
-            self.inner.max_connections,
-            self.in_transaction(),
-            self.closed()
-        )
-    }
-
     pub fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
@@ -3001,7 +3012,7 @@ impl SyncDuckDBClient {
     ) {
         self.close(py);
     }
-}
+});
 
 /// Native asynchronous DuckDB 2.0 client bridged via [`AsyncCompletionQueue`] + [`Notifier`].
 #[pyclass(frozen, immutable_type)]
@@ -3010,6 +3021,62 @@ pub struct AsyncDuckDBClient {
 }
 
 impl AsyncDuckDBClient {
+    fn spawn_cancellable<T, W, M>(
+        &self,
+        py: Python<'_>,
+        work: W,
+        map_ok: M,
+    ) -> PyResult<RustDbTaskAwaitable>
+    where
+        T: Send + 'static,
+        W: FnOnce(Arc<DuckDBInner>, Arc<AtomicBool>) -> Result<T, DuckDBClientError>
+            + Send
+            + 'static,
+        M: FnOnce(Python<'_>, T) -> PyResult<Py<PyAny>> + Send + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
+        let cancel_flag = inner.register_cancel_flag();
+        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let res = tokio::task::spawn_blocking(move || work(inner, cancel_flag))
+                    .await
+                    .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
+                drop_guard.mark_completed();
+                res
+            },
+            map_ok,
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    fn spawn_blocking_op<T, W, M>(
+        &self,
+        py: Python<'_>,
+        work: W,
+        map_ok: M,
+    ) -> PyResult<RustDbTaskAwaitable>
+    where
+        T: Send + 'static,
+        W: FnOnce(Arc<DuckDBInner>) -> Result<T, DuckDBClientError> + Send + 'static,
+        M: FnOnce(Python<'_>, T) -> PyResult<Py<PyAny>> + Send + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                tokio::task::spawn_blocking(move || work(inner))
+                    .await
+                    .map_err(|e| DuckDBClientError::Operational(e.to_string()))?
+            },
+            map_ok,
+            |py, err| err.into_py_err(py),
+            DUCKDB_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
     fn spawn_single_call<M>(
         &self,
         py: Python<'_>,
@@ -3021,119 +3088,16 @@ impl AsyncDuckDBClient {
         M: FnOnce(Python<'_>, StatementOutcome) -> PyResult<Py<PyAny>> + Send + 'static,
     {
         let bound = extract_bound_params(params).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
+        self.spawn_cancellable(
             py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.run_statement(sql_owned, bound, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
+            move |inner, cancel_flag| inner.run_statement(sql_owned, bound, &cancel_flag),
             map_ok,
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
     }
 }
 
-#[pymethods]
-impl AsyncDuckDBClient {
-    #[new]
-    #[pyo3(signature = (
-        database = ":memory:",
-        *,
-        read_only = false,
-        max_connections = 4,
-        max_memory_bytes = None,
-        threads = None,
-        temp_directory = None,
-        parquet_metadata_cache = true,
-        httpfs_connection_caching = true,
-        enable_http_metadata_cache = true,
-        config = None,
-        extensions = None,
-        init_statements = None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        py: Python<'_>,
-        database: &str,
-        read_only: bool,
-        max_connections: usize,
-        max_memory_bytes: Option<u64>,
-        threads: Option<usize>,
-        temp_directory: Option<String>,
-        parquet_metadata_cache: bool,
-        httpfs_connection_caching: bool,
-        enable_http_metadata_cache: bool,
-        config: Option<HashMap<String, String>>,
-        extensions: Option<Vec<String>>,
-        init_statements: Option<Vec<String>>,
-    ) -> PyResult<Self> {
-        let db_str = database.to_string();
-        let inner = py
-            .detach(move || {
-                DuckDBInner::open(
-                    &db_str,
-                    read_only,
-                    max_connections,
-                    max_memory_bytes,
-                    threads,
-                    temp_directory,
-                    parquet_metadata_cache,
-                    httpfs_connection_caching,
-                    enable_http_metadata_cache,
-                    config,
-                    extensions,
-                    init_statements,
-                )
-            })
-            .map_err(|e| e.into_py_err(py))?;
-        Ok(Self { inner })
-    }
-
-    #[getter]
-    pub fn database(&self) -> &str {
-        &self.inner.database
-    }
-
-    #[getter]
-    pub fn read_only(&self) -> bool {
-        self.inner.read_only
-    }
-
-    #[getter]
-    pub fn is_in_memory(&self) -> bool {
-        self.inner.is_in_memory
-    }
-
-    #[getter]
-    pub fn max_connections(&self) -> usize {
-        self.inner.max_connections
-    }
-
-    #[getter]
-    pub fn in_transaction(&self) -> bool {
-        self.inner.in_transaction.load(Ordering::Acquire)
-    }
-
-    #[getter]
-    pub fn closed(&self) -> bool {
-        self.inner.closed.load(Ordering::Acquire)
-    }
-
-    #[getter]
-    pub fn bootstrap_statements(&self) -> Vec<String> {
-        self.inner.bootstrap_statements.clone()
-    }
-
+impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckDBCursor, {
     #[pyo3(signature = (sql, parameters=None))]
     pub fn execute(
         &self,
@@ -3142,24 +3106,11 @@ impl AsyncDuckDBClient {
         parameters: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<RustDbTaskAwaitable> {
         let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
+        self.spawn_cancellable(
             py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.execute_sql(sql_owned, bound, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
+            move |inner, cancel_flag| inner.execute_sql(sql_owned, bound, &cancel_flag),
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -3170,24 +3121,11 @@ impl AsyncDuckDBClient {
         parameter_sets: &Bound<'_, PyAny>,
     ) -> PyResult<RustDbTaskAwaitable> {
         let bound_sets = extract_parameter_sets(parameter_sets).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
+        self.spawn_cancellable(
             py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.execute_many_sql(sql_owned, bound_sets, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
+            move |inner, cancel_flag| inner.execute_many_sql(sql_owned, bound_sets, &cancel_flag),
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -3201,30 +3139,19 @@ impl AsyncDuckDBClient {
         threshold_rows: usize,
     ) -> PyResult<RustDbTaskAwaitable> {
         let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
+        self.spawn_cancellable(
             py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.query_arrow_payload(
-                        sql_owned,
-                        bound,
-                        batch_size,
-                        threshold_rows,
-                        &cancel_flag,
-                    )
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
+            move |inner, cancel_flag| {
+                inner.query_arrow_payload(
+                    sql_owned,
+                    bound,
+                    batch_size,
+                    threshold_rows,
+                    &cancel_flag,
+                )
             },
             arrow_result_payload_to_py_cursor,
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -3237,36 +3164,13 @@ impl AsyncDuckDBClient {
         batch_size: usize,
     ) -> PyResult<RustDbTaskAwaitable> {
         let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
+        self.spawn_cancellable(
             py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.stream_arrow_shm_batches(sql_owned, bound, batch_size, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
+            move |inner, cancel_flag| {
+                inner.stream_arrow_shm_batches(sql_owned, bound, batch_size, &cancel_flag)
             },
-            |py, payloads| {
-                let out = PyList::empty(py);
-                for payload in payloads {
-                    out.append(construct_py_arrow_cursor(
-                        py,
-                        &payload.shm_name,
-                        payload.byte_len,
-                        payload.row_count,
-                        payload.region,
-                    )?)?;
-                }
-                Ok(out.into_any().unbind())
-            },
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
+            shm_payloads_to_py_list,
         )
     }
 
@@ -3281,103 +3185,52 @@ impl AsyncDuckDBClient {
     ) -> PyResult<RustDbTaskAwaitable> {
         let load_source = extract_bulk_load_source(py, source, columns.as_deref())
             .map_err(|e| e.into_py_err(py))?;
-        let inner = Arc::clone(&self.inner);
         let table_owned = table.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
+        self.spawn_cancellable(
             py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.load_arrow_bulk(
-                        table_owned,
-                        load_source,
-                        columns,
-                        create_if_missing,
-                        &cancel_flag,
-                    )
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
+            move |inner, cancel_flag| {
+                inner.load_arrow_bulk(
+                    table_owned,
+                    load_source,
+                    columns,
+                    create_if_missing,
+                    &cancel_flag,
+                )
             },
             |py, rows| Ok(rows.into_pyobject(py)?.into_any().unbind()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
     }
 
     pub fn begin(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let inner = Arc::clone(&self.inner);
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
+        self.spawn_cancellable(
             py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || inner.begin_tx(&cancel_flag))
-                    .await
-                    .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
+            |inner, cancel_flag| inner.begin_tx(&cancel_flag),
             |py, ()| Ok(py.None()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
     }
 
     pub fn commit(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let inner = Arc::clone(&self.inner);
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
+        self.spawn_cancellable(
             py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || inner.commit_tx(&cancel_flag))
-                    .await
-                    .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
+            |inner, cancel_flag| inner.commit_tx(&cancel_flag),
             |py, ()| Ok(py.None()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
     }
 
     pub fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let inner = Arc::clone(&self.inner);
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
+        self.spawn_cancellable(
             py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || inner.rollback_tx(&cancel_flag))
-                    .await
-                    .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
+            |inner, cancel_flag| inner.rollback_tx(&cancel_flag),
             |py, ()| Ok(py.None()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
     }
 
     pub fn savepoint(&self, py: Python<'_>, name: &str) -> PyResult<RustDbTaskAwaitable> {
-        let inner = Arc::clone(&self.inner);
         let name_owned = name.to_string();
-        spawn_rust_db_task_with_attr(
+        self.spawn_blocking_op(
             py,
-            async move {
-                tokio::task::spawn_blocking(move || inner.savepoint_tx(&name_owned))
-                    .await
-                    .map_err(|e| DuckDBClientError::Operational(e.to_string()))?
-            },
+            move |inner| inner.savepoint_tx(&name_owned),
             |py, ()| Ok(py.None()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -3386,49 +3239,21 @@ impl AsyncDuckDBClient {
         py: Python<'_>,
         name: &str,
     ) -> PyResult<RustDbTaskAwaitable> {
-        let inner = Arc::clone(&self.inner);
         let name_owned = name.to_string();
-        let cancel_flag = inner.register_cancel_flag();
-        let mut drop_guard = CancelOnDropGuard::new(Arc::clone(&inner), Arc::clone(&cancel_flag));
-        spawn_rust_db_task_with_attr(
+        self.spawn_cancellable(
             py,
-            async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    inner.rollback_to_savepoint_tx(&name_owned, &cancel_flag)
-                })
-                .await
-                .map_err(|e| DuckDBClientError::Operational(e.to_string()))?;
-                drop_guard.mark_completed();
-                res
-            },
+            move |inner, cancel_flag| inner.rollback_to_savepoint_tx(&name_owned, &cancel_flag),
             |py, ()| Ok(py.None()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
     }
 
     pub fn release_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<RustDbTaskAwaitable> {
-        let inner = Arc::clone(&self.inner);
         let name_owned = name.to_string();
-        spawn_rust_db_task_with_attr(
+        self.spawn_blocking_op(
             py,
-            async move {
-                tokio::task::spawn_blocking(move || inner.release_savepoint_tx(&name_owned))
-                    .await
-                    .map_err(|e| DuckDBClientError::Operational(e.to_string()))?
-            },
+            move |inner| inner.release_savepoint_tx(&name_owned),
             |py, ()| Ok(py.None()),
-            |py, err| err.into_py_err(py),
-            DUCKDB_COMPLETION_DRAINER_ATTR,
         )
-    }
-
-    pub fn interrupt(&self) {
-        self.inner.interrupt_all();
-    }
-
-    pub fn cancel(&self) {
-        self.inner.interrupt_all();
     }
 
     pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
@@ -3449,11 +3274,6 @@ impl AsyncDuckDBClient {
         SyncDuckDBClient {
             inner: Arc::clone(&self.inner),
         }
-    }
-
-    #[pyo3(signature = (*, lazy_begin = false))]
-    pub fn cursor(&self, lazy_begin: bool) -> AsyncDuckDBCursor {
-        AsyncDuckDBCursor::new(Arc::clone(&self.inner), lazy_begin)
     }
 
     #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
@@ -3506,17 +3326,6 @@ impl AsyncDuckDBClient {
         })
     }
 
-    pub fn __repr__(&self) -> String {
-        format!(
-            "AsyncDuckDBClient(database={:?}, read_only={}, max_connections={}, in_transaction={}, closed={})",
-            self.inner.database,
-            self.inner.read_only,
-            self.inner.max_connections,
-            self.in_transaction(),
-            self.closed()
-        )
-    }
-
     pub fn __aenter__(slf: Py<Self>, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
         spawn_rust_db_task_with_attr(
             py,
@@ -3537,7 +3346,7 @@ impl AsyncDuckDBClient {
     ) -> PyResult<RustDbTaskAwaitable> {
         self.close(py)
     }
-}
+});
 
 const DUCKDB_BROKER_ARROW_SPILL_ROWS: usize = 256;
 const DUCKDB_MAX_ACTIVE_SHM: usize = 64;
@@ -3571,8 +3380,7 @@ impl DuckDBPoolEntry {
 
 /// Shared-memory broker backend managing single-writer DuckDB pools (`DIALECT_TAG_DUCKDB = 6`).
 pub struct DuckDBBrokerBackend {
-    pools: RwLock<HashMap<u64, Arc<DuckDBPoolEntry>>>,
-    next_pool_id: AtomicU64,
+    pools: BrokerPoolRegistry<DuckDBPoolEntry>,
 }
 
 impl Default for DuckDBBrokerBackend {
@@ -3586,8 +3394,7 @@ impl DuckDBBrokerBackend {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            pools: RwLock::new(HashMap::new()),
-            next_pool_id: AtomicU64::new(1),
+            pools: BrokerPoolRegistry::new(),
         }
     }
 }
@@ -3711,24 +3518,14 @@ impl BrokerPoolBackend for DuckDBBrokerBackend {
             inner,
             active_shm: Mutex::new(VecDeque::new()),
         });
-        let pool_id = self.next_pool_id.fetch_add(1, Ordering::Relaxed);
-        let mut guard = self
-            .pools
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.insert(pool_id, entry);
-        Ok(pool_id)
+        Ok(self.pools.register(entry))
     }
 
     fn execute(&self, pool_id: u64, frame: &[u8]) -> Result<Vec<u8>, String> {
-        let entry = {
-            let guard = self
-                .pools
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.get(&pool_id).cloned()
-        }
-        .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
+        let entry = self
+            .pools
+            .get(pool_id)
+            .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
 
         let req = decode_dbrpc_request_frame(frame)?;
         let req_id = req.request_id;
@@ -3893,14 +3690,7 @@ impl BrokerPoolBackend for DuckDBBrokerBackend {
     }
 
     fn close_pool(&self, pool_id: u64) {
-        let removed = {
-            let mut guard = self
-                .pools
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.remove(&pool_id)
-        };
-        if let Some(entry) = removed {
+        if let Some(entry) = self.pools.remove(pool_id) {
             entry.inner.close_all();
             let pending: Vec<String> = entry
                 .active_shm

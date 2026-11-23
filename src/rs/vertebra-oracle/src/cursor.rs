@@ -2,85 +2,39 @@
 //! `SyncOracleCursor` / `AsyncOracleCursor` for `vertebra-oracle`.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyNone, PyString, PyTuple, PyType,
 };
 use vertebra_db::py_async::{
     ReadyAwaitable, RustDbTaskAwaitable, ready_ok, spawn_rust_db_task_with_attr,
 };
+use vertebra_db::py_cursor::{BufferedCursorState, build_description_7tuple};
+#[cfg(test)]
+use vertebra_db::py_errors::cursor_programming_err;
+pub(crate) use vertebra_db::py_errors::{cursor_interface_err, cursor_not_supported_err};
+use vertebra_db::py_errors::{instantiate_db_exc, resolve_db_exceptions};
 
 use crate::client::{
     BindArgs, ORACLE_COMPLETION_DRAINER_ATTR, OracleWorkerHandle, OutBindSpec, OutBindsPayload,
     StatementFacts, StatementKind, WorkerCommand, WorkerReply, extract_out_bind_spec,
     statement_facts,
 };
-use crate::errors::{OracleError, resolve_exception_types};
+use crate::errors::OracleError;
 use crate::types::{
     OracleCellValue, OracleColumn, OracleValueOptions, coerce_bind_from_py, coerce_cell_to_py,
     normalize_named_bind_map,
 };
 
-static NOT_SUPPORTED_ERROR_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-
-/// Build an `InterfaceError` from the shared exception cache in `errors.rs`.
-pub(crate) fn cursor_interface_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py) {
-        Ok(types) => PyErr::from_type(types.interface.bind(py).clone(), (message.to_owned(),)),
-        Err(py_err) => py_err,
-    }
-}
-
-/// Build a `ProgrammingError` from the shared exception cache in `errors.rs`.
-pub(crate) fn cursor_programming_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py) {
-        Ok(types) => PyErr::from_type(types.programming.bind(py).clone(), (message.to_owned(),)),
-        Err(py_err) => py_err,
-    }
-}
-
-/// Build a `NotFoundError` from the shared exception cache in `errors.rs`.
+/// Build a `NotFoundError` from the shared exception cache in `vertebra_db::py_errors`.
 pub(crate) fn cursor_not_found_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py) {
-        Ok(types) => PyErr::from_type(types.not_found.bind(py).clone(), (message.to_owned(),)),
-        Err(py_err) => py_err,
-    }
-}
-
-/// Build a `NotSupportedError` from `vertebra._vertebra` (with a stand-in fallback for bare unit tests).
-pub(crate) fn cursor_not_supported_err(py: Python<'_>, message: &str) -> PyErr {
-    let ty = NOT_SUPPORTED_ERROR_TYPE.get_or_try_init(py, || {
-        if let Ok(mod_vtb) = py.import("vertebra._vertebra")
-            && let Ok(cls) = mod_vtb.getattr("NotSupportedError")
-            && let Ok(ty) = cls.cast_into::<PyType>()
-        {
-            return Ok(ty.unbind());
-        }
-        if let Ok(mod_drv) = py.import("vertebra.db.driver")
-            && let Ok(cls) = mod_drv.getattr("NotSupportedError")
-            && let Ok(ty) = cls.cast_into::<PyType>()
-        {
-            return Ok(ty.unbind());
-        }
-        let base_err = resolve_exception_types(py)
-            .map(|t| t.interface.bind(py).clone())
-            .unwrap_or_else(|_| py.get_type::<pyo3::exceptions::PyException>());
-        let bases = PyTuple::new(py, [base_err])?;
-        let dict = PyDict::new(py);
-        dict.set_item("__module__", "vertebra._vertebra")?;
-        let stand_in = py
-            .get_type::<PyType>()
-            .call1(("NotSupportedError", bases, dict))?
-            .cast_into::<PyType>()?;
-        Ok::<Py<PyType>, PyErr>(stand_in.unbind())
-    });
-    match ty {
-        Ok(cls) => PyErr::from_type(cls.bind(py).clone(), (message.to_owned(),)),
+    match resolve_db_exceptions(py) {
+        Ok(types) => instantiate_db_exc(py, &types.not_found, message, None, None, false),
         Err(py_err) => py_err,
     }
 }
@@ -250,50 +204,38 @@ impl OracleOutBindVar {
 
 /// Buffered result and PEP 249 state shared by `SyncOracleCursor` and `AsyncOracleCursor`.
 pub(crate) struct CursorState {
-    pub(crate) rows: Vec<Py<PyTuple>>,
-    pub(crate) pos: usize,
-    pub(crate) description: Option<Py<PyTuple>>,
-    pub(crate) rowcount: i64,
-    pub(crate) lastrowid: Option<Py<PyAny>>,
-    pub(crate) arraysize: usize,
-    pub(crate) executed: bool,
-    pub(crate) closed: bool,
+    pub(crate) buf: BufferedCursorState,
     pub(crate) touches_session_context: bool,
     pub(crate) out_binds: Option<Py<PyAny>>,
+}
+
+impl Deref for CursorState {
+    type Target = BufferedCursorState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.buf
+    }
+}
+
+impl DerefMut for CursorState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.buf
+    }
 }
 
 impl CursorState {
     /// Construct a fresh, open cursor state with `rowcount = -1` and `arraysize = 1`.
     pub(crate) fn new() -> Self {
         Self {
-            rows: Vec::new(),
-            pos: 0,
-            description: None,
-            rowcount: -1,
-            lastrowid: None,
-            arraysize: 1,
-            executed: false,
-            closed: false,
+            buf: BufferedCursorState::new(),
             touches_session_context: false,
             out_binds: None,
         }
     }
 
-    /// Return `InterfaceError` if the cursor has been closed.
-    pub(crate) fn ensure_open(&self, py: Python<'_>) -> PyResult<()> {
-        if self.closed {
-            return Err(cursor_interface_err(py, "cursor is closed"));
-        }
-        Ok(())
-    }
-
     /// Clear buffered rows and reset statement metadata after a failed call or `close()`.
     pub(crate) fn clear_result(&mut self) {
-        self.rows.clear();
-        self.pos = 0;
-        self.description = None;
-        self.rowcount = -1;
-        self.lastrowid = None;
+        self.buf.clear_result();
         self.touches_session_context = false;
         self.out_binds = None;
     }
@@ -306,73 +248,15 @@ impl CursorState {
         rowcount: i64,
         lastrowid: Option<Py<PyAny>>,
     ) {
-        self.description = description;
-        self.rows = rows;
-        self.pos = 0;
-        self.rowcount = rowcount;
-        self.lastrowid = lastrowid;
-        self.executed = true;
+        self.buf.store(description, rows, rowcount, lastrowid);
         self.out_binds = None;
-    }
-
-    /// Fetch the next buffered row, or `None` when no result set exists or rows are exhausted.
-    pub(crate) fn fetchone(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(None);
-        }
-        let row = self.rows[self.pos].clone_ref(py);
-        self.pos += 1;
-        Ok(Some(row))
-    }
-
-    /// Fetch up to `size` (or `arraysize` when `None`) buffered rows.
-    pub(crate) fn fetchmany(
-        &mut self,
-        py: Python<'_>,
-        size: Option<usize>,
-    ) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        let wanted = size.unwrap_or(self.arraysize);
-        if self.description.is_none() || wanted == 0 || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let end = self.pos.saturating_add(wanted).min(self.rows.len());
-        let out = self.rows[self.pos..end]
-            .iter()
-            .map(|row| row.clone_ref(py))
-            .collect();
-        self.pos = end;
-        Ok(out)
-    }
-
-    /// Fetch all remaining buffered rows and leave the cursor exhausted.
-    pub(crate) fn fetchall(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let out = self.rows[self.pos..]
-            .iter()
-            .map(|row| row.clone_ref(py))
-            .collect();
-        self.pos = self.rows.len();
-        Ok(out)
-    }
-
-    /// Update `arraysize`, rejecting values below `1` with `ProgrammingError`.
-    pub(crate) fn set_arraysize(&mut self, py: Python<'_>, value: i64) -> PyResult<()> {
-        if value < 1 {
-            return Err(cursor_programming_err(py, "arraysize must be at least 1"));
-        }
-        self.arraysize = value as usize;
-        Ok(())
     }
 
     /// Close the cursor idempotently and release buffered rows.
     pub(crate) fn close(&mut self) {
-        self.closed = true;
-        self.clear_result();
+        self.buf.close();
+        self.touches_session_context = false;
+        self.out_binds = None;
     }
 }
 
@@ -386,29 +270,22 @@ pub(crate) fn describe_columns(
     columns: &[OracleColumn],
     lowercase: bool,
 ) -> PyResult<Py<PyTuple>> {
-    let none = PyNone::get(py);
-    let mut entries = Vec::with_capacity(columns.len());
+    let mut cols = Vec::with_capacity(columns.len());
     for col in columns {
         let col_name = if lowercase {
             col.name.to_ascii_lowercase()
         } else {
             col.name.clone()
         };
-        let item = PyTuple::new(
-            py,
-            [
-                col_name.into_pyobject(py)?.into_any(),
-                col.type_name.as_str().into_pyobject(py)?.into_any(),
-                none.as_any().clone(),
-                none.as_any().clone(),
-                none.as_any().clone(),
-                none.as_any().clone(),
-                none.as_any().clone(),
-            ],
-        )?;
-        entries.push(item.into_any());
+        let type_code = col
+            .type_name
+            .as_str()
+            .into_pyobject(py)?
+            .into_any()
+            .unbind();
+        cols.push((col_name, Some(type_code), None));
     }
-    Ok(PyTuple::new(py, entries)?.unbind())
+    build_description_7tuple(py, cols)
 }
 
 /// Pack already-converted Python cells for a single row into a `Py<PyTuple>`.
@@ -427,17 +304,6 @@ pub(crate) fn rows_to_tuples(
         out.push(cells_to_tuple(py, row)?);
     }
     Ok(out)
-}
-
-fn check_fetchmany_size(py: Python<'_>, size: Option<i64>) -> PyResult<Option<usize>> {
-    match size {
-        None => Ok(None),
-        Some(n) if n < 0 => Err(cursor_programming_err(
-            py,
-            "fetchmany size must be non-negative",
-        )),
-        Some(n) => Ok(Some(n as usize)),
-    }
 }
 
 fn remap_bind_py_err(py: Python<'_>, err: PyErr) -> PyErr {
@@ -1535,16 +1401,12 @@ impl SyncOracleCursor {
     #[pyo3(signature = (size = None))]
     pub fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<PyList>> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.ensure_open(py)?;
-        let checked_size = check_fetchmany_size(py, size)?;
-        let rows = state.fetchmany(py, checked_size)?;
-        Ok(PyList::new(py, rows)?.unbind())
+        state.fetchmany(py, size)
     }
 
     pub fn fetchall(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let rows = state.fetchall(py)?;
-        Ok(PyList::new(py, rows)?.unbind())
+        state.fetchall(py)
     }
 
     #[pyo3(signature = (type_code, size = 0, arraysize = 1, outconverter = None))]
@@ -1900,11 +1762,9 @@ impl AsyncOracleCursor {
     pub fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<ReadyAwaitable>> {
         let rows = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            state.ensure_open(py)?;
-            let checked_size = check_fetchmany_size(py, size)?;
-            state.fetchmany(py, checked_size)?
+            state.fetchmany(py, size)?
         };
-        ready_ok(py, PyList::new(py, rows)?.into_any().unbind())
+        ready_ok(py, rows.into_any())
     }
 
     pub fn fetchall(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
@@ -1912,7 +1772,7 @@ impl AsyncOracleCursor {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.fetchall(py)?
         };
-        ready_ok(py, PyList::new(py, rows)?.into_any().unbind())
+        ready_ok(py, rows.into_any())
     }
 
     #[pyo3(signature = (type_code, size = 0, arraysize = 1, outconverter = None))]
@@ -1996,8 +1856,14 @@ mod tests {
             assert!(!state.closed);
 
             assert!(state.fetchone(py).expect("fetchone").is_none());
-            assert!(state.fetchmany(py, None).expect("fetchmany").is_empty());
-            assert!(state.fetchall(py).expect("fetchall").is_empty());
+            assert!(
+                state
+                    .fetchmany(py, None)
+                    .expect("fetchmany")
+                    .bind(py)
+                    .is_empty()
+            );
+            assert!(state.fetchall(py).expect("fetchall").bind(py).is_empty());
 
             state.store(None, Vec::new(), 3, None);
             assert_eq!(state.rowcount, 3);
@@ -2005,7 +1871,13 @@ mod tests {
             assert!(state.lastrowid.is_none());
             assert!(state.executed);
             assert!(state.fetchone(py).expect("fetchone after DML").is_none());
-            assert!(state.fetchall(py).expect("fetchall after DML").is_empty());
+            assert!(
+                state
+                    .fetchall(py)
+                    .expect("fetchall after DML")
+                    .bind(py)
+                    .is_empty()
+            );
         });
     }
 
@@ -2017,7 +1889,13 @@ mod tests {
             let desc = make_desc(py);
             state.store(Some(desc.clone_ref(py)), Vec::new(), 0, None);
             assert!(state.description.is_some());
-            assert!(state.fetchall(py).expect("empty fetchall").is_empty());
+            assert!(
+                state
+                    .fetchall(py)
+                    .expect("empty fetchall")
+                    .bind(py)
+                    .is_empty()
+            );
 
             let rows: Vec<Py<PyTuple>> = (1..=5).map(|v| make_row(py, v)).collect();
             state.store(Some(desc.clone_ref(py)), rows, 5, None);
@@ -2027,6 +1905,7 @@ mod tests {
                 state
                     .fetchmany(py, Some(0))
                     .expect("fetchmany(0)")
+                    .bind(py)
                     .is_empty()
             );
 
@@ -2034,10 +1913,10 @@ mod tests {
             let batch2 = state.fetchmany(py, None).expect("batch2");
             let batch3 = state.fetchmany(py, None).expect("batch3");
             let batch4 = state.fetchmany(py, None).expect("batch4");
-            assert_eq!(batch1.len(), 2);
-            assert_eq!(batch2.len(), 2);
-            assert_eq!(batch3.len(), 1);
-            assert!(batch4.is_empty());
+            assert_eq!(batch1.bind(py).len(), 2);
+            assert_eq!(batch2.bind(py).len(), 2);
+            assert_eq!(batch3.bind(py).len(), 1);
+            assert!(batch4.bind(py).is_empty());
 
             let rows2: Vec<Py<PyTuple>> = (10..=14).map(|v| make_row(py, v)).collect();
             state.store(Some(desc), rows2, 5, None);
@@ -2055,8 +1934,14 @@ mod tests {
                 10
             );
             let rest = state.fetchall(py).expect("fetchall remainder");
-            assert_eq!(rest.len(), 4);
-            assert!(state.fetchall(py).expect("exhausted fetchall").is_empty());
+            assert_eq!(rest.bind(py).len(), 4);
+            assert!(
+                state
+                    .fetchall(py)
+                    .expect("exhausted fetchall")
+                    .bind(py)
+                    .is_empty()
+            );
         });
     }
 
@@ -2461,10 +2346,12 @@ mod tests {
                 "a"
             );
             let rows = state.fetchall(py).expect("fetchall");
-            assert_eq!(rows.len(), 1);
+            let rows_list = rows.bind(py);
+            assert_eq!(rows_list.len(), 1);
             assert_eq!(
-                rows[0]
-                    .bind(py)
+                rows_list
+                    .get_item(0)
+                    .expect("row 0")
                     .get_item(0)
                     .expect("0")
                     .extract::<i64>()
@@ -2771,10 +2658,12 @@ mod tests {
                 42
             );
             let synth_rows = state.fetchall(py).expect("fetchall");
-            assert_eq!(synth_rows.len(), 1);
+            let synth_list = synth_rows.bind(py);
+            assert_eq!(synth_list.len(), 1);
             assert_eq!(
-                synth_rows[0]
-                    .bind(py)
+                synth_list
+                    .get_item(0)
+                    .expect("row 0")
                     .get_item(0)
                     .expect("0")
                     .extract::<i64>()

@@ -7,11 +7,8 @@ from typing import Any
 from sqlalchemy.dialects.mysql.base import MySQLDialect as BaseMySQLDialect
 
 from vertebra.extensions.sqlalchemy.dialects._base import (
-    _NON_DISCONNECT_SQLSTATES,
     _AsyncDialectMixin,
-    _extract_sqlstate,
     _extract_vendor_code,
-    _is_disconnect_common,
     _SyncDialectMixin,
 )
 
@@ -75,23 +72,11 @@ class _MySQLDialectMixin:
             current = getattr(current, "__cause__", None)
         return None
 
-    def is_disconnect(self, e: Exception, connection: Any = None, cursor: Any = None) -> bool:
-        """Return True if the exception represents a MySQL disconnect, never raising."""
-        try:
-            sqlstate = _extract_sqlstate(e)
-            if sqlstate in _NON_DISCONNECT_SQLSTATES or type(e).__name__ == "SerializationFailure":
-                return False
-            if sqlstate is not None and sqlstate.startswith("08"):
-                return True
-            error_code = self._extract_error_code(e)
-            if error_code in _MYSQL_DISCONNECT_CODES:
-                return True
-            parent = super()
-            raw_parent_fn = getattr(parent, "is_disconnect", None)
-            parent_fn = raw_parent_fn if callable(raw_parent_fn) and getattr(self, "dbapi", None) is not None else None
-            return _is_disconnect_common(e, connection, cursor, parent_fn)
-        except Exception:
-            return False
+    _disconnect_codes = _MYSQL_DISCONNECT_CODES
+    _guard_parent_dbapi = True
+
+    def _extract_error_code_for_disconnect(self, e: Exception) -> int | None:
+        return self._extract_error_code(e)
 
 
 class SyncMySQLDialect(_MySQLDialectMixin, _SyncDialectMixin, BaseMySQLDialect):

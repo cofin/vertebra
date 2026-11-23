@@ -2,7 +2,6 @@
 
 use std::io::Cursor;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, Float64Builder, Int64Builder,
@@ -24,6 +23,7 @@ use vertebra_core::shm::ShmRegion;
 use vertebra_db::arrow_shm::{
     SHM_ARROW_MAGIC, ShmArrowFrameHeader, ShmArrowStreamWriter, write_shm_arrow_region_unregistered,
 };
+use vertebra_db::py_broker::next_shm_name;
 
 use crate::client::DecodedCell;
 use crate::errors::MySQLError;
@@ -34,8 +34,6 @@ pub const DEFAULT_MYSQL_ARROW_SHM_CAPACITY: usize = 64 * 1024;
 /// Default scale (`9`) used when encoding MySQL `DECIMAL` columns into `Decimal128(38, 9)`.
 pub const MYSQL_ARROW_DECIMAL_SCALE: i8 = 9;
 
-static SHM_COUNTER: AtomicU64 = AtomicU64::new(1);
-
 /// Tuple `(shm_name, byte_len, row_count, Arc<ShmRegion>)` representing a materialized `VTBARROW` segment.
 pub type ShmArrowBatchHandle = (String, usize, usize, Arc<ShmRegion>);
 
@@ -44,9 +42,7 @@ pub type ShmArrowBatchHandle = (String, usize, usize, Arc<ShmRegion>);
 #[inline]
 #[pyo3::pyfunction]
 pub fn next_mysql_shm_name() -> String {
-    let seq = SHM_COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFFFF_FFFF;
-    let pid = std::process::id();
-    format!("/vtb-my-{pid:x}-{seq:x}")
+    next_shm_name("/vtb-my", '-')
 }
 
 /// Open a [`ShmArrowStreamWriter`] backed by a fresh `/vtb-my-*` POSIX shared-memory segment

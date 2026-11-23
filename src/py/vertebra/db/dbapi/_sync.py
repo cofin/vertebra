@@ -642,38 +642,37 @@ def _apply_dialect_metadata(module_obj: Any, dialect: str | None) -> None:
 _POOL_ROUTED_DIALECTS: Final[frozenset[str]] = frozenset({"postgres"})
 
 
-class SyncDBAPIConnection:
-    """Standalone synchronous PEP 249 connection backed by Vertebra native drivers."""
+class _BaseDBAPIConnection:
+    """Shared PEP 249 connection state, property accessors, and lazy cursor binding."""
 
     __slots__ = (
-        "_aggregates",
         "_autocommit",
         "_broker",
-        "_collations",
         "_config",
         "_driver",
         "_driver_cursor",
-        "_functions",
         "_in_transaction",
         "_owns_driver",
         "_share_pool",
         "_url",
         "closed",
-        "cursor",
     )
 
-    def __init__(
+    _driver: Any
+    cursor: Callable[..., Any]
+
+    def _init_connection(
         self,
-        url: str | BaseDatabaseConfig | None = None,
+        url: str | BaseDatabaseConfig | None,
         *,
-        driver: Any = None,
-        broker: Any = None,
-        share_pool: bool = True,
-        lease_managed: bool = False,
-        autocommit: bool | None = None,
-        **kwargs: Any,
+        driver: Any,
+        broker: Any,
+        share_pool: bool,
+        lease_managed: bool,
+        autocommit: bool | None,
+        connect_kwargs: dict[str, Any],
+        driver_builder: Callable[..., tuple[Any, bool]],
     ) -> None:
-        """Initialize PEP 249 connection with a non-empty database URL."""
         self._share_pool = bool(share_pool)
         self._broker = (
             broker
@@ -681,26 +680,22 @@ class SyncDBAPIConnection:
             else (DatabaseRegistry.default_broker() if self._share_pool and not lease_managed else None)
         )
         self._in_transaction = False
-        self.closed: bool = False
-        self._functions: dict[str, Any] = {}
-        self._aggregates: dict[str, Any] = {}
-        self._collations: dict[str, Any] = {}
-
+        self.closed = False
         driver_broker = None if lease_managed else self._broker
         resolved_url, resolved_config = _resolve_dbapi_config(
             url,
             driver=driver,
             driver_broker=driver_broker,
-            connect_kwargs=kwargs,
+            connect_kwargs=connect_kwargs,
         )
         self._url: str = resolved_url
         self._config: AnyDatabaseConfig | BaseDatabaseConfig | None = resolved_config
         self._autocommit: bool = bool(getattr(self._config, "requires_statement_autocommit", False))
-        self._driver: SyncSQLDriverProtocol | None = driver
+        self._driver = driver
         self._owns_driver: bool = driver is not None
 
         if self._driver is None and self._config is not None:
-            self._driver, self._owns_driver = _build_driver(
+            self._driver, self._owns_driver = driver_builder(
                 self._config,
                 broker=broker,
                 share_pool=self._share_pool,
@@ -714,8 +709,7 @@ class SyncDBAPIConnection:
                 msg = f"{type(self._driver).__name__} does not provide cursor()"
                 raise InterfaceError(msg)
             self._driver_cursor = factory
-        self.cursor: Callable[..., Any] = self._bound_cursor()
-
+        object.__setattr__(self, "cursor", self._bound_cursor())
         if autocommit is not None:
             self.autocommit = bool(autocommit)
 
@@ -735,11 +729,6 @@ class SyncDBAPIConnection:
         return self._broker
 
     @property
-    def driver(self) -> SyncSQLDriverProtocol | None:
-        """Return the active underlying driver instance."""
-        return self._driver
-
-    @property
     def autocommit(self) -> bool:
         """Return connection autocommit state."""
         return self._autocommit
@@ -751,11 +740,99 @@ class SyncDBAPIConnection:
             config_name = type(self._config).__name__ if self._config is not None else "Backend"
             msg = f"{config_name} DBAPI connections require autocommit; use the native driver transaction API"
             raise NotSupportedError(msg)
-        if value and self._transaction_open():
-            self.commit()
+        self._set_autocommit_value(value)
+
+    def _set_autocommit_value(self, value: bool) -> None:
         self._autocommit = value
         if not self.closed:
-            self.cursor = self._bound_cursor()
+            object.__setattr__(self, "cursor", self._bound_cursor())
+
+    def _bound_cursor(self) -> Callable[..., Any]:
+        """Return the callable stored in `cursor` for the current autocommit state."""
+        factory = self._driver_cursor
+        if factory is None:
+            return self._no_driver_cursor
+        if self._autocommit:
+            return factory
+        if self._engine_key() in _POOL_ROUTED_DIALECTS:
+            return self._session_routed_cursor
+        return partial(factory, lazy_begin=True)
+
+    def _session_routed_cursor(self) -> Any:
+        """Return a lazy-begin cursor when the driver has a pinned session, else a plain cursor."""
+        factory = cast("Callable[..., Any]", self._driver_cursor)
+        try:
+            return factory(lazy_begin=True)
+        except InterfaceError:
+            return factory(lazy_begin=False)
+
+    def _engine_key(self) -> str:
+        """Return the lowercase engine name from the config or driver."""
+        if self._config is not None:
+            return _config_dialect(self._config)
+        return str(getattr(self._driver, "dialect", "")).lower()
+
+    def _no_driver_cursor(self) -> Any:
+        """Raise `InterfaceError` for a connection built without a driver."""
+        raise InterfaceError(f"{type(self).__name__} has no underlying driver cursor factory")
+
+    def _closed_cursor(self) -> Any:
+        """Raise `InterfaceError` for a cursor request on a closed connection."""
+        raise InterfaceError("Cannot operate on a closed connection.")
+
+    def _transaction_open(self) -> bool:
+        """Return whether a transaction is open on the underlying driver."""
+        if self._driver is not None:
+            in_tx = getattr(self._driver, "in_transaction", None)
+            if in_tx is not None:
+                return bool(in_tx)
+        return self._in_transaction
+
+    def _require_open(self) -> None:
+        if self.closed:
+            raise InterfaceError("Cannot operate on a closed connection.")
+
+
+class SyncDBAPIConnection(_BaseDBAPIConnection):
+    """Standalone synchronous PEP 249 connection backed by Vertebra native drivers."""
+
+    __slots__ = ("_aggregates", "_collations", "_functions", "cursor")
+
+    def __init__(
+        self,
+        url: str | BaseDatabaseConfig | None = None,
+        *,
+        driver: Any = None,
+        broker: Any = None,
+        share_pool: bool = True,
+        lease_managed: bool = False,
+        autocommit: bool | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize PEP 249 connection with a non-empty database URL."""
+        self._functions: dict[str, Any] = {}
+        self._aggregates: dict[str, Any] = {}
+        self._collations: dict[str, Any] = {}
+        self._init_connection(
+            url,
+            driver=driver,
+            broker=broker,
+            share_pool=share_pool,
+            lease_managed=lease_managed,
+            autocommit=autocommit,
+            connect_kwargs=kwargs,
+            driver_builder=_build_driver,
+        )
+
+    @property
+    def driver(self) -> SyncSQLDriverProtocol | None:
+        """Return the active underlying driver instance."""
+        return cast("SyncSQLDriverProtocol | None", self._driver)
+
+    def _set_autocommit_value(self, value: bool) -> None:
+        if value and self._transaction_open():
+            self.commit()
+        super()._set_autocommit_value(value)
 
     def execute(
         self,
@@ -850,64 +927,9 @@ class SyncDBAPIConnection:
         else:
             self.commit()
 
-    def _bound_cursor(self) -> Callable[..., Any]:
-        """Return the callable stored in `cursor` for the current autocommit state.
 
-        The driver's `cursor` method is stored unchanged when autocommit is on. PostgreSQL, whose driver
-        accepts lazy begin only while a session is pinned, gets `_session_routed_cursor`, which decides on
-        each call. Every other engine gets the driver method with `lazy_begin=True` bound.
-        """
-        factory = self._driver_cursor
-        if factory is None:
-            return self._no_driver_cursor
-        if self._autocommit:
-            return factory
-        if self._engine_key() in _POOL_ROUTED_DIALECTS:
-            return self._session_routed_cursor
-        return partial(factory, lazy_begin=True)
-
-    def _session_routed_cursor(self) -> Any:
-        """Return a lazy-begin cursor when the driver has a pinned session, else a plain cursor.
-
-        Raises:
-            InterfaceError: When the driver cannot provide a cursor at all.
-        """
-        factory = cast("Callable[..., Any]", self._driver_cursor)
-        try:
-            return factory(lazy_begin=True)
-        except InterfaceError:
-            return factory(lazy_begin=False)
-
-    def _engine_key(self) -> str:
-        """Return the lowercase engine name from the config, or from the driver when no config resolved."""
-        if self._config is not None:
-            return _config_dialect(self._config)
-        return str(getattr(self._driver, "dialect", "")).lower()
-
-    def _no_driver_cursor(self) -> Any:
-        """Raise `InterfaceError` for a connection built without a driver."""
-        msg = "SyncDBAPIConnection has no underlying driver cursor factory"
-        raise InterfaceError(msg)
-
-    def _closed_cursor(self) -> Any:
-        """Raise `InterfaceError` for a cursor request on a closed connection."""
-        raise InterfaceError("Cannot operate on a closed connection.")
-
-    def _transaction_open(self) -> bool:
-        """Return whether a transaction is open on the underlying driver."""
-        if self._driver is not None:
-            in_tx = getattr(self._driver, "in_transaction", None)
-            if in_tx is not None:
-                return bool(in_tx)
-        return self._in_transaction
-
-    def _require_open(self) -> None:
-        if self.closed:
-            raise InterfaceError("Cannot operate on a closed connection.")
-
-
-class SyncDBAPIModule:
-    """Standalone synchronous PEP 249 DBAPI 2.0 module descriptor."""
+class _BaseDBAPIModule:
+    """Shared PEP 249 DBAPI 2.0 module descriptor attributes and URL extraction."""
 
     apilevel: str = "2.0"
     threadsafety: int = 2
@@ -951,8 +973,8 @@ class SyncDBAPIModule:
         self.dialect = dialect
         _apply_dialect_metadata(self, dialect)
 
-    def connect(self, *args: Any, **kwargs: Any) -> SyncDBAPIConnection:
-        """Open a synchronous PEP 249 connection with a required URL."""
+    @staticmethod
+    def _extract_connect_url(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | BaseDatabaseConfig | None:
         url_arg: str | BaseDatabaseConfig | None = None
         if args and isinstance(args[0], (str, BaseDatabaseConfig)):
             url_arg = args[0]
@@ -964,7 +986,15 @@ class SyncDBAPIModule:
             and "driver" not in kwargs
         ):
             raise InterfaceError("A non-empty database connection URL is required.")
-        return SyncDBAPIConnection(url_arg, **kwargs)
+        return url_arg
+
+
+class SyncDBAPIModule(_BaseDBAPIModule):
+    """Standalone synchronous PEP 249 DBAPI 2.0 module descriptor."""
+
+    def connect(self, *args: Any, **kwargs: Any) -> SyncDBAPIConnection:
+        """Open a synchronous PEP 249 connection with a required URL."""
+        return SyncDBAPIConnection(self._extract_connect_url(args, kwargs), **kwargs)
 
 
 def connect(url: str | BaseDatabaseConfig | None = None, **kwargs: Any) -> SyncDBAPIConnection:

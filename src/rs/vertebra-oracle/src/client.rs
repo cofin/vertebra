@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -17,6 +17,8 @@ use vertebra_db::oracle::OracleSessionAttrs;
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
+use vertebra_db::py_broker::next_shm_name;
+use vertebra_db::py_cursor::{DEFAULT_PLAN_CACHE_CAPACITY, PlanLruCache};
 
 use crate::config::{NativeOracleConfig, RawOracleOptions};
 use crate::cursor::{
@@ -41,7 +43,6 @@ pub const ORACLE_COMPLETION_DRAINER_ATTR: &str = "_vertebra_oracle_completion_dr
 pub const ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED: bool = false;
 
 const ARROW_SHM_THRESHOLD_ROWS: usize = 256;
-static NEXT_ARROW_SHM_SEQ: AtomicUsize = AtomicUsize::new(1);
 static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Validate an Oracle savepoint identifier against ASCII `[A-Za-z_][A-Za-z0-9_$#]*`.
@@ -619,8 +620,7 @@ fn build_py_arrow_cursor(
     let arrow_mod = py.import("vertebra.db.arrow")?;
     let arrow_cls = arrow_mod.getattr("ArrowCursor")?;
     if use_shm {
-        let seq = NEXT_ARROW_SHM_SEQ.fetch_add(1, Ordering::Relaxed);
-        let shm_name = format!("/vtb-ora-arrow-{}-{seq}", std::process::id());
+        let shm_name = next_shm_name("/vtb-ora-arrow", '-');
         let (norm_name, byte_len, region) =
             write_shm_arrow_region_unregistered(&shm_name, &ipc_bytes)
                 .map_err(|e| OracleError::operational(e).to_py_err(py))?;
@@ -857,53 +857,6 @@ pub(crate) struct StatementFacts {
     pub touches_session_context: bool,
 }
 
-const STATEMENT_FACTS_CACHE_CAPACITY: usize = 512;
-
-struct StatementFactsLru {
-    entries: HashMap<String, (StatementFacts, u64)>,
-    clock: u64,
-    capacity: usize,
-    #[cfg(test)]
-    scan_count: usize,
-}
-
-impl StatementFactsLru {
-    fn new(capacity: usize) -> Self {
-        Self {
-            entries: HashMap::with_capacity(capacity.min(64)),
-            clock: 0,
-            capacity: capacity.max(1),
-            #[cfg(test)]
-            scan_count: 0,
-        }
-    }
-
-    fn get_or_insert(&mut self, sql: &str) -> StatementFacts {
-        self.clock = self.clock.wrapping_add(1);
-        let tick = self.clock;
-        if let Some((facts, last_used)) = self.entries.get_mut(sql) {
-            *last_used = tick;
-            return *facts;
-        }
-        #[cfg(test)]
-        {
-            self.scan_count += 1;
-        }
-        let facts = compute_statement_facts(sql);
-        if self.entries.len() >= self.capacity
-            && let Some(oldest_key) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, (_, used_at))| *used_at)
-                .map(|(k, _)| k.clone())
-        {
-            self.entries.remove(&oldest_key);
-        }
-        self.entries.insert(sql.to_owned(), (facts, tick));
-        facts
-    }
-}
-
 fn starts_with_ascii_ci(s: &str, prefix: &str) -> bool {
     s.get(..prefix.len())
         .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
@@ -926,15 +879,24 @@ fn compute_statement_facts(sql: &str) -> StatementFacts {
     }
 }
 
-static STATEMENT_FACTS_CACHE: LazyLock<Mutex<StatementFactsLru>> =
-    LazyLock::new(|| Mutex::new(StatementFactsLru::new(STATEMENT_FACTS_CACHE_CAPACITY)));
+static STATEMENT_FACTS_CACHE: LazyLock<Mutex<PlanLruCache<StatementFacts>>> =
+    LazyLock::new(|| Mutex::new(PlanLruCache::new(DEFAULT_PLAN_CACHE_CAPACITY)));
 
 /// Return cached [`StatementFacts`] for `sql`, computing and caching on a miss (LRU capacity 512).
 pub(crate) fn statement_facts(sql: &str) -> StatementFacts {
+    {
+        let mut cache = STATEMENT_FACTS_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = cache.get(sql) {
+            return hit;
+        }
+    }
+    let facts = compute_statement_facts(sql);
     let mut cache = STATEMENT_FACTS_CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    cache.get_or_insert(sql)
+    cache.insert(sql.into(), facts)
 }
 
 fn command_may_open_txn(cmd: &WorkerCommand) -> bool {
@@ -2472,6 +2434,388 @@ fn session_attrs_to_py_dict(py: Python<'_>, attrs: &OracleSessionAttrs) -> PyRes
     Ok(dict.unbind())
 }
 
+fn reply_to_query_result(py: Python<'_>, reply: WorkerReply) -> PyResult<OracleQueryResult> {
+    match reply {
+        WorkerReply::QueryOutcome(outcome) => outcome.into_py_query_result(py),
+        WorkerReply::RowCount(n) => Ok(OracleQueryResult::new(
+            py,
+            Vec::new(),
+            Vec::new(),
+            n,
+            None,
+            None,
+        )),
+        _ => Ok(OracleQueryResult::new(
+            py,
+            Vec::new(),
+            Vec::new(),
+            0,
+            None,
+            None,
+        )),
+    }
+}
+
+macro_rules! impl_oracle_client_pymethods {
+    (
+        $client:ident,
+        cursor = $cursor:ident,
+        unit_ret = $unit_ret:ty,
+        single_ret = $single_ret:ty,
+        pipeline_ret = $pipeline_ret:ty,
+        single_calls = [ $( $sc_name:ident => $sc_shape:path ),* $(,)? ],
+        extra = { $($extra:tt)* }
+    ) => {
+        impl $client {
+            /// Construct a client wrapping an existing [`OracleWorkerHandle`].
+            #[must_use]
+            pub fn from_worker(worker: Arc<OracleWorkerHandle>) -> Self {
+                Self {
+                    worker,
+                    lease: Arc::new(Mutex::new(None)),
+                }
+            }
+
+            /// Return a reference to the underlying [`OracleWorkerHandle`].
+            #[must_use]
+            pub fn worker(&self) -> &Arc<OracleWorkerHandle> {
+                &self.worker
+            }
+        }
+
+        #[pymethods]
+        impl $client {
+            #[new]
+            #[pyo3(signature = (
+                *,
+                user=None,
+                password=None,
+                dsn=None,
+                host="localhost",
+                port=1521,
+                service_name="FREEPDB1",
+                sid=None,
+                tns_admin=None,
+                connect_descriptor=None,
+                protocol="tcp",
+                ssl_server_dn_match=true,
+                ssl_server_cert_dn=None,
+                wallet_location=None,
+                wallet_password=None,
+                pem_cert_data=None,
+                cwallet_sso_data=None,
+                auth_mode="password",
+                access_token=None,
+                token_auth_options=None,
+                cclass=None,
+                purity="SELF",
+                connection_tag=None,
+                stmtcachesize=64,
+                prefetchrows=256,
+                arraysize=256,
+                call_timeout_ms=None,
+                connect_timeout=10.0,
+                enable_lowercase_column_names=true,
+                client_identifier=None,
+                module=None,
+                action=None,
+                ecid=None,
+                enable_reset_relay=true,
+            ))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn new(
+                py: Python<'_>,
+                user: Option<String>,
+                password: Option<String>,
+                dsn: Option<String>,
+                host: &str,
+                port: i32,
+                service_name: &str,
+                sid: Option<String>,
+                tns_admin: Option<String>,
+                connect_descriptor: Option<String>,
+                protocol: &str,
+                ssl_server_dn_match: bool,
+                ssl_server_cert_dn: Option<String>,
+                wallet_location: Option<String>,
+                wallet_password: Option<String>,
+                pem_cert_data: Option<Vec<u8>>,
+                cwallet_sso_data: Option<Vec<u8>>,
+                auth_mode: &str,
+                access_token: Option<String>,
+                token_auth_options: Option<BTreeMap<String, String>>,
+                cclass: Option<String>,
+                purity: &str,
+                connection_tag: Option<String>,
+                stmtcachesize: i32,
+                prefetchrows: i64,
+                arraysize: i64,
+                call_timeout_ms: Option<i64>,
+                connect_timeout: f64,
+                enable_lowercase_column_names: bool,
+                client_identifier: Option<String>,
+                module: Option<String>,
+                action: Option<String>,
+                ecid: Option<String>,
+                enable_reset_relay: bool,
+            ) -> PyResult<Self> {
+                let raw = build_raw_oracle_options(
+                    user,
+                    password,
+                    dsn,
+                    host.to_owned(),
+                    port,
+                    service_name.to_owned(),
+                    sid,
+                    tns_admin,
+                    connect_descriptor,
+                    protocol.to_owned(),
+                    ssl_server_dn_match,
+                    ssl_server_cert_dn,
+                    wallet_location,
+                    wallet_password,
+                    pem_cert_data,
+                    cwallet_sso_data,
+                    auth_mode.to_owned(),
+                    access_token,
+                    token_auth_options,
+                    cclass,
+                    purity.to_owned(),
+                    connection_tag,
+                    stmtcachesize,
+                    prefetchrows,
+                    arraysize,
+                    call_timeout_ms,
+                    connect_timeout,
+                    enable_lowercase_column_names,
+                    client_identifier,
+                    module,
+                    action,
+                    ecid,
+                );
+                let mut cfg = NativeOracleConfig::validate(raw).map_err(|e| e.to_py_err(py))?;
+                cfg.enable_reset_relay = enable_reset_relay;
+                let worker = OracleWorkerHandle::spawn(cfg).map_err(|e| e.to_py_err(py))?;
+                Ok(Self {
+                    worker: Arc::new(worker),
+                    lease: Arc::new(Mutex::new(None)),
+                })
+            }
+
+            #[getter]
+            pub fn closed(&self) -> bool {
+                self.worker.is_closed()
+            }
+
+            #[getter]
+            pub fn in_transaction(&self) -> bool {
+                self.worker.is_in_transaction()
+            }
+
+            #[getter]
+            pub fn cclass(&self) -> Option<String> {
+                self.worker.cclass()
+            }
+
+            #[getter]
+            pub fn purity(&self) -> String {
+                self.worker.purity()
+            }
+
+            #[getter]
+            pub fn connection_tag(&self) -> Option<String> {
+                self.worker.connection_tag()
+            }
+
+            #[getter]
+            pub fn tag_matched(&self) -> bool {
+                self.worker.tag_matched()
+            }
+
+            #[getter]
+            pub fn pending_session_attrs(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+                match self.worker.pending_session_attrs() {
+                    Some(attrs) => Ok(Some(session_attrs_to_py_dict(py, &attrs)?)),
+                    None => Ok(None),
+                }
+            }
+
+            #[getter]
+            pub fn active_session_attrs(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+                let attrs = self.worker.active_session_attrs();
+                session_attrs_to_py_dict(py, &attrs)
+            }
+
+            #[getter]
+            pub fn last_piggyback_frame(&self, py: Python<'_>) -> Option<Py<PyBytes>> {
+                self.worker
+                    .last_piggyback_frame()
+                    .map(|bytes| PyBytes::new(py, &bytes).unbind())
+            }
+
+            #[pyo3(signature = (
+                *,
+                client_identifier=None,
+                module=None,
+                action=None,
+                ecid=None,
+            ))]
+            pub fn set_session_attrs(
+                &self,
+                client_identifier: Option<String>,
+                module: Option<String>,
+                action: Option<String>,
+                ecid: Option<String>,
+            ) {
+                self.worker
+                    .stage_session_attrs(client_identifier, module, action, ecid);
+            }
+
+            pub fn connect(&self, py: Python<'_>) -> PyResult<$unit_ret> {
+                self.dispatch_unit(py, WorkerCommand::Connect)
+            }
+
+            pub fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
+                let previous = {
+                    let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+                    slot.replace(LeaseGuard::new(release))
+                };
+                if let Some(mut guard) = previous {
+                    guard.release(py);
+                }
+            }
+
+            pub fn release_lease(&self, py: Python<'_>) {
+                let previous = {
+                    let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+                    slot.take()
+                };
+                if let Some(mut guard) = previous {
+                    guard.release(py);
+                }
+            }
+
+            #[pyo3(signature = (
+                *,
+                enable_uuid_binary = true,
+                fetch_decimals = false,
+                vector_return_format = "list",
+                enable_lowercase_column_names = true,
+                lazy_begin = false,
+            ))]
+            pub fn cursor(
+                &self,
+                py: Python<'_>,
+                enable_uuid_binary: bool,
+                fetch_decimals: bool,
+                vector_return_format: &str,
+                enable_lowercase_column_names: bool,
+                lazy_begin: bool,
+            ) -> PyResult<$cursor> {
+                let parsed_format = VectorReturnFormat::parse(vector_return_format)
+                    .map_err(|e| e.to_py_err(py))?;
+                let options = OracleValueOptions {
+                    enable_uuid_binary,
+                    fetch_decimals,
+                    vector_return_format: parsed_format,
+                };
+                Ok($cursor::new(
+                    Arc::clone(&self.worker),
+                    options,
+                    enable_lowercase_column_names,
+                    lazy_begin,
+                ))
+            }
+
+            $(
+                #[pyo3(
+                    signature = (
+                        sql,
+                        params = None,
+                        *,
+                        out_binds = None,
+                        enable_uuid_binary = true,
+                        fetch_decimals = false,
+                        vector_return_format = "list",
+                        enable_lowercase_column_names = true,
+                    ),
+                    text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+                )]
+                #[allow(clippy::too_many_arguments)]
+                pub fn $sc_name(
+                    &self,
+                    py: Python<'_>,
+                    sql: &str,
+                    params: Option<&Bound<'_, PyAny>>,
+                    out_binds: Option<&Bound<'_, PyAny>>,
+                    enable_uuid_binary: bool,
+                    fetch_decimals: bool,
+                    vector_return_format: &str,
+                    enable_lowercase_column_names: bool,
+                ) -> PyResult<$single_ret> {
+                    self.single_call(
+                        py,
+                        sql,
+                        params,
+                        out_binds,
+                        enable_uuid_binary,
+                        fetch_decimals,
+                        vector_return_format,
+                        enable_lowercase_column_names,
+                        $sc_shape,
+                    )
+                }
+            )*
+
+            pub fn ping(&self, py: Python<'_>) -> PyResult<$unit_ret> {
+                self.dispatch_unit(py, WorkerCommand::Ping)
+            }
+
+            pub fn cancel(&self) {
+                self.worker.cancel();
+            }
+
+            pub fn begin(&self, py: Python<'_>) -> PyResult<$unit_ret> {
+                self.dispatch_unit(py, WorkerCommand::Begin)
+            }
+
+            pub fn commit(&self, py: Python<'_>) -> PyResult<$unit_ret> {
+                self.dispatch_unit(py, WorkerCommand::Commit)
+            }
+
+            pub fn rollback(&self, py: Python<'_>) -> PyResult<$unit_ret> {
+                self.dispatch_unit(py, WorkerCommand::Rollback)
+            }
+
+            pub fn savepoint(&self, py: Python<'_>, name: String) -> PyResult<$unit_ret> {
+                validate_savepoint_identifier(&name).map_err(|e| e.to_py_err(py))?;
+                self.dispatch_unit(py, WorkerCommand::Savepoint(name))
+            }
+
+            pub fn rollback_to_savepoint(
+                &self,
+                py: Python<'_>,
+                name: String,
+            ) -> PyResult<$unit_ret> {
+                validate_savepoint_identifier(&name).map_err(|e| e.to_py_err(py))?;
+                self.dispatch_unit(py, WorkerCommand::RollbackToSavepoint(name))
+            }
+
+            #[pyo3(signature = (operations, *, continue_on_error=false))]
+            pub fn run_pipeline(
+                &self,
+                py: Python<'_>,
+                operations: &Bound<'_, PyAny>,
+                continue_on_error: bool,
+            ) -> PyResult<$pipeline_ret> {
+                self.execute_pipeline_batch(py, operations, continue_on_error)
+            }
+
+            $($extra)*
+        }
+    };
+}
+
 /// Synchronous physical Oracle session client (`vertebra._oracle.SyncOracleClient`).
 #[derive(Clone)]
 #[pyclass(
@@ -2486,19 +2830,11 @@ pub struct SyncOracleClient {
 }
 
 impl SyncOracleClient {
-    /// Construct a [`SyncOracleClient`] wrapping an existing [`OracleWorkerHandle`].
-    #[must_use]
-    pub fn from_worker(worker: Arc<OracleWorkerHandle>) -> Self {
-        Self {
-            worker,
-            lease: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    /// Return a reference to the underlying [`OracleWorkerHandle`].
-    #[must_use]
-    pub fn worker(&self) -> &Arc<OracleWorkerHandle> {
-        &self.worker
+    fn dispatch_unit(&self, py: Python<'_>, cmd: WorkerCommand) -> PyResult<()> {
+        let worker = Arc::clone(&self.worker);
+        py.detach(|| worker.dispatch_sync(cmd))
+            .map(|_| ())
+            .map_err(|e| e.to_py_err(py))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2533,694 +2869,233 @@ impl SyncOracleClient {
     }
 }
 
-#[pymethods]
-impl SyncOracleClient {
-    #[new]
-    #[pyo3(signature = (
-        *,
-        user=None,
-        password=None,
-        dsn=None,
-        host="localhost",
-        port=1521,
-        service_name="FREEPDB1",
-        sid=None,
-        tns_admin=None,
-        connect_descriptor=None,
-        protocol="tcp",
-        ssl_server_dn_match=true,
-        ssl_server_cert_dn=None,
-        wallet_location=None,
-        wallet_password=None,
-        pem_cert_data=None,
-        cwallet_sso_data=None,
-        auth_mode="password",
-        access_token=None,
-        token_auth_options=None,
-        cclass=None,
-        purity="SELF",
-        connection_tag=None,
-        stmtcachesize=64,
-        prefetchrows=256,
-        arraysize=256,
-        call_timeout_ms=None,
-        connect_timeout=10.0,
-        enable_lowercase_column_names=true,
-        client_identifier=None,
-        module=None,
-        action=None,
-        ecid=None,
-        enable_reset_relay=true,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        py: Python<'_>,
-        user: Option<String>,
-        password: Option<String>,
-        dsn: Option<String>,
-        host: &str,
-        port: i32,
-        service_name: &str,
-        sid: Option<String>,
-        tns_admin: Option<String>,
-        connect_descriptor: Option<String>,
-        protocol: &str,
-        ssl_server_dn_match: bool,
-        ssl_server_cert_dn: Option<String>,
-        wallet_location: Option<String>,
-        wallet_password: Option<String>,
-        pem_cert_data: Option<Vec<u8>>,
-        cwallet_sso_data: Option<Vec<u8>>,
-        auth_mode: &str,
-        access_token: Option<String>,
-        token_auth_options: Option<BTreeMap<String, String>>,
-        cclass: Option<String>,
-        purity: &str,
-        connection_tag: Option<String>,
-        stmtcachesize: i32,
-        prefetchrows: i64,
-        arraysize: i64,
-        call_timeout_ms: Option<i64>,
-        connect_timeout: f64,
-        enable_lowercase_column_names: bool,
-        client_identifier: Option<String>,
-        module: Option<String>,
-        action: Option<String>,
-        ecid: Option<String>,
-        enable_reset_relay: bool,
-    ) -> PyResult<Self> {
-        let raw = build_raw_oracle_options(
-            user,
-            password,
-            dsn,
-            host.to_owned(),
-            port,
-            service_name.to_owned(),
-            sid,
-            tns_admin,
-            connect_descriptor,
-            protocol.to_owned(),
-            ssl_server_dn_match,
-            ssl_server_cert_dn,
-            wallet_location,
-            wallet_password,
-            pem_cert_data,
-            cwallet_sso_data,
-            auth_mode.to_owned(),
-            access_token,
-            token_auth_options,
-            cclass,
-            purity.to_owned(),
-            connection_tag,
-            stmtcachesize,
-            prefetchrows,
-            arraysize,
-            call_timeout_ms,
-            connect_timeout,
-            enable_lowercase_column_names,
-            client_identifier,
-            module,
-            action,
-            ecid,
-        );
-        let mut cfg = NativeOracleConfig::validate(raw).map_err(|e| e.to_py_err(py))?;
-        cfg.enable_reset_relay = enable_reset_relay;
-        let worker = OracleWorkerHandle::spawn(cfg).map_err(|e| e.to_py_err(py))?;
-        Ok(Self {
-            worker: Arc::new(worker),
-            lease: Arc::new(Mutex::new(None)),
-        })
-    }
-
-    #[getter]
-    pub fn closed(&self) -> bool {
-        self.worker.is_closed()
-    }
-
-    #[getter]
-    pub fn in_transaction(&self) -> bool {
-        self.worker.is_in_transaction()
-    }
-
-    #[getter]
-    pub fn cclass(&self) -> Option<String> {
-        self.worker.cclass()
-    }
-
-    #[getter]
-    pub fn purity(&self) -> String {
-        self.worker.purity()
-    }
-
-    #[getter]
-    pub fn connection_tag(&self) -> Option<String> {
-        self.worker.connection_tag()
-    }
-
-    #[getter]
-    pub fn tag_matched(&self) -> bool {
-        self.worker.tag_matched()
-    }
-
-    #[getter]
-    pub fn pending_session_attrs(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
-        match self.worker.pending_session_attrs() {
-            Some(attrs) => Ok(Some(session_attrs_to_py_dict(py, &attrs)?)),
-            None => Ok(None),
+impl_oracle_client_pymethods!(
+    SyncOracleClient,
+    cursor = SyncOracleCursor,
+    unit_ret = (),
+    single_ret = Py<PyAny>,
+    pipeline_ret = Vec<OraclePipelineOutcome>,
+    single_calls = [
+        fetch_rows => reply_rows_and_names,
+        fetch_dicts => reply_dicts,
+        fetch_value => reply_first_value,
+        execute_dml => reply_dml,
+    ],
+    extra = {
+        pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+            let worker = Arc::clone(&self.worker);
+            let res = py
+                .detach(|| worker.close_sync())
+                .map_err(|e| e.to_py_err(py));
+            self.release_lease(py);
+            res
         }
-    }
 
-    #[getter]
-    pub fn active_session_attrs(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let attrs = self.worker.active_session_attrs();
-        session_attrs_to_py_dict(py, &attrs)
-    }
-
-    #[getter]
-    pub fn last_piggyback_frame(&self, py: Python<'_>) -> Option<Py<PyBytes>> {
-        self.worker
-            .last_piggyback_frame()
-            .map(|bytes| PyBytes::new(py, &bytes).unbind())
-    }
-
-    #[pyo3(signature = (
-        *,
-        client_identifier=None,
-        module=None,
-        action=None,
-        ecid=None,
-    ))]
-    pub fn set_session_attrs(
-        &self,
-        client_identifier: Option<String>,
-        module: Option<String>,
-        action: Option<String>,
-        ecid: Option<String>,
-    ) {
-        self.worker
-            .stage_session_attrs(client_identifier, module, action, ecid);
-    }
-
-    pub fn connect(&self, py: Python<'_>) -> PyResult<()> {
-        let worker = Arc::clone(&self.worker);
-        py.detach(|| worker.dispatch_sync(WorkerCommand::Connect))
-            .map(|_| ())
-            .map_err(|e| e.to_py_err(py))
-    }
-
-    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
-        let worker = Arc::clone(&self.worker);
-        let res = py
-            .detach(|| worker.close_sync())
-            .map_err(|e| e.to_py_err(py));
-        self.release_lease(py);
-        res
-    }
-
-    pub fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
-        let previous = {
-            let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-            slot.replace(LeaseGuard::new(release))
-        };
-        if let Some(mut guard) = previous {
-            guard.release(py);
-        }
-    }
-
-    pub fn release_lease(&self, py: Python<'_>) {
-        let previous = {
-            let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-            slot.take()
-        };
-        if let Some(mut guard) = previous {
-            guard.release(py);
-        }
-    }
-
-    #[pyo3(signature = (
-        *,
-        enable_uuid_binary = true,
-        fetch_decimals = false,
-        vector_return_format = "list",
-        enable_lowercase_column_names = true,
-        lazy_begin = false,
-    ))]
-    pub fn cursor(
-        &self,
-        py: Python<'_>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-        lazy_begin: bool,
-    ) -> PyResult<SyncOracleCursor> {
-        let parsed_format =
-            VectorReturnFormat::parse(vector_return_format).map_err(|e| e.to_py_err(py))?;
-        let options = OracleValueOptions {
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format: parsed_format,
-        };
-        Ok(SyncOracleCursor::new(
-            Arc::clone(&self.worker),
-            options,
-            enable_lowercase_column_names,
-            lazy_begin,
-        ))
-    }
-
-    #[pyo3(
-        signature = (
+        #[pyo3(signature = (
             sql,
-            params = None,
+            params=None,
             *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_rows(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<Py<PyAny>> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_rows_and_names,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_dicts(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<Py<PyAny>> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_dicts,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_value(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<Py<PyAny>> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_first_value,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_dml(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<Py<PyAny>> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_dml,
-        )
-    }
-
-    pub fn ping(&self, py: Python<'_>) -> PyResult<()> {
-        let worker = Arc::clone(&self.worker);
-        py.detach(|| worker.dispatch_sync(WorkerCommand::Ping))
-            .map(|_| ())
-            .map_err(|e| e.to_py_err(py))
-    }
-
-    pub fn cancel(&self) {
-        self.worker.cancel();
-    }
-
-    pub fn begin(&self, py: Python<'_>) -> PyResult<()> {
-        let worker = Arc::clone(&self.worker);
-        py.detach(|| worker.dispatch_sync(WorkerCommand::Begin))
-            .map(|_| ())
-            .map_err(|e| e.to_py_err(py))
-    }
-
-    pub fn commit(&self, py: Python<'_>) -> PyResult<()> {
-        let worker = Arc::clone(&self.worker);
-        py.detach(|| worker.dispatch_sync(WorkerCommand::Commit))
-            .map(|_| ())
-            .map_err(|e| e.to_py_err(py))
-    }
-
-    pub fn rollback(&self, py: Python<'_>) -> PyResult<()> {
-        let worker = Arc::clone(&self.worker);
-        py.detach(|| worker.dispatch_sync(WorkerCommand::Rollback))
-            .map(|_| ())
-            .map_err(|e| e.to_py_err(py))
-    }
-
-    pub fn savepoint(&self, py: Python<'_>, name: String) -> PyResult<()> {
-        validate_savepoint_identifier(&name).map_err(|e| e.to_py_err(py))?;
-        let worker = Arc::clone(&self.worker);
-        py.detach(|| worker.dispatch_sync(WorkerCommand::Savepoint(name)))
-            .map(|_| ())
-            .map_err(|e| e.to_py_err(py))
-    }
-
-    pub fn rollback_to_savepoint(&self, py: Python<'_>, name: String) -> PyResult<()> {
-        validate_savepoint_identifier(&name).map_err(|e| e.to_py_err(py))?;
-        let worker = Arc::clone(&self.worker);
-        py.detach(|| worker.dispatch_sync(WorkerCommand::RollbackToSavepoint(name)))
-            .map(|_| ())
-            .map_err(|e| e.to_py_err(py))
-    }
-
-    #[pyo3(signature = (
-        sql,
-        params=None,
-        *,
-        out_binds=None,
-        fetch_decimals=false,
-        enable_lowercase_column_names=None,
-    ))]
-    pub fn execute(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        fetch_decimals: bool,
-        enable_lowercase_column_names: Option<bool>,
-    ) -> PyResult<OracleQueryResult> {
-        let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
-        let lowercase = enable_lowercase_column_names
-            .unwrap_or(self.worker.config().enable_lowercase_column_names);
-        let worker = Arc::clone(&self.worker);
-        let reply = py
-            .detach(|| {
-                worker.dispatch_sync(WorkerCommand::Execute {
-                    sql,
-                    params: bind_args,
-                    out_binds: out_spec,
-                    fetch_decimals,
-                    lowercase_column_names: lowercase,
+            out_binds=None,
+            fetch_decimals=false,
+            enable_lowercase_column_names=None,
+        ))]
+        pub fn execute(
+            &self,
+            py: Python<'_>,
+            sql: String,
+            params: Option<&Bound<'_, PyAny>>,
+            out_binds: Option<&Bound<'_, PyAny>>,
+            fetch_decimals: bool,
+            enable_lowercase_column_names: Option<bool>,
+        ) -> PyResult<OracleQueryResult> {
+            let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
+            let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
+            let lowercase = enable_lowercase_column_names
+                .unwrap_or(self.worker.config().enable_lowercase_column_names);
+            let worker = Arc::clone(&self.worker);
+            let reply = py
+                .detach(|| {
+                    worker.dispatch_sync(WorkerCommand::Execute {
+                        sql,
+                        params: bind_args,
+                        out_binds: out_spec,
+                        fetch_decimals,
+                        lowercase_column_names: lowercase,
+                    })
                 })
-            })
-            .map_err(|e| e.to_py_err(py))?;
-        match reply {
-            WorkerReply::QueryOutcome(outcome) => outcome.into_py_query_result(py),
-            WorkerReply::RowCount(n) => Ok(OracleQueryResult::new(
-                py,
-                Vec::new(),
-                Vec::new(),
-                n,
-                None,
-                None,
-            )),
-            _ => Ok(OracleQueryResult::new(
-                py,
-                Vec::new(),
-                Vec::new(),
-                0,
-                None,
-                None,
-            )),
+                .map_err(|e| e.to_py_err(py))?;
+            reply_to_query_result(py, reply)
         }
-    }
 
-    pub fn execute_many(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params_seq: &Bound<'_, PyAny>,
-    ) -> PyResult<usize> {
-        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
-        let seq = extract_bind_seq(params_seq).map_err(|e| e.to_py_err(py))?;
-        if seq.is_empty() {
-            return Ok(0);
-        }
-        let worker = Arc::clone(&self.worker);
-        let reply = py
-            .detach(|| {
-                worker.dispatch_sync(WorkerCommand::ExecuteMany {
-                    sql,
-                    params_seq: seq,
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
-        match reply {
-            WorkerReply::RowCount(n) => Ok(n),
-            _ => Ok(0),
-        }
-    }
-
-    #[pyo3(signature = (
-        sql,
-        params=None,
-        *,
-        batch_size=8192,
-        force_shm=None,
-        enable_lowercase_column_names=None,
-    ))]
-    pub fn query_arrow(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params: Option<&Bound<'_, PyAny>>,
-        batch_size: usize,
-        force_shm: Option<bool>,
-        enable_lowercase_column_names: Option<bool>,
-    ) -> PyResult<Py<PyAny>> {
-        let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let lowercase = enable_lowercase_column_names
-            .unwrap_or(self.worker.config().enable_lowercase_column_names);
-        let worker = Arc::clone(&self.worker);
-        let reply = py
-            .detach(|| {
-                worker.dispatch_sync(WorkerCommand::QueryArrow {
-                    sql,
-                    params: bind_args,
-                    batch_size: batch_size.max(1),
-                    lowercase_column_names: lowercase,
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
-        match reply {
-            WorkerReply::ArrowIpc {
-                ipc_bytes,
-                row_count,
-            } => build_py_arrow_cursor(py, ipc_bytes, row_count, force_shm),
-            _ => build_py_arrow_cursor(py, Vec::new(), 0, force_shm),
-        }
-    }
-
-    #[pyo3(signature = (operations, *, continue_on_error=false))]
-    pub fn execute_pipeline_batch(
-        &self,
-        py: Python<'_>,
-        operations: &Bound<'_, PyAny>,
-        continue_on_error: bool,
-    ) -> PyResult<Vec<OraclePipelineOutcome>> {
-        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
-        let lowercase = self.worker.config().enable_lowercase_column_names;
-        let ops =
-            extract_pipeline_ops(operations, false, lowercase).map_err(|e| e.to_py_err(py))?;
-        if ops.is_empty() {
-            return Ok(Vec::new());
-        }
-        let worker = Arc::clone(&self.worker);
-        let reply = py
-            .detach(|| {
-                worker.dispatch_sync(WorkerCommand::PipelineBatch {
-                    ops,
-                    continue_on_error,
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
-        match reply {
-            WorkerReply::PipelineOutcomes(steps) => {
-                let mut py_outcomes = Vec::with_capacity(steps.len());
-                for step in steps {
-                    py_outcomes.push(step.into_py_outcome(py)?);
-                }
-                Ok(py_outcomes)
+        pub fn execute_many(
+            &self,
+            py: Python<'_>,
+            sql: String,
+            params_seq: &Bound<'_, PyAny>,
+        ) -> PyResult<usize> {
+            self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+            let seq = extract_bind_seq(params_seq).map_err(|e| e.to_py_err(py))?;
+            if seq.is_empty() {
+                return Ok(0);
             }
-            _ => Ok(Vec::new()),
+            let worker = Arc::clone(&self.worker);
+            let reply = py
+                .detach(|| {
+                    worker.dispatch_sync(WorkerCommand::ExecuteMany {
+                        sql,
+                        params_seq: seq,
+                    })
+                })
+                .map_err(|e| e.to_py_err(py))?;
+            match reply {
+                WorkerReply::RowCount(n) => Ok(n),
+                _ => Ok(0),
+            }
         }
-    }
 
-    #[pyo3(signature = (operations, *, continue_on_error=false))]
-    pub fn run_pipeline(
-        &self,
-        py: Python<'_>,
-        operations: &Bound<'_, PyAny>,
-        continue_on_error: bool,
-    ) -> PyResult<Vec<OraclePipelineOutcome>> {
-        self.execute_pipeline_batch(py, operations, continue_on_error)
-    }
-
-    #[pyo3(signature = (
-        *,
-        queue_name,
-        payload,
-        consumer_name=None,
-        correlation_id=None,
-    ))]
-    pub fn enqueue_notification<'py>(
-        &self,
-        py: Python<'py>,
-        queue_name: String,
-        payload: Vec<u8>,
-        consumer_name: Option<String>,
-        correlation_id: Option<String>,
-    ) -> PyResult<Bound<'py, PyBytes>> {
-        let worker = Arc::clone(&self.worker);
-        let msg_id = py
-            .detach(|| {
-                enqueue_notification_sync(
-                    &worker,
-                    &queue_name,
-                    &payload,
-                    consumer_name.as_deref(),
-                    correlation_id.as_deref(),
-                )
-            })
-            .map_err(|e| e.to_py_err(py))?;
-        Ok(PyBytes::new(py, &msg_id))
-    }
-
-    #[pyo3(signature = (
-        *,
-        queue_name,
-        consumer_name=None,
-        wait_timeout_seconds=5,
-        max_buffered=1024,
-    ))]
-    pub fn open_listener(
-        &self,
-        py: Python<'_>,
-        queue_name: String,
-        consumer_name: Option<String>,
-        wait_timeout_seconds: u32,
-        max_buffered: usize,
-    ) -> PyResult<SyncOracleListener> {
-        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
-        validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
-        if let Some(ref c) = consumer_name {
-            validate_aq_identifier(c, "consumer_name").map_err(|e| e.to_py_err(py))?;
+        #[pyo3(signature = (
+            sql,
+            params=None,
+            *,
+            batch_size=8192,
+            force_shm=None,
+            enable_lowercase_column_names=None,
+        ))]
+        pub fn query_arrow(
+            &self,
+            py: Python<'_>,
+            sql: String,
+            params: Option<&Bound<'_, PyAny>>,
+            batch_size: usize,
+            force_shm: Option<bool>,
+            enable_lowercase_column_names: Option<bool>,
+        ) -> PyResult<Py<PyAny>> {
+            let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
+            let lowercase = enable_lowercase_column_names
+                .unwrap_or(self.worker.config().enable_lowercase_column_names);
+            let worker = Arc::clone(&self.worker);
+            let reply = py
+                .detach(|| {
+                    worker.dispatch_sync(WorkerCommand::QueryArrow {
+                        sql,
+                        params: bind_args,
+                        batch_size: batch_size.max(1),
+                        lowercase_column_names: lowercase,
+                    })
+                })
+                .map_err(|e| e.to_py_err(py))?;
+            match reply {
+                WorkerReply::ArrowIpc {
+                    ipc_bytes,
+                    row_count,
+                } => build_py_arrow_cursor(py, ipc_bytes, row_count, force_shm),
+                _ => build_py_arrow_cursor(py, Vec::new(), 0, force_shm),
+            }
         }
-        if max_buffered == 0 {
-            return Err(OracleError::Config(
-                "SyncOracleListener max_buffered must be >= 1".to_owned(),
-            )
-            .to_py_err(py));
+
+        #[pyo3(signature = (operations, *, continue_on_error=false))]
+        pub fn execute_pipeline_batch(
+            &self,
+            py: Python<'_>,
+            operations: &Bound<'_, PyAny>,
+            continue_on_error: bool,
+        ) -> PyResult<Vec<OraclePipelineOutcome>> {
+            self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+            let lowercase = self.worker.config().enable_lowercase_column_names;
+            let ops = extract_pipeline_ops(operations, false, lowercase)
+                .map_err(|e| e.to_py_err(py))?;
+            if ops.is_empty() {
+                return Ok(Vec::new());
+            }
+            let worker = Arc::clone(&self.worker);
+            let reply = py
+                .detach(|| {
+                    worker.dispatch_sync(WorkerCommand::PipelineBatch {
+                        ops,
+                        continue_on_error,
+                    })
+                })
+                .map_err(|e| e.to_py_err(py))?;
+            match reply {
+                WorkerReply::PipelineOutcomes(steps) => {
+                    let mut py_outcomes = Vec::with_capacity(steps.len());
+                    for step in steps {
+                        py_outcomes.push(step.into_py_outcome(py)?);
+                    }
+                    Ok(py_outcomes)
+                }
+                _ => Ok(Vec::new()),
+            }
         }
-        let cfg = self.worker.config_arc();
-        SyncOracleListener::spawn(
-            cfg,
+
+        #[pyo3(signature = (
+            *,
             queue_name,
-            consumer_name,
-            wait_timeout_seconds,
-            max_buffered,
-        )
-        .map_err(|e| e.to_py_err(py))
+            payload,
+            consumer_name=None,
+            correlation_id=None,
+        ))]
+        pub fn enqueue_notification<'py>(
+            &self,
+            py: Python<'py>,
+            queue_name: String,
+            payload: Vec<u8>,
+            consumer_name: Option<String>,
+            correlation_id: Option<String>,
+        ) -> PyResult<Bound<'py, PyBytes>> {
+            let worker = Arc::clone(&self.worker);
+            let msg_id = py
+                .detach(|| {
+                    enqueue_notification_sync(
+                        &worker,
+                        &queue_name,
+                        &payload,
+                        consumer_name.as_deref(),
+                        correlation_id.as_deref(),
+                    )
+                })
+                .map_err(|e| e.to_py_err(py))?;
+            Ok(PyBytes::new(py, &msg_id))
+        }
+
+        #[pyo3(signature = (
+            *,
+            queue_name,
+            consumer_name=None,
+            wait_timeout_seconds=5,
+            max_buffered=1024,
+        ))]
+        pub fn open_listener(
+            &self,
+            py: Python<'_>,
+            queue_name: String,
+            consumer_name: Option<String>,
+            wait_timeout_seconds: u32,
+            max_buffered: usize,
+        ) -> PyResult<SyncOracleListener> {
+            self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+            validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
+            if let Some(ref c) = consumer_name {
+                validate_aq_identifier(c, "consumer_name").map_err(|e| e.to_py_err(py))?;
+            }
+            if max_buffered == 0 {
+                return Err(OracleError::Config(
+                    "SyncOracleListener max_buffered must be >= 1".to_owned(),
+                )
+                .to_py_err(py));
+            }
+            let cfg = self.worker.config_arc();
+            SyncOracleListener::spawn(
+                cfg,
+                queue_name,
+                consumer_name,
+                wait_timeout_seconds,
+                max_buffered,
+            )
+            .map_err(|e| e.to_py_err(py))
+        }
     }
-}
+);
 
 /// Asynchronous physical Oracle session client (`vertebra._oracle.AsyncOracleClient`).
 #[derive(Clone)]
@@ -3236,19 +3111,8 @@ pub struct AsyncOracleClient {
 }
 
 impl AsyncOracleClient {
-    /// Construct an [`AsyncOracleClient`] wrapping an existing [`OracleWorkerHandle`].
-    #[must_use]
-    pub fn from_worker(worker: Arc<OracleWorkerHandle>) -> Self {
-        Self {
-            worker,
-            lease: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    /// Return a reference to the underlying [`OracleWorkerHandle`].
-    #[must_use]
-    pub fn worker(&self) -> &Arc<OracleWorkerHandle> {
-        &self.worker
+    fn dispatch_unit(&self, py: Python<'_>, cmd: WorkerCommand) -> PyResult<RustDbTaskAwaitable> {
+        self.worker.dispatch_async(py, cmd, |py, _| Ok(py.None()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3283,711 +3147,266 @@ impl AsyncOracleClient {
     }
 }
 
-#[pymethods]
-impl AsyncOracleClient {
-    #[new]
-    #[pyo3(signature = (
-        *,
-        user=None,
-        password=None,
-        dsn=None,
-        host="localhost",
-        port=1521,
-        service_name="FREEPDB1",
-        sid=None,
-        tns_admin=None,
-        connect_descriptor=None,
-        protocol="tcp",
-        ssl_server_dn_match=true,
-        ssl_server_cert_dn=None,
-        wallet_location=None,
-        wallet_password=None,
-        pem_cert_data=None,
-        cwallet_sso_data=None,
-        auth_mode="password",
-        access_token=None,
-        token_auth_options=None,
-        cclass=None,
-        purity="SELF",
-        connection_tag=None,
-        stmtcachesize=64,
-        prefetchrows=256,
-        arraysize=256,
-        call_timeout_ms=None,
-        connect_timeout=10.0,
-        enable_lowercase_column_names=true,
-        client_identifier=None,
-        module=None,
-        action=None,
-        ecid=None,
-        enable_reset_relay=true,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        py: Python<'_>,
-        user: Option<String>,
-        password: Option<String>,
-        dsn: Option<String>,
-        host: &str,
-        port: i32,
-        service_name: &str,
-        sid: Option<String>,
-        tns_admin: Option<String>,
-        connect_descriptor: Option<String>,
-        protocol: &str,
-        ssl_server_dn_match: bool,
-        ssl_server_cert_dn: Option<String>,
-        wallet_location: Option<String>,
-        wallet_password: Option<String>,
-        pem_cert_data: Option<Vec<u8>>,
-        cwallet_sso_data: Option<Vec<u8>>,
-        auth_mode: &str,
-        access_token: Option<String>,
-        token_auth_options: Option<BTreeMap<String, String>>,
-        cclass: Option<String>,
-        purity: &str,
-        connection_tag: Option<String>,
-        stmtcachesize: i32,
-        prefetchrows: i64,
-        arraysize: i64,
-        call_timeout_ms: Option<i64>,
-        connect_timeout: f64,
-        enable_lowercase_column_names: bool,
-        client_identifier: Option<String>,
-        module: Option<String>,
-        action: Option<String>,
-        ecid: Option<String>,
-        enable_reset_relay: bool,
-    ) -> PyResult<Self> {
-        let raw = build_raw_oracle_options(
-            user,
-            password,
-            dsn,
-            host.to_owned(),
-            port,
-            service_name.to_owned(),
-            sid,
-            tns_admin,
-            connect_descriptor,
-            protocol.to_owned(),
-            ssl_server_dn_match,
-            ssl_server_cert_dn,
-            wallet_location,
-            wallet_password,
-            pem_cert_data,
-            cwallet_sso_data,
-            auth_mode.to_owned(),
-            access_token,
-            token_auth_options,
-            cclass,
-            purity.to_owned(),
-            connection_tag,
-            stmtcachesize,
-            prefetchrows,
-            arraysize,
-            call_timeout_ms,
-            connect_timeout,
-            enable_lowercase_column_names,
-            client_identifier,
-            module,
-            action,
-            ecid,
-        );
-        let mut cfg = NativeOracleConfig::validate(raw).map_err(|e| e.to_py_err(py))?;
-        cfg.enable_reset_relay = enable_reset_relay;
-        let worker = OracleWorkerHandle::spawn(cfg).map_err(|e| e.to_py_err(py))?;
-        Ok(Self {
-            worker: Arc::new(worker),
-            lease: Arc::new(Mutex::new(None)),
-        })
-    }
-
-    #[getter]
-    pub fn closed(&self) -> bool {
-        self.worker.is_closed()
-    }
-
-    #[getter]
-    pub fn in_transaction(&self) -> bool {
-        self.worker.is_in_transaction()
-    }
-
-    #[getter]
-    pub fn cclass(&self) -> Option<String> {
-        self.worker.cclass()
-    }
-
-    #[getter]
-    pub fn purity(&self) -> String {
-        self.worker.purity()
-    }
-
-    #[getter]
-    pub fn connection_tag(&self) -> Option<String> {
-        self.worker.connection_tag()
-    }
-
-    #[getter]
-    pub fn tag_matched(&self) -> bool {
-        self.worker.tag_matched()
-    }
-
-    #[getter]
-    pub fn pending_session_attrs(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
-        match self.worker.pending_session_attrs() {
-            Some(attrs) => Ok(Some(session_attrs_to_py_dict(py, &attrs)?)),
-            None => Ok(None),
-        }
-    }
-
-    #[getter]
-    pub fn active_session_attrs(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let attrs = self.worker.active_session_attrs();
-        session_attrs_to_py_dict(py, &attrs)
-    }
-
-    #[getter]
-    pub fn last_piggyback_frame(&self, py: Python<'_>) -> Option<Py<PyBytes>> {
-        self.worker
-            .last_piggyback_frame()
-            .map(|bytes| PyBytes::new(py, &bytes).unbind())
-    }
-
-    #[pyo3(signature = (
-        *,
-        client_identifier=None,
-        module=None,
-        action=None,
-        ecid=None,
-    ))]
-    pub fn set_session_attrs(
-        &self,
-        client_identifier: Option<String>,
-        module: Option<String>,
-        action: Option<String>,
-        ecid: Option<String>,
-    ) {
-        self.worker
-            .stage_session_attrs(client_identifier, module, action, ecid);
-    }
-
-    pub fn connect(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        self.worker
-            .dispatch_async(py, WorkerCommand::Connect, |py, _| Ok(py.None()))
-    }
-
-    pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let previous = {
-            let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-            slot.take()
-        };
-        self.worker
-            .dispatch_async(py, WorkerCommand::Close, move |py, _| {
-                if let Some(mut guard) = previous {
-                    guard.release(py);
-                }
-                Ok(py.None())
-            })
-    }
-
-    pub fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
-        let previous = {
-            let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-            slot.replace(LeaseGuard::new(release))
-        };
-        if let Some(mut guard) = previous {
-            guard.release(py);
-        }
-    }
-
-    pub fn release_lease(&self, py: Python<'_>) {
-        let previous = {
-            let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-            slot.take()
-        };
-        if let Some(mut guard) = previous {
-            guard.release(py);
-        }
-    }
-
-    #[pyo3(signature = (
-        *,
-        enable_uuid_binary = true,
-        fetch_decimals = false,
-        vector_return_format = "list",
-        enable_lowercase_column_names = true,
-        lazy_begin = false,
-    ))]
-    pub fn cursor(
-        &self,
-        py: Python<'_>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-        lazy_begin: bool,
-    ) -> PyResult<AsyncOracleCursor> {
-        let parsed_format =
-            VectorReturnFormat::parse(vector_return_format).map_err(|e| e.to_py_err(py))?;
-        let options = OracleValueOptions {
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format: parsed_format,
-        };
-        Ok(AsyncOracleCursor::new(
-            Arc::clone(&self.worker),
-            options,
-            enable_lowercase_column_names,
-            lazy_begin,
-        ))
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_rows(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_rows_and_names,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_dicts(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_dicts,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_value(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_first_value,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_dml(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_dml,
-        )
-    }
-
-    pub fn ping(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        self.worker
-            .dispatch_async(py, WorkerCommand::Ping, |py, _| Ok(py.None()))
-    }
-
-    pub fn cancel(&self) {
-        self.worker.cancel();
-    }
-
-    pub fn begin(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        self.worker
-            .dispatch_async(py, WorkerCommand::Begin, |py, _| Ok(py.None()))
-    }
-
-    pub fn commit(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        self.worker
-            .dispatch_async(py, WorkerCommand::Commit, |py, _| Ok(py.None()))
-    }
-
-    pub fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        self.worker
-            .dispatch_async(py, WorkerCommand::Rollback, |py, _| Ok(py.None()))
-    }
-
-    pub fn savepoint(&self, py: Python<'_>, name: String) -> PyResult<RustDbTaskAwaitable> {
-        validate_savepoint_identifier(&name).map_err(|e| e.to_py_err(py))?;
-        self.worker
-            .dispatch_async(py, WorkerCommand::Savepoint(name), |py, _| Ok(py.None()))
-    }
-
-    pub fn rollback_to_savepoint(
-        &self,
-        py: Python<'_>,
-        name: String,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        validate_savepoint_identifier(&name).map_err(|e| e.to_py_err(py))?;
-        self.worker
-            .dispatch_async(py, WorkerCommand::RollbackToSavepoint(name), |py, _| {
-                Ok(py.None())
-            })
-    }
-
-    #[pyo3(signature = (
-        sql,
-        params=None,
-        *,
-        out_binds=None,
-        fetch_decimals=false,
-        enable_lowercase_column_names=None,
-    ))]
-    pub fn execute(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        fetch_decimals: bool,
-        enable_lowercase_column_names: Option<bool>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
-        let lowercase = enable_lowercase_column_names
-            .unwrap_or(self.worker.config().enable_lowercase_column_names);
-        self.worker.dispatch_async(
-            py,
-            WorkerCommand::Execute {
-                sql,
-                params: bind_args,
-                out_binds: out_spec,
-                fetch_decimals,
-                lowercase_column_names: lowercase,
-            },
-            |py, reply| match reply {
-                WorkerReply::QueryOutcome(outcome) => {
-                    let qres = outcome.into_py_query_result(py)?;
-                    Ok(Py::new(py, qres)?.into_any())
-                }
-                WorkerReply::RowCount(n) => {
-                    let qres = OracleQueryResult::new(py, Vec::new(), Vec::new(), n, None, None);
-                    Ok(Py::new(py, qres)?.into_any())
-                }
-                _ => {
-                    let qres = OracleQueryResult::new(py, Vec::new(), Vec::new(), 0, None, None);
-                    Ok(Py::new(py, qres)?.into_any())
-                }
-            },
-        )
-    }
-
-    pub fn execute_many(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params_seq: &Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
-        let seq = extract_bind_seq(params_seq).map_err(|e| e.to_py_err(py))?;
-        if seq.is_empty() {
-            return spawn_rust_db_task_with_attr(
-                py,
-                async { Ok::<usize, OracleError>(0) },
-                |py, n| Ok(n.into_pyobject(py)?.into_any().unbind()),
-                |py, err| err.to_py_err(py),
-                ORACLE_COMPLETION_DRAINER_ATTR,
-            );
-        }
-        self.worker.dispatch_async(
-            py,
-            WorkerCommand::ExecuteMany {
-                sql,
-                params_seq: seq,
-            },
-            |py, reply| match reply {
-                WorkerReply::RowCount(n) => Ok(n.into_pyobject(py)?.into_any().unbind()),
-                _ => Ok(0usize.into_pyobject(py)?.into_any().unbind()),
-            },
-        )
-    }
-
-    #[pyo3(signature = (
-        sql,
-        params=None,
-        *,
-        batch_size=8192,
-        force_shm=None,
-        enable_lowercase_column_names=None,
-    ))]
-    pub fn query_arrow(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params: Option<&Bound<'_, PyAny>>,
-        batch_size: usize,
-        force_shm: Option<bool>,
-        enable_lowercase_column_names: Option<bool>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let lowercase = enable_lowercase_column_names
-            .unwrap_or(self.worker.config().enable_lowercase_column_names);
-        self.worker.dispatch_async(
-            py,
-            WorkerCommand::QueryArrow {
-                sql,
-                params: bind_args,
-                batch_size: batch_size.max(1),
-                lowercase_column_names: lowercase,
-            },
-            move |py, reply| match reply {
-                WorkerReply::ArrowIpc {
-                    ipc_bytes,
-                    row_count,
-                } => build_py_arrow_cursor(py, ipc_bytes, row_count, force_shm),
-                _ => build_py_arrow_cursor(py, Vec::new(), 0, force_shm),
-            },
-        )
-    }
-
-    #[pyo3(signature = (operations, *, continue_on_error=false))]
-    pub fn execute_pipeline_batch(
-        &self,
-        py: Python<'_>,
-        operations: &Bound<'_, PyAny>,
-        continue_on_error: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
-        let lowercase = self.worker.config().enable_lowercase_column_names;
-        let ops =
-            extract_pipeline_ops(operations, false, lowercase).map_err(|e| e.to_py_err(py))?;
-        if ops.is_empty() {
-            return spawn_rust_db_task_with_attr(
-                py,
-                async { Ok::<Vec<WorkerPipelineStepOutcome>, OracleError>(Vec::new()) },
-                |py, _| Ok(PyList::empty(py).into_any().unbind()),
-                |py, err| err.to_py_err(py),
-                ORACLE_COMPLETION_DRAINER_ATTR,
-            );
-        }
-        self.worker.dispatch_async(
-            py,
-            WorkerCommand::PipelineBatch {
-                ops,
-                continue_on_error,
-            },
-            |py, reply| match reply {
-                WorkerReply::PipelineOutcomes(steps) => {
-                    let mut py_outcomes = Vec::with_capacity(steps.len());
-                    for step in steps {
-                        let out = step.into_py_outcome(py)?;
-                        py_outcomes.push(Py::new(py, out)?);
+impl_oracle_client_pymethods!(
+    AsyncOracleClient,
+    cursor = AsyncOracleCursor,
+    unit_ret = RustDbTaskAwaitable,
+    single_ret = RustDbTaskAwaitable,
+    pipeline_ret = RustDbTaskAwaitable,
+    single_calls = [
+        fetch_rows => reply_rows_and_names,
+        fetch_dicts => reply_dicts,
+        fetch_value => reply_first_value,
+        execute_dml => reply_dml,
+    ],
+    extra = {
+        pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+            let previous = {
+                let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+                slot.take()
+            };
+            self.worker
+                .dispatch_async(py, WorkerCommand::Close, move |py, _| {
+                    if let Some(mut guard) = previous {
+                        guard.release(py);
                     }
-                    let list = PyList::new(py, py_outcomes)?;
-                    Ok(list.into_any().unbind())
-                }
-                _ => Ok(PyList::empty(py).into_any().unbind()),
-            },
-        )
-    }
-
-    #[pyo3(signature = (operations, *, continue_on_error=false))]
-    pub fn run_pipeline(
-        &self,
-        py: Python<'_>,
-        operations: &Bound<'_, PyAny>,
-        continue_on_error: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.execute_pipeline_batch(py, operations, continue_on_error)
-    }
-
-    #[pyo3(signature = (
-        *,
-        queue_name,
-        consumer_name=None,
-        wait_timeout_seconds=5,
-        max_buffered=1024,
-    ))]
-    pub fn open_listener(
-        &self,
-        py: Python<'_>,
-        queue_name: String,
-        consumer_name: Option<String>,
-        wait_timeout_seconds: u32,
-        max_buffered: usize,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
-        validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
-        if let Some(ref c) = consumer_name {
-            validate_aq_identifier(c, "consumer_name").map_err(|e| e.to_py_err(py))?;
-        }
-        if max_buffered == 0 {
-            return Err(OracleError::Config(
-                "AsyncOracleListener max_buffered must be >= 1".to_owned(),
-            )
-            .to_py_err(py));
-        }
-        let cfg = self.worker.config_arc();
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                AsyncOracleListener::spawn(
-                    cfg,
-                    queue_name,
-                    consumer_name,
-                    wait_timeout_seconds,
-                    max_buffered,
-                )
-            },
-            |py, listener| Ok(Py::new(py, listener)?.into_any()),
-            |py, err| err.to_py_err(py),
-            ORACLE_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (
-        *,
-        queue_name,
-        payload,
-        consumer_name=None,
-        correlation_id=None,
-    ))]
-    pub fn enqueue_notification(
-        &self,
-        py: Python<'_>,
-        queue_name: String,
-        payload: Vec<u8>,
-        consumer_name: Option<String>,
-        correlation_id: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
-        validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
-        if let Some(ref c) = consumer_name {
-            validate_aq_identifier(c, "consumer_name").map_err(|e| e.to_py_err(py))?;
-        }
-        let worker = Arc::clone(&self.worker);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    enqueue_notification_sync(
-                        &worker,
-                        &queue_name,
-                        &payload,
-                        consumer_name.as_deref(),
-                        correlation_id.as_deref(),
-                    )
+                    Ok(py.None())
                 })
-                .await
-                .map_err(|e| OracleError::Interface(format!("enqueue task join error: {e}")))?
-            },
-            |py, msg_id| Ok(PyBytes::new(py, &msg_id).into_any().unbind()),
-            |py, err| err.to_py_err(py),
-            ORACLE_COMPLETION_DRAINER_ATTR,
-        )
+        }
+
+        #[pyo3(signature = (
+            sql,
+            params=None,
+            *,
+            out_binds=None,
+            fetch_decimals=false,
+            enable_lowercase_column_names=None,
+        ))]
+        pub fn execute(
+            &self,
+            py: Python<'_>,
+            sql: String,
+            params: Option<&Bound<'_, PyAny>>,
+            out_binds: Option<&Bound<'_, PyAny>>,
+            fetch_decimals: bool,
+            enable_lowercase_column_names: Option<bool>,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
+            let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
+            let lowercase = enable_lowercase_column_names
+                .unwrap_or(self.worker.config().enable_lowercase_column_names);
+            self.worker.dispatch_async(
+                py,
+                WorkerCommand::Execute {
+                    sql,
+                    params: bind_args,
+                    out_binds: out_spec,
+                    fetch_decimals,
+                    lowercase_column_names: lowercase,
+                },
+                |py, reply| {
+                    let qres = reply_to_query_result(py, reply)?;
+                    Ok(Py::new(py, qres)?.into_any())
+                },
+            )
+        }
+
+        pub fn execute_many(
+            &self,
+            py: Python<'_>,
+            sql: String,
+            params_seq: &Bound<'_, PyAny>,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+            let seq = extract_bind_seq(params_seq).map_err(|e| e.to_py_err(py))?;
+            if seq.is_empty() {
+                return spawn_rust_db_task_with_attr(
+                    py,
+                    async { Ok::<usize, OracleError>(0) },
+                    |py, n| Ok(n.into_pyobject(py)?.into_any().unbind()),
+                    |py, err| err.to_py_err(py),
+                    ORACLE_COMPLETION_DRAINER_ATTR,
+                );
+            }
+            self.worker.dispatch_async(
+                py,
+                WorkerCommand::ExecuteMany {
+                    sql,
+                    params_seq: seq,
+                },
+                |py, reply| match reply {
+                    WorkerReply::RowCount(n) => Ok(n.into_pyobject(py)?.into_any().unbind()),
+                    _ => Ok(0usize.into_pyobject(py)?.into_any().unbind()),
+                },
+            )
+        }
+
+        #[pyo3(signature = (
+            sql,
+            params=None,
+            *,
+            batch_size=8192,
+            force_shm=None,
+            enable_lowercase_column_names=None,
+        ))]
+        pub fn query_arrow(
+            &self,
+            py: Python<'_>,
+            sql: String,
+            params: Option<&Bound<'_, PyAny>>,
+            batch_size: usize,
+            force_shm: Option<bool>,
+            enable_lowercase_column_names: Option<bool>,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
+            let lowercase = enable_lowercase_column_names
+                .unwrap_or(self.worker.config().enable_lowercase_column_names);
+            self.worker.dispatch_async(
+                py,
+                WorkerCommand::QueryArrow {
+                    sql,
+                    params: bind_args,
+                    batch_size: batch_size.max(1),
+                    lowercase_column_names: lowercase,
+                },
+                move |py, reply| match reply {
+                    WorkerReply::ArrowIpc {
+                        ipc_bytes,
+                        row_count,
+                    } => build_py_arrow_cursor(py, ipc_bytes, row_count, force_shm),
+                    _ => build_py_arrow_cursor(py, Vec::new(), 0, force_shm),
+                },
+            )
+        }
+
+        #[pyo3(signature = (operations, *, continue_on_error=false))]
+        pub fn execute_pipeline_batch(
+            &self,
+            py: Python<'_>,
+            operations: &Bound<'_, PyAny>,
+            continue_on_error: bool,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+            let lowercase = self.worker.config().enable_lowercase_column_names;
+            let ops = extract_pipeline_ops(operations, false, lowercase)
+                .map_err(|e| e.to_py_err(py))?;
+            if ops.is_empty() {
+                return spawn_rust_db_task_with_attr(
+                    py,
+                    async { Ok::<Vec<WorkerPipelineStepOutcome>, OracleError>(Vec::new()) },
+                    |py, _| Ok(PyList::empty(py).into_any().unbind()),
+                    |py, err| err.to_py_err(py),
+                    ORACLE_COMPLETION_DRAINER_ATTR,
+                );
+            }
+            self.worker.dispatch_async(
+                py,
+                WorkerCommand::PipelineBatch {
+                    ops,
+                    continue_on_error,
+                },
+                |py, reply| match reply {
+                    WorkerReply::PipelineOutcomes(steps) => {
+                        let mut py_outcomes = Vec::with_capacity(steps.len());
+                        for step in steps {
+                            let out = step.into_py_outcome(py)?;
+                            py_outcomes.push(Py::new(py, out)?);
+                        }
+                        let list = PyList::new(py, py_outcomes)?;
+                        Ok(list.into_any().unbind())
+                    }
+                    _ => Ok(PyList::empty(py).into_any().unbind()),
+                },
+            )
+        }
+
+        #[pyo3(signature = (
+            *,
+            queue_name,
+            consumer_name=None,
+            wait_timeout_seconds=5,
+            max_buffered=1024,
+        ))]
+        pub fn open_listener(
+            &self,
+            py: Python<'_>,
+            queue_name: String,
+            consumer_name: Option<String>,
+            wait_timeout_seconds: u32,
+            max_buffered: usize,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+            validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
+            if let Some(ref c) = consumer_name {
+                validate_aq_identifier(c, "consumer_name").map_err(|e| e.to_py_err(py))?;
+            }
+            if max_buffered == 0 {
+                return Err(OracleError::Config(
+                    "AsyncOracleListener max_buffered must be >= 1".to_owned(),
+                )
+                .to_py_err(py));
+            }
+            let cfg = self.worker.config_arc();
+            spawn_rust_db_task_with_attr(
+                py,
+                async move {
+                    AsyncOracleListener::spawn(
+                        cfg,
+                        queue_name,
+                        consumer_name,
+                        wait_timeout_seconds,
+                        max_buffered,
+                    )
+                },
+                |py, listener| Ok(Py::new(py, listener)?.into_any()),
+                |py, err| err.to_py_err(py),
+                ORACLE_COMPLETION_DRAINER_ATTR,
+            )
+        }
+
+        #[pyo3(signature = (
+            *,
+            queue_name,
+            payload,
+            consumer_name=None,
+            correlation_id=None,
+        ))]
+        pub fn enqueue_notification(
+            &self,
+            py: Python<'_>,
+            queue_name: String,
+            payload: Vec<u8>,
+            consumer_name: Option<String>,
+            correlation_id: Option<String>,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+            validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
+            if let Some(ref c) = consumer_name {
+                validate_aq_identifier(c, "consumer_name").map_err(|e| e.to_py_err(py))?;
+            }
+            let worker = Arc::clone(&self.worker);
+            spawn_rust_db_task_with_attr(
+                py,
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        enqueue_notification_sync(
+                            &worker,
+                            &queue_name,
+                            &payload,
+                            consumer_name.as_deref(),
+                            correlation_id.as_deref(),
+                        )
+                    })
+                    .await
+                    .map_err(|e| OracleError::Interface(format!("enqueue task join error: {e}")))?
+                },
+                |py, msg_id| Ok(PyBytes::new(py, &msg_id).into_any().unbind()),
+                |py, err| err.to_py_err(py),
+                ORACLE_COMPLETION_DRAINER_ATTR,
+            )
+        }
     }
-}
+);
 
 #[cfg(test)]
 mod tests {
@@ -3997,12 +3416,12 @@ mod tests {
     use std::time::Duration;
 
     use tokio::sync::oneshot;
+    use vertebra_db::py_cursor::{DEFAULT_PLAN_CACHE_CAPACITY, PlanLruCache};
 
     use super::{
-        BindArgs, OracleBreakHandle, OracleWorkerHandle, OutBindSpec, ReplyChannel,
-        STATEMENT_FACTS_CACHE_CAPACITY, StatementFacts, StatementFactsLru, StatementKind,
-        WorkerCommand, WorkerEnvelope, command_may_open_txn, statement_facts,
-        validate_savepoint_identifier,
+        BindArgs, OracleBreakHandle, OracleWorkerHandle, OutBindSpec, ReplyChannel, StatementFacts,
+        StatementKind, WorkerCommand, WorkerEnvelope, command_may_open_txn,
+        compute_statement_facts, statement_facts, validate_savepoint_identifier,
     };
     use crate::config::{NativeOracleConfig, RawOracleOptions};
     use crate::errors::OracleError;
@@ -4127,24 +3546,32 @@ mod tests {
 
     #[test]
     fn statement_facts_lru_caches_without_rescan_and_evicts_at_capacity() {
-        let mut lru = StatementFactsLru::new(STATEMENT_FACTS_CACHE_CAPACITY);
+        let mut lru: PlanLruCache<StatementFacts> = PlanLruCache::new(DEFAULT_PLAN_CACHE_CAPACITY);
         let sql = "SELECT 42 FROM dual";
-        let first = lru.get_or_insert(sql);
-        let second = lru.get_or_insert(sql);
+        let first = lru.insert(sql.into(), compute_statement_facts(sql));
+        let second = lru.get(sql).expect("cache hit");
         assert_eq!(first, second);
         assert_eq!(first.kind, StatementKind::Query);
-        assert_eq!(lru.scan_count, 1);
-        assert_eq!(lru.entries.len(), 1);
+        assert_eq!(lru.len(), 1);
 
-        let mut small = StatementFactsLru::new(2);
-        small.get_or_insert("SELECT 1 FROM dual");
-        small.get_or_insert("SELECT 2 FROM dual");
-        small.get_or_insert("SELECT 1 FROM dual");
-        small.get_or_insert("SELECT 3 FROM dual");
-        assert_eq!(small.entries.len(), 2);
-        assert!(small.entries.contains_key("SELECT 1 FROM dual"));
-        assert!(!small.entries.contains_key("SELECT 2 FROM dual"));
-        assert!(small.entries.contains_key("SELECT 3 FROM dual"));
+        let mut small: PlanLruCache<StatementFacts> = PlanLruCache::new(2);
+        small.insert(
+            "SELECT 1 FROM dual".into(),
+            compute_statement_facts("SELECT 1 FROM dual"),
+        );
+        small.insert(
+            "SELECT 2 FROM dual".into(),
+            compute_statement_facts("SELECT 2 FROM dual"),
+        );
+        assert!(small.get("SELECT 1 FROM dual").is_some());
+        small.insert(
+            "SELECT 3 FROM dual".into(),
+            compute_statement_facts("SELECT 3 FROM dual"),
+        );
+        assert_eq!(small.len(), 2);
+        assert!(small.get("SELECT 1 FROM dual").is_some());
+        assert!(small.get("SELECT 2 FROM dual").is_none());
+        assert!(small.get("SELECT 3 FROM dual").is_some());
     }
 
     fn spawn_unconnected_worker() -> OracleWorkerHandle {

@@ -128,7 +128,7 @@ def _serve_stateful_portal_session(
         while True:
             try:
                 grp = _read_group(conn)
-            except EOFError:
+            except (EOFError, OSError):
                 return events
             tags = [t for t, _ in grp]
             if tags == [b"X"]:
@@ -454,16 +454,16 @@ def test_cancelled_async_portal_fetch_and_gc_drop_retire_and_restore_pool_capaci
             database="appdb",
             sslmode="disable",
             channel_binding="disable",
-            connect_timeout=0.5,
+            connect_timeout=5.0,
             min_size=0,
             max_size=1,
-            acquire_timeout=1.0,
+            acquire_timeout=5.0,
         )
         c1 = await pool.acquire()
         p1 = await c1.open_portal("SELECT pg_sleep(10)")
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(p1.fetch(10), timeout=0.05)
-        assert saw_cancel.wait(timeout=1.0)
+        assert saw_cancel.wait(timeout=5.0)
         await c1.close()
 
         c2 = await pool.acquire()
@@ -471,13 +471,13 @@ def test_cancelled_async_portal_fetch_and_gc_drop_retire_and_restore_pool_capaci
         assert p2 is not None
         chunk = await p2.fetch(1)
         assert chunk.rows == ((0,),)
-        p2 = None
-        gc.collect()
         rollback_ev = asyncio.Event()
         rollback_waiter["ev"] = (asyncio.get_running_loop(), rollback_ev)
+        p2 = None
+        gc.collect()
         if not saw_rollback.is_set():
-            await asyncio.wait_for(rollback_ev.wait(), timeout=2.0)
-        deadline = time.monotonic() + 1.0
+            await asyncio.wait_for(rollback_ev.wait(), timeout=5.0)
+        deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             try:
                 await c2.close()

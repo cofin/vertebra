@@ -406,7 +406,7 @@ class ServerBinaryBuilder:
         profile: str = "release",
     ) -> Path:
         """Compile ``vertebra-server`` against a shared CPython build and stage it under ``src/py/vertebra/bin/``."""
-        selected_python = self.select_build_python(build_python)
+        selected_python = self.select_build_python(build_python).resolve()
         env = dict(os.environ)
         if extra_env:
             env.update(extra_env)

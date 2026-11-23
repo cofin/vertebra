@@ -36,10 +36,6 @@ impl std::io::Write for MemoryLogSink {
 pub struct LogSink {
     core: Option<AsyncLogCore>,
     memory_buf: Option<Arc<Mutex<Vec<Vec<u8>>>>>,
-    #[allow(dead_code)]
-    target: String,
-    #[allow(dead_code)]
-    capacity: usize,
     overflow_policy: String,
     flush_interval_ms: u64,
 }
@@ -94,8 +90,6 @@ impl LogSink {
         Ok(Self {
             core: Some(core),
             memory_buf,
-            target: target.to_string(),
-            capacity,
             overflow_policy: overflow_policy.to_string(),
             flush_interval_ms,
         })

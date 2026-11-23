@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING, Self
 
 from vertebra.cache._sync import (
@@ -12,6 +11,7 @@ from vertebra.cache._sync import (
     _SHM_MAX_VALUE_BYTES,
     _VALKEY_SCHEMES,
     SyncCacheStore,
+    _BaseCacheStore,
     _decode_envelope,
     _encode_envelope,
     _encode_shm_key,
@@ -20,13 +20,8 @@ from vertebra.cache._sync import (
     _MemoryState,
     _object_store_item_hex,
     _object_store_key,
-    _object_store_ns_dir,
     _parse_int_bytes,
-    _parse_url_scheme,
     _resolve_px_ms,
-    _shm_namespace_prefix,
-    _shm_segment_name,
-    _validate_key_prefix,
 )
 from vertebra.cache._types import CacheStats
 from vertebra.utils.module_loader import ensure_module
@@ -34,7 +29,6 @@ from vertebra.utils.module_loader import ensure_module
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from vertebra._vertebra import ShmCache
     from vertebra.db.adapters.redis._async import AsyncRedisDriver
     from vertebra.db.adapters.valkey._async import AsyncValkeyDriver
     from vertebra.storage._store import AsyncObjectStore
@@ -42,30 +36,14 @@ if TYPE_CHECKING:
 __all__ = ("AsyncCacheStore",)
 
 
-class AsyncCacheStore:
+class AsyncCacheStore(_BaseCacheStore):
     """Framework-neutral asynchronous cache store supporting memory, SHM, Valkey, Redis, and object storage."""
 
-    __slots__ = (
-        "_capacity",
-        "_clock",
-        "_default_ttl",
-        "_driver",
-        "_expirations",
-        "_hits",
-        "_key_prefix",
-        "_l1",
-        "_l1_url",
-        "_misses",
-        "_ns_dir",
-        "_raw_clock",
-        "_scheme",
-        "_shm",
-        "_shm_name",
-        "_shm_ns_prefix",
-        "_state",
-        "_store",
-        "_url",
-    )
+    __slots__ = ()
+
+    _driver: AsyncValkeyDriver | AsyncRedisDriver | None
+    _store: AsyncObjectStore | None
+    _l1: AsyncCacheStore | None
 
     def __init__(
         self,
@@ -339,26 +317,7 @@ class AsyncCacheStore:
 
     async def stats(self) -> CacheStats:
         """Return a snapshot of hit, miss, eviction, expiration, size, and capacity metrics."""
-        if self._state is not None:
-            return self._state.stats()
-        if self._shm is not None:
-            raw = self._shm.stats()
-            return CacheStats(
-                hits=raw.hits,
-                misses=raw.misses,
-                evictions=raw.evictions,
-                expirations=raw.expirations,
-                size=0,
-                capacity=self._capacity,
-            )
-        return CacheStats(
-            hits=self._hits,
-            misses=self._misses,
-            evictions=0,
-            expirations=self._expirations,
-            size=0,
-            capacity=self._capacity,
-        )
+        return self._stats_snapshot()
 
     async def aclose(self) -> None:
         """Asynchronously release underlying backend connections or shared-memory handles."""
@@ -383,46 +342,17 @@ class AsyncCacheStore:
         shared_state: _MemoryState | None,
         l1_store: AsyncCacheStore | None,
     ) -> None:
-        if capacity < 1:
-            msg = "capacity must be >= 1"
-            raise ValueError(msg)
-        scheme = _parse_url_scheme(url)
-        if l1_url is not None:
-            _parse_url_scheme(l1_url)
-        validated_prefix = _validate_key_prefix(key_prefix)
-
-        self._url = url
-        self._l1_url = l1_url
-        self._scheme = scheme
-        self._capacity = capacity
-        self._default_ttl = default_ttl
-        self._key_prefix = validated_prefix
-        self._raw_clock = _clock
-        default_clock = time.time if scheme in _OBJECT_SCHEMES else time.monotonic
-        self._clock: Callable[[], float] = _clock if _clock is not None else default_clock
-        self._hits = 0
-        self._misses = 0
-        self._expirations = 0
-        self._state: _MemoryState | None = None
-        self._shm: ShmCache | None = None
-        self._shm_name: str | None = None
-        self._shm_ns_prefix = _shm_namespace_prefix(validated_prefix)
-        self._driver: AsyncValkeyDriver | AsyncRedisDriver | None = None
-        self._store: AsyncObjectStore | None = None
-        self._ns_dir = _object_store_ns_dir(validated_prefix)
-        self._l1: AsyncCacheStore | None = l1_store
-
-        if scheme == "memory":
-            self._state = (
-                shared_state if shared_state is not None else _MemoryState(capacity=capacity, clock=self._clock)
-            )
-        elif scheme == "shm":
-            from vertebra._vertebra import ShmCache
-
-            segment = _shm_segment_name(url)
-            self._shm_name = segment
-            self._shm = ShmCache(segment, capacity_bytes=max(65536, capacity * 1024), max_entries=capacity)
-        elif scheme in _VALKEY_SCHEMES:
+        scheme, validated_prefix = self._init_common(
+            url=url,
+            l1_url=l1_url,
+            capacity=capacity,
+            default_ttl=default_ttl,
+            key_prefix=key_prefix,
+            clock=_clock,
+            shared_state=shared_state,
+            l1_store=l1_store,
+        )
+        if scheme in _VALKEY_SCHEMES:
             ensure_module("vertebra._valkey", package="vertebra-core[valkey]", extra="valkey")
             from vertebra.db.adapters.valkey import AsyncValkeyDriver, ValkeyConfig
 
@@ -446,18 +376,6 @@ class AsyncCacheStore:
                 key_prefix=validated_prefix,
                 _clock=_clock,
             )
-
-    def _effective_ttl(self, ttl: float | None) -> float | None:
-        return self._default_ttl if ttl is None else ttl
-
-    def _driver_key(self, key: str) -> str:
-        return f"{self._key_prefix}{key}"
-
-    def _record_hit(self) -> None:
-        if self._state is not None:
-            self._state.record_hit()
-        else:
-            self._hits += 1
 
     async def _get_l2_with_ttl(self, key: str) -> tuple[bytes, float | None] | None:
         if self._state is not None:
@@ -544,22 +462,6 @@ class AsyncCacheStore:
         if self._store is not None:
             return await self._incr_store(key, delta)
         return delta, self._default_ttl
-
-    def _incr_shm(self, key: str, delta: int) -> int:
-        assert self._shm is not None
-        dkey = _encode_shm_key(self._key_prefix, key)
-        while True:
-            existing = self._shm.get(dkey)
-            if existing is not None:
-                _parse_int_bytes(existing, key)
-                return int(self._shm.incr(dkey, delta))
-            if self._default_ttl is not None and self._default_ttl <= 0:
-                return delta
-            if self._default_ttl is None:
-                return int(self._shm.incr(dkey, delta))
-            encoded = str(delta).encode("utf-8")
-            if self._shm.add(dkey, encoded, ttl=self._default_ttl):
-                return delta
 
     async def _incr_driver(self, key: str, delta: int) -> int:
         assert self._driver is not None

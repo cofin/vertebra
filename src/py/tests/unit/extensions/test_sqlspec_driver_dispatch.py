@@ -16,10 +16,19 @@ from sqlspec.builder import QueryBuilder
 from sqlspec.core import SQL, ParameterStyle, ParameterStyleConfig, Statement, StatementConfig, StatementFilter
 from sqlspec.data_dictionary import MetadataResult, MetadataSupport, TableMetadata, get_dialect_config
 from sqlspec.data_dictionary.dialects.bigquery.dictionary import (
+    BigQueryAsyncDataDictionary as UpstreamBigQueryAsyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.bigquery.dictionary import (
     BigQuerySyncDataDictionary as UpstreamBigQuerySyncDataDictionary,
 )
 from sqlspec.data_dictionary.dialects.duckdb.dictionary import (
+    DuckDBAsyncDataDictionary as UpstreamDuckDBAsyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.duckdb.dictionary import (
     DuckDBSyncDataDictionary as UpstreamDuckDBSyncDataDictionary,
+)
+from sqlspec.data_dictionary.dialects.mssql.dictionary import (
+    MssqlAsyncDataDictionary as UpstreamMssqlAsyncDataDictionary,
 )
 from sqlspec.data_dictionary.dialects.mssql.dictionary import (
     MssqlSyncDataDictionary as UpstreamMssqlSyncDataDictionary,
@@ -1393,9 +1402,9 @@ def test_core_adapter_data_dictionaries_slots_bases_and_import_hygiene(
         "postgres": (UpstreamPostgresSyncDataDictionary, UpstreamPostgresAsyncDataDictionary),
         "oracle": (UpstreamOracleSyncDataDictionary, UpstreamOracleAsyncDataDictionary),
         "spanner": (UpstreamSpannerSyncDataDictionary, UpstreamSpannerAsyncDataDictionary),
-        "duckdb": (UpstreamDuckDBSyncDataDictionary, AsyncDataDictionaryBase),
-        "mssql": (UpstreamMssqlSyncDataDictionary, AsyncDataDictionaryBase),
-        "bigquery": (UpstreamBigQuerySyncDataDictionary, AsyncDataDictionaryBase),
+        "duckdb": (UpstreamDuckDBSyncDataDictionary, UpstreamDuckDBAsyncDataDictionary),
+        "mssql": (UpstreamMssqlSyncDataDictionary, UpstreamMssqlAsyncDataDictionary),
+        "bigquery": (UpstreamBigQuerySyncDataDictionary, UpstreamBigQueryAsyncDataDictionary),
     }
     expected_sync_base, expected_async_base = upstream_bases[adapter_name]
     assert issubclass(sync_cls, expected_sync_base)

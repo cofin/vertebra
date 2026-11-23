@@ -281,30 +281,15 @@ class _BaseProxyConfig:
         ext_cfg = _deep_merge_dicts(base_cfg, caller_cfg)
         litestar_raw = ext_cfg.get("litestar")
         litestar_cfg: dict[str, Any] = dict(litestar_raw) if isinstance(litestar_raw, Mapping) else {}
-        if "connection_key" not in litestar_cfg:
-            conn_k = getattr(config, "connection_key", None)
-            if conn_k:
-                litestar_cfg["connection_key"] = str(conn_k)
-            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
-                litestar_cfg["connection_key"] = f"{resolved_bind_key}_connection"
-            else:
-                litestar_cfg["connection_key"] = "db_connection"
-        if "session_key" not in litestar_cfg:
-            sess_k = getattr(config, "session_key", None)
-            if sess_k:
-                litestar_cfg["session_key"] = str(sess_k)
-            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
-                litestar_cfg["session_key"] = f"{resolved_bind_key}_session"
-            else:
-                litestar_cfg["session_key"] = "db_session"
-        if "pool_key" not in litestar_cfg:
-            p_k = getattr(config, "pool_key", None)
-            if p_k:
-                litestar_cfg["pool_key"] = str(p_k)
-            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
-                litestar_cfg["pool_key"] = f"{resolved_bind_key}_pool"
-            else:
-                litestar_cfg["pool_key"] = "db_pool"
+        for key, suffix in (("connection_key", "connection"), ("session_key", "session"), ("pool_key", "pool")):
+            if key not in litestar_cfg:
+                existing = getattr(config, key, None)
+                if existing:
+                    litestar_cfg[key] = str(existing)
+                elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
+                    litestar_cfg[key] = f"{resolved_bind_key}_{suffix}"
+                else:
+                    litestar_cfg[key] = f"db_{suffix}"
         ext_cfg["litestar"] = litestar_cfg
         return ext_cfg
 
@@ -312,6 +297,101 @@ class _BaseProxyConfig:
         """Delegate pool creation to wrapped configuration."""
         fn = getattr(self.config, "_create_pool", None) or getattr(self.config, "create_pool", None)
         return fn() if callable(fn) else None
+
+    def _prepare_proxy_init_kwargs(
+        self,
+        config: Any,
+        *,
+        broker: Any = None,
+        provider: Any = None,
+        statement_config: Any = None,
+        bind_key: str | None = None,
+        extension_config: Mapping[str, Any] | None = None,
+        replicas: Any = None,
+        is_replica: bool | None = None,
+        extra_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        target = cast("Any", self)
+        target.config = config
+        if isinstance(broker, _BaseSQLSpecProvider):
+            target.provider = provider or broker
+            target.broker = broker.broker
+        else:
+            target.provider = provider
+            target.broker = broker
+        resolved_bind_key = bind_key or getattr(config, "bind_key", "default")
+        stmt_cfg = statement_config or getattr(config, "statement_config", None)
+        driver_feats = extra_kwargs.pop("driver_features", None)
+        if driver_feats is None:
+            driver_feats = getattr(config, "driver_features", None)
+        merged_ext_cfg = self._build_merged_extension_config(config, extension_config, resolved_bind_key)
+        resolved_is_replica = bool(getattr(config, "is_replica", False)) if is_replica is None else bool(is_replica)
+        return {
+            "bind_key": resolved_bind_key,
+            "statement_config": stmt_cfg,
+            "driver_features": driver_feats,
+            "extension_config": cast("Any", merged_ext_cfg),
+            "replicas": replicas,
+            "is_replica": resolved_is_replica,
+            **extra_kwargs,
+        }
+
+    def _make_proxied_session_context(
+        self,
+        provider_cls: type[Any],
+        context_cls: type[Any],
+        *,
+        worker_pid: int | None = None,
+        statement_config: Any = None,
+    ) -> Any:
+        target = cast("Any", self)
+        resolved_bind_key = getattr(self, "bind_key", None) or "default"
+        if target.provider is None:
+            target.provider = provider_cls(target.config, broker=target.broker, pool_name=resolved_bind_key)
+        return context_cls(
+            target.provider,
+            broker=target.broker,
+            pool_name=resolved_bind_key,
+            worker_pid=worker_pid,
+            statement_config=statement_config or getattr(self, "statement_config", None),
+            dialect=getattr(target.config, "dialect", None),
+        )
+
+    def _derive_proxy_pool(self, overrides: dict[str, Any]) -> Any:
+        cls: Any = type(self)
+        ext_cfg = getattr(self, "extension_config", None)
+        fn = getattr(self.config, "derive_pool", None)
+        if callable(fn):
+            derived = fn(**overrides)
+            return cls(
+                derived,
+                broker=self.broker,
+                provider=self.provider,
+                extension_config=overrides.get("extension_config", ext_cfg),
+                is_replica=bool(overrides.get("is_replica", getattr(derived, "is_replica", False))),
+            )
+        if overrides:
+            return cls(
+                self.config,
+                broker=self.broker,
+                provider=self.provider,
+                bind_key=overrides.get("bind_key", getattr(self, "bind_key", None)),
+                extension_config=overrides.get("extension_config", ext_cfg),
+                is_replica=bool(overrides.get("is_replica", getattr(self, "is_replica", False))),
+            )
+        return self
+
+    def _derive_proxy_direct(self) -> Any:
+        fn = getattr(self.config, "derive_direct_config", None)
+        if callable(fn):
+            cls: Any = type(self)
+            return cls(
+                fn(),
+                broker=self.broker,
+                provider=self.provider,
+                extension_config=getattr(self, "extension_config", None),
+            )
+        return self
 
 
 class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any, Any]):
@@ -336,69 +416,37 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
         **kwargs: Any,
     ) -> None:
         """Initialize ProxySyncConfig wrapping a synchronous database configuration."""
-        self.config: SyncConfigT = config
+        self.config: SyncConfigT
         self.provider: SQLSpecSyncProvider | None
-        if isinstance(broker, _BaseSQLSpecProvider):
-            self.provider = provider or broker
-            self.broker: Any = broker.broker
-        else:
-            self.provider = provider
-            self.broker = broker
-
-        resolved_bind_key = bind_key or getattr(config, "bind_key", "default")
-        stmt_cfg = statement_config or getattr(config, "statement_config", None)
-        driver_feats = kwargs.pop("driver_features", None)
-        if driver_feats is None:
-            driver_feats = getattr(config, "driver_features", None)
-        merged_ext_cfg = self._build_merged_extension_config(config, extension_config, resolved_bind_key)
-        resolved_is_replica = bool(getattr(config, "is_replica", False)) if is_replica is None else bool(is_replica)
-        super().__init__(
-            bind_key=resolved_bind_key,
-            statement_config=stmt_cfg,
-            driver_features=driver_feats,
-            extension_config=cast("Any", merged_ext_cfg),
+        self.broker: Any
+        init_kwargs = self._prepare_proxy_init_kwargs(
+            config,
+            broker=broker,
+            provider=provider,
+            statement_config=statement_config,
+            bind_key=bind_key,
+            extension_config=extension_config,
             replicas=replicas,
-            is_replica=resolved_is_replica,
-            **kwargs,
+            is_replica=is_replica,
+            extra_kwargs=kwargs,
         )
+        super().__init__(**init_kwargs)
 
     def provide_proxied_session(self, *, worker_pid: int | None = None) -> ProxySyncSessionContext:
         """Return a synchronous session context manager backed by SQLSpecSyncProvider and SHM leases."""
-        resolved_bind_key = self.bind_key or "default"
-        if self.provider is None:
-            self.provider = SQLSpecSyncProvider(
-                self.config,
-                broker=self.broker,
-                pool_name=resolved_bind_key,
-            )
-        return ProxySyncSessionContext(
-            self.provider,
-            broker=self.broker,
-            pool_name=resolved_bind_key,
-            worker_pid=worker_pid,
-            statement_config=self.statement_config,
-            dialect=getattr(self.config, "dialect", None),
+        return cast(
+            "ProxySyncSessionContext",
+            self._make_proxied_session_context(SQLSpecSyncProvider, ProxySyncSessionContext, worker_pid=worker_pid),
         )
 
     def provide_session(self, *args: Any, **kwargs: Any) -> Any:
         """Delegate session provision to ProxySyncSessionContext when proxied, or inner SyncConfigT."""
-        resolved_bind_key = self.bind_key or "default"
         if self.provider is not None or self.broker is not None:
-            if self.provider is None:
-                self.provider = SQLSpecSyncProvider(
-                    self.config,
-                    broker=self.broker,
-                    pool_name=resolved_bind_key,
-                )
-            worker_pid = kwargs.get("worker_pid")
-            stmt_cfg = kwargs.get("statement_config") or self.statement_config
-            return ProxySyncSessionContext(
-                self.provider,
-                broker=self.broker,
-                pool_name=resolved_bind_key,
-                worker_pid=worker_pid,
-                statement_config=stmt_cfg,
-                dialect=getattr(self.config, "dialect", None),
+            return self._make_proxied_session_context(
+                SQLSpecSyncProvider,
+                ProxySyncSessionContext,
+                worker_pid=kwargs.get("worker_pid"),
+                statement_config=kwargs.get("statement_config"),
             )
         fn = getattr(self.config, "provide_session", None)
         return fn(*args, **kwargs) if callable(fn) else None
@@ -418,38 +466,11 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
 
     def derive_pool(self, **overrides: Any) -> ProxySyncConfig[SyncConfigT]:
         """Delegate per-pool configuration cloning to the wrapped SyncConfigT."""
-        fn = getattr(self.config, "derive_pool", None)
-        if callable(fn):
-            derived = cast("SyncConfigT", fn(**overrides))
-            return ProxySyncConfig(
-                derived,
-                broker=self.broker,
-                provider=self.provider,
-                extension_config=overrides.get("extension_config", self.extension_config),
-                is_replica=bool(overrides.get("is_replica", getattr(derived, "is_replica", False))),
-            )
-        if overrides:
-            return ProxySyncConfig(
-                self.config,
-                broker=self.broker,
-                provider=self.provider,
-                bind_key=overrides.get("bind_key", self.bind_key),
-                extension_config=overrides.get("extension_config", self.extension_config),
-                is_replica=bool(overrides.get("is_replica", self.is_replica)),
-            )
-        return self
+        return cast("ProxySyncConfig[SyncConfigT]", self._derive_proxy_pool(overrides))
 
     def derive_direct_config(self) -> ProxySyncConfig[SyncConfigT]:
         """Delegate direct-session configuration derivation to the wrapped SyncConfigT."""
-        fn = getattr(self.config, "derive_direct_config", None)
-        if callable(fn):
-            return ProxySyncConfig(
-                cast("SyncConfigT", fn()),
-                broker=self.broker,
-                provider=self.provider,
-                extension_config=self.extension_config,
-            )
-        return self
+        return cast("ProxySyncConfig[SyncConfigT]", self._derive_proxy_direct())
 
     def _close_pool(self) -> None:
         """Delegate pool close to wrapped configuration."""
@@ -480,69 +501,37 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
         **kwargs: Any,
     ) -> None:
         """Initialize ProxyAsyncConfig wrapping an asynchronous database configuration."""
-        self.config: AsyncConfigT = config
+        self.config: AsyncConfigT
         self.provider: SQLSpecAsyncProvider | None
-        if isinstance(broker, _BaseSQLSpecProvider):
-            self.provider = provider or broker
-            self.broker: Any = broker.broker
-        else:
-            self.provider = provider
-            self.broker = broker
-
-        resolved_bind_key = bind_key or getattr(config, "bind_key", "default")
-        stmt_cfg = statement_config or getattr(config, "statement_config", None)
-        driver_feats = kwargs.pop("driver_features", None)
-        if driver_feats is None:
-            driver_feats = getattr(config, "driver_features", None)
-        merged_ext_cfg = self._build_merged_extension_config(config, extension_config, resolved_bind_key)
-        resolved_is_replica = bool(getattr(config, "is_replica", False)) if is_replica is None else bool(is_replica)
-        super().__init__(
-            bind_key=resolved_bind_key,
-            statement_config=stmt_cfg,
-            driver_features=driver_feats,
-            extension_config=cast("Any", merged_ext_cfg),
+        self.broker: Any
+        init_kwargs = self._prepare_proxy_init_kwargs(
+            config,
+            broker=broker,
+            provider=provider,
+            statement_config=statement_config,
+            bind_key=bind_key,
+            extension_config=extension_config,
             replicas=replicas,
-            is_replica=resolved_is_replica,
-            **kwargs,
+            is_replica=is_replica,
+            extra_kwargs=kwargs,
         )
+        super().__init__(**init_kwargs)
 
     def provide_proxied_session(self, *, worker_pid: int | None = None) -> ProxyAsyncSessionContext:
         """Return an asynchronous session context manager backed by SQLSpecAsyncProvider and SHM leases."""
-        resolved_bind_key = self.bind_key or "default"
-        if self.provider is None:
-            self.provider = SQLSpecAsyncProvider(
-                self.config,
-                broker=self.broker,
-                pool_name=resolved_bind_key,
-            )
-        return ProxyAsyncSessionContext(
-            self.provider,
-            broker=self.broker,
-            pool_name=resolved_bind_key,
-            worker_pid=worker_pid,
-            statement_config=self.statement_config,
-            dialect=getattr(self.config, "dialect", None),
+        return cast(
+            "ProxyAsyncSessionContext",
+            self._make_proxied_session_context(SQLSpecAsyncProvider, ProxyAsyncSessionContext, worker_pid=worker_pid),
         )
 
     def provide_session(self, *args: Any, **kwargs: Any) -> Any:
         """Delegate session provision to ProxyAsyncSessionContext when proxied, or inner AsyncConfigT."""
-        resolved_bind_key = self.bind_key or "default"
         if self.provider is not None or self.broker is not None:
-            if self.provider is None:
-                self.provider = SQLSpecAsyncProvider(
-                    self.config,
-                    broker=self.broker,
-                    pool_name=resolved_bind_key,
-                )
-            worker_pid = kwargs.get("worker_pid")
-            stmt_cfg = kwargs.get("statement_config") or self.statement_config
-            return ProxyAsyncSessionContext(
-                self.provider,
-                broker=self.broker,
-                pool_name=resolved_bind_key,
-                worker_pid=worker_pid,
-                statement_config=stmt_cfg,
-                dialect=getattr(self.config, "dialect", None),
+            return self._make_proxied_session_context(
+                SQLSpecAsyncProvider,
+                ProxyAsyncSessionContext,
+                worker_pid=kwargs.get("worker_pid"),
+                statement_config=kwargs.get("statement_config"),
             )
         fn = getattr(self.config, "provide_session", None)
         return fn(*args, **kwargs) if callable(fn) else None
@@ -562,38 +551,11 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
 
     def derive_pool(self, **overrides: Any) -> ProxyAsyncConfig[AsyncConfigT]:
         """Delegate per-pool configuration cloning to the wrapped AsyncConfigT."""
-        fn = getattr(self.config, "derive_pool", None)
-        if callable(fn):
-            derived = cast("AsyncConfigT", fn(**overrides))
-            return ProxyAsyncConfig(
-                derived,
-                broker=self.broker,
-                provider=self.provider,
-                extension_config=overrides.get("extension_config", self.extension_config),
-                is_replica=bool(overrides.get("is_replica", getattr(derived, "is_replica", False))),
-            )
-        if overrides:
-            return ProxyAsyncConfig(
-                self.config,
-                broker=self.broker,
-                provider=self.provider,
-                bind_key=overrides.get("bind_key", self.bind_key),
-                extension_config=overrides.get("extension_config", self.extension_config),
-                is_replica=bool(overrides.get("is_replica", self.is_replica)),
-            )
-        return self
+        return cast("ProxyAsyncConfig[AsyncConfigT]", self._derive_proxy_pool(overrides))
 
     def derive_direct_config(self) -> ProxyAsyncConfig[AsyncConfigT]:
         """Delegate direct-session configuration derivation to the wrapped AsyncConfigT."""
-        fn = getattr(self.config, "derive_direct_config", None)
-        if callable(fn):
-            return ProxyAsyncConfig(
-                cast("AsyncConfigT", fn()),
-                broker=self.broker,
-                provider=self.provider,
-                extension_config=self.extension_config,
-            )
-        return self
+        return cast("ProxyAsyncConfig[AsyncConfigT]", self._derive_proxy_direct())
 
     async def _close_pool(self) -> None:
         """Delegate pool close to wrapped configuration asynchronously."""

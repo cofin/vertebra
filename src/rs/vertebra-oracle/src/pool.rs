@@ -787,454 +787,371 @@ impl SyncOraclePool {
     }
 }
 
-#[pymethods]
-impl SyncOraclePool {
-    #[new]
-    #[pyo3(signature = (
-        *,
-        user=None,
-        password=None,
-        dsn=None,
-        host="localhost",
-        port=1521,
-        service_name="FREEPDB1",
-        sid=None,
-        tns_admin=None,
-        connect_descriptor=None,
-        protocol="tcp",
-        ssl_server_dn_match=true,
-        ssl_server_cert_dn=None,
-        wallet_location=None,
-        wallet_password=None,
-        pem_cert_data=None,
-        cwallet_sso_data=None,
-        auth_mode="password",
-        access_token=None,
-        token_auth_options=None,
-        cclass=None,
-        purity="SELF",
-        connection_tag=None,
-        stmtcachesize=64,
-        prefetchrows=256,
-        arraysize=256,
-        call_timeout_ms=None,
-        connect_timeout=10.0,
-        enable_lowercase_column_names=true,
-        client_identifier=None,
-        module=None,
-        action=None,
-        ecid=None,
-        min_size=1,
-        max_size=10,
-        acquire_timeout=30.0,
-        reset_timeout=10.0,
-        close_timeout=30.0,
-        max_lifetime_seconds=3600.0,
-        idle_timeout_seconds=600.0,
-        health_check_interval_seconds=30.0,
-        enable_reset_relay=true,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        py: Python<'_>,
-        user: Option<String>,
-        password: Option<String>,
-        dsn: Option<String>,
-        host: &str,
-        port: i32,
-        service_name: &str,
-        sid: Option<String>,
-        tns_admin: Option<String>,
-        connect_descriptor: Option<String>,
-        protocol: &str,
-        ssl_server_dn_match: bool,
-        ssl_server_cert_dn: Option<String>,
-        wallet_location: Option<String>,
-        wallet_password: Option<String>,
-        pem_cert_data: Option<Vec<u8>>,
-        cwallet_sso_data: Option<Vec<u8>>,
-        auth_mode: &str,
-        access_token: Option<String>,
-        token_auth_options: Option<BTreeMap<String, String>>,
-        cclass: Option<String>,
-        purity: &str,
-        connection_tag: Option<String>,
-        stmtcachesize: i32,
-        prefetchrows: i64,
-        arraysize: i64,
-        call_timeout_ms: Option<i64>,
-        connect_timeout: f64,
-        enable_lowercase_column_names: bool,
-        client_identifier: Option<String>,
-        module: Option<String>,
-        action: Option<String>,
-        ecid: Option<String>,
-        min_size: i64,
-        max_size: i64,
-        acquire_timeout: f64,
-        reset_timeout: f64,
-        close_timeout: f64,
-        max_lifetime_seconds: f64,
-        idle_timeout_seconds: f64,
-        health_check_interval_seconds: f64,
-        enable_reset_relay: bool,
-    ) -> PyResult<Self> {
-        let options = build_pool_options_from_py(
-            user,
-            password,
-            dsn,
-            host,
-            port,
-            service_name,
-            sid,
-            tns_admin,
-            connect_descriptor,
-            protocol,
-            ssl_server_dn_match,
-            ssl_server_cert_dn,
-            wallet_location,
-            wallet_password,
-            pem_cert_data,
-            cwallet_sso_data,
-            auth_mode,
-            access_token,
-            token_auth_options,
-            cclass,
-            purity,
-            connection_tag,
-            stmtcachesize,
-            prefetchrows,
-            arraysize,
-            call_timeout_ms,
-            connect_timeout,
-            enable_lowercase_column_names,
-            client_identifier,
-            module,
-            action,
-            ecid,
-            min_size,
-            max_size,
-            acquire_timeout,
-            reset_timeout,
-            close_timeout,
-            max_lifetime_seconds,
-            idle_timeout_seconds,
-            health_check_interval_seconds,
-            enable_reset_relay,
-        )
-        .map_err(|e| e.to_py_err(py))?;
-        Ok(Self {
-            inner: Arc::new(OraclePoolCore::new(options)),
-        })
-    }
+macro_rules! impl_oracle_pool_pymethods {
+    (
+        $pool:ident,
+        client = $client:ident,
+        acquire_ret = $acquire_ret:ty,
+        unit_ret = $unit_ret:ty,
+        single_ret = $single_ret:ty,
+        single_calls = [ $( $sc_name:ident => $sc_shape:path ),* $(,)? ],
+        extra = { $($extra:tt)* }
+    ) => {
+        #[pymethods]
+        impl $pool {
+            #[new]
+            #[pyo3(signature = (
+                *,
+                user=None,
+                password=None,
+                dsn=None,
+                host="localhost",
+                port=1521,
+                service_name="FREEPDB1",
+                sid=None,
+                tns_admin=None,
+                connect_descriptor=None,
+                protocol="tcp",
+                ssl_server_dn_match=true,
+                ssl_server_cert_dn=None,
+                wallet_location=None,
+                wallet_password=None,
+                pem_cert_data=None,
+                cwallet_sso_data=None,
+                auth_mode="password",
+                access_token=None,
+                token_auth_options=None,
+                cclass=None,
+                purity="SELF",
+                connection_tag=None,
+                stmtcachesize=64,
+                prefetchrows=256,
+                arraysize=256,
+                call_timeout_ms=None,
+                connect_timeout=10.0,
+                enable_lowercase_column_names=true,
+                client_identifier=None,
+                module=None,
+                action=None,
+                ecid=None,
+                min_size=1,
+                max_size=10,
+                acquire_timeout=30.0,
+                reset_timeout=10.0,
+                close_timeout=30.0,
+                max_lifetime_seconds=3600.0,
+                idle_timeout_seconds=600.0,
+                health_check_interval_seconds=30.0,
+                enable_reset_relay=true,
+            ))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn new(
+                py: Python<'_>,
+                user: Option<String>,
+                password: Option<String>,
+                dsn: Option<String>,
+                host: &str,
+                port: i32,
+                service_name: &str,
+                sid: Option<String>,
+                tns_admin: Option<String>,
+                connect_descriptor: Option<String>,
+                protocol: &str,
+                ssl_server_dn_match: bool,
+                ssl_server_cert_dn: Option<String>,
+                wallet_location: Option<String>,
+                wallet_password: Option<String>,
+                pem_cert_data: Option<Vec<u8>>,
+                cwallet_sso_data: Option<Vec<u8>>,
+                auth_mode: &str,
+                access_token: Option<String>,
+                token_auth_options: Option<BTreeMap<String, String>>,
+                cclass: Option<String>,
+                purity: &str,
+                connection_tag: Option<String>,
+                stmtcachesize: i32,
+                prefetchrows: i64,
+                arraysize: i64,
+                call_timeout_ms: Option<i64>,
+                connect_timeout: f64,
+                enable_lowercase_column_names: bool,
+                client_identifier: Option<String>,
+                module: Option<String>,
+                action: Option<String>,
+                ecid: Option<String>,
+                min_size: i64,
+                max_size: i64,
+                acquire_timeout: f64,
+                reset_timeout: f64,
+                close_timeout: f64,
+                max_lifetime_seconds: f64,
+                idle_timeout_seconds: f64,
+                health_check_interval_seconds: f64,
+                enable_reset_relay: bool,
+            ) -> PyResult<Self> {
+                let options = build_pool_options_from_py(
+                    user,
+                    password,
+                    dsn,
+                    host,
+                    port,
+                    service_name,
+                    sid,
+                    tns_admin,
+                    connect_descriptor,
+                    protocol,
+                    ssl_server_dn_match,
+                    ssl_server_cert_dn,
+                    wallet_location,
+                    wallet_password,
+                    pem_cert_data,
+                    cwallet_sso_data,
+                    auth_mode,
+                    access_token,
+                    token_auth_options,
+                    cclass,
+                    purity,
+                    connection_tag,
+                    stmtcachesize,
+                    prefetchrows,
+                    arraysize,
+                    call_timeout_ms,
+                    connect_timeout,
+                    enable_lowercase_column_names,
+                    client_identifier,
+                    module,
+                    action,
+                    ecid,
+                    min_size,
+                    max_size,
+                    acquire_timeout,
+                    reset_timeout,
+                    close_timeout,
+                    max_lifetime_seconds,
+                    idle_timeout_seconds,
+                    health_check_interval_seconds,
+                    enable_reset_relay,
+                )
+                .map_err(|e| e.to_py_err(py))?;
+                Ok(Self {
+                    inner: Arc::new(OraclePoolCore::new(options)),
+                })
+            }
 
-    #[getter]
-    pub fn min_size(&self) -> usize {
-        self.inner.min_size()
-    }
+            #[getter]
+            pub fn min_size(&self) -> usize {
+                self.inner.min_size()
+            }
 
-    #[getter]
-    pub fn max_size(&self) -> usize {
-        self.inner.max_size()
-    }
+            #[getter]
+            pub fn max_size(&self) -> usize {
+                self.inner.max_size()
+            }
 
-    #[getter]
-    pub fn size(&self) -> usize {
-        self.inner.size()
-    }
+            #[getter]
+            pub fn size(&self) -> usize {
+                self.inner.size()
+            }
 
-    #[getter]
-    pub fn idle_size(&self) -> usize {
-        self.inner.idle_size()
-    }
+            #[getter]
+            pub fn idle_size(&self) -> usize {
+                self.inner.idle_size()
+            }
 
-    #[getter]
-    pub fn borrowed_size(&self) -> usize {
-        self.inner.borrowed_size()
-    }
+            #[getter]
+            pub fn borrowed_size(&self) -> usize {
+                self.inner.borrowed_size()
+            }
 
-    #[getter]
-    pub fn closed(&self) -> bool {
-        self.inner.is_closed()
-    }
+            #[getter]
+            pub fn closed(&self) -> bool {
+                self.inner.is_closed()
+            }
 
-    #[pyo3(signature = (
-        *,
-        timeout=None,
-        connection_tag=None,
-        purity=None,
-        client_identifier=None,
-        module=None,
-        action=None,
-        ecid=None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn acquire(
-        &self,
-        py: Python<'_>,
-        timeout: Option<f64>,
-        connection_tag: Option<String>,
-        purity: Option<String>,
-        client_identifier: Option<String>,
-        module: Option<String>,
-        action: Option<String>,
-        ecid: Option<String>,
-    ) -> PyResult<SyncOracleClient> {
-        let inner = Arc::clone(&self.inner);
-        let worker = py
-            .detach(|| {
-                inner.acquire_sync(
+            #[pyo3(signature = (
+                *,
+                timeout=None,
+                connection_tag=None,
+                purity=None,
+                client_identifier=None,
+                module=None,
+                action=None,
+                ecid=None,
+            ))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn acquire_from_pool(
+                &self,
+                py: Python<'_>,
+                timeout: Option<f64>,
+                connection_tag: Option<String>,
+                purity: Option<String>,
+                client_identifier: Option<String>,
+                module: Option<String>,
+                action: Option<String>,
+                ecid: Option<String>,
+            ) -> PyResult<$acquire_ret> {
+                self.acquire(
+                    py,
                     timeout,
                     connection_tag,
-                    purity.as_deref(),
+                    purity,
                     client_identifier,
                     module,
                     action,
                     ecid,
                 )
-            })
-            .map_err(|e| e.to_py_err(py))?;
-        Ok(SyncOracleClient::from_worker(worker))
-    }
+            }
 
-    #[pyo3(signature = (
-        client,
-        *,
-        connection_tag=None,
-        discard=false,
-    ))]
-    pub fn release(
-        &self,
-        py: Python<'_>,
-        client: &SyncOracleClient,
-        connection_tag: Option<String>,
-        discard: bool,
-    ) -> PyResult<()> {
-        let inner = Arc::clone(&self.inner);
-        let worker = Arc::clone(client.worker());
-        py.detach(|| inner.release_sync(&worker, connection_tag, discard))
-            .map_err(|e| e.to_py_err(py))
-    }
+            #[pyo3(signature = (
+                client,
+                *,
+                connection_tag=None,
+                discard=false,
+            ))]
+            pub fn release_to_pool(
+                &self,
+                py: Python<'_>,
+                client: &$client,
+                connection_tag: Option<String>,
+                discard: bool,
+            ) -> PyResult<$unit_ret> {
+                self.release(py, client, connection_tag, discard)
+            }
 
-    #[pyo3(signature = (
-        *,
-        timeout=None,
-        connection_tag=None,
-        purity=None,
-        client_identifier=None,
-        module=None,
-        action=None,
-        ecid=None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn acquire_from_pool(
-        &self,
-        py: Python<'_>,
-        timeout: Option<f64>,
-        connection_tag: Option<String>,
-        purity: Option<String>,
-        client_identifier: Option<String>,
-        module: Option<String>,
-        action: Option<String>,
-        ecid: Option<String>,
-    ) -> PyResult<SyncOracleClient> {
-        self.acquire(
-            py,
-            timeout,
-            connection_tag,
-            purity,
-            client_identifier,
-            module,
-            action,
-            ecid,
-        )
-    }
+            pub fn stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+                build_stats_dict(py, &self.inner)
+            }
 
-    #[pyo3(signature = (
-        client,
-        *,
-        connection_tag=None,
-        discard=false,
-    ))]
-    pub fn release_to_pool(
-        &self,
-        py: Python<'_>,
-        client: &SyncOracleClient,
-        connection_tag: Option<String>,
-        discard: bool,
-    ) -> PyResult<()> {
-        self.release(py, client, connection_tag, discard)
-    }
+            $(
+                #[pyo3(
+                    signature = (
+                        sql,
+                        params = None,
+                        *,
+                        out_binds = None,
+                        enable_uuid_binary = true,
+                        fetch_decimals = false,
+                        vector_return_format = "list",
+                        enable_lowercase_column_names = true,
+                    ),
+                    text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+                )]
+                #[allow(clippy::too_many_arguments)]
+                pub fn $sc_name(
+                    &self,
+                    py: Python<'_>,
+                    sql: &str,
+                    params: Option<&Bound<'_, PyAny>>,
+                    out_binds: Option<&Bound<'_, PyAny>>,
+                    enable_uuid_binary: bool,
+                    fetch_decimals: bool,
+                    vector_return_format: &str,
+                    enable_lowercase_column_names: bool,
+                ) -> PyResult<$single_ret> {
+                    self.single_call(
+                        py,
+                        sql,
+                        params,
+                        out_binds,
+                        enable_uuid_binary,
+                        fetch_decimals,
+                        vector_return_format,
+                        enable_lowercase_column_names,
+                        $sc_shape,
+                    )
+                }
+            )*
 
-    pub fn evict(&self, py: Python<'_>, client: &SyncOracleClient) -> PyResult<()> {
-        let inner = Arc::clone(&self.inner);
-        let worker = Arc::clone(client.worker());
-        py.detach(|| inner.evict_sync(&worker))
-            .map_err(|e| e.to_py_err(py))
-    }
-
-    pub fn stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        build_stats_dict(py, &self.inner)
-    }
-
-    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
-        let inner = Arc::clone(&self.inner);
-        py.detach(|| inner.close_sync())
-            .map_err(|e| e.to_py_err(py))
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_rows(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<Py<PyAny>> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_rows_and_names,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_dicts(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<Py<PyAny>> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_dicts,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_value(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<Py<PyAny>> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_first_value,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_dml(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<Py<PyAny>> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_dml,
-        )
-    }
+            $($extra)*
+        }
+    };
 }
+
+impl_oracle_pool_pymethods!(
+    SyncOraclePool,
+    client = SyncOracleClient,
+    acquire_ret = SyncOracleClient,
+    unit_ret = (),
+    single_ret = Py<PyAny>,
+    single_calls = [
+        fetch_rows => reply_rows_and_names,
+        fetch_dicts => reply_dicts,
+        fetch_value => reply_first_value,
+        execute_dml => reply_dml,
+    ],
+    extra = {
+        #[pyo3(signature = (
+            *,
+            timeout=None,
+            connection_tag=None,
+            purity=None,
+            client_identifier=None,
+            module=None,
+            action=None,
+            ecid=None,
+        ))]
+        #[allow(clippy::too_many_arguments)]
+        pub fn acquire(
+            &self,
+            py: Python<'_>,
+            timeout: Option<f64>,
+            connection_tag: Option<String>,
+            purity: Option<String>,
+            client_identifier: Option<String>,
+            module: Option<String>,
+            action: Option<String>,
+            ecid: Option<String>,
+        ) -> PyResult<SyncOracleClient> {
+            let inner = Arc::clone(&self.inner);
+            let worker = py
+                .detach(|| {
+                    inner.acquire_sync(
+                        timeout,
+                        connection_tag,
+                        purity.as_deref(),
+                        client_identifier,
+                        module,
+                        action,
+                        ecid,
+                    )
+                })
+                .map_err(|e| e.to_py_err(py))?;
+            Ok(SyncOracleClient::from_worker(worker))
+        }
+
+        #[pyo3(signature = (
+            client,
+            *,
+            connection_tag=None,
+            discard=false,
+        ))]
+        pub fn release(
+            &self,
+            py: Python<'_>,
+            client: &SyncOracleClient,
+            connection_tag: Option<String>,
+            discard: bool,
+        ) -> PyResult<()> {
+            let inner = Arc::clone(&self.inner);
+            let worker = Arc::clone(client.worker());
+            py.detach(|| inner.release_sync(&worker, connection_tag, discard))
+                .map_err(|e| e.to_py_err(py))
+        }
+
+        pub fn evict(&self, py: Python<'_>, client: &SyncOracleClient) -> PyResult<()> {
+            let inner = Arc::clone(&self.inner);
+            let worker = Arc::clone(client.worker());
+            py.detach(|| inner.evict_sync(&worker))
+                .map_err(|e| e.to_py_err(py))
+        }
+
+        pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+            let inner = Arc::clone(&self.inner);
+            py.detach(|| inner.close_sync())
+                .map_err(|e| e.to_py_err(py))
+        }
+    }
+);
 
 struct AsyncPoolReleaseGuard {
     inner: Arc<OraclePoolCore>,
@@ -1359,495 +1276,138 @@ impl AsyncOraclePool {
     }
 }
 
-#[pymethods]
-impl AsyncOraclePool {
-    #[new]
-    #[pyo3(signature = (
-        *,
-        user=None,
-        password=None,
-        dsn=None,
-        host="localhost",
-        port=1521,
-        service_name="FREEPDB1",
-        sid=None,
-        tns_admin=None,
-        connect_descriptor=None,
-        protocol="tcp",
-        ssl_server_dn_match=true,
-        ssl_server_cert_dn=None,
-        wallet_location=None,
-        wallet_password=None,
-        pem_cert_data=None,
-        cwallet_sso_data=None,
-        auth_mode="password",
-        access_token=None,
-        token_auth_options=None,
-        cclass=None,
-        purity="SELF",
-        connection_tag=None,
-        stmtcachesize=64,
-        prefetchrows=256,
-        arraysize=256,
-        call_timeout_ms=None,
-        connect_timeout=10.0,
-        enable_lowercase_column_names=true,
-        client_identifier=None,
-        module=None,
-        action=None,
-        ecid=None,
-        min_size=1,
-        max_size=10,
-        acquire_timeout=30.0,
-        reset_timeout=10.0,
-        close_timeout=30.0,
-        max_lifetime_seconds=3600.0,
-        idle_timeout_seconds=600.0,
-        health_check_interval_seconds=30.0,
-        enable_reset_relay=true,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        py: Python<'_>,
-        user: Option<String>,
-        password: Option<String>,
-        dsn: Option<String>,
-        host: &str,
-        port: i32,
-        service_name: &str,
-        sid: Option<String>,
-        tns_admin: Option<String>,
-        connect_descriptor: Option<String>,
-        protocol: &str,
-        ssl_server_dn_match: bool,
-        ssl_server_cert_dn: Option<String>,
-        wallet_location: Option<String>,
-        wallet_password: Option<String>,
-        pem_cert_data: Option<Vec<u8>>,
-        cwallet_sso_data: Option<Vec<u8>>,
-        auth_mode: &str,
-        access_token: Option<String>,
-        token_auth_options: Option<BTreeMap<String, String>>,
-        cclass: Option<String>,
-        purity: &str,
-        connection_tag: Option<String>,
-        stmtcachesize: i32,
-        prefetchrows: i64,
-        arraysize: i64,
-        call_timeout_ms: Option<i64>,
-        connect_timeout: f64,
-        enable_lowercase_column_names: bool,
-        client_identifier: Option<String>,
-        module: Option<String>,
-        action: Option<String>,
-        ecid: Option<String>,
-        min_size: i64,
-        max_size: i64,
-        acquire_timeout: f64,
-        reset_timeout: f64,
-        close_timeout: f64,
-        max_lifetime_seconds: f64,
-        idle_timeout_seconds: f64,
-        health_check_interval_seconds: f64,
-        enable_reset_relay: bool,
-    ) -> PyResult<Self> {
-        let options = build_pool_options_from_py(
-            user,
-            password,
-            dsn,
-            host,
-            port,
-            service_name,
-            sid,
-            tns_admin,
-            connect_descriptor,
-            protocol,
-            ssl_server_dn_match,
-            ssl_server_cert_dn,
-            wallet_location,
-            wallet_password,
-            pem_cert_data,
-            cwallet_sso_data,
-            auth_mode,
-            access_token,
-            token_auth_options,
-            cclass,
-            purity,
-            connection_tag,
-            stmtcachesize,
-            prefetchrows,
-            arraysize,
-            call_timeout_ms,
-            connect_timeout,
-            enable_lowercase_column_names,
-            client_identifier,
-            module,
-            action,
-            ecid,
-            min_size,
-            max_size,
-            acquire_timeout,
-            reset_timeout,
-            close_timeout,
-            max_lifetime_seconds,
-            idle_timeout_seconds,
-            health_check_interval_seconds,
-            enable_reset_relay,
-        )
-        .map_err(|e| e.to_py_err(py))?;
-        Ok(Self {
-            inner: Arc::new(OraclePoolCore::new(options)),
-        })
-    }
+impl_oracle_pool_pymethods!(
+    AsyncOraclePool,
+    client = AsyncOracleClient,
+    acquire_ret = RustDbTaskAwaitable,
+    unit_ret = RustDbTaskAwaitable,
+    single_ret = RustDbTaskAwaitable,
+    single_calls = [
+        fetch_rows => reply_rows_and_names,
+        fetch_dicts => reply_dicts,
+        fetch_value => reply_first_value,
+        execute_dml => reply_dml,
+    ],
+    extra = {
+        #[pyo3(signature = (
+            *,
+            timeout=None,
+            connection_tag=None,
+            purity=None,
+            client_identifier=None,
+            module=None,
+            action=None,
+            ecid=None,
+        ))]
+        #[allow(clippy::too_many_arguments)]
+        pub fn acquire(
+            &self,
+            py: Python<'_>,
+            timeout: Option<f64>,
+            connection_tag: Option<String>,
+            purity: Option<String>,
+            client_identifier: Option<String>,
+            module: Option<String>,
+            action: Option<String>,
+            ecid: Option<String>,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let inner = Arc::clone(&self.inner);
+            spawn_rust_db_task_with_attr(
+                py,
+                async move {
+                    inner
+                        .acquire_async(
+                            timeout,
+                            connection_tag,
+                            purity,
+                            client_identifier,
+                            module,
+                            action,
+                            ecid,
+                        )
+                        .await
+                },
+                |py, worker| {
+                    let client = AsyncOracleClient::from_worker(worker);
+                    Ok(Py::new(py, client)?.into_any())
+                },
+                |py, err| err.to_py_err(py),
+                ORACLE_COMPLETION_DRAINER_ATTR,
+            )
+        }
 
-    #[getter]
-    pub fn min_size(&self) -> usize {
-        self.inner.min_size()
-    }
-
-    #[getter]
-    pub fn max_size(&self) -> usize {
-        self.inner.max_size()
-    }
-
-    #[getter]
-    pub fn size(&self) -> usize {
-        self.inner.size()
-    }
-
-    #[getter]
-    pub fn idle_size(&self) -> usize {
-        self.inner.idle_size()
-    }
-
-    #[getter]
-    pub fn borrowed_size(&self) -> usize {
-        self.inner.borrowed_size()
-    }
-
-    #[getter]
-    pub fn closed(&self) -> bool {
-        self.inner.is_closed()
-    }
-
-    #[pyo3(signature = (
-        *,
-        timeout=None,
-        connection_tag=None,
-        purity=None,
-        client_identifier=None,
-        module=None,
-        action=None,
-        ecid=None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn acquire(
-        &self,
-        py: Python<'_>,
-        timeout: Option<f64>,
-        connection_tag: Option<String>,
-        purity: Option<String>,
-        client_identifier: Option<String>,
-        module: Option<String>,
-        action: Option<String>,
-        ecid: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let inner = Arc::clone(&self.inner);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                inner
-                    .acquire_async(
-                        timeout,
-                        connection_tag,
-                        purity,
-                        client_identifier,
-                        module,
-                        action,
-                        ecid,
-                    )
+        #[pyo3(signature = (
+            client,
+            *,
+            connection_tag=None,
+            discard=false,
+        ))]
+        pub fn release(
+            &self,
+            py: Python<'_>,
+            client: &AsyncOracleClient,
+            connection_tag: Option<String>,
+            discard: bool,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let inner = Arc::clone(&self.inner);
+            let worker = Arc::clone(client.worker());
+            spawn_rust_db_task_with_attr(
+                py,
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        inner.release_sync(&worker, connection_tag, discard)
+                    })
                     .await
-            },
-            |py, worker| {
-                let client = AsyncOracleClient::from_worker(worker);
-                Ok(Py::new(py, client)?.into_any())
-            },
-            |py, err| err.to_py_err(py),
-            ORACLE_COMPLETION_DRAINER_ATTR,
-        )
-    }
+                    .map_err(|e| {
+                        OracleError::Interface(format!("pool release task panicked: {e}"))
+                    })?
+                },
+                |py, ()| Ok(py.None()),
+                |py, err| err.to_py_err(py),
+                ORACLE_COMPLETION_DRAINER_ATTR,
+            )
+        }
 
-    #[pyo3(signature = (
-        client,
-        *,
-        connection_tag=None,
-        discard=false,
-    ))]
-    pub fn release(
-        &self,
-        py: Python<'_>,
-        client: &AsyncOracleClient,
-        connection_tag: Option<String>,
-        discard: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let inner = Arc::clone(&self.inner);
-        let worker = Arc::clone(client.worker());
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    inner.release_sync(&worker, connection_tag, discard)
-                })
-                .await
-                .map_err(|e| OracleError::Interface(format!("pool release task panicked: {e}")))?
-            },
-            |py, ()| Ok(py.None()),
-            |py, err| err.to_py_err(py),
-            ORACLE_COMPLETION_DRAINER_ATTR,
-        )
-    }
+        pub fn evict(
+            &self,
+            py: Python<'_>,
+            client: &AsyncOracleClient,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let inner = Arc::clone(&self.inner);
+            let worker = Arc::clone(client.worker());
+            spawn_rust_db_task_with_attr(
+                py,
+                async move {
+                    tokio::task::spawn_blocking(move || inner.evict_sync(&worker))
+                        .await
+                        .map_err(|e| {
+                            OracleError::Interface(format!("pool evict task panicked: {e}"))
+                        })?
+                },
+                |py, ()| Ok(py.None()),
+                |py, err| err.to_py_err(py),
+                ORACLE_COMPLETION_DRAINER_ATTR,
+            )
+        }
 
-    #[pyo3(signature = (
-        *,
-        timeout=None,
-        connection_tag=None,
-        purity=None,
-        client_identifier=None,
-        module=None,
-        action=None,
-        ecid=None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn acquire_from_pool(
-        &self,
-        py: Python<'_>,
-        timeout: Option<f64>,
-        connection_tag: Option<String>,
-        purity: Option<String>,
-        client_identifier: Option<String>,
-        module: Option<String>,
-        action: Option<String>,
-        ecid: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.acquire(
-            py,
-            timeout,
-            connection_tag,
-            purity,
-            client_identifier,
-            module,
-            action,
-            ecid,
-        )
+        pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+            let inner = Arc::clone(&self.inner);
+            spawn_rust_db_task_with_attr(
+                py,
+                async move {
+                    tokio::task::spawn_blocking(move || inner.close_sync())
+                        .await
+                        .map_err(|e| {
+                            OracleError::Interface(format!("pool close task panicked: {e}"))
+                        })?
+                },
+                |py, ()| Ok(py.None()),
+                |py, err| err.to_py_err(py),
+                ORACLE_COMPLETION_DRAINER_ATTR,
+            )
+        }
     }
-
-    #[pyo3(signature = (
-        client,
-        *,
-        connection_tag=None,
-        discard=false,
-    ))]
-    pub fn release_to_pool(
-        &self,
-        py: Python<'_>,
-        client: &AsyncOracleClient,
-        connection_tag: Option<String>,
-        discard: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.release(py, client, connection_tag, discard)
-    }
-
-    pub fn evict(
-        &self,
-        py: Python<'_>,
-        client: &AsyncOracleClient,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let inner = Arc::clone(&self.inner);
-        let worker = Arc::clone(client.worker());
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                tokio::task::spawn_blocking(move || inner.evict_sync(&worker))
-                    .await
-                    .map_err(|e| OracleError::Interface(format!("pool evict task panicked: {e}")))?
-            },
-            |py, ()| Ok(py.None()),
-            |py, err| err.to_py_err(py),
-            ORACLE_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    pub fn stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        build_stats_dict(py, &self.inner)
-    }
-
-    pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let inner = Arc::clone(&self.inner);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                tokio::task::spawn_blocking(move || inner.close_sync())
-                    .await
-                    .map_err(|e| OracleError::Interface(format!("pool close task panicked: {e}")))?
-            },
-            |py, ()| Ok(py.None()),
-            |py, err| err.to_py_err(py),
-            ORACLE_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_rows(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_rows_and_names,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_dicts(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_dicts,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn fetch_value(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_first_value,
-        )
-    }
-
-    #[pyo3(
-        signature = (
-            sql,
-            params = None,
-            *,
-            out_binds = None,
-            enable_uuid_binary = true,
-            fetch_decimals = false,
-            vector_return_format = "list",
-            enable_lowercase_column_names = true,
-        ),
-        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
-    )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_dml(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        enable_uuid_binary: bool,
-        fetch_decimals: bool,
-        vector_return_format: &str,
-        enable_lowercase_column_names: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        self.single_call(
-            py,
-            sql,
-            params,
-            out_binds,
-            enable_uuid_binary,
-            fetch_decimals,
-            vector_return_format,
-            enable_lowercase_column_names,
-            reply_dml,
-        )
-    }
-}
+);
 
 #[cfg(test)]
 mod tests {

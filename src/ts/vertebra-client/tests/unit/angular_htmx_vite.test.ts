@@ -6,6 +6,7 @@ import ts from "typescript";
 import type { Plugin, ViteDevServer } from "vite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as clientModule from "../../src/client/client";
+import * as asyncRunnerModule from "../../src/internal/async_runner";
 import { type RouteRegistry, routeUrl, wsUrl } from "../../src/router";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -135,6 +136,9 @@ function loadAngularAdapter(): typeof AngularAdapterModule {
     }
     if (specifier === "../client/client") {
       return clientModule;
+    }
+    if (specifier === "../internal/async_runner") {
+      return asyncRunnerModule;
     }
     throw new Error(`Unexpected import in angular adapter: ${specifier}`);
   };

@@ -880,6 +880,262 @@ fn validate_vector_payload(
     Ok((normalized, cell_bytes))
 }
 
+fn init_list_offsets(row_cap: usize) -> Vec<i32> {
+    let mut offsets = Vec::with_capacity(row_cap.saturating_add(1));
+    offsets.push(0);
+    offsets
+}
+
+fn vector_kind_from_encoding(enc: &str) -> VectorKind {
+    if enc == "pghalfvec" {
+        VectorKind::HalfVec
+    } else {
+        VectorKind::Vector
+    }
+}
+
+fn extract_list_item_field(
+    field: &Field,
+    parent_name: &str,
+    expected: &str,
+) -> Result<FieldRef, PostgresError> {
+    match field.data_type() {
+        DataType::List(item_field) => Ok(Arc::clone(item_field)),
+        _ => Err(PostgresError::Data(format!(
+            "pg-array `{parent_name}` {expected}"
+        ))),
+    }
+}
+
+fn check_single_cell_cap(
+    bytes: usize,
+    max_bytes: usize,
+    label: &str,
+) -> Result<usize, PostgresError> {
+    if bytes > max_bytes {
+        Err(PostgresError::Data(format!(
+            "{label} value of {bytes} bytes exceeds Arrow batch max_bytes ({max_bytes})"
+        )))
+    } else {
+        Ok(bytes)
+    }
+}
+
+fn accumulate_child_bytes(
+    total: usize,
+    child_bytes: usize,
+    max_bytes: usize,
+    label: &str,
+) -> Result<usize, PostgresError> {
+    let next = total
+        .checked_add(child_bytes)
+        .ok_or_else(|| PostgresError::Data(format!("{label} aggregate byte count overflow")))?;
+    check_single_cell_cap(next, max_bytes, label)?;
+    Ok(next)
+}
+
+fn prepare_temporal_epoch<T: Copy + PartialEq>(
+    val: T,
+    neg_inf: T,
+    pos_inf: T,
+    zero: T,
+) -> PreparedTemporalValue<T> {
+    let (kind, value) = if val == neg_inf {
+        (-1i8, zero)
+    } else if val == pos_inf {
+        (1i8, zero)
+    } else {
+        (0i8, val)
+    };
+    PreparedTemporalValue::Epoch { kind, value }
+}
+
+fn prepare_vector_cell(
+    val: &PgValue,
+    expected_kind: VectorKind,
+    fixed_dim: Option<i32>,
+    max_bytes: usize,
+    mode_label: &str,
+) -> Result<(PreparedArrowCell, usize), PostgresError> {
+    match val {
+        PgValue::Vector { values, kind } => {
+            let (normalized, bytes) =
+                validate_vector_payload(values, *kind, expected_kind, fixed_dim, max_bytes)?;
+            Ok((PreparedArrowCell::Vector(normalized), bytes))
+        }
+        other => Err(PostgresError::Data(format!(
+            "expected PgValue::Vector for {mode_label} pgvector/halfvec column, got {}",
+            pg_value_tag(other)
+        ))),
+    }
+}
+
+fn push_null_list(nulls: &mut NullBufferBuilder, offsets: &mut Vec<i32>, count: usize) {
+    nulls.append_null();
+    offsets.push(count as i32);
+}
+
+fn push_i32_list_slice(
+    nulls: &mut NullBufferBuilder,
+    offsets: &mut Vec<i32>,
+    values: &mut Int32Builder,
+    count: &mut usize,
+    slice: &[i32],
+) {
+    nulls.append_non_null();
+    *count += slice.len();
+    offsets.push(*count as i32);
+    values.append_slice(slice);
+}
+
+fn finish_struct_array(
+    fields: &Fields,
+    children: Vec<ArrayRef>,
+    nulls: &mut NullBufferBuilder,
+    row_count: usize,
+    label: &str,
+) -> Result<ArrayRef, PostgresError> {
+    let arr = StructArray::try_new_with_length(fields.clone(), children, nulls.finish(), row_count)
+        .map_err(|e| PostgresError::Data(format!("failed to build {label}: {e}")))?;
+    Ok(Arc::new(arr))
+}
+
+fn finish_list_array(
+    item_field: &FieldRef,
+    offsets: &mut Vec<i32>,
+    values: ArrayRef,
+    nulls: &mut NullBufferBuilder,
+    label: &str,
+) -> Result<ArrayRef, PostgresError> {
+    let arr = ListArray::try_new(
+        Arc::clone(item_field),
+        OffsetBuffer::new(std::mem::replace(offsets, vec![0]).into()),
+        values,
+        nulls.finish(),
+    )
+    .map_err(|e| PostgresError::Data(format!("failed to build {label}: {e}")))?;
+    Ok(Arc::new(arr))
+}
+
+macro_rules! match_simple_from_field {
+    (
+        $dt:expr, $enc:expr, $row_cap:expr;
+        simple: [ $( $arrow_dt:path => $variant:ident ($builder:ty) ),* $(,)? ];
+        rest: { $( $pat:pat => $body:expr ),* $(,)? }
+    ) => {
+        match ($dt, $enc) {
+            $(
+                ($arrow_dt, _) => Ok(ArrowColumnBuilder::$variant(<$builder>::with_capacity($row_cap))),
+            )*
+            $(
+                $pat => $body,
+            )*
+        }
+    };
+}
+
+macro_rules! match_prepare_cell {
+    (
+        $self_:expr, $val:expr, $max_bytes:expr;
+        scalars: [ $( $b_pat:pat => ($pg_pat:path, $cell_ctor:path, $size:expr, $label:expr, $expected:expr) ),* $(,)? ];
+        rest: { $( $pat:pat => $body:expr ),* $(,)? }
+    ) => {
+        match $self_ {
+            $(
+                $b_pat => match $val {
+                    $pg_pat(v) => Ok(($cell_ctor(*v), check_single_cell_cap($size, $max_bytes, $label)?)),
+                    other => Err(PostgresError::Data(format!(
+                        "expected {}, got {}",
+                        $expected,
+                        pg_value_tag(other)
+                    ))),
+                },
+            )*
+            $(
+                $pat => $body,
+            )*
+        }
+    };
+}
+
+macro_rules! validate_offset_cells {
+    ($cells:expr, $base:expr, $reset:expr, $pat:pat => $len:expr, $label:expr) => {{
+        let mut cur = if $reset { 0 } else { *$base };
+        for c in $cells {
+            if let $pat = c {
+                cur = checked_i32_offset_sum(cur, $len, $label)?;
+            }
+        }
+        Ok(())
+    }};
+}
+
+macro_rules! append_temporal_cell {
+    ($meta:expr, $value:expr, $cell:expr, $variant:path, $label:expr) => {{
+        let tv = match $cell {
+            PreparedArrowCell::Null => PreparedTemporalValue::Null,
+            $variant(t) => t,
+            _ => unreachable!(concat!("prepared cell matches ", $label, " builder")),
+        };
+        match tv {
+            PreparedTemporalValue::Null => {
+                $meta.append_null();
+                $value.append_null();
+            }
+            PreparedTemporalValue::Epoch {
+                kind: k,
+                value: raw,
+            } => {
+                $meta.append_epoch(k);
+                $value.append_value(raw);
+            }
+            PreparedTemporalValue::WireText {
+                wire_text: wt,
+                date_style: ds,
+                time_zone: tz,
+            } => {
+                $value.append_null();
+                $meta.append_wire_text(&wt, &ds, &tz);
+            }
+        }
+    }};
+}
+
+macro_rules! match_append_prepared {
+    (
+        $builder:expr, $cell:expr;
+        primitives: [ $( $b_var:ident => $c_var:ident ),* $(,)? ];
+        rest: { $( $pat:pat => $body:expr ),* $(,)? }
+    ) => {
+        match ($builder, $cell) {
+            $(
+                (ArrowColumnBuilder::$b_var(b), PreparedArrowCell::Null) => b.append_null(),
+                (ArrowColumnBuilder::$b_var(b), PreparedArrowCell::$c_var(v)) => b.append_value(v),
+            )*
+            $(
+                $pat => $body,
+            )*
+        }
+    };
+}
+
+macro_rules! match_finish_array {
+    (
+        $builder:expr;
+        simple: [ $( $s_var:ident ),* $(,)? ];
+        rest: { $( $pat:pat => $body:expr ),* $(,)? }
+    ) => {
+        match $builder {
+            $(
+                ArrowColumnBuilder::$s_var(b) => Ok(Arc::new(b.finish())),
+            )*
+            $(
+                $pat => $body,
+            )*
+        }
+    };
+}
+
 impl ArrowColumnBuilder {
     fn from_field(field: &Field, row_cap: usize, depth: usize) -> Result<Self, PostgresError> {
         if depth > MAX_ARROW_NESTING_DEPTH {
@@ -893,168 +1149,147 @@ impl ArrowColumnBuilder {
             .cloned()
             .unwrap_or_default();
 
-        match (field.data_type(), encoding.as_str()) {
-            (DataType::Boolean, _) => Ok(Self::Boolean(BooleanBuilder::with_capacity(row_cap))),
-            (DataType::Int16, _) => Ok(Self::Int16(Int16Builder::with_capacity(row_cap))),
-            (DataType::Int32, _) => Ok(Self::Int32(Int32Builder::with_capacity(row_cap))),
-            (DataType::Int64, enc) => Ok(Self::Int64 {
-                builder: Int64Builder::with_capacity(row_cap),
-                is_pg_time: enc == "pg-time-micros",
-            }),
-            (DataType::UInt32, _) => Ok(Self::UInt32(UInt32Builder::with_capacity(row_cap))),
-            (DataType::Float32, _) => Ok(Self::Float32(Float32Builder::with_capacity(row_cap))),
-            (DataType::Float64, _) => Ok(Self::Float64(Float64Builder::with_capacity(row_cap))),
-            (DataType::Utf8, _) => Ok(Self::Utf8 {
-                builder: StringBuilder::with_capacity(row_cap, row_cap.saturating_mul(16)),
-                encoding,
-                offset_bytes: 0,
-            }),
-            (DataType::Binary, _) => Ok(Self::Binary {
-                builder: BinaryBuilder::with_capacity(row_cap, row_cap.saturating_mul(16)),
-                offset_bytes: 0,
-            }),
-            (DataType::FixedSizeBinary(16), _) => Ok(Self::Uuid {
-                builder: FixedSizeBinaryBuilder::with_capacity(row_cap, 16),
-                row_cap,
-            }),
-            (DataType::Struct(fields), "pg-date") => Ok(Self::Date {
-                meta: TemporalMetaBuilders::with_capacity(fields.clone(), row_cap),
-                value: Int32Builder::with_capacity(row_cap),
-            }),
-            (DataType::Struct(fields), "pg-timestamp" | "pg-timestamptz") => Ok(Self::Timestamp {
-                meta: TemporalMetaBuilders::with_capacity(fields.clone(), row_cap),
-                expected_kind: if encoding == "pg-timestamptz" {
-                    TemporalKind::TimestampTz
-                } else {
-                    TemporalKind::Timestamp
+        match_simple_from_field!(
+            field.data_type(), encoding.as_str(), row_cap;
+            simple: [
+                DataType::Boolean => Boolean(BooleanBuilder),
+                DataType::Int16 => Int16(Int16Builder),
+                DataType::Int32 => Int32(Int32Builder),
+                DataType::UInt32 => UInt32(UInt32Builder),
+                DataType::Float32 => Float32(Float32Builder),
+                DataType::Float64 => Float64(Float64Builder),
+            ];
+            rest: {
+                (DataType::Int64, enc) => Ok(Self::Int64 {
+                    builder: Int64Builder::with_capacity(row_cap),
+                    is_pg_time: enc == "pg-time-micros",
+                }),
+                (DataType::Utf8, _) => Ok(Self::Utf8 {
+                    builder: StringBuilder::with_capacity(row_cap, row_cap.saturating_mul(16)),
+                    encoding,
+                    offset_bytes: 0,
+                }),
+                (DataType::Binary, _) => Ok(Self::Binary {
+                    builder: BinaryBuilder::with_capacity(row_cap, row_cap.saturating_mul(16)),
+                    offset_bytes: 0,
+                }),
+                (DataType::FixedSizeBinary(16), _) => Ok(Self::Uuid {
+                    builder: FixedSizeBinaryBuilder::with_capacity(row_cap, 16),
+                    row_cap,
+                }),
+                (DataType::Struct(fields), "pg-date") => Ok(Self::Date {
+                    meta: TemporalMetaBuilders::with_capacity(fields.clone(), row_cap),
+                    value: Int32Builder::with_capacity(row_cap),
+                }),
+                (DataType::Struct(fields), "pg-timestamp" | "pg-timestamptz") => Ok(Self::Timestamp {
+                    meta: TemporalMetaBuilders::with_capacity(fields.clone(), row_cap),
+                    expected_kind: if encoding == "pg-timestamptz" {
+                        TemporalKind::TimestampTz
+                    } else {
+                        TemporalKind::Timestamp
+                    },
+                    value: Int64Builder::with_capacity(row_cap),
+                }),
+                (DataType::Struct(fields), "pg-interval") => Ok(Self::Interval {
+                    fields: fields.clone(),
+                    nulls: NullBufferBuilder::new(row_cap),
+                    months: Int32Builder::with_capacity(row_cap),
+                    days: Int32Builder::with_capacity(row_cap),
+                    microseconds: Int64Builder::with_capacity(row_cap),
+                }),
+                (DataType::Struct(fields), "pg-bits") => Ok(Self::BitString {
+                    fields: fields.clone(),
+                    nulls: NullBufferBuilder::new(row_cap),
+                    bytes: BinaryBuilder::with_capacity(row_cap, row_cap.saturating_mul(8)),
+                    bytes_offset: 0,
+                    bit_length: Int32Builder::with_capacity(row_cap),
+                }),
+                (DataType::FixedSizeList(item_field, dim), enc @ ("pgvector" | "pghalfvec")) => {
+                    if !(1..=MAX_PGVECTOR_ARROW_DIM).contains(dim) {
+                        return Err(PostgresError::Data(format!(
+                            "invalid fixed {enc} Arrow dimension {dim} on field `{}`",
+                            field.name()
+                        )));
+                    }
+                    let elem_cap = row_cap.saturating_mul((*dim as usize).min(64));
+                    Ok(Self::VectorFixed {
+                        item_field: Arc::clone(item_field),
+                        dim: *dim,
+                        expected_kind: vector_kind_from_encoding(enc),
+                        nulls: NullBufferBuilder::new(row_cap),
+                        values: Float32Builder::with_capacity(elem_cap),
+                    })
                 },
-                value: Int64Builder::with_capacity(row_cap),
-            }),
-            (DataType::Struct(fields), "pg-interval") => Ok(Self::Interval {
-                fields: fields.clone(),
-                nulls: NullBufferBuilder::new(row_cap),
-                months: Int32Builder::with_capacity(row_cap),
-                days: Int32Builder::with_capacity(row_cap),
-                microseconds: Int64Builder::with_capacity(row_cap),
-            }),
-            (DataType::Struct(fields), "pg-bits") => Ok(Self::BitString {
-                fields: fields.clone(),
-                nulls: NullBufferBuilder::new(row_cap),
-                bytes: BinaryBuilder::with_capacity(row_cap, row_cap.saturating_mul(8)),
-                bytes_offset: 0,
-                bit_length: Int32Builder::with_capacity(row_cap),
-            }),
-            (DataType::FixedSizeList(item_field, dim), enc @ ("pgvector" | "pghalfvec")) => {
-                if !(1..=MAX_PGVECTOR_ARROW_DIM).contains(dim) {
-                    return Err(PostgresError::Data(format!(
-                        "invalid fixed {enc} Arrow dimension {dim} on field `{}`",
-                        field.name()
-                    )));
-                }
-                let expected_kind = if enc == "pghalfvec" {
-                    VectorKind::HalfVec
-                } else {
-                    VectorKind::Vector
-                };
-                let elem_cap = row_cap.saturating_mul((*dim as usize).min(64));
-                Ok(Self::VectorFixed {
+                (DataType::List(item_field), enc @ ("pgvector" | "pghalfvec")) => Ok(Self::VectorDynamic {
                     item_field: Arc::clone(item_field),
-                    dim: *dim,
-                    expected_kind,
+                    expected_kind: vector_kind_from_encoding(enc),
                     nulls: NullBufferBuilder::new(row_cap),
-                    values: Float32Builder::with_capacity(elem_cap),
-                })
-            }
-            (DataType::List(item_field), enc @ ("pgvector" | "pghalfvec")) => {
-                let expected_kind = if enc == "pghalfvec" {
-                    VectorKind::HalfVec
-                } else {
-                    VectorKind::Vector
-                };
-                let mut offsets = Vec::with_capacity(row_cap.saturating_add(1));
-                offsets.push(0);
-                Ok(Self::VectorDynamic {
-                    item_field: Arc::clone(item_field),
-                    expected_kind,
-                    nulls: NullBufferBuilder::new(row_cap),
-                    offsets,
+                    offsets: init_list_offsets(row_cap),
                     values: Float32Builder::with_capacity(row_cap.saturating_mul(8)),
                     elem_count: 0,
-                })
+                }),
+                (DataType::Struct(fields), "pg-array") => {
+                    if fields.len() != 3 {
+                        return Err(PostgresError::Data(format!(
+                            "invalid pg-array Struct field count {} on `{}` (expected 3)",
+                            fields.len(),
+                            field.name()
+                        )));
+                    }
+                    let dim_item_field = extract_list_item_field(
+                        &fields[0],
+                        field.name(),
+                        "dimensions field must be List<Int32>",
+                    )?;
+                    let lb_item_field = extract_list_item_field(
+                        &fields[1],
+                        field.name(),
+                        "lower_bounds field must be List<Int32>",
+                    )?;
+                    let val_item_field =
+                        extract_list_item_field(&fields[2], field.name(), "values field must be List")?;
+                    let val_builder = Box::new(Self::from_field(
+                        val_item_field.as_ref(),
+                        row_cap,
+                        depth + 1,
+                    )?);
+                    Ok(Self::PgArray {
+                        fields: fields.clone(),
+                        dim_item_field,
+                        lb_item_field,
+                        val_item_field,
+                        nulls: NullBufferBuilder::new(row_cap),
+                        dim_nulls: NullBufferBuilder::new(row_cap),
+                        dim_offsets: init_list_offsets(row_cap),
+                        dim_values: Int32Builder::with_capacity(row_cap),
+                        dim_count: 0,
+                        lb_nulls: NullBufferBuilder::new(row_cap),
+                        lb_offsets: init_list_offsets(row_cap),
+                        lb_values: Int32Builder::with_capacity(row_cap),
+                        lb_count: 0,
+                        val_nulls: NullBufferBuilder::new(row_cap),
+                        val_offsets: init_list_offsets(row_cap),
+                        val_builder,
+                        val_count: 0,
+                    })
+                },
+                (DataType::Struct(fields), "pg-composite") => {
+                    let mut children = Vec::with_capacity(fields.len());
+                    for child_field in fields {
+                        children.push(Self::from_field(child_field.as_ref(), row_cap, depth + 1)?);
+                    }
+                    Ok(Self::Composite {
+                        fields: fields.clone(),
+                        nulls: NullBufferBuilder::new(row_cap),
+                        children,
+                    })
+                },
+                (dt, enc) => Err(PostgresError::Data(format!(
+                    "unsupported PostgreSQL Arrow column `{}` ({dt:?}, encoding `{enc}`)",
+                    field.name()
+                ))),
             }
-            (DataType::Struct(fields), "pg-array") => {
-                if fields.len() != 3 {
-                    return Err(PostgresError::Data(format!(
-                        "invalid pg-array Struct field count {} on `{}` (expected 3)",
-                        fields.len(),
-                        field.name()
-                    )));
-                }
-                let DataType::List(dim_item_field) = fields[0].data_type() else {
-                    return Err(PostgresError::Data(format!(
-                        "pg-array `{}` dimensions field must be List<Int32>",
-                        field.name()
-                    )));
-                };
-                let DataType::List(lb_item_field) = fields[1].data_type() else {
-                    return Err(PostgresError::Data(format!(
-                        "pg-array `{}` lower_bounds field must be List<Int32>",
-                        field.name()
-                    )));
-                };
-                let DataType::List(val_item_field) = fields[2].data_type() else {
-                    return Err(PostgresError::Data(format!(
-                        "pg-array `{}` values field must be List",
-                        field.name()
-                    )));
-                };
-                let val_builder = Box::new(Self::from_field(
-                    val_item_field.as_ref(),
-                    row_cap,
-                    depth + 1,
-                )?);
-                let mut dim_offsets = Vec::with_capacity(row_cap.saturating_add(1));
-                dim_offsets.push(0);
-                let mut lb_offsets = Vec::with_capacity(row_cap.saturating_add(1));
-                lb_offsets.push(0);
-                let mut val_offsets = Vec::with_capacity(row_cap.saturating_add(1));
-                val_offsets.push(0);
-                Ok(Self::PgArray {
-                    fields: fields.clone(),
-                    dim_item_field: Arc::clone(dim_item_field),
-                    lb_item_field: Arc::clone(lb_item_field),
-                    val_item_field: Arc::clone(val_item_field),
-                    nulls: NullBufferBuilder::new(row_cap),
-                    dim_nulls: NullBufferBuilder::new(row_cap),
-                    dim_offsets,
-                    dim_values: Int32Builder::with_capacity(row_cap),
-                    dim_count: 0,
-                    lb_nulls: NullBufferBuilder::new(row_cap),
-                    lb_offsets,
-                    lb_values: Int32Builder::with_capacity(row_cap),
-                    lb_count: 0,
-                    val_nulls: NullBufferBuilder::new(row_cap),
-                    val_offsets,
-                    val_builder,
-                    val_count: 0,
-                })
-            }
-            (DataType::Struct(fields), "pg-composite") => {
-                let mut children = Vec::with_capacity(fields.len());
-                for child_field in fields {
-                    children.push(Self::from_field(child_field.as_ref(), row_cap, depth + 1)?);
-                }
-                Ok(Self::Composite {
-                    fields: fields.clone(),
-                    nulls: NullBufferBuilder::new(row_cap),
-                    children,
-                })
-            }
-            (dt, enc) => Err(PostgresError::Data(format!(
-                "unsupported PostgreSQL Arrow column `{}` ({dt:?}, encoding `{enc}`)",
-                field.name()
-            ))),
-        }
+        )
     }
 
     fn prepare_cell(
@@ -1066,461 +1301,343 @@ impl ArrowColumnBuilder {
             return Ok((PreparedArrowCell::Null, 0));
         }
 
-        let check_single_cap = |bytes: usize, label: &str| -> Result<usize, PostgresError> {
-            if bytes > max_bytes {
-                Err(PostgresError::Data(format!(
-                    "{label} value of {bytes} bytes exceeds Arrow batch max_bytes ({max_bytes})"
-                )))
-            } else {
-                Ok(bytes)
-            }
-        };
-
-        match self {
-            Self::Boolean(_) => match val {
-                PgValue::Bool(v) => Ok((PreparedArrowCell::Bool(*v), check_single_cap(1, "bool")?)),
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Bool for Boolean Arrow column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::Int16(_) => match val {
-                PgValue::Int2(v) => {
-                    Ok((PreparedArrowCell::Int16(*v), check_single_cap(2, "int2")?))
-                }
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Int2 for Int16 Arrow column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::Int32(_) => match val {
-                PgValue::Int4(v) => {
-                    Ok((PreparedArrowCell::Int32(*v), check_single_cap(4, "int4")?))
-                }
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Int4 for Int32 Arrow column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::Int64 { is_pg_time, .. } => {
-                if *is_pg_time {
-                    match val {
-                        PgValue::Time(us) => {
-                            let valid = validate_time_micros(*us)?;
-                            Ok((
-                                PreparedArrowCell::Int64(valid),
-                                check_single_cap(8, "time")?,
+        match_prepare_cell!(
+            self, val, max_bytes;
+            scalars: [
+                Self::Boolean(_) => (PgValue::Bool, PreparedArrowCell::Bool, 1, "bool", "PgValue::Bool for Boolean Arrow column"),
+                Self::Int16(_) => (PgValue::Int2, PreparedArrowCell::Int16, 2, "int2", "PgValue::Int2 for Int16 Arrow column"),
+                Self::Int32(_) => (PgValue::Int4, PreparedArrowCell::Int32, 4, "int4", "PgValue::Int4 for Int32 Arrow column"),
+                Self::Int64 { is_pg_time: false, .. } => (PgValue::Int8, PreparedArrowCell::Int64, 8, "int8", "PgValue::Int8 for Int64 Arrow column"),
+                Self::Float32(_) => (PgValue::Float4, PreparedArrowCell::Float32, 4, "float4", "PgValue::Float4 for Float32 Arrow column"),
+                Self::Float64(_) => (PgValue::Float8, PreparedArrowCell::Float64, 8, "float8", "PgValue::Float8 for Float64 Arrow column"),
+                Self::Uuid { .. } => (PgValue::Uuid, PreparedArrowCell::Uuid, 16, "uuid", "PgValue::Uuid for FixedSizeBinary(16) Arrow column"),
+            ];
+            rest: {
+                Self::Int64 { is_pg_time: true, .. } => match val {
+                    PgValue::Time(us) => Ok((
+                        PreparedArrowCell::Int64(validate_time_micros(*us)?),
+                        check_single_cell_cap(8, max_bytes, "time")?,
+                    )),
+                    other => Err(PostgresError::Data(format!(
+                        "expected PgValue::Time for pg-time-micros column, got {}",
+                        pg_value_tag(other)
+                    ))),
+                },
+                Self::UInt32(_) => {
+                    let parsed = match val {
+                        PgValue::Int8(v) => u32::try_from(*v).map_err(|_| {
+                            PostgresError::Data(format!(
+                                "PostgreSQL unsigned 32-bit OID/regproc/xid/cid value {v} outside 0..={}",
+                                u32::MAX
                             ))
+                        })?,
+                        PgValue::Text(s) => s.trim().parse::<u32>().map_err(|_| {
+                            PostgresError::Data(format!(
+                                "invalid PostgreSQL unsigned 32-bit OID/regproc/xid/cid text {s:?}"
+                            ))
+                        })?,
+                        other => {
+                            return Err(PostgresError::Data(format!(
+                                "expected PgValue::Int8 or Text for UInt32 Arrow column, got {}",
+                                pg_value_tag(other)
+                            )));
                         }
-                        other => Err(PostgresError::Data(format!(
-                            "expected PgValue::Time for pg-time-micros column, got {}",
-                            pg_value_tag(other)
-                        ))),
-                    }
-                } else {
-                    match val {
-                        PgValue::Int8(v) => {
-                            Ok((PreparedArrowCell::Int64(*v), check_single_cap(8, "int8")?))
-                        }
-                        other => Err(PostgresError::Data(format!(
-                            "expected PgValue::Int8 for Int64 Arrow column, got {}",
-                            pg_value_tag(other)
-                        ))),
-                    }
-                }
-            }
-            Self::UInt32(_) => {
-                let parsed = match val {
-                    PgValue::Int8(v) => u32::try_from(*v).map_err(|_| {
-                        PostgresError::Data(format!(
-                            "PostgreSQL unsigned 32-bit OID/regproc/xid/cid value {v} outside 0..={}",
-                            u32::MAX
-                        ))
-                    })?,
-                    PgValue::Text(s) => s.trim().parse::<u32>().map_err(|_| {
-                        PostgresError::Data(format!(
-                            "invalid PostgreSQL unsigned 32-bit OID/regproc/xid/cid text {s:?}"
-                        ))
-                    })?,
-                    other => {
-                        return Err(PostgresError::Data(format!(
-                            "expected PgValue::Int8 or Text for UInt32 Arrow column, got {}",
-                            pg_value_tag(other)
-                        )));
-                    }
-                };
-                Ok((
-                    PreparedArrowCell::UInt32(parsed),
-                    check_single_cap(4, "uint32")?,
-                ))
-            }
-            Self::Float32(_) => match val {
-                PgValue::Float4(v) => Ok((
-                    PreparedArrowCell::Float32(*v),
-                    check_single_cap(4, "float4")?,
-                )),
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Float4 for Float32 Arrow column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::Float64(_) => match val {
-                PgValue::Float8(v) => Ok((
-                    PreparedArrowCell::Float64(*v),
-                    check_single_cap(8, "float8")?,
-                )),
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Float8 for Float64 Arrow column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::Utf8 { encoding, .. } => {
-                let text = match (encoding.as_str(), val) {
-                    ("numeric-decimal", PgValue::Numeric(num)) => {
-                        let rendered = num.to_canonical_string();
-                        check_single_cap(rendered.len(), "numeric")?;
-                        rendered
-                    }
-                    ("json" | "jsonb", PgValue::Json(raw)) => {
-                        check_single_cap(raw.len(), encoding)?;
-                        let s = std::str::from_utf8(raw).map_err(|e| {
-                            PostgresError::Data(format!("invalid UTF-8 in PgValue::Json: {e}"))
-                        })?;
-                        s.to_owned()
-                    }
-                    ("numeric-decimal" | "json" | "jsonb", other) => {
-                        return Err(PostgresError::Data(format!(
-                            "incompatible PgValue {} for `{encoding}` Utf8 Arrow column",
-                            pg_value_tag(other)
-                        )));
-                    }
-                    (_, PgValue::Text(s)) => {
-                        check_single_cap(s.len(), "text")?;
-                        s.clone()
-                    }
-                    (_, other) => {
-                        return Err(PostgresError::Data(format!(
-                            "expected PgValue::Text for Utf8 Arrow column, got {}",
-                            pg_value_tag(other)
-                        )));
-                    }
-                };
-                checked_i32_offset_sum(0, text.len(), "Utf8")?;
-                let len = text.len();
-                Ok((PreparedArrowCell::Utf8(text), len))
-            }
-            Self::Binary { .. } => match val {
-                PgValue::Bytes(raw) => {
-                    check_single_cap(raw.len(), "bytea")?;
-                    checked_i32_offset_sum(0, raw.len(), "Binary")?;
-                    Ok((PreparedArrowCell::Binary(raw.clone()), raw.len()))
-                }
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Bytes for Binary Arrow column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::Uuid { .. } => match val {
-                PgValue::Uuid(bytes) => Ok((
-                    PreparedArrowCell::Uuid(*bytes),
-                    check_single_cap(16, "uuid")?,
-                )),
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Uuid for FixedSizeBinary(16) Arrow column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::Date { .. } => match val {
-                PgValue::Date(days) => {
-                    let d = validate_date_days(*days)?;
-                    let (kind, raw_val) = if d == PG_DATE_NEG_INF {
-                        (-1i8, 0i32)
-                    } else if d == PG_DATE_POS_INF {
-                        (1i8, 0i32)
-                    } else {
-                        (0i8, d)
                     };
                     Ok((
-                        PreparedArrowCell::Date(PreparedTemporalValue::Epoch {
-                            kind,
-                            value: raw_val,
-                        }),
-                        check_single_cap(5, "date")?,
+                        PreparedArrowCell::UInt32(parsed),
+                        check_single_cell_cap(4, max_bytes, "uint32")?,
                     ))
-                }
-                PgValue::TemporalText {
-                    kind: TemporalKind::Date,
-                    wire_text,
-                    date_style,
-                    time_zone,
-                } => {
-                    let (tv, bytes) = TemporalMetaBuilders::prepare_wire_text(
-                        5,
-                        wire_text,
-                        date_style,
-                        time_zone,
-                        max_bytes,
-                        ("date wire_text", "date date_style", "date time_zone"),
-                    )?;
-                    Ok((PreparedArrowCell::Date(tv), bytes))
-                }
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Date or Date TemporalText for pg-date column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::Timestamp { expected_kind, .. } => match (*expected_kind, val) {
-                (TemporalKind::Timestamp, PgValue::Timestamp(us))
-                | (TemporalKind::TimestampTz, PgValue::TimestampTz(us)) => {
-                    let v = validate_timestamp_micros(*us)?;
-                    let (kind, raw_val) = if v == PG_TS_NEG_INF {
-                        (-1i8, 0i64)
-                    } else if v == PG_TS_POS_INF {
-                        (1i8, 0i64)
-                    } else {
-                        (0i8, v)
+                },
+                Self::Utf8 { encoding, .. } => {
+                    let text = match (encoding.as_str(), val) {
+                        ("numeric-decimal", PgValue::Numeric(num)) => {
+                            let rendered = num.to_canonical_string();
+                            check_single_cell_cap(rendered.len(), max_bytes, "numeric")?;
+                            rendered
+                        }
+                        ("json" | "jsonb", PgValue::Json(raw)) => {
+                            check_single_cell_cap(raw.len(), max_bytes, encoding)?;
+                            std::str::from_utf8(raw)
+                                .map_err(|e| {
+                                    PostgresError::Data(format!("invalid UTF-8 in PgValue::Json: {e}"))
+                                })?
+                                .to_owned()
+                        }
+                        ("numeric-decimal" | "json" | "jsonb", other) => {
+                            return Err(PostgresError::Data(format!(
+                                "incompatible PgValue {} for `{encoding}` Utf8 Arrow column",
+                                pg_value_tag(other)
+                            )));
+                        }
+                        (_, PgValue::Text(s)) => {
+                            check_single_cell_cap(s.len(), max_bytes, "text")?;
+                            s.clone()
+                        }
+                        (_, other) => {
+                            return Err(PostgresError::Data(format!(
+                                "expected PgValue::Text for Utf8 Arrow column, got {}",
+                                pg_value_tag(other)
+                            )));
+                        }
                     };
-                    Ok((
-                        PreparedArrowCell::Timestamp(PreparedTemporalValue::Epoch {
-                            kind,
-                            value: raw_val,
-                        }),
-                        check_single_cap(9, "timestamp")?,
-                    ))
-                }
-                (
-                    exp,
+                    checked_i32_offset_sum(0, text.len(), "Utf8")?;
+                    let len = text.len();
+                    Ok((PreparedArrowCell::Utf8(text), len))
+                },
+                Self::Binary { .. } => match val {
+                    PgValue::Bytes(raw) => {
+                        check_single_cell_cap(raw.len(), max_bytes, "bytea")?;
+                        checked_i32_offset_sum(0, raw.len(), "Binary")?;
+                        Ok((PreparedArrowCell::Binary(raw.clone()), raw.len()))
+                    }
+                    other => Err(PostgresError::Data(format!(
+                        "expected PgValue::Bytes for Binary Arrow column, got {}",
+                        pg_value_tag(other)
+                    ))),
+                },
+                Self::Date { .. } => match val {
+                    PgValue::Date(days) => Ok((
+                        PreparedArrowCell::Date(prepare_temporal_epoch(
+                            validate_date_days(*days)?,
+                            PG_DATE_NEG_INF,
+                            PG_DATE_POS_INF,
+                            0i32,
+                        )),
+                        check_single_cell_cap(5, max_bytes, "date")?,
+                    )),
                     PgValue::TemporalText {
-                        kind,
+                        kind: TemporalKind::Date,
                         wire_text,
                         date_style,
                         time_zone,
-                    },
-                ) if exp == *kind => {
-                    let (tv, bytes) = TemporalMetaBuilders::prepare_wire_text(
-                        9,
-                        wire_text,
-                        date_style,
-                        time_zone,
-                        max_bytes,
-                        (
-                            "timestamp wire_text",
-                            "timestamp date_style",
-                            "timestamp time_zone",
-                        ),
-                    )?;
-                    Ok((PreparedArrowCell::Timestamp(tv), bytes))
-                }
-                (_, other) => Err(PostgresError::Data(format!(
-                    "expected matching Timestamp/TemporalText ({expected_kind:?}), got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::Interval { .. } => match val {
-                PgValue::Interval {
-                    months,
-                    days,
-                    microseconds,
-                } => {
-                    let (m, d, us) = validate_interval_parts(*months, *days, *microseconds)?;
-                    Ok((
-                        PreparedArrowCell::Interval {
-                            months: m,
-                            days: d,
-                            microseconds: us,
+                    } => {
+                        let (tv, bytes) = TemporalMetaBuilders::prepare_wire_text(
+                            5,
+                            wire_text,
+                            date_style,
+                            time_zone,
+                            max_bytes,
+                            ("date wire_text", "date date_style", "date time_zone"),
+                        )?;
+                        Ok((PreparedArrowCell::Date(tv), bytes))
+                    }
+                    other => Err(PostgresError::Data(format!(
+                        "expected PgValue::Date or Date TemporalText for pg-date column, got {}",
+                        pg_value_tag(other)
+                    ))),
+                },
+                Self::Timestamp { expected_kind, .. } => match (*expected_kind, val) {
+                    (TemporalKind::Timestamp, PgValue::Timestamp(us))
+                    | (TemporalKind::TimestampTz, PgValue::TimestampTz(us)) => Ok((
+                        PreparedArrowCell::Timestamp(prepare_temporal_epoch(
+                            validate_timestamp_micros(*us)?,
+                            PG_TS_NEG_INF,
+                            PG_TS_POS_INF,
+                            0i64,
+                        )),
+                        check_single_cell_cap(9, max_bytes, "timestamp")?,
+                    )),
+                    (
+                        exp,
+                        PgValue::TemporalText {
+                            kind,
+                            wire_text,
+                            date_style,
+                            time_zone,
                         },
-                        check_single_cap(16, "interval")?,
-                    ))
-                }
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Interval for pg-interval column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::BitString { .. } => match val {
-                PgValue::BitString { data, bit_length } => {
-                    let bytes = validate_bitstring_payload(data, *bit_length, max_bytes)?;
-                    Ok((
-                        PreparedArrowCell::BitString {
-                            data: data.clone(),
-                            bit_length: *bit_length,
-                        },
-                        bytes,
-                    ))
-                }
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::BitString for pg-bits column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::VectorFixed {
-                dim, expected_kind, ..
-            } => match val {
-                PgValue::Vector { values, kind } => {
-                    let (normalized, bytes) = validate_vector_payload(
+                    ) if exp == *kind => {
+                        let (tv, bytes) = TemporalMetaBuilders::prepare_wire_text(
+                            9,
+                            wire_text,
+                            date_style,
+                            time_zone,
+                            max_bytes,
+                            (
+                                "timestamp wire_text",
+                                "timestamp date_style",
+                                "timestamp time_zone",
+                            ),
+                        )?;
+                        Ok((PreparedArrowCell::Timestamp(tv), bytes))
+                    }
+                    (_, other) => Err(PostgresError::Data(format!(
+                        "expected matching Timestamp/TemporalText ({expected_kind:?}), got {}",
+                        pg_value_tag(other)
+                    ))),
+                },
+                Self::Interval { .. } => match val {
+                    PgValue::Interval {
+                        months,
+                        days,
+                        microseconds,
+                    } => {
+                        let (m, d, us) = validate_interval_parts(*months, *days, *microseconds)?;
+                        Ok((
+                            PreparedArrowCell::Interval {
+                                months: m,
+                                days: d,
+                                microseconds: us,
+                            },
+                            check_single_cell_cap(16, max_bytes, "interval")?,
+                        ))
+                    }
+                    other => Err(PostgresError::Data(format!(
+                        "expected PgValue::Interval for pg-interval column, got {}",
+                        pg_value_tag(other)
+                    ))),
+                },
+                Self::BitString { .. } => match val {
+                    PgValue::BitString { data, bit_length } => {
+                        let bytes = validate_bitstring_payload(data, *bit_length, max_bytes)?;
+                        Ok((
+                            PreparedArrowCell::BitString {
+                                data: data.clone(),
+                                bit_length: *bit_length,
+                            },
+                            bytes,
+                        ))
+                    }
+                    other => Err(PostgresError::Data(format!(
+                        "expected PgValue::BitString for pg-bits column, got {}",
+                        pg_value_tag(other)
+                    ))),
+                },
+                Self::VectorFixed { dim, expected_kind, .. } => {
+                    prepare_vector_cell(val, *expected_kind, Some(*dim), max_bytes, "fixed")
+                },
+                Self::VectorDynamic { expected_kind, .. } => {
+                    prepare_vector_cell(val, *expected_kind, None, max_bytes, "dynamic")
+                },
+                Self::PgArray { val_builder, .. } => match val {
+                    PgValue::Array {
                         values,
-                        *kind,
-                        *expected_kind,
-                        Some(*dim),
-                        max_bytes,
-                    )?;
-                    Ok((PreparedArrowCell::Vector(normalized), bytes))
-                }
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Vector for fixed pgvector/halfvec column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::VectorDynamic { expected_kind, .. } => match val {
-                PgValue::Vector { values, kind } => {
-                    let (normalized, bytes) =
-                        validate_vector_payload(values, *kind, *expected_kind, None, max_bytes)?;
-                    Ok((PreparedArrowCell::Vector(normalized), bytes))
-                }
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Vector for dynamic pgvector/halfvec column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::PgArray { val_builder, .. } => match val {
-                PgValue::Array {
-                    values,
-                    dimensions,
-                    lower_bounds,
-                    element_oid,
-                } => {
-                    if *element_oid == 0 {
-                        return Err(PostgresError::Data(
-                            "PostgreSQL array element_oid must be >= 1".to_string(),
-                        ));
-                    }
-                    if dimensions.len() != lower_bounds.len() {
-                        return Err(PostgresError::Data(format!(
-                            "PostgreSQL array dimensions length {} does not match lower_bounds length {}",
-                            dimensions.len(),
-                            lower_bounds.len()
-                        )));
-                    }
-                    if dimensions.len() > MAX_ARRAY_DIMS {
-                        return Err(PostgresError::Data(format!(
-                            "PostgreSQL array rank {} exceeds maximum {MAX_ARRAY_DIMS}",
-                            dimensions.len()
-                        )));
-                    }
-                    if dimensions.is_empty() {
-                        if !values.is_empty() {
+                        dimensions,
+                        lower_bounds,
+                        element_oid,
+                    } => {
+                        if *element_oid == 0 {
                             return Err(PostgresError::Data(
-                                "0D PostgreSQL array must contain zero elements".to_string(),
+                                "PostgreSQL array element_oid must be >= 1".to_string(),
                             ));
                         }
-                        return Ok((
+                        if dimensions.len() != lower_bounds.len() {
+                            return Err(PostgresError::Data(format!(
+                                "PostgreSQL array dimensions length {} does not match lower_bounds length {}",
+                                dimensions.len(),
+                                lower_bounds.len()
+                            )));
+                        }
+                        if dimensions.len() > MAX_ARRAY_DIMS {
+                            return Err(PostgresError::Data(format!(
+                                "PostgreSQL array rank {} exceeds maximum {MAX_ARRAY_DIMS}",
+                                dimensions.len()
+                            )));
+                        }
+                        if dimensions.is_empty() {
+                            if !values.is_empty() {
+                                return Err(PostgresError::Data(
+                                    "0D PostgreSQL array must contain zero elements".to_string(),
+                                ));
+                            }
+                            return Ok((
+                                PreparedArrowCell::Array {
+                                    dimensions: Vec::new(),
+                                    lower_bounds: Vec::new(),
+                                    values: Vec::new(),
+                                },
+                                0,
+                            ));
+                        }
+
+                        let mut expected_len = 1usize;
+                        for (&dim, &lb) in dimensions.iter().zip(lower_bounds.iter()) {
+                            if dim < 1 {
+                                return Err(PostgresError::Data(format!(
+                                    "PostgreSQL array dimension must be >= 1, got {dim}"
+                                )));
+                            }
+                            if lb.checked_add(dim - 1).is_none() {
+                                return Err(PostgresError::Data(format!(
+                                    "PostgreSQL array upper bound overflows i32 (lower_bound={lb}, dim={dim})"
+                                )));
+                            }
+                            expected_len = expected_len.checked_mul(dim as usize).ok_or_else(|| {
+                                PostgresError::Data(
+                                    "PostgreSQL array dimensions product overflow".to_string(),
+                                )
+                            })?;
+                        }
+                        if expected_len != values.len() {
+                            return Err(PostgresError::Data(format!(
+                                "PostgreSQL array values length {} does not match dimensions product {expected_len}",
+                                values.len()
+                            )));
+                        }
+                        checked_i32_offset_sum(0, values.len(), "pg-array element list")?;
+
+                        let mut total_bytes =
+                            dimensions.len().saturating_mul(8).min(MAX_I32_OFFSET_BYTES);
+                        check_single_cell_cap(total_bytes, max_bytes, "pg-array header")?;
+
+                        let mut prepared_vals = Vec::with_capacity(values.len());
+                        for elem in values {
+                            let (p_elem, elem_bytes) = val_builder.prepare_cell(elem, max_bytes)?;
+                            total_bytes =
+                                accumulate_child_bytes(total_bytes, elem_bytes, max_bytes, "pg-array")?;
+                            prepared_vals.push(p_elem);
+                        }
+                        Ok((
                             PreparedArrowCell::Array {
-                                dimensions: Vec::new(),
-                                lower_bounds: Vec::new(),
-                                values: Vec::new(),
+                                dimensions: dimensions.clone(),
+                                lower_bounds: lower_bounds.clone(),
+                                values: prepared_vals,
                             },
-                            0,
-                        ));
+                            total_bytes,
+                        ))
                     }
-
-                    let mut expected_len = 1usize;
-                    for (&dim, &lb) in dimensions.iter().zip(lower_bounds.iter()) {
-                        if dim < 1 {
+                    other => Err(PostgresError::Data(format!(
+                        "expected PgValue::Array for pg-array column, got {}",
+                        pg_value_tag(other)
+                    ))),
+                },
+                Self::Composite { fields, children, .. } => match val {
+                    PgValue::Composite { field_names, values, .. } => {
+                        if values.len() != children.len() {
                             return Err(PostgresError::Data(format!(
-                                "PostgreSQL array dimension must be >= 1, got {dim}"
+                                "PgValue::Composite attribute count {} does not match catalog composite field count {}",
+                                values.len(),
+                                children.len()
                             )));
                         }
-                        if lb.checked_add(dim - 1).is_none() {
+                        if !field_names.is_empty() && field_names.len() != fields.len() {
                             return Err(PostgresError::Data(format!(
-                                "PostgreSQL array upper bound overflows i32 (lower_bound={lb}, dim={dim})"
+                                "PgValue::Composite field_names length {} does not match catalog composite field count {}",
+                                field_names.len(),
+                                fields.len()
                             )));
                         }
-                        expected_len = expected_len.checked_mul(dim as usize).ok_or_else(|| {
-                            PostgresError::Data(
-                                "PostgreSQL array dimensions product overflow".to_string(),
-                            )
-                        })?;
+                        let mut total_bytes = 0usize;
+                        let mut prepared_children = Vec::with_capacity(children.len());
+                        for (child_builder, child_val) in children.iter().zip(values.iter()) {
+                            let (p_child, child_bytes) =
+                                child_builder.prepare_cell(child_val, max_bytes)?;
+                            total_bytes = accumulate_child_bytes(
+                                total_bytes,
+                                child_bytes,
+                                max_bytes,
+                                "pg-composite",
+                            )?;
+                            prepared_children.push(p_child);
+                        }
+                        Ok((PreparedArrowCell::Composite(prepared_children), total_bytes))
                     }
-                    if expected_len != values.len() {
-                        return Err(PostgresError::Data(format!(
-                            "PostgreSQL array values length {} does not match dimensions product {expected_len}",
-                            values.len()
-                        )));
-                    }
-                    checked_i32_offset_sum(0, values.len(), "pg-array element list")?;
-
-                    let mut total_bytes =
-                        dimensions.len().saturating_mul(8).min(MAX_I32_OFFSET_BYTES);
-                    check_single_cap(total_bytes, "pg-array header")?;
-
-                    let mut prepared_vals = Vec::with_capacity(values.len());
-                    for elem in values {
-                        let (p_elem, elem_bytes) = val_builder.prepare_cell(elem, max_bytes)?;
-                        total_bytes = total_bytes.checked_add(elem_bytes).ok_or_else(|| {
-                            PostgresError::Data(
-                                "pg-array aggregate byte count overflow".to_string(),
-                            )
-                        })?;
-                        check_single_cap(total_bytes, "pg-array")?;
-                        prepared_vals.push(p_elem);
-                    }
-                    Ok((
-                        PreparedArrowCell::Array {
-                            dimensions: dimensions.clone(),
-                            lower_bounds: lower_bounds.clone(),
-                            values: prepared_vals,
-                        },
-                        total_bytes,
-                    ))
-                }
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Array for pg-array column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-            Self::Composite {
-                fields, children, ..
-            } => match val {
-                PgValue::Composite {
-                    field_names,
-                    values,
-                    ..
-                } => {
-                    if values.len() != children.len() {
-                        return Err(PostgresError::Data(format!(
-                            "PgValue::Composite attribute count {} does not match catalog composite field count {}",
-                            values.len(),
-                            children.len()
-                        )));
-                    }
-                    if !field_names.is_empty() && field_names.len() != fields.len() {
-                        return Err(PostgresError::Data(format!(
-                            "PgValue::Composite field_names length {} does not match catalog composite field count {}",
-                            field_names.len(),
-                            fields.len()
-                        )));
-                    }
-                    let mut total_bytes = 0usize;
-                    let mut prepared_children = Vec::with_capacity(children.len());
-                    for (child_builder, child_val) in children.iter().zip(values.iter()) {
-                        let (p_child, child_bytes) =
-                            child_builder.prepare_cell(child_val, max_bytes)?;
-                        total_bytes = total_bytes.checked_add(child_bytes).ok_or_else(|| {
-                            PostgresError::Data(
-                                "pg-composite aggregate byte count overflow".to_string(),
-                            )
-                        })?;
-                        check_single_cap(total_bytes, "pg-composite")?;
-                        prepared_children.push(p_child);
-                    }
-                    Ok((PreparedArrowCell::Composite(prepared_children), total_bytes))
-                }
-                other => Err(PostgresError::Data(format!(
-                    "expected PgValue::Composite for pg-composite column, got {}",
-                    pg_value_tag(other)
-                ))),
-            },
-        }
+                    other => Err(PostgresError::Data(format!(
+                        "expected PgValue::Composite for pg-composite column, got {}",
+                        pg_value_tag(other)
+                    ))),
+                },
+            }
+        )
     }
 
     fn validate_cells_offsets(
@@ -1529,24 +1646,34 @@ impl ArrowColumnBuilder {
         reset_current: bool,
     ) -> Result<(), PostgresError> {
         match self {
-            Self::Utf8 { offset_bytes, .. } => {
-                let mut cur = if reset_current { 0 } else { *offset_bytes };
-                for c in cells {
-                    if let PreparedArrowCell::Utf8(s) = c {
-                        cur = checked_i32_offset_sum(cur, s.len(), "Utf8")?;
-                    }
-                }
-                Ok(())
-            }
-            Self::Binary { offset_bytes, .. } => {
-                let mut cur = if reset_current { 0 } else { *offset_bytes };
-                for c in cells {
-                    if let PreparedArrowCell::Binary(b) = c {
-                        cur = checked_i32_offset_sum(cur, b.len(), "Binary")?;
-                    }
-                }
-                Ok(())
-            }
+            Self::Utf8 { offset_bytes, .. } => validate_offset_cells!(
+                cells,
+                offset_bytes,
+                reset_current,
+                PreparedArrowCell::Utf8(s) => s.len(),
+                "Utf8"
+            ),
+            Self::Binary { offset_bytes, .. } => validate_offset_cells!(
+                cells,
+                offset_bytes,
+                reset_current,
+                PreparedArrowCell::Binary(b) => b.len(),
+                "Binary"
+            ),
+            Self::BitString { bytes_offset, .. } => validate_offset_cells!(
+                cells,
+                bytes_offset,
+                reset_current,
+                PreparedArrowCell::BitString { data, .. } => data.len(),
+                "bitstring bytes"
+            ),
+            Self::VectorDynamic { elem_count, .. } => validate_offset_cells!(
+                cells,
+                elem_count,
+                reset_current,
+                PreparedArrowCell::Vector(v) => v.len(),
+                "dynamic vector list"
+            ),
             Self::Date { meta, .. } => meta.validate_wire_text_offsets(
                 cells.iter().filter_map(|c| match c {
                     PreparedArrowCell::Date(tv) => Some(tv),
@@ -1567,24 +1694,6 @@ impl ArrowColumnBuilder {
                     "timestamp time_zone",
                 ),
             ),
-            Self::BitString { bytes_offset, .. } => {
-                let mut cur = if reset_current { 0 } else { *bytes_offset };
-                for c in cells {
-                    if let PreparedArrowCell::BitString { data, .. } = c {
-                        cur = checked_i32_offset_sum(cur, data.len(), "bitstring bytes")?;
-                    }
-                }
-                Ok(())
-            }
-            Self::VectorDynamic { elem_count, .. } => {
-                let mut cur = if reset_current { 0 } else { *elem_count };
-                for c in cells {
-                    if let PreparedArrowCell::Vector(v) = c {
-                        cur = checked_i32_offset_sum(cur, v.len(), "dynamic vector list")?;
-                    }
-                }
-                Ok(())
-            }
             Self::PgArray {
                 dim_count,
                 lb_count,
@@ -1637,255 +1746,232 @@ impl ArrowColumnBuilder {
     }
 
     fn append_prepared(&mut self, cell: PreparedArrowCell) {
-        match (self, cell) {
-            (Self::Boolean(b), PreparedArrowCell::Null) => b.append_null(),
-            (Self::Boolean(b), PreparedArrowCell::Bool(v)) => b.append_value(v),
-
-            (Self::Int16(b), PreparedArrowCell::Null) => b.append_null(),
-            (Self::Int16(b), PreparedArrowCell::Int16(v)) => b.append_value(v),
-
-            (Self::Int32(b), PreparedArrowCell::Null) => b.append_null(),
-            (Self::Int32(b), PreparedArrowCell::Int32(v)) => b.append_value(v),
-
-            (Self::Int64 { builder, .. }, PreparedArrowCell::Null) => builder.append_null(),
-            (Self::Int64 { builder, .. }, PreparedArrowCell::Int64(v)) => builder.append_value(v),
-
-            (Self::UInt32(b), PreparedArrowCell::Null) => b.append_null(),
-            (Self::UInt32(b), PreparedArrowCell::UInt32(v)) => b.append_value(v),
-
-            (Self::Float32(b), PreparedArrowCell::Null) => b.append_null(),
-            (Self::Float32(b), PreparedArrowCell::Float32(v)) => b.append_value(v),
-
-            (Self::Float64(b), PreparedArrowCell::Null) => b.append_null(),
-            (Self::Float64(b), PreparedArrowCell::Float64(v)) => b.append_value(v),
-
-            (Self::Utf8 { builder, .. }, PreparedArrowCell::Null) => builder.append_null(),
-            (
-                Self::Utf8 {
-                    builder,
-                    offset_bytes,
-                    ..
+        match_append_prepared!(
+            self, cell;
+            primitives: [
+                Boolean => Bool,
+                Int16 => Int16,
+                Int32 => Int32,
+                UInt32 => UInt32,
+                Float32 => Float32,
+                Float64 => Float64,
+            ];
+            rest: {
+                (Self::Int64 { builder, .. }, PreparedArrowCell::Null) => builder.append_null(),
+                (Self::Int64 { builder, .. }, PreparedArrowCell::Int64(v)) => builder.append_value(v),
+                (Self::Utf8 { builder, .. }, PreparedArrowCell::Null) => builder.append_null(),
+                (Self::Utf8 { builder, offset_bytes, .. }, PreparedArrowCell::Utf8(s)) => {
+                    *offset_bytes += s.len();
+                    builder.append_value(&s);
                 },
-                PreparedArrowCell::Utf8(s),
-            ) => {
-                *offset_bytes += s.len();
-                builder.append_value(&s);
-            }
-
-            (Self::Binary { builder, .. }, PreparedArrowCell::Null) => builder.append_null(),
-            (
-                Self::Binary {
-                    builder,
-                    offset_bytes,
+                (Self::Binary { builder, .. }, PreparedArrowCell::Null) => builder.append_null(),
+                (Self::Binary { builder, offset_bytes }, PreparedArrowCell::Binary(raw)) => {
+                    *offset_bytes += raw.len();
+                    builder.append_value(&raw);
                 },
-                PreparedArrowCell::Binary(raw),
-            ) => {
-                *offset_bytes += raw.len();
-                builder.append_value(&raw);
-            }
-
-            (Self::Uuid { builder, .. }, PreparedArrowCell::Null) => builder.append_null(),
-            (Self::Uuid { builder, .. }, PreparedArrowCell::Uuid(bytes)) => {
-                builder
-                    .append_value(bytes)
-                    .expect("validated 16-byte UUID matches FixedSizeBinaryBuilder(16)");
-            }
-
-            (Self::Date { meta, value }, cell) => {
-                let tv = match cell {
-                    PreparedArrowCell::Null => PreparedTemporalValue::Null,
-                    PreparedArrowCell::Date(t) => t,
-                    _ => unreachable!("prepared cell matches Date builder"),
-                };
-                match tv {
-                    PreparedTemporalValue::Null => {
-                        meta.append_null();
-                        value.append_null();
+                (Self::Uuid { builder, .. }, PreparedArrowCell::Null) => builder.append_null(),
+                (Self::Uuid { builder, .. }, PreparedArrowCell::Uuid(bytes)) => {
+                    builder
+                        .append_value(bytes)
+                        .expect("validated 16-byte UUID matches FixedSizeBinaryBuilder(16)");
+                },
+                (Self::Date { meta, value }, cell) => {
+                    append_temporal_cell!(meta, value, cell, PreparedArrowCell::Date, "Date");
+                },
+                (Self::Timestamp { meta, value, .. }, cell) => {
+                    append_temporal_cell!(meta, value, cell, PreparedArrowCell::Timestamp, "Timestamp");
+                },
+                (Self::Interval { nulls, months, days, microseconds, .. }, PreparedArrowCell::Null) => {
+                    nulls.append_null();
+                    months.append_null();
+                    days.append_null();
+                    microseconds.append_null();
+                },
+                (
+                    Self::Interval { nulls, months, days, microseconds, .. },
+                    PreparedArrowCell::Interval { months: m, days: d, microseconds: us },
+                ) => {
+                    nulls.append_non_null();
+                    months.append_value(m);
+                    days.append_value(d);
+                    microseconds.append_value(us);
+                },
+                (Self::BitString { nulls, bytes, bit_length, .. }, PreparedArrowCell::Null) => {
+                    nulls.append_null();
+                    bytes.append_null();
+                    bit_length.append_null();
+                },
+                (
+                    Self::BitString { nulls, bytes, bytes_offset, bit_length, .. },
+                    PreparedArrowCell::BitString { data, bit_length: bl },
+                ) => {
+                    nulls.append_non_null();
+                    *bytes_offset += data.len();
+                    bytes.append_value(&data);
+                    bit_length.append_value(bl);
+                },
+                (Self::VectorFixed { dim, nulls, values, .. }, PreparedArrowCell::Null) => {
+                    nulls.append_null();
+                    for _ in 0..*dim {
+                        values.append_null();
                     }
-                    PreparedTemporalValue::Epoch {
-                        kind: k,
-                        value: raw,
-                    } => {
-                        meta.append_epoch(k);
-                        value.append_value(raw);
+                },
+                (Self::VectorFixed { nulls, values, .. }, PreparedArrowCell::Vector(vec)) => {
+                    nulls.append_non_null();
+                    values.append_slice(&vec);
+                },
+                (Self::VectorDynamic { nulls, offsets, elem_count, .. }, PreparedArrowCell::Null) => {
+                    push_null_list(nulls, offsets, *elem_count);
+                },
+                (
+                    Self::VectorDynamic { nulls, offsets, values, elem_count, .. },
+                    PreparedArrowCell::Vector(vec),
+                ) => {
+                    nulls.append_non_null();
+                    *elem_count += vec.len();
+                    offsets.push(*elem_count as i32);
+                    values.append_slice(&vec);
+                },
+                (
+                    Self::PgArray {
+                        nulls,
+                        dim_nulls,
+                        dim_offsets,
+                        dim_count,
+                        lb_nulls,
+                        lb_offsets,
+                        lb_count,
+                        val_nulls,
+                        val_offsets,
+                        val_count,
+                        ..
+                    },
+                    PreparedArrowCell::Null,
+                ) => {
+                    nulls.append_null();
+                    push_null_list(dim_nulls, dim_offsets, *dim_count);
+                    push_null_list(lb_nulls, lb_offsets, *lb_count);
+                    push_null_list(val_nulls, val_offsets, *val_count);
+                },
+                (
+                    Self::PgArray {
+                        nulls,
+                        dim_nulls,
+                        dim_offsets,
+                        dim_values,
+                        dim_count,
+                        lb_nulls,
+                        lb_offsets,
+                        lb_values,
+                        lb_count,
+                        val_nulls,
+                        val_offsets,
+                        val_builder,
+                        val_count,
+                        ..
+                    },
+                    PreparedArrowCell::Array { dimensions, lower_bounds, values },
+                ) => {
+                    nulls.append_non_null();
+                    push_i32_list_slice(dim_nulls, dim_offsets, dim_values, dim_count, &dimensions);
+                    push_i32_list_slice(lb_nulls, lb_offsets, lb_values, lb_count, &lower_bounds);
+                    val_nulls.append_non_null();
+                    *val_count += values.len();
+                    val_offsets.push(*val_count as i32);
+                    for v in values {
+                        val_builder.append_prepared(v);
                     }
-                    PreparedTemporalValue::WireText {
-                        wire_text: wt,
-                        date_style: ds,
-                        time_zone: tz,
-                    } => {
-                        value.append_null();
-                        meta.append_wire_text(&wt, &ds, &tz);
+                },
+                (Self::Composite { nulls, children, .. }, PreparedArrowCell::Null) => {
+                    nulls.append_null();
+                    for child in children {
+                        child.append_prepared(PreparedArrowCell::Null);
                     }
-                }
-            }
-
-            (Self::Timestamp { meta, value, .. }, cell) => {
-                let tv = match cell {
-                    PreparedArrowCell::Null => PreparedTemporalValue::Null,
-                    PreparedArrowCell::Timestamp(t) => t,
-                    _ => unreachable!("prepared cell matches Timestamp builder"),
-                };
-                match tv {
-                    PreparedTemporalValue::Null => {
-                        meta.append_null();
-                        value.append_null();
+                },
+                (Self::Composite { nulls, children, .. }, PreparedArrowCell::Composite(attrs)) => {
+                    nulls.append_non_null();
+                    for (child, attr) in children.iter_mut().zip(attrs) {
+                        child.append_prepared(attr);
                     }
-                    PreparedTemporalValue::Epoch {
-                        kind: k,
-                        value: raw,
-                    } => {
-                        meta.append_epoch(k);
-                        value.append_value(raw);
-                    }
-                    PreparedTemporalValue::WireText {
-                        wire_text: wt,
-                        date_style: ds,
-                        time_zone: tz,
-                    } => {
-                        value.append_null();
-                        meta.append_wire_text(&wt, &ds, &tz);
-                    }
-                }
+                },
+                _ => unreachable!("prepared cell variant matches ArrowColumnBuilder variant"),
             }
+        );
+    }
 
-            (
-                Self::Interval {
+    fn finish_array(&mut self, row_count: usize) -> Result<ArrayRef, PostgresError> {
+        match_finish_array!(
+            self;
+            simple: [Boolean, Int16, Int32, UInt32, Float32, Float64];
+            rest: {
+                Self::Int64 { builder, .. } => Ok(Arc::new(builder.finish())),
+                Self::Utf8 { builder, offset_bytes, .. } => {
+                    *offset_bytes = 0;
+                    Ok(Arc::new(builder.finish()))
+                },
+                Self::Binary { builder, offset_bytes } => {
+                    *offset_bytes = 0;
+                    Ok(Arc::new(builder.finish()))
+                },
+                Self::Uuid { builder, row_cap } => {
+                    let fresh = FixedSizeBinaryBuilder::with_capacity(*row_cap, 16);
+                    let finished = std::mem::replace(builder, fresh).finish();
+                    Ok(Arc::new(finished))
+                },
+                Self::Date { meta, value } => {
+                    meta.finish_struct(Arc::new(value.finish()), row_count, "date")
+                },
+                Self::Timestamp { meta, value, .. } => {
+                    meta.finish_struct(Arc::new(value.finish()), row_count, "timestamp")
+                },
+                Self::Interval { fields, nulls, months, days, microseconds } => finish_struct_array(
+                    fields,
+                    vec![
+                        Arc::new(months.finish()),
+                        Arc::new(days.finish()),
+                        Arc::new(microseconds.finish()),
+                    ],
                     nulls,
-                    months,
-                    days,
-                    microseconds,
-                    ..
+                    row_count,
+                    "interval StructArray",
+                ),
+                Self::BitString { fields, nulls, bytes, bytes_offset, bit_length } => {
+                    *bytes_offset = 0;
+                    finish_struct_array(
+                        fields,
+                        vec![Arc::new(bytes.finish()), Arc::new(bit_length.finish())],
+                        nulls,
+                        row_count,
+                        "bitstring StructArray",
+                    )
                 },
-                PreparedArrowCell::Null,
-            ) => {
-                nulls.append_null();
-                months.append_null();
-                days.append_null();
-                microseconds.append_null();
-            }
-            (
-                Self::Interval {
-                    nulls,
-                    months,
-                    days,
-                    microseconds,
-                    ..
+                Self::VectorFixed { item_field, dim, nulls, values, .. } => {
+                    let arr = FixedSizeListArray::try_new(
+                        Arc::clone(item_field),
+                        *dim,
+                        Arc::new(values.finish()),
+                        nulls.finish(),
+                    )
+                    .map_err(|e| {
+                        PostgresError::Data(format!("failed to build vector FixedSizeListArray: {e}"))
+                    })?;
+                    Ok(Arc::new(arr))
                 },
-                PreparedArrowCell::Interval {
-                    months: m,
-                    days: d,
-                    microseconds: us,
+                Self::VectorDynamic { item_field, nulls, offsets, values, elem_count, .. } => {
+                    *elem_count = 0;
+                    finish_list_array(
+                        item_field,
+                        offsets,
+                        Arc::new(values.finish()),
+                        nulls,
+                        "dynamic vector ListArray",
+                    )
                 },
-            ) => {
-                nulls.append_non_null();
-                months.append_value(m);
-                days.append_value(d);
-                microseconds.append_value(us);
-            }
-
-            (
-                Self::BitString {
-                    nulls,
-                    bytes,
-                    bit_length,
-                    ..
-                },
-                PreparedArrowCell::Null,
-            ) => {
-                nulls.append_null();
-                bytes.append_null();
-                bit_length.append_null();
-            }
-            (
-                Self::BitString {
-                    nulls,
-                    bytes,
-                    bytes_offset,
-                    bit_length,
-                    ..
-                },
-                PreparedArrowCell::BitString {
-                    data,
-                    bit_length: bl,
-                },
-            ) => {
-                nulls.append_non_null();
-                *bytes_offset += data.len();
-                bytes.append_value(&data);
-                bit_length.append_value(bl);
-            }
-
-            (
-                Self::VectorFixed {
-                    dim, nulls, values, ..
-                },
-                PreparedArrowCell::Null,
-            ) => {
-                nulls.append_null();
-                for _ in 0..*dim {
-                    values.append_null();
-                }
-            }
-            (Self::VectorFixed { nulls, values, .. }, PreparedArrowCell::Vector(vec)) => {
-                nulls.append_non_null();
-                values.append_slice(&vec);
-            }
-
-            (
-                Self::VectorDynamic {
-                    nulls,
-                    offsets,
-                    elem_count,
-                    ..
-                },
-                PreparedArrowCell::Null,
-            ) => {
-                nulls.append_null();
-                offsets.push(*elem_count as i32);
-            }
-            (
-                Self::VectorDynamic {
-                    nulls,
-                    offsets,
-                    values,
-                    elem_count,
-                    ..
-                },
-                PreparedArrowCell::Vector(vec),
-            ) => {
-                nulls.append_non_null();
-                *elem_count += vec.len();
-                offsets.push(*elem_count as i32);
-                values.append_slice(&vec);
-            }
-
-            (
                 Self::PgArray {
-                    nulls,
-                    dim_nulls,
-                    dim_offsets,
-                    dim_count,
-                    lb_nulls,
-                    lb_offsets,
-                    lb_count,
-                    val_nulls,
-                    val_offsets,
-                    val_count,
-                    ..
-                },
-                PreparedArrowCell::Null,
-            ) => {
-                nulls.append_null();
-                dim_nulls.append_null();
-                dim_offsets.push(*dim_count as i32);
-                lb_nulls.append_null();
-                lb_offsets.push(*lb_count as i32);
-                val_nulls.append_null();
-                val_offsets.push(*val_count as i32);
-            }
-            (
-                Self::PgArray {
+                    fields,
+                    dim_item_field,
+                    lb_item_field,
+                    val_item_field,
                     nulls,
                     dim_nulls,
                     dim_offsets,
@@ -1899,266 +1985,49 @@ impl ArrowColumnBuilder {
                     val_offsets,
                     val_builder,
                     val_count,
-                    ..
+                } => {
+                    *dim_count = 0;
+                    *lb_count = 0;
+                    let cur_vals = std::mem::replace(val_count, 0);
+                    let dims_arr = finish_list_array(
+                        dim_item_field,
+                        dim_offsets,
+                        Arc::new(dim_values.finish()),
+                        dim_nulls,
+                        "pg-array dimensions",
+                    )?;
+                    let lbs_arr = finish_list_array(
+                        lb_item_field,
+                        lb_offsets,
+                        Arc::new(lb_values.finish()),
+                        lb_nulls,
+                        "pg-array lower_bounds",
+                    )?;
+                    let elem_arr = val_builder.finish_array(cur_vals)?;
+                    let vals_arr = finish_list_array(
+                        val_item_field,
+                        val_offsets,
+                        elem_arr,
+                        val_nulls,
+                        "pg-array values",
+                    )?;
+                    finish_struct_array(
+                        fields,
+                        vec![dims_arr, lbs_arr, vals_arr],
+                        nulls,
+                        row_count,
+                        "pg-array StructArray",
+                    )
                 },
-                PreparedArrowCell::Array {
-                    dimensions,
-                    lower_bounds,
-                    values,
+                Self::Composite { fields, nulls, children } => {
+                    let mut child_arrays = Vec::with_capacity(children.len());
+                    for child in children {
+                        child_arrays.push(child.finish_array(row_count)?);
+                    }
+                    finish_struct_array(fields, child_arrays, nulls, row_count, "pg-composite StructArray")
                 },
-            ) => {
-                nulls.append_non_null();
-                dim_nulls.append_non_null();
-                *dim_count += dimensions.len();
-                dim_offsets.push(*dim_count as i32);
-                dim_values.append_slice(&dimensions);
-
-                lb_nulls.append_non_null();
-                *lb_count += lower_bounds.len();
-                lb_offsets.push(*lb_count as i32);
-                lb_values.append_slice(&lower_bounds);
-
-                val_nulls.append_non_null();
-                *val_count += values.len();
-                val_offsets.push(*val_count as i32);
-                for v in values {
-                    val_builder.append_prepared(v);
-                }
             }
-
-            (
-                Self::Composite {
-                    nulls, children, ..
-                },
-                PreparedArrowCell::Null,
-            ) => {
-                nulls.append_null();
-                for child in children {
-                    child.append_prepared(PreparedArrowCell::Null);
-                }
-            }
-            (
-                Self::Composite {
-                    nulls, children, ..
-                },
-                PreparedArrowCell::Composite(attrs),
-            ) => {
-                nulls.append_non_null();
-                for (child, attr) in children.iter_mut().zip(attrs) {
-                    child.append_prepared(attr);
-                }
-            }
-
-            _ => unreachable!("prepared cell variant matches ArrowColumnBuilder variant"),
-        }
-    }
-
-    fn finish_array(&mut self, row_count: usize) -> Result<ArrayRef, PostgresError> {
-        match self {
-            Self::Boolean(b) => Ok(Arc::new(b.finish())),
-            Self::Int16(b) => Ok(Arc::new(b.finish())),
-            Self::Int32(b) => Ok(Arc::new(b.finish())),
-            Self::Int64 { builder, .. } => Ok(Arc::new(builder.finish())),
-            Self::UInt32(b) => Ok(Arc::new(b.finish())),
-            Self::Float32(b) => Ok(Arc::new(b.finish())),
-            Self::Float64(b) => Ok(Arc::new(b.finish())),
-            Self::Utf8 {
-                builder,
-                offset_bytes,
-                ..
-            } => {
-                *offset_bytes = 0;
-                Ok(Arc::new(builder.finish()))
-            }
-            Self::Binary {
-                builder,
-                offset_bytes,
-            } => {
-                *offset_bytes = 0;
-                Ok(Arc::new(builder.finish()))
-            }
-            Self::Uuid { builder, row_cap } => {
-                let fresh = FixedSizeBinaryBuilder::with_capacity(*row_cap, 16);
-                let finished = std::mem::replace(builder, fresh).finish();
-                Ok(Arc::new(finished))
-            }
-            Self::Date { meta, value } => {
-                meta.finish_struct(Arc::new(value.finish()), row_count, "date")
-            }
-            Self::Timestamp { meta, value, .. } => {
-                meta.finish_struct(Arc::new(value.finish()), row_count, "timestamp")
-            }
-            Self::Interval {
-                fields,
-                nulls,
-                months,
-                days,
-                microseconds,
-            } => {
-                let children: Vec<ArrayRef> = vec![
-                    Arc::new(months.finish()),
-                    Arc::new(days.finish()),
-                    Arc::new(microseconds.finish()),
-                ];
-                let arr = StructArray::try_new_with_length(
-                    fields.clone(),
-                    children,
-                    nulls.finish(),
-                    row_count,
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build interval StructArray: {e}"))
-                })?;
-                Ok(Arc::new(arr))
-            }
-            Self::BitString {
-                fields,
-                nulls,
-                bytes,
-                bytes_offset,
-                bit_length,
-            } => {
-                *bytes_offset = 0;
-                let children: Vec<ArrayRef> =
-                    vec![Arc::new(bytes.finish()), Arc::new(bit_length.finish())];
-                let arr = StructArray::try_new_with_length(
-                    fields.clone(),
-                    children,
-                    nulls.finish(),
-                    row_count,
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build bitstring StructArray: {e}"))
-                })?;
-                Ok(Arc::new(arr))
-            }
-            Self::VectorFixed {
-                item_field,
-                dim,
-                nulls,
-                values,
-                ..
-            } => {
-                let vals_arr: ArrayRef = Arc::new(values.finish());
-                let arr = FixedSizeListArray::try_new(
-                    Arc::clone(item_field),
-                    *dim,
-                    vals_arr,
-                    nulls.finish(),
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build vector FixedSizeListArray: {e}"))
-                })?;
-                Ok(Arc::new(arr))
-            }
-            Self::VectorDynamic {
-                item_field,
-                nulls,
-                offsets,
-                values,
-                elem_count,
-                ..
-            } => {
-                *elem_count = 0;
-                let offsets_vec = std::mem::replace(offsets, vec![0]);
-                let vals_arr: ArrayRef = Arc::new(values.finish());
-                let arr = ListArray::try_new(
-                    Arc::clone(item_field),
-                    OffsetBuffer::new(offsets_vec.into()),
-                    vals_arr,
-                    nulls.finish(),
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build dynamic vector ListArray: {e}"))
-                })?;
-                Ok(Arc::new(arr))
-            }
-            Self::PgArray {
-                fields,
-                dim_item_field,
-                lb_item_field,
-                val_item_field,
-                nulls,
-                dim_nulls,
-                dim_offsets,
-                dim_values,
-                dim_count,
-                lb_nulls,
-                lb_offsets,
-                lb_values,
-                lb_count,
-                val_nulls,
-                val_offsets,
-                val_builder,
-                val_count,
-            } => {
-                *dim_count = 0;
-                *lb_count = 0;
-                let cur_vals = std::mem::replace(val_count, 0);
-
-                let dims_arr = ListArray::try_new(
-                    Arc::clone(dim_item_field),
-                    OffsetBuffer::new(std::mem::replace(dim_offsets, vec![0]).into()),
-                    Arc::new(dim_values.finish()),
-                    dim_nulls.finish(),
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build pg-array dimensions: {e}"))
-                })?;
-
-                let lbs_arr = ListArray::try_new(
-                    Arc::clone(lb_item_field),
-                    OffsetBuffer::new(std::mem::replace(lb_offsets, vec![0]).into()),
-                    Arc::new(lb_values.finish()),
-                    lb_nulls.finish(),
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build pg-array lower_bounds: {e}"))
-                })?;
-
-                let elem_arr = val_builder.finish_array(cur_vals)?;
-                let vals_arr = ListArray::try_new(
-                    Arc::clone(val_item_field),
-                    OffsetBuffer::new(std::mem::replace(val_offsets, vec![0]).into()),
-                    elem_arr,
-                    val_nulls.finish(),
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build pg-array values: {e}"))
-                })?;
-
-                let arr = StructArray::try_new_with_length(
-                    fields.clone(),
-                    vec![Arc::new(dims_arr), Arc::new(lbs_arr), Arc::new(vals_arr)],
-                    nulls.finish(),
-                    row_count,
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build pg-array StructArray: {e}"))
-                })?;
-                Ok(Arc::new(arr))
-            }
-            Self::Composite {
-                fields,
-                nulls,
-                children,
-            } => {
-                let mut child_arrays = Vec::with_capacity(children.len());
-                for child in children {
-                    child_arrays.push(child.finish_array(row_count)?);
-                }
-                let arr = StructArray::try_new_with_length(
-                    fields.clone(),
-                    child_arrays,
-                    nulls.finish(),
-                    row_count,
-                )
-                .map_err(|e| {
-                    PostgresError::Data(format!("failed to build pg-composite StructArray: {e}"))
-                })?;
-                Ok(Arc::new(arr))
-            }
-        }
+        )
     }
 }
 
@@ -3911,6 +3780,62 @@ fn string_target_for_oid(
     }
 }
 
+fn float_target_for_oid(base_target_oid: u32) -> Option<FloatTargetKind> {
+    match base_target_oid {
+        FLOAT4_OID => Some(FloatTargetKind::Float4),
+        FLOAT8_OID => Some(FloatTargetKind::Float8),
+        _ => None,
+    }
+}
+
+fn dict_key_type_for_dt(dt: &DataType, field_name: &str) -> Result<DictKeyType, PostgresError> {
+    macro_rules! map_dict_keys {
+        ($dt:expr, [ $( $v:ident ),* $(,)? ]) => {
+            match $dt {
+                $( DataType::$v => Ok(DictKeyType::$v), )*
+                other => Err(PostgresError::Data(format!(
+                    "unsupported Arrow Dictionary key DataType {other:?} on `{field_name}`"
+                ))),
+            }
+        };
+    }
+    map_dict_keys!(
+        dt,
+        [Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64]
+    )
+}
+
+macro_rules! match_ordinary_importer {
+    (
+        $dt:expr, $field_name:expr, $target_oid:expr, $base_target_oid:expr, $catalog:expr, $depth:expr;
+        ints: [ $( $int_v:ident ),* $(,)? ];
+        floats: [ $( $flt_v:ident ),* $(,)? ];
+        strings: [ $( $str_v:ident ),* $(,)? ];
+        rest: { $( $pat:pat $(if $guard:expr)? => $body:expr ),* $(,)? }
+    ) => {
+        match $dt {
+            $(
+                DataType::$int_v => int_target_for_oid($base_target_oid)
+                    .map(FieldImporter::$int_v)
+                    .ok_or_else(|| incompatible_arrow_type($field_name, $dt, $target_oid)),
+            )*
+            $(
+                DataType::$flt_v => float_target_for_oid($base_target_oid)
+                    .map(FieldImporter::$flt_v)
+                    .ok_or_else(|| incompatible_arrow_type($field_name, $dt, $target_oid)),
+            )*
+            $(
+                DataType::$str_v => string_target_for_oid($base_target_oid, $catalog, $depth)
+                    .map(FieldImporter::$str_v)
+                    .ok_or_else(|| incompatible_arrow_type($field_name, $dt, $target_oid)),
+            )*
+            $(
+                $pat $(if $guard)? => $body,
+            )*
+        }
+    };
+}
+
 fn compile_ordinary_importer(
     field_name: &str,
     dt: &DataType,
@@ -3926,279 +3851,223 @@ fn compile_ordinary_importer(
         )));
     }
 
-    match dt {
-        DataType::Null => Ok(FieldImporter::Null),
-        DataType::Boolean if base_target_oid == BOOL_OID => Ok(FieldImporter::Bool),
-        DataType::Int8 => int_target_for_oid(base_target_oid)
-            .map(FieldImporter::Int8)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::Int16 => int_target_for_oid(base_target_oid)
-            .map(FieldImporter::Int16)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::Int32 => int_target_for_oid(base_target_oid)
-            .map(FieldImporter::Int32)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::Int64 => int_target_for_oid(base_target_oid)
-            .map(FieldImporter::Int64)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::UInt8 => int_target_for_oid(base_target_oid)
-            .map(FieldImporter::UInt8)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::UInt16 => int_target_for_oid(base_target_oid)
-            .map(FieldImporter::UInt16)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::UInt32 => int_target_for_oid(base_target_oid)
-            .map(FieldImporter::UInt32)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::UInt64 => int_target_for_oid(base_target_oid)
-            .map(FieldImporter::UInt64)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::Float16 => match base_target_oid {
-            FLOAT4_OID => Ok(FieldImporter::Float16(FloatTargetKind::Float4)),
-            FLOAT8_OID => Ok(FieldImporter::Float16(FloatTargetKind::Float8)),
-            _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
-        },
-        DataType::Float32 => match base_target_oid {
-            FLOAT4_OID => Ok(FieldImporter::Float32(FloatTargetKind::Float4)),
-            FLOAT8_OID => Ok(FieldImporter::Float32(FloatTargetKind::Float8)),
-            _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
-        },
-        DataType::Float64 => match base_target_oid {
-            FLOAT4_OID => Ok(FieldImporter::Float64(FloatTargetKind::Float4)),
-            FLOAT8_OID => Ok(FieldImporter::Float64(FloatTargetKind::Float8)),
-            _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
-        },
-        DataType::Utf8 => string_target_for_oid(base_target_oid, catalog, depth)
-            .map(FieldImporter::Utf8)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::LargeUtf8 => string_target_for_oid(base_target_oid, catalog, depth)
-            .map(FieldImporter::LargeUtf8)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::Utf8View => string_target_for_oid(base_target_oid, catalog, depth)
-            .map(FieldImporter::Utf8View)
-            .ok_or_else(|| incompatible_arrow_type(field_name, dt, target_oid)),
-        DataType::Binary if base_target_oid == BYTEA_OID => {
-            Ok(FieldImporter::Binary(BinaryTargetKind::Bytea))
-        }
-        DataType::LargeBinary if base_target_oid == BYTEA_OID => Ok(FieldImporter::LargeBinary),
-        DataType::BinaryView if base_target_oid == BYTEA_OID => Ok(FieldImporter::BinaryView),
-        DataType::FixedSizeBinary(size) => match (base_target_oid, *size) {
-            (UUID_OID, 16) => Ok(FieldImporter::FixedSizeBinary {
-                size: 16,
-                target: BinaryTargetKind::Uuid,
-            }),
-            (BYTEA_OID, n) if n >= 0 => Ok(FieldImporter::FixedSizeBinary {
-                size: n,
-                target: BinaryTargetKind::Bytea,
-            }),
-            _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
-        },
-        DataType::Decimal128(precision, scale) if base_target_oid == NUMERIC_OID => {
-            if *precision == 0 || *precision > 38 {
-                return Err(PostgresError::Data(format!(
-                    "invalid Arrow Decimal128 precision {precision} on `{field_name}`"
-                )));
-            }
-            Ok(FieldImporter::Decimal128 {
-                precision: *precision,
-                scale: *scale,
-            })
-        }
-        DataType::Decimal256(precision, scale) if base_target_oid == NUMERIC_OID => {
-            if *precision == 0 || *precision > 76 {
-                return Err(PostgresError::Data(format!(
-                    "invalid Arrow Decimal256 precision {precision} on `{field_name}`"
-                )));
-            }
-            Ok(FieldImporter::Decimal256 {
-                precision: *precision,
-                scale: *scale,
-            })
-        }
-        DataType::Date32 if base_target_oid == DATE_OID => Ok(FieldImporter::Date32),
-        DataType::Date64 if base_target_oid == DATE_OID => Ok(FieldImporter::Date64),
-        DataType::Time32(TimeUnit::Second) if base_target_oid == TIME_OID => {
-            Ok(FieldImporter::Time32Sec)
-        }
-        DataType::Time32(TimeUnit::Millisecond) if base_target_oid == TIME_OID => {
-            Ok(FieldImporter::Time32Ms)
-        }
-        DataType::Time64(TimeUnit::Microsecond) if base_target_oid == TIME_OID => {
-            Ok(FieldImporter::Time64Us)
-        }
-        DataType::Time64(TimeUnit::Nanosecond) if base_target_oid == TIME_OID => {
-            Ok(FieldImporter::Time64Ns)
-        }
-        DataType::Timestamp(unit, tz_opt) => match (tz_opt.as_deref(), base_target_oid) {
-            (Some(tz), TIMESTAMPTZ_OID) => {
-                validate_arrow_timezone(tz)?;
-                Ok(FieldImporter::Timestamp {
-                    unit: *unit,
-                    is_tz: true,
-                })
-            }
-            (Some(tz), TIMESTAMP_OID) => Err(PostgresError::Data(format!(
-                "refusing timezone-losing import of tz-aware Arrow Timestamp({unit:?}, {tz:?}) into naive `timestamp` column `{field_name}`"
-            ))),
-            (None, TIMESTAMP_OID) => Ok(FieldImporter::Timestamp {
-                unit: *unit,
-                is_tz: false,
-            }),
-            (None, TIMESTAMPTZ_OID) => Err(PostgresError::Data(format!(
-                "refusing implicit-timezone import of naive Arrow Timestamp({unit:?}, None) into `timestamptz` column `{field_name}`"
-            ))),
-            _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
-        },
-        DataType::Interval(IntervalUnit::YearMonth) if base_target_oid == INTERVAL_OID => {
-            Ok(FieldImporter::IntervalYearMonth)
-        }
-        DataType::Interval(IntervalUnit::DayTime) if base_target_oid == INTERVAL_OID => {
-            Ok(FieldImporter::IntervalDayTime)
-        }
-        DataType::Interval(IntervalUnit::MonthDayNano) if base_target_oid == INTERVAL_OID => {
-            Ok(FieldImporter::IntervalMonthDayNano)
-        }
-        DataType::Duration(unit) if base_target_oid == INTERVAL_OID => {
-            Ok(FieldImporter::Duration(*unit))
-        }
-        DataType::Dictionary(key_dt, val_dt) => {
-            if matches!(val_dt.as_ref(), DataType::Dictionary(_, _)) {
-                return Err(PostgresError::Data(format!(
-                    "nested Arrow Dictionary values are not supported on `{field_name}`"
-                )));
-            }
-            let key_type = match key_dt.as_ref() {
-                DataType::Int8 => DictKeyType::Int8,
-                DataType::Int16 => DictKeyType::Int16,
-                DataType::Int32 => DictKeyType::Int32,
-                DataType::Int64 => DictKeyType::Int64,
-                DataType::UInt8 => DictKeyType::UInt8,
-                DataType::UInt16 => DictKeyType::UInt16,
-                DataType::UInt32 => DictKeyType::UInt32,
-                DataType::UInt64 => DictKeyType::UInt64,
-                other => {
+    match_ordinary_importer!(
+        dt, field_name, target_oid, base_target_oid, catalog, depth;
+        ints: [Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64];
+        floats: [Float16, Float32, Float64];
+        strings: [Utf8, LargeUtf8, Utf8View];
+        rest: {
+            DataType::Null => Ok(FieldImporter::Null),
+            DataType::Boolean if base_target_oid == BOOL_OID => Ok(FieldImporter::Bool),
+            DataType::Binary if base_target_oid == BYTEA_OID => {
+                Ok(FieldImporter::Binary(BinaryTargetKind::Bytea))
+            },
+            DataType::LargeBinary if base_target_oid == BYTEA_OID => Ok(FieldImporter::LargeBinary),
+            DataType::BinaryView if base_target_oid == BYTEA_OID => Ok(FieldImporter::BinaryView),
+            DataType::FixedSizeBinary(size) => match (base_target_oid, *size) {
+                (UUID_OID, 16) => Ok(FieldImporter::FixedSizeBinary {
+                    size: 16,
+                    target: BinaryTargetKind::Uuid,
+                }),
+                (BYTEA_OID, n) if n >= 0 => Ok(FieldImporter::FixedSizeBinary {
+                    size: n,
+                    target: BinaryTargetKind::Bytea,
+                }),
+                _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
+            },
+            DataType::Decimal128(precision, scale) if base_target_oid == NUMERIC_OID => {
+                if *precision == 0 || *precision > 38 {
                     return Err(PostgresError::Data(format!(
-                        "unsupported Arrow Dictionary key DataType {other:?} on `{field_name}`"
+                        "invalid Arrow Decimal128 precision {precision} on `{field_name}`"
                     )));
                 }
-            };
-            let val_imp = compile_ordinary_importer(
-                field_name,
-                val_dt.as_ref(),
-                target_oid,
-                base_target_oid,
-                target_typmod,
-                catalog,
-                depth,
-            )?;
-            Ok(FieldImporter::Dictionary {
-                key_type,
-                values: Box::new(val_imp),
-            })
-        }
-        DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => {
-            match catalog.type_info(base_target_oid) {
-                Some(TypeInfo {
-                    kind: TypeKind::Extension { name, .. },
-                    ..
-                }) if name == "vector" => {
-                    compile_vector_list_importer(field_name, dt, VectorKind::Vector, target_typmod)
+                Ok(FieldImporter::Decimal128 {
+                    precision: *precision,
+                    scale: *scale,
+                })
+            },
+            DataType::Decimal256(precision, scale) if base_target_oid == NUMERIC_OID => {
+                if *precision == 0 || *precision > 76 {
+                    return Err(PostgresError::Data(format!(
+                        "invalid Arrow Decimal256 precision {precision} on `{field_name}`"
+                    )));
                 }
-                Some(TypeInfo {
-                    kind: TypeKind::Extension { name, .. },
-                    ..
-                }) if name == "halfvec" => {
-                    compile_vector_list_importer(field_name, dt, VectorKind::HalfVec, target_typmod)
+                Ok(FieldImporter::Decimal256 {
+                    precision: *precision,
+                    scale: *scale,
+                })
+            },
+            DataType::Date32 if base_target_oid == DATE_OID => Ok(FieldImporter::Date32),
+            DataType::Date64 if base_target_oid == DATE_OID => Ok(FieldImporter::Date64),
+            DataType::Time32(TimeUnit::Second) if base_target_oid == TIME_OID => {
+                Ok(FieldImporter::Time32Sec)
+            },
+            DataType::Time32(TimeUnit::Millisecond) if base_target_oid == TIME_OID => {
+                Ok(FieldImporter::Time32Ms)
+            },
+            DataType::Time64(TimeUnit::Microsecond) if base_target_oid == TIME_OID => {
+                Ok(FieldImporter::Time64Us)
+            },
+            DataType::Time64(TimeUnit::Nanosecond) if base_target_oid == TIME_OID => {
+                Ok(FieldImporter::Time64Ns)
+            },
+            DataType::Timestamp(unit, tz_opt) => match (tz_opt.as_deref(), base_target_oid) {
+                (Some(tz), TIMESTAMPTZ_OID) => {
+                    validate_arrow_timezone(tz)?;
+                    Ok(FieldImporter::Timestamp {
+                        unit: *unit,
+                        is_tz: true,
+                    })
                 }
+                (Some(tz), TIMESTAMP_OID) => Err(PostgresError::Data(format!(
+                    "refusing timezone-losing import of tz-aware Arrow Timestamp({unit:?}, {tz:?}) into naive `timestamp` column `{field_name}`"
+                ))),
+                (None, TIMESTAMP_OID) => Ok(FieldImporter::Timestamp {
+                    unit: *unit,
+                    is_tz: false,
+                }),
+                (None, TIMESTAMPTZ_OID) => Err(PostgresError::Data(format!(
+                    "refusing implicit-timezone import of naive Arrow Timestamp({unit:?}, None) into `timestamptz` column `{field_name}`"
+                ))),
+                _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
+            },
+            DataType::Interval(IntervalUnit::YearMonth) if base_target_oid == INTERVAL_OID => {
+                Ok(FieldImporter::IntervalYearMonth)
+            },
+            DataType::Interval(IntervalUnit::DayTime) if base_target_oid == INTERVAL_OID => {
+                Ok(FieldImporter::IntervalDayTime)
+            },
+            DataType::Interval(IntervalUnit::MonthDayNano) if base_target_oid == INTERVAL_OID => {
+                Ok(FieldImporter::IntervalMonthDayNano)
+            },
+            DataType::Duration(unit) if base_target_oid == INTERVAL_OID => {
+                Ok(FieldImporter::Duration(*unit))
+            },
+            DataType::Dictionary(key_dt, val_dt) => {
+                if matches!(val_dt.as_ref(), DataType::Dictionary(_, _)) {
+                    return Err(PostgresError::Data(format!(
+                        "nested Arrow Dictionary values are not supported on `{field_name}`"
+                    )));
+                }
+                let key_type = dict_key_type_for_dt(key_dt.as_ref(), field_name)?;
+                let val_imp = compile_ordinary_importer(
+                    field_name,
+                    val_dt.as_ref(),
+                    target_oid,
+                    base_target_oid,
+                    target_typmod,
+                    catalog,
+                    depth,
+                )?;
+                Ok(FieldImporter::Dictionary {
+                    key_type,
+                    values: Box::new(val_imp),
+                })
+            },
+            DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => {
+                match catalog.type_info(base_target_oid) {
+                    Some(TypeInfo {
+                        kind: TypeKind::Extension { name, .. },
+                        ..
+                    }) if name == "vector" => {
+                        compile_vector_list_importer(field_name, dt, VectorKind::Vector, target_typmod)
+                    }
+                    Some(TypeInfo {
+                        kind: TypeKind::Extension { name, .. },
+                        ..
+                    }) if name == "halfvec" => {
+                        compile_vector_list_importer(field_name, dt, VectorKind::HalfVec, target_typmod)
+                    }
+                    Some(TypeInfo {
+                        kind: TypeKind::Array { element_oid, .. },
+                        ..
+                    }) => {
+                        if !crate::codecs::supports_binary_with_catalog(base_target_oid, catalog) {
+                            return Err(PostgresError::Data(format!(
+                                "PostgreSQL array target OID {target_oid} (base {base_target_oid}) does not support binary COPY encoding on `{field_name}`"
+                            )));
+                        }
+                        let (offsets, item_field) = match dt {
+                            DataType::List(f) => (ListOffsetsKind::I32, f.as_ref()),
+                            DataType::LargeList(f) => (ListOffsetsKind::I64, f.as_ref()),
+                            DataType::FixedSizeList(f, d) => {
+                                if *d < 0 {
+                                    return Err(PostgresError::Data(format!(
+                                        "negative FixedSizeList length {d} on `{field_name}`"
+                                    )));
+                                }
+                                (ListOffsetsKind::Fixed(*d), f.as_ref())
+                            }
+                            _ => unreachable!(),
+                        };
+                        let resolved_elem_oid = catalog.resolve_domain_base(*element_oid)?;
+                        let elem_imp = compile_field_importer(
+                            item_field,
+                            *element_oid,
+                            target_typmod,
+                            catalog,
+                            depth + 1,
+                        )?;
+                        Ok(FieldImporter::OrdinaryArray {
+                            offsets,
+                            element_oid: resolved_elem_oid,
+                            element: Box::new(elem_imp),
+                        })
+                    }
+                    _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
+                }
+            },
+            DataType::Struct(arrow_children) => match catalog.type_info(base_target_oid) {
                 Some(TypeInfo {
-                    kind: TypeKind::Array { element_oid, .. },
+                    kind: TypeKind::Composite { fields },
                     ..
-                }) => {
+                }) if !fields.is_empty() => {
                     if !crate::codecs::supports_binary_with_catalog(base_target_oid, catalog) {
                         return Err(PostgresError::Data(format!(
-                            "PostgreSQL array target OID {target_oid} (base {base_target_oid}) does not support binary COPY encoding on `{field_name}`"
+                            "PostgreSQL composite target OID {target_oid} (base {base_target_oid}) does not support binary COPY encoding on `{field_name}`"
                         )));
                     }
-                    let (offsets, item_field) = match dt {
-                        DataType::List(f) => (ListOffsetsKind::I32, f.as_ref()),
-                        DataType::LargeList(f) => (ListOffsetsKind::I64, f.as_ref()),
-                        DataType::FixedSizeList(f, d) => {
-                            if *d < 0 {
-                                return Err(PostgresError::Data(format!(
-                                    "negative FixedSizeList length {d} on `{field_name}`"
-                                )));
-                            }
-                            (ListOffsetsKind::Fixed(*d), f.as_ref())
+                    if arrow_children.len() != fields.len() {
+                        return Err(PostgresError::Data(format!(
+                            "Arrow Struct `{field_name}` attribute count {} does not match composite attribute count {}",
+                            arrow_children.len(),
+                            fields.len()
+                        )));
+                    }
+                    let mut field_names = Vec::with_capacity(fields.len());
+                    let mut field_oids = Vec::with_capacity(fields.len());
+                    let mut child_importers = Vec::with_capacity(fields.len());
+                    for (arrow_child, pg_attr) in arrow_children.iter().zip(fields.iter()) {
+                        if arrow_child.name() != &pg_attr.name {
+                            return Err(PostgresError::Data(format!(
+                                "Arrow Struct `{field_name}` attribute `{}` does not match expected composite attribute `{}`",
+                                arrow_child.name(),
+                                pg_attr.name
+                            )));
                         }
-                        _ => unreachable!(),
-                    };
-                    let resolved_elem_oid = catalog.resolve_domain_base(*element_oid)?;
-                    let elem_imp = compile_field_importer(
-                        item_field,
-                        *element_oid,
-                        target_typmod,
-                        catalog,
-                        depth + 1,
-                    )?;
-                    Ok(FieldImporter::OrdinaryArray {
-                        offsets,
-                        element_oid: resolved_elem_oid,
-                        element: Box::new(elem_imp),
+                        let imp = compile_field_importer(
+                            arrow_child.as_ref(),
+                            pg_attr.type_oid,
+                            pg_attr.type_modifier,
+                            catalog,
+                            depth + 1,
+                        )?;
+                        field_names.push(pg_attr.name.clone());
+                        field_oids.push(pg_attr.type_oid);
+                        child_importers.push(imp);
+                    }
+                    Ok(FieldImporter::CompositeStruct {
+                        type_oid: base_target_oid,
+                        field_names,
+                        field_oids,
+                        children: child_importers,
                     })
                 }
                 _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
-            }
-        }
-        DataType::Struct(arrow_children) => match catalog.type_info(base_target_oid) {
-            Some(TypeInfo {
-                kind: TypeKind::Composite { fields },
-                ..
-            }) if !fields.is_empty() => {
-                if !crate::codecs::supports_binary_with_catalog(base_target_oid, catalog) {
-                    return Err(PostgresError::Data(format!(
-                        "PostgreSQL composite target OID {target_oid} (base {base_target_oid}) does not support binary COPY encoding on `{field_name}`"
-                    )));
-                }
-                if arrow_children.len() != fields.len() {
-                    return Err(PostgresError::Data(format!(
-                        "Arrow Struct `{field_name}` attribute count {} does not match composite attribute count {}",
-                        arrow_children.len(),
-                        fields.len()
-                    )));
-                }
-                let mut field_names = Vec::with_capacity(fields.len());
-                let mut field_oids = Vec::with_capacity(fields.len());
-                let mut child_importers = Vec::with_capacity(fields.len());
-                for (arrow_child, pg_attr) in arrow_children.iter().zip(fields.iter()) {
-                    if arrow_child.name() != &pg_attr.name {
-                        return Err(PostgresError::Data(format!(
-                            "Arrow Struct `{field_name}` attribute `{}` does not match expected composite attribute `{}`",
-                            arrow_child.name(),
-                            pg_attr.name
-                        )));
-                    }
-                    let imp = compile_field_importer(
-                        arrow_child.as_ref(),
-                        pg_attr.type_oid,
-                        pg_attr.type_modifier,
-                        catalog,
-                        depth + 1,
-                    )?;
-                    field_names.push(pg_attr.name.clone());
-                    field_oids.push(pg_attr.type_oid);
-                    child_importers.push(imp);
-                }
-                Ok(FieldImporter::CompositeStruct {
-                    type_oid: base_target_oid,
-                    field_names,
-                    field_oids,
-                    children: child_importers,
-                })
-            }
+            },
             _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
-        },
-        _ => Err(incompatible_arrow_type(field_name, dt, target_oid)),
-    }
+        }
+    )
 }
 
 fn incompatible_arrow_type(field_name: &str, dt: &DataType, target_oid: u32) -> PostgresError {
@@ -4291,6 +4160,34 @@ fn downcast_err(expected: &str, actual: &DataType) -> PostgresError {
     ))
 }
 
+fn downcast_array<'a, T: 'static>(
+    array: &'a dyn Array,
+    expected: &str,
+) -> Result<&'a T, PostgresError> {
+    array
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| downcast_err(expected, array.data_type()))
+}
+
+fn extract_list_offsets<O: TryInto<usize> + Copy>(
+    offs: &[O],
+    row_idx: usize,
+    invalid_msg: &str,
+    non_mono_msg: &str,
+) -> Result<(usize, usize), PostgresError> {
+    let start: usize = offs[row_idx]
+        .try_into()
+        .map_err(|_| PostgresError::Data(invalid_msg.to_string()))?;
+    let end: usize = offs[row_idx + 1]
+        .try_into()
+        .map_err(|_| PostgresError::Data(invalid_msg.to_string()))?;
+    if end < start {
+        return Err(PostgresError::Data(non_mono_msg.to_string()));
+    }
+    Ok((start, end))
+}
+
 fn list_row_slice_bounds(
     array: &dyn Array,
     offsets: ListOffsetsKind,
@@ -4298,46 +4195,27 @@ fn list_row_slice_bounds(
 ) -> Result<(ArrayRef, usize, usize), PostgresError> {
     match offsets {
         ListOffsetsKind::I32 => {
-            let list = array
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .ok_or_else(|| downcast_err("ListArray", array.data_type()))?;
-            let offs = list.value_offsets();
-            let start = usize::try_from(offs[row_idx])
-                .map_err(|_| PostgresError::Data("negative Arrow ListArray offset".to_string()))?;
-            let end = usize::try_from(offs[row_idx + 1])
-                .map_err(|_| PostgresError::Data("negative Arrow ListArray offset".to_string()))?;
-            if end < start {
-                return Err(PostgresError::Data(
-                    "non-monotonic Arrow ListArray offsets".to_string(),
-                ));
-            }
+            let list = downcast_array::<ListArray>(array, "ListArray")?;
+            let (start, end) = extract_list_offsets(
+                list.value_offsets(),
+                row_idx,
+                "negative Arrow ListArray offset",
+                "non-monotonic Arrow ListArray offsets",
+            )?;
             Ok((Arc::clone(list.values()), start, end))
         }
         ListOffsetsKind::I64 => {
-            let list = array
-                .as_any()
-                .downcast_ref::<LargeListArray>()
-                .ok_or_else(|| downcast_err("LargeListArray", array.data_type()))?;
-            let offs = list.value_offsets();
-            let start = usize::try_from(offs[row_idx]).map_err(|_| {
-                PostgresError::Data("invalid Arrow LargeListArray offset".to_string())
-            })?;
-            let end = usize::try_from(offs[row_idx + 1]).map_err(|_| {
-                PostgresError::Data("invalid Arrow LargeListArray offset".to_string())
-            })?;
-            if end < start {
-                return Err(PostgresError::Data(
-                    "non-monotonic Arrow LargeListArray offsets".to_string(),
-                ));
-            }
+            let list = downcast_array::<LargeListArray>(array, "LargeListArray")?;
+            let (start, end) = extract_list_offsets(
+                list.value_offsets(),
+                row_idx,
+                "invalid Arrow LargeListArray offset",
+                "non-monotonic Arrow LargeListArray offsets",
+            )?;
             Ok((Arc::clone(list.values()), start, end))
         }
         ListOffsetsKind::Fixed(dim) => {
-            let list = array
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .ok_or_else(|| downcast_err("FixedSizeListArray", array.data_type()))?;
+            let list = downcast_array::<FixedSizeListArray>(array, "FixedSizeListArray")?;
             let step = usize::try_from(dim).map_err(|_| {
                 PostgresError::Data("negative FixedSizeListArray dimension".to_string())
             })?;
@@ -4352,6 +4230,129 @@ fn list_row_slice_bounds(
     }
 }
 
+fn float32_to_pg_target(f: f32, target: FloatTargetKind) -> PgValue {
+    match target {
+        FloatTargetKind::Float4 => PgValue::Float4(f),
+        FloatTargetKind::Float8 => PgValue::Float8(f64::from(f)),
+    }
+}
+
+fn checked_pg_date_days(pg_days_i64: i64, label: &str) -> Result<PgValue, PostgresError> {
+    let pg_days = i32::try_from(pg_days_i64)
+        .map_err(|_| PostgresError::Data(format!("{label} overflows PostgreSQL i32 days")))?;
+    if !(crate::codecs::temporal::PG_DATE_MIN_FINITE..=crate::codecs::temporal::PG_DATE_MAX_FINITE)
+        .contains(&pg_days)
+    {
+        return Err(PostgresError::Data(format!(
+            "{label} -> {pg_days} is outside PostgreSQL finite date bounds"
+        )));
+    }
+    Ok(PgValue::Date(pg_days))
+}
+
+fn validated_interval(months: i32, days: i32, micros: i64) -> Result<PgValue, PostgresError> {
+    let (m, d, u) = validate_interval_parts(months, days, micros)?;
+    Ok(PgValue::Interval {
+        months: m,
+        days: d,
+        microseconds: u,
+    })
+}
+
+fn decimal_str_to_pg_value(
+    rendered: &str,
+    precision: u8,
+    scale: i8,
+    label: &str,
+) -> Result<PgValue, PostgresError> {
+    let (negative, digit_str) = match rendered.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, rendered),
+    };
+    if digit_str != "0" && digit_str.len() > usize::from(precision) {
+        return Err(PostgresError::Data(format!(
+            "Arrow {label} value {rendered} exceeds declared precision {precision}"
+        )));
+    }
+    let digits: Vec<u8> = digit_str
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_digit() {
+                Ok(b - b'0')
+            } else {
+                Err(PostgresError::Data(format!(
+                    "unexpected character in {label} rendering {rendered:?}"
+                )))
+            }
+        })
+        .collect::<Result<Vec<u8>, PostgresError>>()?;
+    let num = crate::codecs::numeric::numeric_from_decimal_parts(
+        negative,
+        &digits,
+        -i32::from(scale),
+        false,
+    )?;
+    Ok(PgValue::Numeric(num))
+}
+
+macro_rules! match_arrow_importers {
+    (
+        $importer:expr, $array:expr, $row_idx:expr;
+        ints: [ $( $int_var:ident => $int_arr:ty ),* $(,)? ];
+        strings: [ $( $str_var:ident => $str_arr:ty ),* $(,)? ];
+        bytes: [ $( $bin_pat:pat => $bin_arr:ty ),* $(,)? ];
+        rest: { $( $rest_pat:pat $(if $guard:expr)? => $rest_body:expr ),* $(,)? }
+    ) => {
+        match $importer {
+            $(
+                FieldImporter::$int_var(target) => {
+                    let arr = downcast_array::<$int_arr>($array, stringify!($int_arr))?;
+                    convert_i128_to_int_target(i128::from(arr.value($row_idx)), *target)
+                }
+            )*
+            $(
+                FieldImporter::$str_var(target) => {
+                    let arr = downcast_array::<$str_arr>($array, stringify!($str_arr))?;
+                    convert_string_to_target(arr.value($row_idx), *target)
+                }
+            )*
+            $(
+                $bin_pat => {
+                    let arr = downcast_array::<$bin_arr>($array, stringify!($bin_arr))?;
+                    Ok(PgValue::Bytes(arr.value($row_idx).to_vec()))
+                }
+            )*
+            $(
+                $rest_pat $(if $guard)? => $rest_body,
+            )*
+        }
+    };
+}
+
+macro_rules! extract_vector_slice {
+    ($values_arr:expr, $arr_ty:ty, $start:expr, $end:expr, $kind:expr, $out:expr, |$raw:ident| $to_f32:expr) => {{
+        let typed = downcast_array::<$arr_ty>($values_arr.as_ref(), stringify!($arr_ty))?;
+        for idx in $start..$end {
+            if typed.is_null(idx) {
+                return Err(PostgresError::Data(
+                    "pgvector elements cannot be NULL".to_string(),
+                ));
+            }
+            let $raw = typed.value(idx);
+            let f: f32 = $to_f32;
+            $out.push(validate_vector_elem(f, $kind)?);
+        }
+    }};
+}
+
+macro_rules! dispatch_dict_key {
+    ($key_type:expr, $array:expr, $row_idx:expr; [ $( $var:ident => $key_ty:ty ),* $(,)? ]) => {
+        match $key_type {
+            $( DictKeyType::$var => extract_dict_entry::<$key_ty>($array, $row_idx)?, )*
+        }
+    };
+}
+
 fn extract_field_value(
     importer: &FieldImporter,
     array: &dyn Array,
@@ -4361,908 +4362,603 @@ fn extract_field_value(
         return Ok(PgValue::Null);
     }
 
-    match importer {
-        FieldImporter::Null => Ok(PgValue::Null),
-        FieldImporter::Bool => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .ok_or_else(|| downcast_err("BooleanArray", array.data_type()))?;
-            Ok(PgValue::Bool(arr.value(row_idx)))
-        }
-        FieldImporter::Int8(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int8Array>()
-                .ok_or_else(|| downcast_err("Int8Array", array.data_type()))?;
-            convert_i128_to_int_target(i128::from(arr.value(row_idx)), *target)
-        }
-        FieldImporter::Int16(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int16Array>()
-                .ok_or_else(|| downcast_err("Int16Array", array.data_type()))?;
-            convert_i128_to_int_target(i128::from(arr.value(row_idx)), *target)
-        }
-        FieldImporter::Int32(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(|| downcast_err("Int32Array", array.data_type()))?;
-            convert_i128_to_int_target(i128::from(arr.value(row_idx)), *target)
-        }
-        FieldImporter::Int64(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| downcast_err("Int64Array", array.data_type()))?;
-            convert_i128_to_int_target(i128::from(arr.value(row_idx)), *target)
-        }
-        FieldImporter::UInt8(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<UInt8Array>()
-                .ok_or_else(|| downcast_err("UInt8Array", array.data_type()))?;
-            convert_i128_to_int_target(i128::from(arr.value(row_idx)), *target)
-        }
-        FieldImporter::UInt16(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<UInt16Array>()
-                .ok_or_else(|| downcast_err("UInt16Array", array.data_type()))?;
-            convert_i128_to_int_target(i128::from(arr.value(row_idx)), *target)
-        }
-        FieldImporter::UInt32(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| downcast_err("UInt32Array", array.data_type()))?;
-            convert_i128_to_int_target(i128::from(arr.value(row_idx)), *target)
-        }
-        FieldImporter::UInt64(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .ok_or_else(|| downcast_err("UInt64Array", array.data_type()))?;
-            convert_i128_to_int_target(i128::from(arr.value(row_idx)), *target)
-        }
-        FieldImporter::Float16(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float16Array>()
-                .ok_or_else(|| downcast_err("Float16Array", array.data_type()))?;
-            let f = arr.value(row_idx).to_f32();
-            Ok(match target {
-                FloatTargetKind::Float4 => PgValue::Float4(f),
-                FloatTargetKind::Float8 => PgValue::Float8(f64::from(f)),
-            })
-        }
-        FieldImporter::Float32(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| downcast_err("Float32Array", array.data_type()))?;
-            let f = arr.value(row_idx);
-            Ok(match target {
-                FloatTargetKind::Float4 => PgValue::Float4(f),
-                FloatTargetKind::Float8 => PgValue::Float8(f64::from(f)),
-            })
-        }
-        FieldImporter::Float64(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| downcast_err("Float64Array", array.data_type()))?;
-            let v = arr.value(row_idx);
-            match target {
-                FloatTargetKind::Float8 => Ok(PgValue::Float8(v)),
-                FloatTargetKind::Float4 => {
-                    let narrowed = v as f32;
-                    if v.is_finite() && !narrowed.is_finite() {
-                        return Err(PostgresError::Data(format!(
-                            "Arrow Float64 value {v} overflows PostgreSQL FLOAT4"
-                        )));
+    match_arrow_importers!(
+        importer, array, row_idx;
+        ints: [
+            Int8 => Int8Array,
+            Int16 => Int16Array,
+            Int32 => Int32Array,
+            Int64 => Int64Array,
+            UInt8 => UInt8Array,
+            UInt16 => UInt16Array,
+            UInt32 => UInt32Array,
+            UInt64 => UInt64Array,
+        ];
+        strings: [
+            Utf8 => StringArray,
+            LargeUtf8 => LargeStringArray,
+            Utf8View => StringViewArray,
+        ];
+        bytes: [
+            FieldImporter::Binary(BinaryTargetKind::Bytea) => BinaryArray,
+            FieldImporter::LargeBinary => LargeBinaryArray,
+            FieldImporter::BinaryView => BinaryViewArray,
+        ];
+        rest: {
+            FieldImporter::Null => Ok(PgValue::Null),
+            FieldImporter::Bool => {
+                let arr = downcast_array::<BooleanArray>(array, "BooleanArray")?;
+                Ok(PgValue::Bool(arr.value(row_idx)))
+            },
+            FieldImporter::Float16(target) => {
+                let arr = downcast_array::<Float16Array>(array, "Float16Array")?;
+                Ok(float32_to_pg_target(arr.value(row_idx).to_f32(), *target))
+            },
+            FieldImporter::Float32(target) => {
+                let arr = downcast_array::<Float32Array>(array, "Float32Array")?;
+                Ok(float32_to_pg_target(arr.value(row_idx), *target))
+            },
+            FieldImporter::Float64(target) => {
+                let v = downcast_array::<Float64Array>(array, "Float64Array")?.value(row_idx);
+                match target {
+                    FloatTargetKind::Float8 => Ok(PgValue::Float8(v)),
+                    FloatTargetKind::Float4 => {
+                        let narrowed = v as f32;
+                        if v.is_finite() && !narrowed.is_finite() {
+                            return Err(PostgresError::Data(format!(
+                                "Arrow Float64 value {v} overflows PostgreSQL FLOAT4"
+                            )));
+                        }
+                        Ok(PgValue::Float4(narrowed))
                     }
-                    Ok(PgValue::Float4(narrowed))
                 }
-            }
-        }
-        FieldImporter::Utf8(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| downcast_err("StringArray", array.data_type()))?;
-            convert_string_to_target(arr.value(row_idx), *target)
-        }
-        FieldImporter::LargeUtf8(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<LargeStringArray>()
-                .ok_or_else(|| downcast_err("LargeStringArray", array.data_type()))?;
-            convert_string_to_target(arr.value(row_idx), *target)
-        }
-        FieldImporter::Utf8View(target) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<StringViewArray>()
-                .ok_or_else(|| downcast_err("StringViewArray", array.data_type()))?;
-            convert_string_to_target(arr.value(row_idx), *target)
-        }
-        FieldImporter::Binary(BinaryTargetKind::Bytea) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .ok_or_else(|| downcast_err("BinaryArray", array.data_type()))?;
-            Ok(PgValue::Bytes(arr.value(row_idx).to_vec()))
-        }
-        FieldImporter::Binary(BinaryTargetKind::Uuid) => unreachable!("UUID uses FixedSizeBinary"),
-        FieldImporter::LargeBinary => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<LargeBinaryArray>()
-                .ok_or_else(|| downcast_err("LargeBinaryArray", array.data_type()))?;
-            Ok(PgValue::Bytes(arr.value(row_idx).to_vec()))
-        }
-        FieldImporter::BinaryView => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<BinaryViewArray>()
-                .ok_or_else(|| downcast_err("BinaryViewArray", array.data_type()))?;
-            Ok(PgValue::Bytes(arr.value(row_idx).to_vec()))
-        }
-        FieldImporter::FixedSizeBinary { size, target } => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<FixedSizeBinaryArray>()
-                .ok_or_else(|| downcast_err("FixedSizeBinaryArray", array.data_type()))?;
-            let slice = arr.value(row_idx);
-            if slice.len() != (*size as usize) {
-                return Err(PostgresError::Data(format!(
-                    "FixedSizeBinary slice length {} does not match size {size}",
-                    slice.len()
-                )));
-            }
-            match target {
-                BinaryTargetKind::Uuid => {
-                    let bytes: [u8; 16] = slice.try_into().map_err(|_| {
-                        PostgresError::Data("UUID FixedSizeBinary must be 16 bytes".to_string())
-                    })?;
-                    Ok(PgValue::Uuid(bytes))
-                }
-                BinaryTargetKind::Bytea => Ok(PgValue::Bytes(slice.to_vec())),
-            }
-        }
-        FieldImporter::Decimal128 { precision, scale } => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Decimal128Array>()
-                .ok_or_else(|| downcast_err("Decimal128Array", array.data_type()))?;
-            let raw = arr.value(row_idx);
-            let negative = raw < 0;
-            let abs = raw.unsigned_abs();
-            let digits: Vec<u8> = if abs == 0 {
-                vec![0]
-            } else {
-                let s = abs.to_string();
-                if s.len() > usize::from(*precision) {
+            },
+            FieldImporter::Binary(BinaryTargetKind::Uuid) => unreachable!("UUID uses FixedSizeBinary"),
+            FieldImporter::FixedSizeBinary { size, target } => {
+                let arr = downcast_array::<FixedSizeBinaryArray>(array, "FixedSizeBinaryArray")?;
+                let slice = arr.value(row_idx);
+                if slice.len() != (*size as usize) {
                     return Err(PostgresError::Data(format!(
-                        "Arrow Decimal128 value {raw} exceeds declared precision {precision}"
+                        "FixedSizeBinary slice length {} does not match size {size}",
+                        slice.len()
                     )));
                 }
-                s.bytes().map(|b| b - b'0').collect()
-            };
-            let num = crate::codecs::numeric::numeric_from_decimal_parts(
-                negative,
-                &digits,
-                -i32::from(*scale),
-                false,
-            )?;
-            Ok(PgValue::Numeric(num))
-        }
-        FieldImporter::Decimal256 { precision, scale } => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Decimal256Array>()
-                .ok_or_else(|| downcast_err("Decimal256Array", array.data_type()))?;
-            let raw = arr.value(row_idx);
-            let rendered = raw.to_string();
-            let (negative, digit_str) = match rendered.strip_prefix('-') {
-                Some(rest) => (true, rest),
-                None => (false, rendered.as_str()),
-            };
-            if digit_str != "0" && digit_str.len() > usize::from(*precision) {
-                return Err(PostgresError::Data(format!(
-                    "Arrow Decimal256 value {rendered} exceeds declared precision {precision}"
-                )));
-            }
-            let digits: Vec<u8> = digit_str
-                .bytes()
-                .map(|b| {
-                    if b.is_ascii_digit() {
-                        Ok(b - b'0')
-                    } else {
-                        Err(PostgresError::Data(format!(
-                            "unexpected character in Decimal256 rendering {rendered:?}"
-                        )))
+                match target {
+                    BinaryTargetKind::Uuid => {
+                        let bytes: [u8; 16] = slice.try_into().map_err(|_| {
+                            PostgresError::Data("UUID FixedSizeBinary must be 16 bytes".to_string())
+                        })?;
+                        Ok(PgValue::Uuid(bytes))
                     }
-                })
-                .collect::<Result<Vec<u8>, PostgresError>>()?;
-            let num = crate::codecs::numeric::numeric_from_decimal_parts(
-                negative,
-                &digits,
-                -i32::from(*scale),
-                false,
-            )?;
-            Ok(PgValue::Numeric(num))
-        }
-        FieldImporter::Date32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Date32Array>()
-                .ok_or_else(|| downcast_err("Date32Array", array.data_type()))?;
-            let unix_days = i64::from(arr.value(row_idx));
-            let pg_days_i64 = unix_days - UNIX_TO_PG_EPOCH_DAYS;
-            let pg_days = i32::try_from(pg_days_i64).map_err(|_| {
-                PostgresError::Data(format!(
-                    "Arrow Date32 {unix_days} overflows PostgreSQL i32 days"
-                ))
-            })?;
-            if !(crate::codecs::temporal::PG_DATE_MIN_FINITE
-                ..=crate::codecs::temporal::PG_DATE_MAX_FINITE)
-                .contains(&pg_days)
-            {
-                return Err(PostgresError::Data(format!(
-                    "Arrow Date32 {unix_days} -> {pg_days} is outside PostgreSQL finite date bounds"
-                )));
-            }
-            Ok(PgValue::Date(pg_days))
-        }
-        FieldImporter::Date64 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Date64Array>()
-                .ok_or_else(|| downcast_err("Date64Array", array.data_type()))?;
-            let unix_ms = arr.value(row_idx);
-            if unix_ms % MILLIS_PER_DAY != 0 {
-                return Err(PostgresError::Data(format!(
-                    "Arrow Date64 value {unix_ms}ms is not an exact multiple of 86_400_000ms"
-                )));
-            }
-            let pg_days_i64 = (unix_ms / MILLIS_PER_DAY) - UNIX_TO_PG_EPOCH_DAYS;
-            let pg_days = i32::try_from(pg_days_i64).map_err(|_| {
-                PostgresError::Data(format!(
-                    "Arrow Date64 {unix_ms}ms overflows PostgreSQL i32 days"
-                ))
-            })?;
-            if !(crate::codecs::temporal::PG_DATE_MIN_FINITE
-                ..=crate::codecs::temporal::PG_DATE_MAX_FINITE)
-                .contains(&pg_days)
-            {
-                return Err(PostgresError::Data(format!(
-                    "Arrow Date64 {unix_ms}ms -> {pg_days} is outside PostgreSQL finite date bounds"
-                )));
-            }
-            Ok(PgValue::Date(pg_days))
-        }
-        FieldImporter::Time32Sec => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Time32SecondArray>()
-                .ok_or_else(|| downcast_err("Time32SecondArray", array.data_type()))?;
-            let micros = i64::from(arr.value(row_idx)) * 1_000_000;
-            validate_time_micros(micros).map(PgValue::Time)
-        }
-        FieldImporter::Time32Ms => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Time32MillisecondArray>()
-                .ok_or_else(|| downcast_err("Time32MillisecondArray", array.data_type()))?;
-            let micros = i64::from(arr.value(row_idx)) * 1_000;
-            validate_time_micros(micros).map(PgValue::Time)
-        }
-        FieldImporter::Time64Us => {
-            let micros = if let Some(arr) = array.as_any().downcast_ref::<Time64MicrosecondArray>()
-            {
-                arr.value(row_idx)
-            } else if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
-                arr.value(row_idx)
-            } else {
-                return Err(downcast_err(
-                    "Time64MicrosecondArray or Int64Array",
-                    array.data_type(),
-                ));
-            };
-            validate_time_micros(micros).map(PgValue::Time)
-        }
-        FieldImporter::Time64Ns => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Time64NanosecondArray>()
-                .ok_or_else(|| downcast_err("Time64NanosecondArray", array.data_type()))?;
-            let ns = arr.value(row_idx);
-            if ns % 1_000 != 0 {
-                return Err(PostgresError::Data(format!(
-                    "refusing sub-microsecond truncation for Arrow Time64(Nanosecond) value {ns} (ns % 1000 != 0)"
-                )));
-            }
-            validate_time_micros(ns / 1_000).map(PgValue::Time)
-        }
-        FieldImporter::Timestamp { unit, is_tz } => {
-            let raw = match unit {
-                TimeUnit::Second => array
-                    .as_any()
-                    .downcast_ref::<TimestampSecondArray>()
-                    .ok_or_else(|| downcast_err("TimestampSecondArray", array.data_type()))?
-                    .value(row_idx),
-                TimeUnit::Millisecond => array
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .ok_or_else(|| downcast_err("TimestampMillisecondArray", array.data_type()))?
-                    .value(row_idx),
-                TimeUnit::Microsecond => array
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .ok_or_else(|| downcast_err("TimestampMicrosecondArray", array.data_type()))?
-                    .value(row_idx),
-                TimeUnit::Nanosecond => array
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .ok_or_else(|| downcast_err("TimestampNanosecondArray", array.data_type()))?
-                    .value(row_idx),
-            };
-            convert_timestamp_tick_to_pg(raw, *unit, *is_tz)
-        }
-        FieldImporter::IntervalYearMonth => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<IntervalYearMonthArray>()
-                .ok_or_else(|| downcast_err("IntervalYearMonthArray", array.data_type()))?;
-            let months = arr.value(row_idx);
-            let (m, d, u) = validate_interval_parts(months, 0, 0)?;
-            Ok(PgValue::Interval {
-                months: m,
-                days: d,
-                microseconds: u,
-            })
-        }
-        FieldImporter::IntervalDayTime => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<IntervalDayTimeArray>()
-                .ok_or_else(|| downcast_err("IntervalDayTimeArray", array.data_type()))?;
-            let dt_val = arr.value(row_idx);
-            let micros = i64::from(dt_val.milliseconds) * 1_000;
-            let (m, d, u) = validate_interval_parts(0, dt_val.days, micros)?;
-            Ok(PgValue::Interval {
-                months: m,
-                days: d,
-                microseconds: u,
-            })
-        }
-        FieldImporter::IntervalMonthDayNano => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<IntervalMonthDayNanoArray>()
-                .ok_or_else(|| downcast_err("IntervalMonthDayNanoArray", array.data_type()))?;
-            let v = arr.value(row_idx);
-            if v.nanoseconds % 1_000 != 0 {
-                return Err(PostgresError::Data(format!(
-                    "refusing sub-microsecond truncation for Arrow Interval(MonthDayNano) nanoseconds {}",
-                    v.nanoseconds
-                )));
-            }
-            let (m, d, u) = validate_interval_parts(v.months, v.days, v.nanoseconds / 1_000)?;
-            Ok(PgValue::Interval {
-                months: m,
-                days: d,
-                microseconds: u,
-            })
-        }
-        FieldImporter::Duration(unit) => {
-            let micros: i64 = match unit {
-                TimeUnit::Second => {
-                    let raw = array
-                        .as_any()
-                        .downcast_ref::<DurationSecondArray>()
-                        .ok_or_else(|| downcast_err("DurationSecondArray", array.data_type()))?
-                        .value(row_idx);
-                    raw.checked_mul(1_000_000).ok_or_else(|| {
-                        PostgresError::Data(format!("Arrow Duration(Second) {raw} overflows i64us"))
-                    })?
+                    BinaryTargetKind::Bytea => Ok(PgValue::Bytes(slice.to_vec())),
                 }
-                TimeUnit::Millisecond => {
-                    let raw = array
-                        .as_any()
-                        .downcast_ref::<DurationMillisecondArray>()
-                        .ok_or_else(|| downcast_err("DurationMillisecondArray", array.data_type()))?
-                        .value(row_idx);
-                    raw.checked_mul(1_000).ok_or_else(|| {
-                        PostgresError::Data(format!(
-                            "Arrow Duration(Millisecond) {raw} overflows i64us"
-                        ))
-                    })?
+            },
+            FieldImporter::Decimal128 { precision, scale } => {
+                let raw = downcast_array::<Decimal128Array>(array, "Decimal128Array")?.value(row_idx);
+                decimal_str_to_pg_value(&raw.to_string(), *precision, *scale, "Decimal128")
+            },
+            FieldImporter::Decimal256 { precision, scale } => {
+                let raw = downcast_array::<Decimal256Array>(array, "Decimal256Array")?.value(row_idx);
+                decimal_str_to_pg_value(&raw.to_string(), *precision, *scale, "Decimal256")
+            },
+            FieldImporter::Date32 => {
+                let unix_days =
+                    i64::from(downcast_array::<Date32Array>(array, "Date32Array")?.value(row_idx));
+                checked_pg_date_days(
+                    unix_days - UNIX_TO_PG_EPOCH_DAYS,
+                    &format!("Arrow Date32 {unix_days}"),
+                )
+            },
+            FieldImporter::Date64 => {
+                let unix_ms = downcast_array::<Date64Array>(array, "Date64Array")?.value(row_idx);
+                if unix_ms % MILLIS_PER_DAY != 0 {
+                    return Err(PostgresError::Data(format!(
+                        "Arrow Date64 value {unix_ms}ms is not an exact multiple of 86_400_000ms"
+                    )));
                 }
-                TimeUnit::Microsecond => array
-                    .as_any()
-                    .downcast_ref::<DurationMicrosecondArray>()
-                    .ok_or_else(|| downcast_err("DurationMicrosecondArray", array.data_type()))?
-                    .value(row_idx),
-                TimeUnit::Nanosecond => {
-                    let ns = array
-                        .as_any()
-                        .downcast_ref::<DurationNanosecondArray>()
-                        .ok_or_else(|| downcast_err("DurationNanosecondArray", array.data_type()))?
-                        .value(row_idx);
-                    if ns % 1_000 != 0 {
-                        return Err(PostgresError::Data(format!(
-                            "refusing sub-microsecond truncation for Arrow Duration(Nanosecond) {ns}"
-                        )));
+                checked_pg_date_days(
+                    (unix_ms / MILLIS_PER_DAY) - UNIX_TO_PG_EPOCH_DAYS,
+                    &format!("Arrow Date64 {unix_ms}ms"),
+                )
+            },
+            FieldImporter::Time32Sec => {
+                let raw = downcast_array::<Time32SecondArray>(array, "Time32SecondArray")?
+                    .value(row_idx);
+                validate_time_micros(i64::from(raw) * 1_000_000).map(PgValue::Time)
+            },
+            FieldImporter::Time32Ms => {
+                let raw = downcast_array::<Time32MillisecondArray>(array, "Time32MillisecondArray")?
+                    .value(row_idx);
+                validate_time_micros(i64::from(raw) * 1_000).map(PgValue::Time)
+            },
+            FieldImporter::Time64Us => {
+                let micros = if let Some(arr) = array.as_any().downcast_ref::<Time64MicrosecondArray>() {
+                    arr.value(row_idx)
+                } else if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                    arr.value(row_idx)
+                } else {
+                    return Err(downcast_err(
+                        "Time64MicrosecondArray or Int64Array",
+                        array.data_type(),
+                    ));
+                };
+                validate_time_micros(micros).map(PgValue::Time)
+            },
+            FieldImporter::Time64Ns => {
+                let ns = downcast_array::<Time64NanosecondArray>(array, "Time64NanosecondArray")?
+                    .value(row_idx);
+                if ns % 1_000 != 0 {
+                    return Err(PostgresError::Data(format!(
+                        "refusing sub-microsecond truncation for Arrow Time64(Nanosecond) value {ns} (ns % 1000 != 0)"
+                    )));
+                }
+                validate_time_micros(ns / 1_000).map(PgValue::Time)
+            },
+            FieldImporter::Timestamp { unit, is_tz } => {
+                let raw = match unit {
+                    TimeUnit::Second => {
+                        downcast_array::<TimestampSecondArray>(array, "TimestampSecondArray")?
+                            .value(row_idx)
                     }
-                    ns / 1_000
+                    TimeUnit::Millisecond => downcast_array::<TimestampMillisecondArray>(
+                        array,
+                        "TimestampMillisecondArray",
+                    )?
+                    .value(row_idx),
+                    TimeUnit::Microsecond => downcast_array::<TimestampMicrosecondArray>(
+                        array,
+                        "TimestampMicrosecondArray",
+                    )?
+                    .value(row_idx),
+                    TimeUnit::Nanosecond => downcast_array::<TimestampNanosecondArray>(
+                        array,
+                        "TimestampNanosecondArray",
+                    )?
+                    .value(row_idx),
+                };
+                convert_timestamp_tick_to_pg(raw, *unit, *is_tz)
+            },
+            FieldImporter::IntervalYearMonth => {
+                let months =
+                    downcast_array::<IntervalYearMonthArray>(array, "IntervalYearMonthArray")?
+                        .value(row_idx);
+                validated_interval(months, 0, 0)
+            },
+            FieldImporter::IntervalDayTime => {
+                let dt_val =
+                    downcast_array::<IntervalDayTimeArray>(array, "IntervalDayTimeArray")?
+                        .value(row_idx);
+                validated_interval(0, dt_val.days, i64::from(dt_val.milliseconds) * 1_000)
+            },
+            FieldImporter::IntervalMonthDayNano => {
+                let v = downcast_array::<IntervalMonthDayNanoArray>(
+                    array,
+                    "IntervalMonthDayNanoArray",
+                )?
+                .value(row_idx);
+                if v.nanoseconds % 1_000 != 0 {
+                    return Err(PostgresError::Data(format!(
+                        "refusing sub-microsecond truncation for Arrow Interval(MonthDayNano) nanoseconds {}",
+                        v.nanoseconds
+                    )));
                 }
-            };
-            let (m, d, u) = validate_interval_parts(0, 0, micros)?;
-            Ok(PgValue::Interval {
-                months: m,
-                days: d,
-                microseconds: u,
-            })
-        }
-        FieldImporter::PgTemporalStruct(target) => {
-            let st = array
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .ok_or_else(|| downcast_err("StructArray (temporal)", array.data_type()))?;
-            let kind_arr = st
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int8Array>()
-                .ok_or_else(|| {
-                    downcast_err("Int8Array (temporal.kind)", st.column(0).data_type())
-                })?;
-            if kind_arr.is_null(row_idx) {
-                return Err(PostgresError::Data(
-                    "non-null PostgreSQL Arrow temporal struct has NULL `kind`".to_string(),
-                ));
-            }
-            let kind = kind_arr.value(row_idx);
-            if kind == 2 {
-                return Err(PostgresError::Data(
-                    "unresolved PostgreSQL temporal `wire_text` (kind = 2) cannot be imported via binary COPY"
-                        .to_string(),
-                ));
-            }
-            match target {
-                TemporalStructTarget::Date => match kind {
-                    -1 => Ok(PgValue::Date(PG_DATE_NEG_INF)),
-                    1 => Ok(PgValue::Date(PG_DATE_POS_INF)),
-                    0 => {
-                        let val_arr = st
-                            .column(1)
-                            .as_any()
-                            .downcast_ref::<Int32Array>()
-                            .ok_or_else(|| {
-                                downcast_err("Int32Array (date.value)", st.column(1).data_type())
-                            })?;
-                        if val_arr.is_null(row_idx) {
-                            return Err(PostgresError::Data(
-                                "PostgreSQL Arrow `pg-date` kind=0 has NULL `value`".to_string(),
-                            ));
-                        }
-                        let days = val_arr.value(row_idx);
-                        if !(crate::codecs::temporal::PG_DATE_MIN_FINITE
-                            ..=crate::codecs::temporal::PG_DATE_MAX_FINITE)
-                            .contains(&days)
-                        {
+                validated_interval(v.months, v.days, v.nanoseconds / 1_000)
+            },
+            FieldImporter::Duration(unit) => {
+                let micros: i64 = match unit {
+                    TimeUnit::Second => {
+                        let raw =
+                            downcast_array::<DurationSecondArray>(array, "DurationSecondArray")?
+                                .value(row_idx);
+                        raw.checked_mul(1_000_000).ok_or_else(|| {
+                            PostgresError::Data(format!(
+                                "Arrow Duration(Second) {raw} overflows i64us"
+                            ))
+                        })?
+                    }
+                    TimeUnit::Millisecond => {
+                        let raw = downcast_array::<DurationMillisecondArray>(
+                            array,
+                            "DurationMillisecondArray",
+                        )?
+                        .value(row_idx);
+                        raw.checked_mul(1_000).ok_or_else(|| {
+                            PostgresError::Data(format!(
+                                "Arrow Duration(Millisecond) {raw} overflows i64us"
+                            ))
+                        })?
+                    }
+                    TimeUnit::Microsecond => downcast_array::<DurationMicrosecondArray>(
+                        array,
+                        "DurationMicrosecondArray",
+                    )?
+                    .value(row_idx),
+                    TimeUnit::Nanosecond => {
+                        let ns = downcast_array::<DurationNanosecondArray>(
+                            array,
+                            "DurationNanosecondArray",
+                        )?
+                        .value(row_idx);
+                        if ns % 1_000 != 0 {
                             return Err(PostgresError::Data(format!(
-                                "PostgreSQL Arrow `pg-date` finite value {days} is out of range"
+                                "refusing sub-microsecond truncation for Arrow Duration(Nanosecond) {ns}"
                             )));
                         }
-                        Ok(PgValue::Date(days))
+                        ns / 1_000
                     }
-                    other => Err(PostgresError::Data(format!(
-                        "invalid PostgreSQL Arrow temporal `kind` {other}"
-                    ))),
-                },
-                TemporalStructTarget::Timestamp | TemporalStructTarget::TimestampTz => match kind {
-                    -1 => Ok(match target {
-                        TemporalStructTarget::Timestamp => PgValue::Timestamp(PG_TS_NEG_INF),
-                        TemporalStructTarget::TimestampTz => PgValue::TimestampTz(PG_TS_NEG_INF),
-                        TemporalStructTarget::Date => unreachable!(),
-                    }),
-                    1 => Ok(match target {
-                        TemporalStructTarget::Timestamp => PgValue::Timestamp(PG_TS_POS_INF),
-                        TemporalStructTarget::TimestampTz => PgValue::TimestampTz(PG_TS_POS_INF),
-                        TemporalStructTarget::Date => unreachable!(),
-                    }),
-                    0 => {
-                        let val_arr = st
-                            .column(1)
-                            .as_any()
-                            .downcast_ref::<Int64Array>()
-                            .ok_or_else(|| {
-                                downcast_err(
-                                    "Int64Array (timestamp.value)",
-                                    st.column(1).data_type(),
-                                )
-                            })?;
-                        if val_arr.is_null(row_idx) {
-                            return Err(PostgresError::Data(
-                                "PostgreSQL Arrow timestamp kind=0 has NULL `value`".to_string(),
-                            ));
+                };
+                validated_interval(0, 0, micros)
+            },
+            FieldImporter::PgTemporalStruct(target) => {
+                let st = downcast_array::<StructArray>(array, "StructArray (temporal)")?;
+                let kind_arr = downcast_array::<Int8Array>(
+                    st.column(0).as_ref(),
+                    "Int8Array (temporal.kind)",
+                )?;
+                if kind_arr.is_null(row_idx) {
+                    return Err(PostgresError::Data(
+                        "non-null PostgreSQL Arrow temporal struct has NULL `kind`".to_string(),
+                    ));
+                }
+                let kind = kind_arr.value(row_idx);
+                if kind == 2 {
+                    return Err(PostgresError::Data(
+                        "unresolved PostgreSQL temporal `wire_text` (kind = 2) cannot be imported via binary COPY"
+                            .to_string(),
+                    ));
+                }
+                match target {
+                    TemporalStructTarget::Date => match kind {
+                        -1 => Ok(PgValue::Date(PG_DATE_NEG_INF)),
+                        1 => Ok(PgValue::Date(PG_DATE_POS_INF)),
+                        0 => {
+                            let val_arr = downcast_array::<Int32Array>(
+                                st.column(1).as_ref(),
+                                "Int32Array (date.value)",
+                            )?;
+                            if val_arr.is_null(row_idx) {
+                                return Err(PostgresError::Data(
+                                    "PostgreSQL Arrow `pg-date` kind=0 has NULL `value`"
+                                        .to_string(),
+                                ));
+                            }
+                            let days = val_arr.value(row_idx);
+                            if !(crate::codecs::temporal::PG_DATE_MIN_FINITE
+                                ..=crate::codecs::temporal::PG_DATE_MAX_FINITE)
+                                .contains(&days)
+                            {
+                                return Err(PostgresError::Data(format!(
+                                    "PostgreSQL Arrow `pg-date` finite value {days} is out of range"
+                                )));
+                            }
+                            Ok(PgValue::Date(days))
                         }
-                        let us = val_arr.value(row_idx);
-                        if !(crate::codecs::temporal::PG_TS_MIN_FINITE
-                            ..=crate::codecs::temporal::PG_TS_MAX_FINITE)
-                            .contains(&us)
-                        {
-                            return Err(PostgresError::Data(format!(
-                                "PostgreSQL Arrow timestamp finite value {us} is out of range"
-                            )));
-                        }
-                        Ok(match target {
+                        other => Err(PostgresError::Data(format!(
+                            "invalid PostgreSQL Arrow temporal `kind` {other}"
+                        ))),
+                    },
+                    TemporalStructTarget::Timestamp | TemporalStructTarget::TimestampTz => {
+                        let wrap_ts = |us: i64| match target {
                             TemporalStructTarget::Timestamp => PgValue::Timestamp(us),
                             TemporalStructTarget::TimestampTz => PgValue::TimestampTz(us),
                             TemporalStructTarget::Date => unreachable!(),
-                        })
+                        };
+                        match kind {
+                            -1 => Ok(wrap_ts(PG_TS_NEG_INF)),
+                            1 => Ok(wrap_ts(PG_TS_POS_INF)),
+                            0 => {
+                                let val_arr = downcast_array::<Int64Array>(
+                                    st.column(1).as_ref(),
+                                    "Int64Array (timestamp.value)",
+                                )?;
+                                if val_arr.is_null(row_idx) {
+                                    return Err(PostgresError::Data(
+                                        "PostgreSQL Arrow timestamp kind=0 has NULL `value`"
+                                            .to_string(),
+                                    ));
+                                }
+                                let us = val_arr.value(row_idx);
+                                if !(crate::codecs::temporal::PG_TS_MIN_FINITE
+                                    ..=crate::codecs::temporal::PG_TS_MAX_FINITE)
+                                    .contains(&us)
+                                {
+                                    return Err(PostgresError::Data(format!(
+                                        "PostgreSQL Arrow timestamp finite value {us} is out of range"
+                                    )));
+                                }
+                                Ok(wrap_ts(us))
+                            }
+                            other => Err(PostgresError::Data(format!(
+                                "invalid PostgreSQL Arrow temporal `kind` {other}"
+                            ))),
+                        }
                     }
-                    other => Err(PostgresError::Data(format!(
-                        "invalid PostgreSQL Arrow temporal `kind` {other}"
-                    ))),
-                },
-            }
-        }
-        FieldImporter::PgIntervalStruct => {
-            let st = array
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .ok_or_else(|| downcast_err("StructArray (pg-interval)", array.data_type()))?;
-            let m_arr = st
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(|| downcast_err("Int32Array (months)", st.column(0).data_type()))?;
-            let d_arr = st
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(|| downcast_err("Int32Array (days)", st.column(1).data_type()))?;
-            let u_arr = st
-                .column(2)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| {
-                    downcast_err("Int64Array (microseconds)", st.column(2).data_type())
-                })?;
-            if m_arr.is_null(row_idx) || d_arr.is_null(row_idx) || u_arr.is_null(row_idx) {
-                return Err(PostgresError::Data(
-                    "non-null PostgreSQL Arrow `pg-interval` struct contains NULL component"
-                        .to_string(),
-                ));
-            }
-            let (m, d, u) = validate_interval_parts(
-                m_arr.value(row_idx),
-                d_arr.value(row_idx),
-                u_arr.value(row_idx),
-            )?;
-            Ok(PgValue::Interval {
-                months: m,
-                days: d,
-                microseconds: u,
-            })
-        }
-        FieldImporter::PgBitStringStruct { fixed_bit_typmod } => {
-            let st = array
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .ok_or_else(|| downcast_err("StructArray (pg-bits)", array.data_type()))?;
-            let b_arr = st
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .ok_or_else(|| downcast_err("BinaryArray (bytes)", st.column(0).data_type()))?;
-            let len_arr = st
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(|| downcast_err("Int32Array (bit_length)", st.column(1).data_type()))?;
-            if b_arr.is_null(row_idx) || len_arr.is_null(row_idx) {
-                return Err(PostgresError::Data(
-                    "non-null PostgreSQL Arrow `pg-bits` struct contains NULL component"
-                        .to_string(),
-                ));
-            }
-            let bit_length = len_arr.value(row_idx);
-            if bit_length < 0 {
-                return Err(PostgresError::Data(format!(
-                    "negative `pg-bits` bit_length {bit_length}"
-                )));
-            }
-            if let Some(exp_bits) = fixed_bit_typmod
-                && bit_length != *exp_bits
-            {
-                return Err(PostgresError::Data(format!(
-                    "BIT({exp_bits}) target requires exact bit_length {exp_bits}, got {bit_length}"
-                )));
-            }
-            let raw_bytes = b_arr.value(row_idx);
-            let expected_bytes = (bit_length as usize).div_ceil(8);
-            if raw_bytes.len() != expected_bytes {
-                return Err(PostgresError::Data(format!(
-                    "`pg-bits` bytes length {} does not match bit_length {bit_length} ({expected_bytes} bytes)",
-                    raw_bytes.len()
-                )));
-            }
-            let rem = (bit_length as usize) % 8;
-            if rem != 0 {
-                let mask = (1u8 << (8 - rem)) - 1;
-                if let Some(&last) = raw_bytes.last()
-                    && last & mask != 0
+                }
+            },
+            FieldImporter::PgIntervalStruct => {
+                let st = downcast_array::<StructArray>(array, "StructArray (pg-interval)")?;
+                let m_arr =
+                    downcast_array::<Int32Array>(st.column(0).as_ref(), "Int32Array (months)")?;
+                let d_arr =
+                    downcast_array::<Int32Array>(st.column(1).as_ref(), "Int32Array (days)")?;
+                let u_arr = downcast_array::<Int64Array>(
+                    st.column(2).as_ref(),
+                    "Int64Array (microseconds)",
+                )?;
+                if m_arr.is_null(row_idx) || d_arr.is_null(row_idx) || u_arr.is_null(row_idx) {
+                    return Err(PostgresError::Data(
+                        "non-null PostgreSQL Arrow `pg-interval` struct contains NULL component"
+                            .to_string(),
+                    ));
+                }
+                validated_interval(
+                    m_arr.value(row_idx),
+                    d_arr.value(row_idx),
+                    u_arr.value(row_idx),
+                )
+            },
+            FieldImporter::PgBitStringStruct { fixed_bit_typmod } => {
+                let st = downcast_array::<StructArray>(array, "StructArray (pg-bits)")?;
+                let b_arr =
+                    downcast_array::<BinaryArray>(st.column(0).as_ref(), "BinaryArray (bytes)")?;
+                let len_arr = downcast_array::<Int32Array>(
+                    st.column(1).as_ref(),
+                    "Int32Array (bit_length)",
+                )?;
+                if b_arr.is_null(row_idx) || len_arr.is_null(row_idx) {
+                    return Err(PostgresError::Data(
+                        "non-null PostgreSQL Arrow `pg-bits` struct contains NULL component"
+                            .to_string(),
+                    ));
+                }
+                let bit_length = len_arr.value(row_idx);
+                if bit_length < 0 {
+                    return Err(PostgresError::Data(format!(
+                        "negative `pg-bits` bit_length {bit_length}"
+                    )));
+                }
+                if let Some(exp_bits) = fixed_bit_typmod
+                    && bit_length != *exp_bits
+                {
+                    return Err(PostgresError::Data(format!(
+                        "BIT({exp_bits}) target requires exact bit_length {exp_bits}, got {bit_length}"
+                    )));
+                }
+                let raw_bytes = b_arr.value(row_idx);
+                let expected_bytes = (bit_length as usize).div_ceil(8);
+                if raw_bytes.len() != expected_bytes {
+                    return Err(PostgresError::Data(format!(
+                        "`pg-bits` bytes length {} does not match bit_length {bit_length} ({expected_bytes} bytes)",
+                        raw_bytes.len()
+                    )));
+                }
+                let rem = (bit_length as usize) % 8;
+                if rem != 0 {
+                    let mask = (1u8 << (8 - rem)) - 1;
+                    if let Some(&last) = raw_bytes.last()
+                        && last & mask != 0
+                    {
+                        return Err(PostgresError::Data(
+                            "`pg-bits` payload contains non-zero trailing padding bits".to_string(),
+                        ));
+                    }
+                }
+                Ok(PgValue::BitString {
+                    data: raw_bytes.to_vec(),
+                    bit_length,
+                })
+            },
+            FieldImporter::PgVector {
+                offsets,
+                kind,
+                expected_dim,
+            } => {
+                let (values_arr, start, end) = list_row_slice_bounds(array, *offsets, row_idx)?;
+                let len = end - start;
+                if len == 0 || len > MAX_PGVECTOR_ARROW_DIM as usize {
+                    return Err(PostgresError::Data(format!(
+                        "PostgreSQL {kind:?} dimension {len} must be within 1..={MAX_PGVECTOR_ARROW_DIM}"
+                    )));
+                }
+                if let Some(exp) = expected_dim
+                    && len != *exp
+                {
+                    return Err(PostgresError::Data(format!(
+                        "PostgreSQL {kind:?} dimension {len} does not match column typmod {exp}"
+                    )));
+                }
+                let mut out_vals = Vec::with_capacity(len);
+                match values_arr.data_type() {
+                    DataType::Float32 => {
+                        extract_vector_slice!(values_arr, Float32Array, start, end, *kind, out_vals, |v| v);
+                    }
+                    DataType::Float16 => {
+                        extract_vector_slice!(values_arr, Float16Array, start, end, *kind, out_vals, |v| v.to_f32());
+                    }
+                    DataType::Float64 => {
+                        extract_vector_slice!(values_arr, Float64Array, start, end, *kind, out_vals, |v64| {
+                            let narrowed = v64 as f32;
+                            if !v64.is_finite() || !narrowed.is_finite() {
+                                return Err(PostgresError::Data(format!(
+                                    "non-finite or overflowing Float64 element {v64} in pgvector"
+                                )));
+                            }
+                            narrowed
+                        });
+                    }
+                    other => {
+                        return Err(PostgresError::Data(format!(
+                            "unsupported vector element DataType {other:?}"
+                        )));
+                    }
+                }
+                Ok(PgValue::Vector {
+                    values: out_vals,
+                    kind: *kind,
+                })
+            },
+            FieldImporter::PgLosslessArray {
+                element_oid,
+                element,
+            } => {
+                let st = downcast_array::<StructArray>(array, "StructArray (pg-array)")?;
+                if st.column(0).is_null(row_idx)
+                    || st.column(1).is_null(row_idx)
+                    || st.column(2).is_null(row_idx)
                 {
                     return Err(PostgresError::Data(
-                        "`pg-bits` payload contains non-zero trailing padding bits".to_string(),
+                        "non-null PostgreSQL Arrow `pg-array` struct contains NULL child list"
+                            .to_string(),
                     ));
                 }
-            }
-            Ok(PgValue::BitString {
-                data: raw_bytes.to_vec(),
-                bit_length,
-            })
-        }
-        FieldImporter::PgVector {
-            offsets,
-            kind,
-            expected_dim,
-        } => {
-            let (values_arr, start, end) = list_row_slice_bounds(array, *offsets, row_idx)?;
-            let len = end - start;
-            if len == 0 || len > MAX_PGVECTOR_ARROW_DIM as usize {
-                return Err(PostgresError::Data(format!(
-                    "PostgreSQL {kind:?} dimension {len} must be within 1..={MAX_PGVECTOR_ARROW_DIM}"
-                )));
-            }
-            if let Some(exp) = expected_dim
-                && len != *exp
-            {
-                return Err(PostgresError::Data(format!(
-                    "PostgreSQL {kind:?} dimension {len} does not match column typmod {exp}"
-                )));
-            }
-            let mut out_vals = Vec::with_capacity(len);
-            match values_arr.data_type() {
-                DataType::Float32 => {
-                    let f32s = values_arr
-                        .as_any()
-                        .downcast_ref::<Float32Array>()
-                        .ok_or_else(|| downcast_err("Float32Array", values_arr.data_type()))?;
-                    for idx in start..end {
-                        if f32s.is_null(idx) {
-                            return Err(PostgresError::Data(
-                                "pgvector elements cannot be NULL".to_string(),
-                            ));
-                        }
-                        out_vals.push(validate_vector_elem(f32s.value(idx), *kind)?);
-                    }
-                }
-                DataType::Float16 => {
-                    let f16s = values_arr
-                        .as_any()
-                        .downcast_ref::<Float16Array>()
-                        .ok_or_else(|| downcast_err("Float16Array", values_arr.data_type()))?;
-                    for idx in start..end {
-                        if f16s.is_null(idx) {
-                            return Err(PostgresError::Data(
-                                "pgvector elements cannot be NULL".to_string(),
-                            ));
-                        }
-                        out_vals.push(validate_vector_elem(f16s.value(idx).to_f32(), *kind)?);
-                    }
-                }
-                DataType::Float64 => {
-                    let f64s = values_arr
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .ok_or_else(|| downcast_err("Float64Array", values_arr.data_type()))?;
-                    for idx in start..end {
-                        if f64s.is_null(idx) {
-                            return Err(PostgresError::Data(
-                                "pgvector elements cannot be NULL".to_string(),
-                            ));
-                        }
-                        let v64 = f64s.value(idx);
-                        let narrowed = v64 as f32;
-                        if !v64.is_finite() || !narrowed.is_finite() {
-                            return Err(PostgresError::Data(format!(
-                                "non-finite or overflowing Float64 element {v64} in pgvector"
-                            )));
-                        }
-                        out_vals.push(validate_vector_elem(narrowed, *kind)?);
-                    }
-                }
-                other => {
+                let (dim_vals, d_start, d_end) =
+                    list_row_slice_bounds(st.column(0).as_ref(), ListOffsetsKind::I32, row_idx)?;
+                let (lb_vals, lb_start, lb_end) =
+                    list_row_slice_bounds(st.column(1).as_ref(), ListOffsetsKind::I32, row_idx)?;
+                let (elem_vals, v_start, v_end) =
+                    list_row_slice_bounds(st.column(2).as_ref(), ListOffsetsKind::I32, row_idx)?;
+
+                let dim_i32 =
+                    downcast_array::<Int32Array>(dim_vals.as_ref(), "Int32Array (dimensions)")?;
+                let lb_i32 =
+                    downcast_array::<Int32Array>(lb_vals.as_ref(), "Int32Array (lower_bounds)")?;
+
+                let ndim = d_end - d_start;
+                if ndim != lb_end - lb_start {
                     return Err(PostgresError::Data(format!(
-                        "unsupported vector element DataType {other:?}"
+                        "`pg-array` dimensions length {ndim} does not match lower_bounds length {}",
+                        lb_end - lb_start
                     )));
                 }
-            }
-            Ok(PgValue::Vector {
-                values: out_vals,
-                kind: *kind,
-            })
-        }
-        FieldImporter::PgLosslessArray {
-            element_oid,
-            element,
-        } => {
-            let st = array
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .ok_or_else(|| downcast_err("StructArray (pg-array)", array.data_type()))?;
-            if st.column(0).is_null(row_idx)
-                || st.column(1).is_null(row_idx)
-                || st.column(2).is_null(row_idx)
-            {
-                return Err(PostgresError::Data(
-                    "non-null PostgreSQL Arrow `pg-array` struct contains NULL child list"
-                        .to_string(),
-                ));
-            }
-            let (dim_vals, d_start, d_end) =
-                list_row_slice_bounds(st.column(0).as_ref(), ListOffsetsKind::I32, row_idx)?;
-            let (lb_vals, lb_start, lb_end) =
-                list_row_slice_bounds(st.column(1).as_ref(), ListOffsetsKind::I32, row_idx)?;
-            let (elem_vals, v_start, v_end) =
-                list_row_slice_bounds(st.column(2).as_ref(), ListOffsetsKind::I32, row_idx)?;
-
-            let dim_i32 = dim_vals
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(|| downcast_err("Int32Array (dimensions)", dim_vals.data_type()))?;
-            let lb_i32 = lb_vals
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(|| downcast_err("Int32Array (lower_bounds)", lb_vals.data_type()))?;
-
-            let ndim = d_end - d_start;
-            if ndim != lb_end - lb_start {
-                return Err(PostgresError::Data(format!(
-                    "`pg-array` dimensions length {ndim} does not match lower_bounds length {}",
-                    lb_end - lb_start
-                )));
-            }
-            if ndim > MAX_ARRAY_DIMS {
-                return Err(PostgresError::Data(format!(
-                    "`pg-array` ndim {ndim} exceeds MAX_ARRAY_DIMS ({MAX_ARRAY_DIMS})"
-                )));
-            }
-
-            let mut dimensions = Vec::with_capacity(ndim);
-            let mut lower_bounds = Vec::with_capacity(ndim);
-            let mut expected_total: usize = if ndim == 0 { 0 } else { 1 };
-            for i in 0..ndim {
-                if dim_i32.is_null(d_start + i) || lb_i32.is_null(lb_start + i) {
-                    return Err(PostgresError::Data(
-                        "`pg-array` dimensions and lower_bounds cannot contain NULL".to_string(),
-                    ));
-                }
-                let d = dim_i32.value(d_start + i);
-                let lb = lb_i32.value(lb_start + i);
-                if d <= 0 {
+                if ndim > MAX_ARRAY_DIMS {
                     return Err(PostgresError::Data(format!(
-                        "`pg-array` non-empty dimension must be >= 1, got {d}"
+                        "`pg-array` ndim {ndim} exceeds MAX_ARRAY_DIMS ({MAX_ARRAY_DIMS})"
                     )));
                 }
-                if lb.checked_add(d - 1).is_none() {
+
+                let mut dimensions = Vec::with_capacity(ndim);
+                let mut lower_bounds = Vec::with_capacity(ndim);
+                let mut expected_total: usize = if ndim == 0 { 0 } else { 1 };
+                for i in 0..ndim {
+                    if dim_i32.is_null(d_start + i) || lb_i32.is_null(lb_start + i) {
+                        return Err(PostgresError::Data(
+                            "`pg-array` dimensions and lower_bounds cannot contain NULL"
+                                .to_string(),
+                        ));
+                    }
+                    let d = dim_i32.value(d_start + i);
+                    let lb = lb_i32.value(lb_start + i);
+                    if d <= 0 {
+                        return Err(PostgresError::Data(format!(
+                            "`pg-array` non-empty dimension must be >= 1, got {d}"
+                        )));
+                    }
+                    if lb.checked_add(d - 1).is_none() {
+                        return Err(PostgresError::Data(format!(
+                            "`pg-array` lower_bound {lb} + dim {d} overflows i32"
+                        )));
+                    }
+                    expected_total = expected_total
+                        .checked_mul(d as usize)
+                        .ok_or_else(|| PostgresError::Data("`pg-array` cardinality overflow".into()))?;
+                    dimensions.push(d);
+                    lower_bounds.push(lb);
+                }
+
+                let actual_total = v_end - v_start;
+                if actual_total != expected_total {
                     return Err(PostgresError::Data(format!(
-                        "`pg-array` lower_bound {lb} + dim {d} overflows i32"
+                        "`pg-array` values length {actual_total} does not match dimensions product {expected_total}"
                     )));
                 }
-                expected_total = expected_total
-                    .checked_mul(d as usize)
-                    .ok_or_else(|| PostgresError::Data("`pg-array` cardinality overflow".into()))?;
-                dimensions.push(d);
-                lower_bounds.push(lb);
-            }
 
-            let actual_total = v_end - v_start;
-            if actual_total != expected_total {
-                return Err(PostgresError::Data(format!(
-                    "`pg-array` values length {actual_total} does not match dimensions product {expected_total}"
-                )));
-            }
-
-            let mut values = Vec::with_capacity(actual_total);
-            for idx in v_start..v_end {
-                values.push(extract_field_value(element, elem_vals.as_ref(), idx)?);
-            }
-            Ok(PgValue::Array {
-                values,
-                dimensions,
-                lower_bounds,
-                element_oid: *element_oid,
-            })
-        }
-        FieldImporter::OrdinaryArray {
-            offsets,
-            element_oid,
-            element,
-        } => {
-            let (elem_vals, start, end) = list_row_slice_bounds(array, *offsets, row_idx)?;
-            let len = end - start;
-            if len == 0 {
-                return Ok(PgValue::Array {
-                    values: Vec::new(),
-                    dimensions: Vec::new(),
-                    lower_bounds: Vec::new(),
+                let mut values = Vec::with_capacity(actual_total);
+                for idx in v_start..v_end {
+                    values.push(extract_field_value(element, elem_vals.as_ref(), idx)?);
+                }
+                Ok(PgValue::Array {
+                    values,
+                    dimensions,
+                    lower_bounds,
                     element_oid: *element_oid,
-                });
-            }
-            let len_i32 = i32::try_from(len).map_err(|_| {
-                PostgresError::Data(format!("Arrow list length {len} overflows PostgreSQL i32"))
-            })?;
-            let mut values = Vec::with_capacity(len);
-            for idx in start..end {
-                values.push(extract_field_value(element, elem_vals.as_ref(), idx)?);
-            }
-            Ok(PgValue::Array {
-                values,
-                dimensions: vec![len_i32],
-                lower_bounds: vec![1],
-                element_oid: *element_oid,
-            })
-        }
-        FieldImporter::CompositeStruct {
-            type_oid,
-            field_names,
-            field_oids,
-            children,
-        } => {
-            let st = array
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .ok_or_else(|| downcast_err("StructArray (composite)", array.data_type()))?;
-            if st.num_columns() != children.len() {
-                return Err(PostgresError::Data(format!(
-                    "composite StructArray column count {} does not match expected {}",
-                    st.num_columns(),
-                    children.len()
-                )));
-            }
-            let mut values = Vec::with_capacity(children.len());
-            for (idx, child_imp) in children.iter().enumerate() {
-                values.push(extract_field_value(
-                    child_imp,
-                    st.column(idx).as_ref(),
-                    row_idx,
-                )?);
-            }
-            Ok(PgValue::Composite {
-                type_oid: *type_oid,
-                field_names: field_names.clone(),
-                field_oids: field_oids.clone(),
-                values,
-            })
-        }
-        FieldImporter::Dictionary { key_type, values } => {
-            let (dict_values, val_idx) = match key_type {
-                DictKeyType::Int8 => extract_dict_entry::<arrow_types::Int8Type>(array, row_idx)?,
-                DictKeyType::Int16 => extract_dict_entry::<arrow_types::Int16Type>(array, row_idx)?,
-                DictKeyType::Int32 => extract_dict_entry::<arrow_types::Int32Type>(array, row_idx)?,
-                DictKeyType::Int64 => extract_dict_entry::<arrow_types::Int64Type>(array, row_idx)?,
-                DictKeyType::UInt8 => extract_dict_entry::<arrow_types::UInt8Type>(array, row_idx)?,
-                DictKeyType::UInt16 => {
-                    extract_dict_entry::<arrow_types::UInt16Type>(array, row_idx)?
+                })
+            },
+            FieldImporter::OrdinaryArray {
+                offsets,
+                element_oid,
+                element,
+            } => {
+                let (elem_vals, start, end) = list_row_slice_bounds(array, *offsets, row_idx)?;
+                let len = end - start;
+                if len == 0 {
+                    return Ok(PgValue::Array {
+                        values: Vec::new(),
+                        dimensions: Vec::new(),
+                        lower_bounds: Vec::new(),
+                        element_oid: *element_oid,
+                    });
                 }
-                DictKeyType::UInt32 => {
-                    extract_dict_entry::<arrow_types::UInt32Type>(array, row_idx)?
+                let len_i32 = i32::try_from(len).map_err(|_| {
+                    PostgresError::Data(format!("Arrow list length {len} overflows PostgreSQL i32"))
+                })?;
+                let mut values = Vec::with_capacity(len);
+                for idx in start..end {
+                    values.push(extract_field_value(element, elem_vals.as_ref(), idx)?);
                 }
-                DictKeyType::UInt64 => {
-                    extract_dict_entry::<arrow_types::UInt64Type>(array, row_idx)?
+                Ok(PgValue::Array {
+                    values,
+                    dimensions: vec![len_i32],
+                    lower_bounds: vec![1],
+                    element_oid: *element_oid,
+                })
+            },
+            FieldImporter::CompositeStruct {
+                type_oid,
+                field_names,
+                field_oids,
+                children,
+            } => {
+                let st = downcast_array::<StructArray>(array, "StructArray (composite)")?;
+                if st.num_columns() != children.len() {
+                    return Err(PostgresError::Data(format!(
+                        "composite StructArray column count {} does not match expected {}",
+                        st.num_columns(),
+                        children.len()
+                    )));
                 }
-            };
-            extract_field_value(values, dict_values.as_ref(), val_idx)
+                let mut values = Vec::with_capacity(children.len());
+                for (idx, child_imp) in children.iter().enumerate() {
+                    values.push(extract_field_value(
+                        child_imp,
+                        st.column(idx).as_ref(),
+                        row_idx,
+                    )?);
+                }
+                Ok(PgValue::Composite {
+                    type_oid: *type_oid,
+                    field_names: field_names.clone(),
+                    field_oids: field_oids.clone(),
+                    values,
+                })
+            },
+            FieldImporter::Dictionary { key_type, values } => {
+                let (dict_values, val_idx) = dispatch_dict_key!(
+                    key_type, array, row_idx;
+                    [
+                        Int8 => arrow_types::Int8Type,
+                        Int16 => arrow_types::Int16Type,
+                        Int32 => arrow_types::Int32Type,
+                        Int64 => arrow_types::Int64Type,
+                        UInt8 => arrow_types::UInt8Type,
+                        UInt16 => arrow_types::UInt16Type,
+                        UInt32 => arrow_types::UInt32Type,
+                        UInt64 => arrow_types::UInt64Type,
+                    ]
+                );
+                extract_field_value(values, dict_values.as_ref(), val_idx)
+            },
         }
-    }
+    )
 }
 
 fn validate_vector_elem(val: f32, kind: VectorKind) -> Result<f32, PostgresError> {
@@ -5287,10 +4983,7 @@ fn extract_dict_entry<K: arrow_types::ArrowDictionaryKeyType>(
     array: &dyn Array,
     row_idx: usize,
 ) -> Result<(ArrayRef, usize), PostgresError> {
-    let dict = array
-        .as_any()
-        .downcast_ref::<DictionaryArray<K>>()
-        .ok_or_else(|| downcast_err("DictionaryArray", array.data_type()))?;
+    let dict = downcast_array::<DictionaryArray<K>>(array, "DictionaryArray")?;
     let val_idx = dict.keys().value(row_idx);
     use arrow_buffer::ArrowNativeType;
     let idx = val_idx.to_usize().ok_or_else(|| {

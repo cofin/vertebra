@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import urllib.parse
-from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, runtime_checkable
 
 import msgspec
 
@@ -21,7 +22,13 @@ from vertebra.db.adapters.spanner.queue import (
     format_spanner_receipt_handle,
     parse_spanner_receipt_handle,
 )
-from vertebra.db.driver.capabilities import QueueEntry
+from vertebra.framework.queues._sql import (
+    _SqlQueueBackendBase,
+    decode_entry_envelope,
+    decode_envelope_bytes,
+    error_type_and_message,
+    unpack_queue_settings,
+)
 from vertebra.framework.queues.base import (
     CronLease,
     DeadLetterEntry,
@@ -32,11 +39,13 @@ from vertebra.framework.queues.base import (
 )
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module
-from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.serializers import encode_json_bytes
 from vertebra.utils.uuids import uuid4
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from vertebra.db.driver.capabilities import QueueEntry
 
 __all__ = (
     "CLAIM_SPANNER_JOBS_SPANGRES_SQL",
@@ -105,6 +114,19 @@ RETURNING *
 """
 
 _SPANNER_SCHEMES: Final[frozenset[str]] = frozenset({"spanner", "spanner+googlesql", "spangres", "spanner+spangres"})
+_NAMED_PARAM_RE: Final[re.Pattern[str]] = re.compile(r"@([a-zA-Z_][a-zA-Z0-9_]*)")
+
+
+def _to_spangres_params(sql: str) -> str:
+    """Replace left-to-right ``@name`` placeholders with sequential ``$1..$N`` slots."""
+    index = 0
+
+    def _replace(_match: re.Match[str]) -> str:
+        nonlocal index
+        index += 1
+        return f"${index}"
+
+    return _NAMED_PARAM_RE.sub(_replace, sql)
 
 
 @runtime_checkable
@@ -128,7 +150,7 @@ class SpannerQueueExecutor(Protocol):
         ...
 
 
-class SpannerQueueBackend:
+class SpannerQueueBackend(_SqlQueueBackendBase):
     """Google Cloud Spanner queue backend over ``SyncSpannerQueueStore``, ``AsyncSpannerQueueStore``, or an executor."""
 
     __slots__ = (
@@ -140,6 +162,8 @@ class SpannerQueueBackend:
         "_store",
         "_sync_store",
     )
+
+    _sync_store_label = "SyncSpannerQueueStore"
 
     def __init__(
         self,
@@ -156,15 +180,7 @@ class SpannerQueueBackend:
         cleanup_on_ack: bool = True,
     ) -> None:
         """Initialize the Spanner queue backend with native queue stores, drivers, DSN, or an executor."""
-        if isinstance(config, QueueBackendSettings):
-            if store is None and config.store is not None:
-                store = cast("AsyncSpannerQueueStore", config.store)
-            if sync_store is None and config.sync_store is not None:
-                sync_store = cast("SyncSpannerQueueStore", config.sync_store)
-            if driver is None and config.driver is not None:
-                driver = cast("AsyncSpannerDriver", config.driver)
-            if sync_driver is None and config.sync_driver is not None:
-                sync_driver = cast("SyncSpannerDriver", config.sync_driver)
+        store, sync_store, driver, sync_driver = unpack_queue_settings(config, store, sync_store, driver, sync_driver)
 
         resolved_config = config or QueueConfig(backend_url="")
         raw_url = resolved_config.backend_url
@@ -305,33 +321,19 @@ class SpannerQueueBackend:
             return UPDATE_CLAIM_SPANNER_JOBS_SPANGRES_SQL
         return UPDATE_CLAIM_SPANNER_JOBS_SQL
 
-    def enqueue_sync(self, envelope: TaskEnvelope) -> TaskEnvelope:
-        """Enqueue a task envelope synchronously via ``SyncSpannerQueueStore``."""
-        if self._sync_store is None:
-            msg = "Synchronous Spanner enqueue requires a configured SyncSpannerQueueStore"
-            raise ImproperConfigurationError(msg)
-        self._sync_store.enqueue(_envelope_to_entry(envelope))
-        return envelope
+    def _render_sql(self, gsql: str) -> str:
+        return _to_spangres_params(gsql) if self._dialect == "spangres" else gsql
 
     async def enqueue(self, envelope: TaskEnvelope) -> TaskEnvelope:
         """Insert a task into ``vertebra_queue_jobs`` under its deterministic ``shard_id``."""
         if self._store is not None:
-            await self._store.enqueue(_envelope_to_entry(envelope))
-            return envelope
+            return await self._store_enqueue(envelope)
         assert self._executor is not None
         shard_id = self.compute_shard_id(envelope.task_id, self._shard_count)
         payload_str = encode_json_bytes(envelope).decode("utf-8")
         initial_attempt = max(0, int(envelope.attempt) - 1)
-        if self._dialect == "spangres":
-            insert_sql = """
-            INSERT INTO vertebra_queue_jobs (
-                shard_id, task_id, task_name, lane, payload, attempt, max_retries,
-                status, enqueued_at, scheduled_at, locked_until, consumer_name,
-                receipt_handle, idempotency_key, traceparent
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        insert_sql = self._render_sql(
             """
-        else:
-            insert_sql = """
             INSERT INTO vertebra_queue_jobs (
                 shard_id, task_id, task_name, lane, payload, attempt, max_retries,
                 status, enqueued_at, scheduled_at, locked_until, consumer_name,
@@ -340,6 +342,7 @@ class SpannerQueueBackend:
                       @status, @enqueued_at, @scheduled_at, @locked_until, @consumer_name,
                       @receipt_handle, @idempotency_key, @traceparent)
             """
+        )
         await self._executor.execute(
             insert_sql,
             shard_id,
@@ -402,19 +405,11 @@ class SpannerQueueBackend:
 
         envelopes: list[TaskEnvelope] = []
         for row in rows:
-            payload_data = row["payload"]
-            payload_bytes = payload_data.encode("utf-8") if isinstance(payload_data, str) else bytes(payload_data)
-            env = msgspec.convert(decode_json(payload_bytes), type=TaskEnvelope)
+            env = decode_envelope_bytes(row["payload"])
             shard_id = int(row.get("shard_id", self.compute_shard_id(env.task_id, self._shard_count)))
             attempt = int(row.get("attempt", env.attempt))
             handle = str(row.get("receipt_handle") or format_spanner_receipt_handle(shard_id, env.task_id, attempt))
-            envelopes.append(
-                msgspec.structs.replace(
-                    env,
-                    attempt=attempt,
-                    receipt_handle=handle,
-                )
-            )
+            envelopes.append(msgspec.structs.replace(env, attempt=attempt, receipt_handle=handle))
         return envelopes
 
     async def ack(self, envelope: TaskEnvelope | str) -> None:
@@ -426,36 +421,12 @@ class SpannerQueueBackend:
             await self._store.ack(task_id, attempt=attempt)
             return
         assert self._executor is not None
-        if self._dialect == "spangres":
-            if self._cleanup_on_ack:
-                await self._executor.execute(
-                    "DELETE FROM vertebra_queue_jobs WHERE shard_id = $1 AND task_id = $2 AND attempt = $3",
-                    shard_id,
-                    task_id,
-                    attempt,
-                )
-            else:
-                await self._executor.execute(
-                    "UPDATE vertebra_queue_jobs SET status = 'acked' WHERE shard_id = $1 AND task_id = $2 AND attempt = $3",
-                    shard_id,
-                    task_id,
-                    attempt,
-                )
-            return
-        if self._cleanup_on_ack:
-            await self._executor.execute(
-                "DELETE FROM vertebra_queue_jobs WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt",
-                shard_id,
-                task_id,
-                attempt,
-            )
-        else:
-            await self._executor.execute(
-                "UPDATE vertebra_queue_jobs SET status = 'acked' WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt",
-                shard_id,
-                task_id,
-                attempt,
-            )
+        stmt = (
+            "DELETE FROM vertebra_queue_jobs WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt"
+            if self._cleanup_on_ack
+            else "UPDATE vertebra_queue_jobs SET status = 'acked' WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt"
+        )
+        await self._executor.execute(self._render_sql(stmt), shard_id, task_id, attempt)
 
     async def nack(
         self,
@@ -467,8 +438,7 @@ class SpannerQueueBackend:
         send_to_dlq: bool = False,
     ) -> DeadLetterEntry | None:
         """Route a failed job to ``vertebra_queue_dlq`` or reschedule with backoff."""
-        err_type = type(error).__name__ if isinstance(error, Exception) else "TaskExecutionError"
-        err_msg = str(error)
+        err_type, err_msg = error_type_and_message(error)
         delay = delay_seconds if delay_seconds is not None else (retry_delay_s if retry_delay_s is not None else 1.0)
 
         if self._store is not None:
@@ -485,7 +455,7 @@ class SpannerQueueBackend:
             )
             if not ok or dlq_row is None:
                 return None
-            resolved_env = envelope if isinstance(envelope, TaskEnvelope) else _decode_dlq_envelope(dlq_row)
+            resolved_env = envelope if isinstance(envelope, TaskEnvelope) else decode_envelope_bytes(dlq_row["payload"])
             return DeadLetterEntry(
                 dlq_id=str(dlq_row["dlq_id"]),
                 envelope=resolved_env,
@@ -499,20 +469,13 @@ class SpannerQueueBackend:
         if resolved is None:
             return None
         shard_id = self.compute_shard_id(resolved.task_id, self._shard_count)
-        is_pg = self._dialect == "spangres"
+        now = time.time()
 
         if send_to_dlq or resolved.attempt >= resolved.max_retries:
             dlq_id = uuid4().hex
             payload_str = encode_json_bytes(resolved).decode("utf-8")
-            now = time.time()
-            dlq_sql = (
+            dlq_sql = self._render_sql(
                 """
-                INSERT INTO vertebra_queue_dlq (
-                    dlq_id, shard_id, task_id, task_name, lane, payload, error_type, error_message, failed_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                """
-                if is_pg
-                else """
                 INSERT INTO vertebra_queue_dlq (
                     dlq_id, shard_id, task_id, task_name, lane, payload, error_type, error_message, failed_at
                 ) VALUES (@dlq_id, @shard_id, @task_id, @task_name, @lane, @payload, @error_type, @error_message, @failed_at)
@@ -530,10 +493,8 @@ class SpannerQueueBackend:
                 err_msg,
                 now,
             )
-            del_sql = (
-                "DELETE FROM vertebra_queue_jobs WHERE shard_id = $1 AND task_id = $2 AND attempt = $3"
-                if is_pg
-                else "DELETE FROM vertebra_queue_jobs WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt"
+            del_sql = self._render_sql(
+                "DELETE FROM vertebra_queue_jobs WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt"
             )
             await self._executor.execute(del_sql, shard_id, resolved.task_id, resolved.attempt)
             return DeadLetterEntry(
@@ -544,17 +505,9 @@ class SpannerQueueBackend:
                 failed_at=now,
             )
 
-        now = time.time()
         sched_at = now + max(0.0, delay)
-        upd_sql = (
+        upd_sql = self._render_sql(
             """
-            UPDATE vertebra_queue_jobs
-            SET status = $1, attempt = $2, scheduled_at = $3,
-                locked_until = $4, receipt_handle = $5
-            WHERE shard_id = $6 AND task_id = $7
-            """
-            if is_pg
-            else """
             UPDATE vertebra_queue_jobs
             SET status = @status, attempt = @attempt, scheduled_at = @scheduled_at,
                 locked_until = @locked_until, receipt_handle = @receipt_handle
@@ -579,14 +532,8 @@ class SpannerQueueBackend:
             return await self._store.promote_scheduled(limit=batch_size)
         assert self._executor is not None
         current_time = now if now is not None else time.time()
-        sql = (
+        sql = self._render_sql(
             """
-            UPDATE vertebra_queue_jobs
-            SET scheduled_at = NULL
-            WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at <= $1
-            """
-            if self._dialect == "spangres"
-            else """
             UPDATE vertebra_queue_jobs
             SET scheduled_at = NULL
             WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at <= @now_ts
@@ -600,24 +547,18 @@ class SpannerQueueBackend:
             rows = await self._store.list_dlq_rows(limit=limit)
         else:
             assert self._executor is not None
-            dlq_sql = (
-                "SELECT * FROM vertebra_queue_dlq ORDER BY failed_at DESC LIMIT $1"
-                if self._dialect == "spangres"
-                else "SELECT * FROM vertebra_queue_dlq ORDER BY failed_at DESC LIMIT @limit"
-            )
+            dlq_sql = self._render_sql("SELECT * FROM vertebra_queue_dlq ORDER BY failed_at DESC LIMIT @limit")
             rows = await self._executor.fetch_all(dlq_sql, limit)
-        entries: list[DeadLetterEntry] = []
-        for row in rows:
-            entries.append(
-                DeadLetterEntry(
-                    dlq_id=str(row["dlq_id"]),
-                    envelope=_decode_dlq_envelope(row),
-                    error_type=str(row["error_type"]),
-                    error_message=str(row["error_message"]),
-                    failed_at=float(row["failed_at"]),
-                )
+        return [
+            DeadLetterEntry(
+                dlq_id=str(row["dlq_id"]),
+                envelope=decode_envelope_bytes(row["payload"]),
+                error_type=str(row["error_type"]),
+                error_message=str(row["error_message"]),
+                failed_at=float(row["failed_at"]),
             )
-        return entries
+            for row in rows
+        ]
 
     async def replay_dlq(self, dlq_id: str) -> TaskEnvelope | None:
         """Re-enqueue a task from the dead-letter queue and remove its DLQ entry."""
@@ -625,29 +566,23 @@ class SpannerQueueBackend:
             row = await self._store.pop_dlq_row(dlq_id)
             if row is None:
                 return None
-            env = _decode_dlq_envelope(row)
+            env = decode_envelope_bytes(row["payload"])
             if env.idempotency_key:
                 await self._store.release_unique_key(env.idempotency_key)
             replayed = msgspec.structs.replace(env, attempt=1, scheduled_at=None, receipt_handle=None)
             return await self.enqueue(replayed)
 
         assert self._executor is not None
-        sel_sql = (
-            "SELECT * FROM vertebra_queue_dlq WHERE dlq_id = $1"
-            if self._dialect == "spangres"
-            else "SELECT * FROM vertebra_queue_dlq WHERE dlq_id = @dlq_id"
+        row = await self._executor.fetch_one(
+            self._render_sql("SELECT * FROM vertebra_queue_dlq WHERE dlq_id = @dlq_id"), dlq_id
         )
-        row = await self._executor.fetch_one(sel_sql, dlq_id)
         if not row:
             return None
-        env = _decode_dlq_envelope(row)
+        env = decode_envelope_bytes(row["payload"])
         replayed = msgspec.structs.replace(env, attempt=1, scheduled_at=None, receipt_handle=None)
-        del_sql = (
-            "DELETE FROM vertebra_queue_dlq WHERE dlq_id = $1"
-            if self._dialect == "spangres"
-            else "DELETE FROM vertebra_queue_dlq WHERE dlq_id = @dlq_id"
+        await self._executor.execute(
+            self._render_sql("DELETE FROM vertebra_queue_dlq WHERE dlq_id = @dlq_id"), row["dlq_id"]
         )
-        await self._executor.execute(del_sql, row["dlq_id"])
         return await self.enqueue(replayed)
 
     async def acquire_lease(
@@ -802,15 +737,6 @@ class SpannerQueueBackend:
         """Renew an active cron leader lease."""
         return await self.renew_lease(lease_key, owner_id, ttl_seconds, slot=slot, ttl_s=ttl_s)
 
-    async def close(self) -> None:
-        """Close backing stores and executor."""
-        if self._store is not None:
-            await self._store.aclose()
-        if self._sync_store is not None:
-            self._sync_store.close()
-        if self._executor is not None:
-            await self._executor.close()
-
     async def _claim_via_executor(
         self,
         lanes: list[str],
@@ -828,32 +754,20 @@ class SpannerQueueBackend:
             batch_size,
         )
         claimed: list[dict[str, Any]] = []
-        is_pg = self._dialect == "spangres"
         for cand in candidates:
             shard_id = int(cand["shard_id"])
             task_id = str(cand["task_id"])
             next_attempt = int(cand.get("attempt", 0)) + 1
             handle = format_spanner_receipt_handle(shard_id, task_id, next_attempt)
-            if is_pg:
-                updated = await self._executor.fetch_one(
-                    self.update_claim_sql(),
-                    next_attempt,
-                    locked_until,
-                    self._config.consumer_name,
-                    handle,
-                    shard_id,
-                    task_id,
-                )
-            else:
-                updated = await self._executor.fetch_one(
-                    self.update_claim_sql(),
-                    next_attempt,
-                    locked_until,
-                    self._config.consumer_name,
-                    handle,
-                    shard_id,
-                    task_id,
-                )
+            updated = await self._executor.fetch_one(
+                self.update_claim_sql(),
+                next_attempt,
+                locked_until,
+                self._config.consumer_name,
+                handle,
+                shard_id,
+                task_id,
+            )
             if updated is not None:
                 claimed.append(updated)
         return claimed
@@ -877,62 +791,18 @@ class SpannerQueueBackend:
         shard_id, task_id, attempt = self._resolve_target(envelope_or_handle)
         if not task_id or self._executor is None:
             return None
-        sel_sql = (
-            "SELECT * FROM vertebra_queue_jobs WHERE shard_id = $1 AND task_id = $2"
-            if self._dialect == "spangres"
-            else "SELECT * FROM vertebra_queue_jobs WHERE shard_id = @shard_id AND task_id = @task_id"
+        row = await self._executor.fetch_one(
+            self._render_sql("SELECT * FROM vertebra_queue_jobs WHERE shard_id = @shard_id AND task_id = @task_id"),
+            shard_id,
+            task_id,
         )
-        row = await self._executor.fetch_one(sel_sql, shard_id, task_id)
         if row is None:
             return None
-        env = _decode_dlq_envelope(row)
+        env = decode_envelope_bytes(row["payload"])
         return msgspec.structs.replace(env, attempt=attempt, receipt_handle=envelope_or_handle)
-
-
-def _envelope_to_entry(envelope: TaskEnvelope) -> QueueEntry:
-    payload_bytes = encode_json_bytes(envelope)
-    sched_ms = int(envelope.scheduled_at * 1000) if envelope.scheduled_at is not None else None
-    headers: dict[str, str] = {}
-    if envelope.idempotency_key:
-        headers["idempotency_key"] = envelope.idempotency_key
-    if envelope.traceparent:
-        headers["traceparent"] = envelope.traceparent
-    return QueueEntry(
-        job_id=envelope.task_id,
-        queue=envelope.lane,
-        task_name=envelope.task_name,
-        payload=payload_bytes,
-        attempt=envelope.attempt,
-        max_attempts=envelope.max_retries,
-        scheduled_at_ms=sched_ms,
-        headers=headers,
-    )
 
 
 def _entry_to_envelope(entry: QueueEntry, shard_count: int) -> TaskEnvelope:
     shard_id = compute_spanner_shard_id(entry.job_id, shard_count)
     handle = format_spanner_receipt_handle(shard_id, entry.job_id, entry.attempt)
-    try:
-        env = msgspec.convert(decode_json(entry.payload), type=TaskEnvelope)
-        return msgspec.structs.replace(
-            env,
-            attempt=entry.attempt,
-            receipt_handle=handle,
-        )
-    except Exception:
-        return TaskEnvelope(
-            task_id=entry.job_id,
-            task_name=entry.task_name,
-            lane=cast("TaskLane", entry.queue),
-            args=(),
-            kwargs={},
-            attempt=entry.attempt,
-            max_retries=entry.max_attempts,
-            receipt_handle=handle,
-        )
-
-
-def _decode_dlq_envelope(row: dict[str, Any]) -> TaskEnvelope:
-    payload_data = row["payload"]
-    payload_bytes = payload_data.encode("utf-8") if isinstance(payload_data, str) else bytes(payload_data)
-    return msgspec.convert(decode_json(payload_bytes), type=TaskEnvelope)
+    return decode_entry_envelope(entry, receipt_handle=handle)

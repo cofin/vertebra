@@ -925,6 +925,9 @@ async def test_engine_driver_resolution_and_provide_driver(
     tmp_path: Path,
 ) -> None:
     """Every SQL/analytical config resolves its paired sync/async driver classes and registers cleanly."""
+    selected_engines = _parse_conformance_env_filter(os.environ, "VERTEBRA_CONFORMANCE_ENGINES")
+    if selected_engines and spec.engine not in selected_engines:
+        pytest.skip(f"{spec.engine} conformance excluded by VERTEBRA_CONFORMANCE_ENGINES")
     url = (
         f"sqlite:///{tmp_path / 'reg.sqlite3'}"
         if spec.engine == "sqlite"
@@ -1520,6 +1523,9 @@ def _resolve_cache_config(
     request: pytest.FixtureRequest,
 ) -> BaseDatabaseConfig:
     """Resolve a live `RedisConfig` or `ValkeyConfig` from an env DSN or `pytest-databases` container, skipping otherwise."""
+    selected_engines = _parse_conformance_env_filter(os.environ, "VERTEBRA_CONFORMANCE_ENGINES")
+    if selected_engines and cache_spec.engine not in selected_engines:
+        pytest.skip(f"{cache_spec.engine} conformance excluded by VERTEBRA_CONFORMANCE_ENGINES")
     if cache_spec.native_extension_module is not None:
         try:
             ensure_module(cache_spec.native_extension_module)
@@ -1528,9 +1534,6 @@ def _resolve_cache_config(
             if os.environ.get(_CONFORMANCE_DOCKER_ENV) == "1":
                 pytest.fail(reason, pytrace=False)
             pytest.skip(reason)
-    selected_engines = _parse_conformance_env_filter(os.environ, "VERTEBRA_CONFORMANCE_ENGINES")
-    if selected_engines and cache_spec.engine not in selected_engines:
-        pytest.skip(f"{cache_spec.engine} conformance excluded by VERTEBRA_CONFORMANCE_ENGINES")
     for env_key in cache_spec.env_dsn_vars:
         value = os.environ.get(env_key, "").strip()
         if value:
@@ -1865,6 +1868,7 @@ def test_resolve_cache_config_honors_engine_env_filter(
     request: pytest.FixtureRequest,
 ) -> None:
     """Verify `_resolve_cache_config` skips non-selected cache engines before starting Docker fixtures."""
+    monkeypatch.setattr(sys.modules[__name__], "ensure_module", lambda _module_name: None)
     monkeypatch.setenv("VERTEBRA_CONFORMANCE_ENGINES", engines_env)
     monkeypatch.setenv(cache_spec.env_dsn_vars[0], cache_spec.tcp_url)
     if should_skip:

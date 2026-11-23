@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=PYO3_PYTHON");
     println!("cargo::rustc-check-cfg=cfg(Py_GIL_DISABLED)");
     if std::env::var_os("CARGO_FEATURE_PYO3").is_some() {
         pyo3_build_config::use_pyo3_cfgs();

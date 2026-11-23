@@ -385,8 +385,8 @@ mod tests {
             return;
         }
 
-        let dead_name = crate::shm::unique_test_shm_name("/vtb-reap-dirless-dead");
-        let live_name = crate::shm::unique_test_shm_name("/vtb-reap-dirless-live");
+        let dead_name = crate::shm::unique_test_shm_name("/vtb-rd");
+        let live_name = crate::shm::unique_test_shm_name("/vtb-rl");
         let live_seg = match crate::shm::ShmRegion::create_named(&live_name, 4096) {
             Ok(seg) => seg,
             Err(crate::shm::ShmError::Sys(err))

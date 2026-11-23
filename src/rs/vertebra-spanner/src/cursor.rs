@@ -1,15 +1,19 @@
 //! Shared PEP 249 cursor state, statement kind cache, and sync/async cursor classes for `vertebra-spanner`.
 
-use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyList, PyString, PyTuple, PyType};
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use vertebra_db::py_async::{
     ReadyAwaitable, RustDbTaskAwaitable, block_on_db, ready_ok, spawn_rust_db_task_with_attr,
 };
+use vertebra_db::py_cursor::{
+    BufferedCursorState, DEFAULT_PLAN_CACHE_CAPACITY, PlanLruCache, build_description_7tuple,
+};
+#[cfg(test)]
+use vertebra_db::py_errors::cursor_programming_err;
+pub(crate) use vertebra_db::py_errors::{cursor_interface_err, cursor_not_supported_err};
 
 use crate::client::{
     SpannerBeginTransactionOptions, SpannerClient as NativeSpannerClient, SpannerError,
@@ -19,11 +23,8 @@ use crate::codec::{
     SpannerBatchDmlStatement, SpannerQueryParameter, SpannerQueryResult, SpannerStaleness,
     SpannerStructField, parse_spanner_parameters_json,
 };
-use crate::errors::{resolve_exception_types, spanner_error_to_py};
+use crate::errors::spanner_error_to_py;
 use crate::{SPANNER_COMPLETION_DRAINER_ATTR, spanner_val_to_py};
-
-/// Maximum number of classified SQL statements retained in the per-process LRU cache.
-pub(crate) const CURSOR_PLAN_CACHE_CAPACITY: usize = 512;
 
 /// Statement kind used to route Spanner execution before sending the RPC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,58 +34,10 @@ pub(crate) enum StatementKind {
     Ddl,
 }
 
-struct StatementKindLruCache {
-    capacity: usize,
-    entries: HashMap<Box<str>, StatementKind>,
-    order: VecDeque<Box<str>>,
-}
+static STATEMENT_KIND_CACHE: OnceLock<Mutex<PlanLruCache<StatementKind>>> = OnceLock::new();
 
-impl StatementKindLruCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            entries: HashMap::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-        }
-    }
-
-    fn get(&mut self, key: &str) -> Option<StatementKind> {
-        let kind = *self.entries.get(key)?;
-        if let Some(pos) = self.order.iter().position(|k| k.as_ref() == key)
-            && let Some(entry_key) = self.order.remove(pos)
-        {
-            self.order.push_back(entry_key);
-        }
-        Some(kind)
-    }
-
-    fn insert(&mut self, key: Box<str>, kind: StatementKind) -> StatementKind {
-        if let Some(existing) = self.get(key.as_ref()) {
-            return existing;
-        }
-        while self.entries.len() >= self.capacity {
-            if let Some(evicted) = self.order.pop_front() {
-                self.entries.remove(evicted.as_ref());
-            } else {
-                break;
-            }
-        }
-        self.order.push_back(key.clone());
-        self.entries.insert(key, kind);
-        kind
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
-
-static STATEMENT_KIND_CACHE: OnceLock<Mutex<StatementKindLruCache>> = OnceLock::new();
-
-fn kind_cache() -> &'static Mutex<StatementKindLruCache> {
-    STATEMENT_KIND_CACHE
-        .get_or_init(|| Mutex::new(StatementKindLruCache::new(CURSOR_PLAN_CACHE_CAPACITY)))
+fn kind_cache() -> &'static Mutex<PlanLruCache<StatementKind>> {
+    STATEMENT_KIND_CACHE.get_or_init(|| Mutex::new(PlanLruCache::new(DEFAULT_PLAN_CACHE_CAPACITY)))
 }
 
 fn skip_hint_block(bytes: &[u8], start: usize) -> usize {
@@ -197,175 +150,40 @@ pub(crate) fn statement_kind(sql: &str) -> StatementKind {
     cache.insert(sql.into(), kind)
 }
 
-/// Build an `InterfaceError` from the shared exception cache in `errors.rs`.
-pub(crate) fn cursor_interface_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py) {
-        Ok(types) => PyErr::from_type(types.interface.bind(py).clone(), (message.to_string(),)),
-        Err(py_err) => py_err,
-    }
-}
+pub(crate) type CursorState = BufferedCursorState;
 
-/// Build a `ProgrammingError` from the shared exception cache in `errors.rs`.
-pub(crate) fn cursor_programming_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py) {
-        Ok(types) => PyErr::from_type(types.programming.bind(py).clone(), (message.to_string(),)),
-        Err(py_err) => py_err,
-    }
-}
-
-/// Buffered result and PEP 249 state shared by `SyncSpannerCursor` and `AsyncSpannerCursor`.
-pub(crate) struct CursorState {
-    pub(crate) rows: Vec<Py<PyTuple>>,
-    pub(crate) pos: usize,
-    pub(crate) description: Option<Py<PyTuple>>,
-    pub(crate) rowcount: i64,
-    pub(crate) lastrowid: Option<Py<PyAny>>,
-    pub(crate) arraysize: usize,
-    pub(crate) executed: bool,
-    pub(crate) closed: bool,
-}
-
-impl CursorState {
-    /// Construct a fresh, open cursor state with `rowcount = -1` and `arraysize = 1`.
-    pub(crate) fn new() -> Self {
-        Self {
-            rows: Vec::new(),
-            pos: 0,
-            description: None,
-            rowcount: -1,
-            lastrowid: None,
-            arraysize: 1,
-            executed: false,
-            closed: false,
+/// Store a decoded [`SpannerQueryResult`] according to its [`StatementKind`].
+pub(crate) fn store_query_result(
+    state: &mut CursorState,
+    py: Python<'_>,
+    kind: StatementKind,
+    result: &SpannerQueryResult,
+) -> PyResult<()> {
+    match kind {
+        StatementKind::Ddl => {
+            state.store(None, Vec::new(), -1, None);
         }
-    }
-
-    /// Return `InterfaceError` if the cursor has been closed.
-    pub(crate) fn ensure_open(&self, py: Python<'_>) -> PyResult<()> {
-        if self.closed {
-            return Err(cursor_interface_err(py, "cursor is closed"));
-        }
-        Ok(())
-    }
-
-    /// Clear buffered rows and reset statement metadata after a failed call or `close()`.
-    pub(crate) fn clear_result(&mut self) {
-        self.rows.clear();
-        self.pos = 0;
-        self.description = None;
-        self.rowcount = -1;
-        self.lastrowid = None;
-    }
-
-    /// Replace the buffered result set and update statement attributes.
-    pub(crate) fn store(
-        &mut self,
-        description: Option<Py<PyTuple>>,
-        rows: Vec<Py<PyTuple>>,
-        rowcount: i64,
-        lastrowid: Option<Py<PyAny>>,
-    ) {
-        self.description = description;
-        self.rows = rows;
-        self.pos = 0;
-        self.rowcount = rowcount;
-        self.lastrowid = lastrowid;
-        self.executed = true;
-    }
-
-    /// Store a decoded [`SpannerQueryResult`] according to its [`StatementKind`].
-    pub(crate) fn store_query_result(
-        &mut self,
-        py: Python<'_>,
-        kind: StatementKind,
-        result: &SpannerQueryResult,
-    ) -> PyResult<()> {
-        match kind {
-            StatementKind::Ddl => {
-                self.store(None, Vec::new(), -1, None);
-            }
-            StatementKind::Dml => {
-                let rowcount = result
-                    .row_count_exact
-                    .or(result.row_count_lower_bound)
-                    .unwrap_or_else(|| i64::try_from(result.rows.len()).unwrap_or(i64::MAX));
-                if result.schema.is_empty() {
-                    self.store(None, Vec::new(), rowcount, None);
-                } else {
-                    let desc = describe_fields(py, &result.schema)?;
-                    let rows = rows_to_tuples(py, result)?;
-                    self.store(Some(desc), rows, rowcount, None);
-                }
-            }
-            StatementKind::Query => {
+        StatementKind::Dml => {
+            let rowcount = result
+                .row_count_exact
+                .or(result.row_count_lower_bound)
+                .unwrap_or_else(|| i64::try_from(result.rows.len()).unwrap_or(i64::MAX));
+            if result.schema.is_empty() {
+                state.store(None, Vec::new(), rowcount, None);
+            } else {
                 let desc = describe_fields(py, &result.schema)?;
                 let rows = rows_to_tuples(py, result)?;
-                let rowcount = i64::try_from(rows.len()).unwrap_or(i64::MAX);
-                self.store(Some(desc), rows, rowcount, None);
+                state.store(Some(desc), rows, rowcount, None);
             }
         }
-        Ok(())
-    }
-
-    /// Fetch the next buffered row, or `None` when no result set exists or rows are exhausted.
-    pub(crate) fn fetchone(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(None);
+        StatementKind::Query => {
+            let desc = describe_fields(py, &result.schema)?;
+            let rows = rows_to_tuples(py, result)?;
+            let rowcount = i64::try_from(rows.len()).unwrap_or(i64::MAX);
+            state.store(Some(desc), rows, rowcount, None);
         }
-        let row = self.rows[self.pos].clone_ref(py);
-        self.pos += 1;
-        Ok(Some(row))
     }
-
-    /// Fetch up to `size` (or `arraysize` when `None`) buffered rows.
-    pub(crate) fn fetchmany(
-        &mut self,
-        py: Python<'_>,
-        size: Option<usize>,
-    ) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        let wanted = size.unwrap_or(self.arraysize);
-        if self.description.is_none() || wanted == 0 || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let end = self.pos.saturating_add(wanted).min(self.rows.len());
-        let out = self.rows[self.pos..end]
-            .iter()
-            .map(|r| r.clone_ref(py))
-            .collect();
-        self.pos = end;
-        Ok(out)
-    }
-
-    /// Fetch all remaining buffered rows and leave the cursor exhausted.
-    pub(crate) fn fetchall(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let out = self.rows[self.pos..]
-            .iter()
-            .map(|r| r.clone_ref(py))
-            .collect();
-        self.pos = self.rows.len();
-        Ok(out)
-    }
-
-    /// Update `arraysize`, rejecting values below `1` with `ProgrammingError`.
-    pub(crate) fn set_arraysize(&mut self, py: Python<'_>, value: i64) -> PyResult<()> {
-        if value < 1 {
-            return Err(cursor_programming_err(py, "arraysize must be at least 1"));
-        }
-        self.arraysize = value as usize;
-        Ok(())
-    }
-
-    /// Close the cursor idempotently and release buffered rows.
-    pub(crate) fn close(&mut self) {
-        self.closed = true;
-        self.clear_result();
-    }
+    Ok(())
 }
 
 /// Build a PEP 249 `description` tuple of 7-item tuples
@@ -374,25 +192,14 @@ pub(crate) fn describe_fields(
     py: Python<'_>,
     fields: &[SpannerStructField],
 ) -> PyResult<Py<PyTuple>> {
-    let mut entries = Vec::with_capacity(fields.len());
+    let mut cols = Vec::with_capacity(fields.len());
     for field in fields {
-        let entry = PyTuple::new(
-            py,
-            [
-                PyString::new(py, &field.name).into_any().unbind(),
-                PyString::new(py, field.field_type.code.as_str())
-                    .into_any()
-                    .unbind(),
-                py.None(),
-                py.None(),
-                py.None(),
-                py.None(),
-                py.None(),
-            ],
-        )?;
-        entries.push(entry.into_any().unbind());
+        let type_code = PyString::new(py, field.field_type.code.as_str())
+            .into_any()
+            .unbind();
+        cols.push((field.name.as_str(), Some(type_code), None));
     }
-    Ok(PyTuple::new(py, entries)?.unbind())
+    build_description_7tuple(py, cols)
 }
 
 /// Convert all rows in a [`SpannerQueryResult`] into Python tuples via [`spanner_val_to_py`].
@@ -409,32 +216,6 @@ pub(crate) fn rows_to_tuples(
         out.push(PyTuple::new(py, cells)?.unbind());
     }
     Ok(out)
-}
-
-/// Build a `NotSupportedError` from `vertebra._vertebra` (with a local stand-in for Rust unit tests).
-pub(crate) fn cursor_not_supported_err(py: Python<'_>, message: &str) -> PyErr {
-    static NOT_SUPPORTED_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-    let ty = NOT_SUPPORTED_ERROR.get_or_try_init(py, || match py.import("vertebra._vertebra") {
-        Ok(core_mod) => Ok(core_mod
-            .getattr("NotSupportedError")?
-            .cast_into::<PyType>()?
-            .unbind()),
-        Err(err) if err.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py) => {
-            let base = py.get_type::<pyo3::exceptions::PyException>();
-            let dict = PyDict::new(py);
-            dict.set_item("__module__", "vertebra._vertebra")?;
-            let ty = py
-                .get_type::<PyType>()
-                .call1(("NotSupportedError", (base,), dict))?
-                .cast_into::<PyType>()?;
-            Ok(ty.unbind())
-        }
-        Err(err) => Err(err),
-    });
-    match ty {
-        Ok(ty) => PyErr::from_type(ty.bind(py).clone(), (message.to_string(),)),
-        Err(py_err) => py_err,
-    }
 }
 
 const DDL_IN_RW_TX_MSG: &str =
@@ -602,17 +383,6 @@ fn encode_batch_dml_statements(
     Ok(statements)
 }
 
-fn parse_fetchmany_size(py: Python<'_>, size: Option<i64>) -> PyResult<Option<usize>> {
-    match size {
-        None => Ok(None),
-        Some(n) if n < 0 => Err(cursor_programming_err(
-            py,
-            "fetchmany size must not be negative",
-        )),
-        Some(n) => Ok(Some(n as usize)),
-    }
-}
-
 fn lock_state(state: &Mutex<CursorState>) -> MutexGuard<'_, CursorState> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -641,7 +411,7 @@ enum SpannerCursorOutcome {
 impl SpannerCursorOutcome {
     fn install_into(self, py: Python<'_>, state: &mut CursorState) -> PyResult<()> {
         match self {
-            Self::QueryResult(kind, result) => state.store_query_result(py, kind, &result),
+            Self::QueryResult(kind, result) => store_query_result(state, py, kind, &result),
             Self::DmlCount(count) => {
                 state.store(None, Vec::new(), count, None);
                 Ok(())
@@ -915,14 +685,11 @@ impl PySyncSpannerCursor {
     }
 
     #[pyo3(signature = (size=None))]
-    fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Vec<Py<PyTuple>>> {
-        let mut state = self.state();
-        state.ensure_open(py)?;
-        let wanted = parse_fetchmany_size(py, size)?;
-        state.fetchmany(py, wanted)
+    fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<PyList>> {
+        self.state().fetchmany(py, size)
     }
 
-    fn fetchall(&self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
+    fn fetchall(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         self.state().fetchall(py)
     }
 
@@ -1144,18 +911,13 @@ impl PyAsyncSpannerCursor {
 
     #[pyo3(signature = (size=None))]
     fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<ReadyAwaitable>> {
-        let rows = {
-            let mut state = self.state();
-            state.ensure_open(py)?;
-            let wanted = parse_fetchmany_size(py, size)?;
-            state.fetchmany(py, wanted)?
-        };
-        ready_ok(py, PyList::new(py, rows)?.into_any().unbind())
+        let rows = self.state().fetchmany(py, size)?;
+        ready_ok(py, rows.into_any())
     }
 
     fn fetchall(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
         let rows = self.state().fetchall(py)?;
-        ready_ok(py, PyList::new(py, rows)?.into_any().unbind())
+        ready_ok(py, rows.into_any())
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
@@ -1176,6 +938,7 @@ mod tests {
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyList, PyString, PyTuple};
     use vertebra_db::gcp::GcpErrorInfo;
+    use vertebra_db::py_cursor::PlanLruCache;
 
     use crate::client::SpannerError;
     use crate::codec::{
@@ -1184,9 +947,10 @@ mod tests {
     use crate::errors::spanner_error_to_py;
 
     use super::{
-        CursorState, StatementKind, StatementKindLruCache, classify_statement_uncached,
-        cursor_interface_err, cursor_not_supported_err, cursor_programming_err, describe_fields,
+        CursorState, StatementKind, classify_statement_uncached, cursor_interface_err,
+        cursor_not_supported_err, cursor_programming_err, describe_fields,
         dml_has_returning_clause, encode_one_param_set, rows_to_tuples, statement_kind,
+        store_query_result,
     };
 
     fn make_row(py: Python<'_>, v: i64) -> Py<PyTuple> {
@@ -1218,19 +982,38 @@ mod tests {
                 state
                     .fetchmany(py, None)
                     .expect("fetchmany fresh")
+                    .bind(py)
                     .is_empty()
             );
-            assert!(state.fetchall(py).expect("fetchall fresh").is_empty());
+            assert!(
+                state
+                    .fetchall(py)
+                    .expect("fetchall fresh")
+                    .bind(py)
+                    .is_empty()
+            );
 
             state.store(None, Vec::new(), 3, None);
             assert_eq!(state.rowcount, 3);
             assert!(state.description.is_none());
-            assert!(state.fetchall(py).expect("fetchall after dml").is_empty());
+            assert!(
+                state
+                    .fetchall(py)
+                    .expect("fetchall after dml")
+                    .bind(py)
+                    .is_empty()
+            );
 
             let desc = make_desc(py);
             state.store(Some(desc), Vec::new(), 0, None);
             assert!(state.description.is_some());
-            assert!(state.fetchall(py).expect("fetchall empty").is_empty());
+            assert!(
+                state
+                    .fetchall(py)
+                    .expect("fetchall empty")
+                    .bind(py)
+                    .is_empty()
+            );
         });
     }
 
@@ -1249,16 +1032,17 @@ mod tests {
                 state
                     .fetchmany(py, Some(0))
                     .expect("fetchmany 0")
+                    .bind(py)
                     .is_empty()
             );
             let chunk1 = state.fetchmany(py, None).expect("chunk 1");
             let chunk2 = state.fetchmany(py, None).expect("chunk 2");
             let chunk3 = state.fetchmany(py, None).expect("chunk 3");
             let chunk4 = state.fetchmany(py, None).expect("chunk 4");
-            assert_eq!(chunk1.len(), 2);
-            assert_eq!(chunk2.len(), 2);
-            assert_eq!(chunk3.len(), 1);
-            assert!(chunk4.is_empty());
+            assert_eq!(chunk1.bind(py).len(), 2);
+            assert_eq!(chunk2.bind(py).len(), 2);
+            assert_eq!(chunk3.bind(py).len(), 1);
+            assert!(chunk4.bind(py).is_empty());
 
             let desc2 = make_desc(py);
             let rows2 = (10..=14).map(|i| make_row(py, i)).collect();
@@ -1274,8 +1058,14 @@ mod tests {
                 10
             );
             let rem = state.fetchall(py).expect("fetchall remainder");
-            assert_eq!(rem.len(), 4);
-            assert!(state.fetchall(py).expect("fetchall exhausted").is_empty());
+            assert_eq!(rem.bind(py).len(), 4);
+            assert!(
+                state
+                    .fetchall(py)
+                    .expect("fetchall exhausted")
+                    .bind(py)
+                    .is_empty()
+            );
         });
     }
 
@@ -1361,8 +1151,7 @@ mod tests {
             );
 
             let mut state = CursorState::new();
-            state
-                .store_query_result(py, StatementKind::Query, &query_result)
+            store_query_result(&mut state, py, StatementKind::Query, &query_result)
                 .expect("store query");
             assert!(state.description.is_some());
             assert_eq!(state.rowcount, 1);
@@ -1375,8 +1164,7 @@ mod tests {
                 row_count_exact: Some(1),
                 row_count_lower_bound: None,
             };
-            state
-                .store_query_result(py, StatementKind::Dml, &dml_returning)
+            store_query_result(&mut state, py, StatementKind::Dml, &dml_returning)
                 .expect("store dml then return");
             assert!(state.description.is_some());
             assert_eq!(state.rowcount, 1);
@@ -1389,16 +1177,12 @@ mod tests {
                 row_count_exact: Some(4),
                 row_count_lower_bound: None,
             };
-            state
-                .store_query_result(py, StatementKind::Dml, &dml_plain)
-                .expect("store dml");
+            store_query_result(&mut state, py, StatementKind::Dml, &dml_plain).expect("store dml");
             assert!(state.description.is_none());
             assert_eq!(state.rowcount, 4);
             assert!(state.lastrowid.is_none());
 
-            state
-                .store_query_result(py, StatementKind::Ddl, &dml_plain)
-                .expect("store ddl");
+            store_query_result(&mut state, py, StatementKind::Ddl, &dml_plain).expect("store ddl");
             assert!(state.description.is_none());
             assert_eq!(state.rowcount, -1);
             assert!(state.lastrowid.is_none());
@@ -1447,7 +1231,7 @@ mod tests {
 
     #[test]
     fn statement_kind_lru_cache_deduplicates_and_evicts() {
-        let mut cache = StatementKindLruCache::new(2);
+        let mut cache = PlanLruCache::new(2);
         let sql = "SELECT 42";
         let k1 = classify_statement_uncached(sql);
         cache.insert(sql.into(), k1);

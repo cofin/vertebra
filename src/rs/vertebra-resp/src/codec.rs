@@ -3,10 +3,12 @@
 use std::borrow::Cow;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+#[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
+#[cfg(feature = "pyo3")]
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyList, PySet};
 
-use crate::error::ValkeyError;
+use crate::error::RespError;
 
 const MAX_RESP_DEPTH: usize = 128;
 
@@ -58,12 +60,10 @@ impl RespValue {
     }
 
     /// Extract error if this value is a `SimpleError` or `BulkError`.
-    pub fn into_result(self) -> Result<Self, ValkeyError> {
+    pub fn into_result(self) -> Result<Self, RespError> {
         let inner = self.into_unattributed();
         match inner {
-            Self::SimpleError(msg) | Self::BulkError(msg) => {
-                Err(ValkeyError::from_server_error(msg))
-            }
+            Self::SimpleError(msg) | Self::BulkError(msg) => Err(RespError::from_server_error(msg)),
             other => Ok(other),
         }
     }
@@ -167,7 +167,7 @@ pub fn encode_owned_command(dst: &mut BytesMut, args: &[Vec<u8>]) {
 /// Attempt to decode a single complete RESP2/RESP3 frame from `buf`.
 ///
 /// Leaves `buf` untouched and returns `Ok(None)` when additional bytes are needed.
-pub fn try_decode_frame(buf: &mut BytesMut) -> Result<Option<RespValue>, ValkeyError> {
+pub fn try_decode_frame(buf: &mut BytesMut) -> Result<Option<RespValue>, RespError> {
     if buf.is_empty() {
         return Ok(None);
     }
@@ -195,9 +195,9 @@ fn parse_at(
     data: &[u8],
     offset: usize,
     depth: usize,
-) -> Result<Option<(RespValue, usize)>, ValkeyError> {
+) -> Result<Option<(RespValue, usize)>, RespError> {
     if depth > MAX_RESP_DEPTH {
-        return Err(ValkeyError::operational(
+        return Err(RespError::operational(
             "RESP3 maximum nesting depth exceeded",
             false,
         ));
@@ -227,13 +227,13 @@ fn parse_at(
         }
         b',' => {
             let s = std::str::from_utf8(line)
-                .map_err(|_| ValkeyError::operational("Invalid UTF-8 in RESP3 double", false))?;
+                .map_err(|_| RespError::operational("Invalid UTF-8 in RESP3 double", false))?;
             let f = match s {
                 "inf" => f64::INFINITY,
                 "-inf" => f64::NEG_INFINITY,
                 "nan" => f64::NAN,
                 other => other.parse::<f64>().map_err(|_| {
-                    ValkeyError::operational(format!("Invalid RESP3 double '{other}'"), false)
+                    RespError::operational(format!("Invalid RESP3 double '{other}'"), false)
                 })?,
             };
             Ok(Some((RespValue::Double(f), after_line)))
@@ -243,17 +243,14 @@ fn parse_at(
                 b"t" => true,
                 b"f" => false,
                 _ => {
-                    return Err(ValkeyError::operational(
-                        "Invalid RESP3 boolean token",
-                        false,
-                    ));
+                    return Err(RespError::operational("Invalid RESP3 boolean token", false));
                 }
             };
             Ok(Some((RespValue::Boolean(b), after_line)))
         }
         b'_' => {
             if !line.is_empty() {
-                return Err(ValkeyError::operational("Invalid RESP3 null line", false));
+                return Err(RespError::operational("Invalid RESP3 null line", false));
             }
             Ok(Some((RespValue::Null, after_line)))
         }
@@ -267,16 +264,16 @@ fn parse_at(
                 return Ok(Some((RespValue::Null, after_line)));
             }
             let len_usize = usize::try_from(len)
-                .map_err(|_| ValkeyError::operational("RESP3 bulk length overflow", false))?;
+                .map_err(|_| RespError::operational("RESP3 bulk length overflow", false))?;
             let end_payload = after_line
                 .checked_add(len_usize)
                 .and_then(|v| v.checked_add(2))
-                .ok_or_else(|| ValkeyError::operational("RESP3 bulk offset overflow", false))?;
+                .ok_or_else(|| RespError::operational("RESP3 bulk offset overflow", false))?;
             if end_payload > data.len() {
                 return Ok(None);
             }
             if &data[after_line + len_usize..end_payload] != b"\r\n" {
-                return Err(ValkeyError::operational(
+                return Err(RespError::operational(
                     "Missing CRLF terminator after RESP3 bulk string",
                     false,
                 ));
@@ -290,16 +287,16 @@ fn parse_at(
                 return Ok(Some((RespValue::Null, after_line)));
             }
             let len_usize = usize::try_from(len)
-                .map_err(|_| ValkeyError::operational("RESP3 blob error overflow", false))?;
+                .map_err(|_| RespError::operational("RESP3 blob error overflow", false))?;
             let end_payload = after_line
                 .checked_add(len_usize)
                 .and_then(|v| v.checked_add(2))
-                .ok_or_else(|| ValkeyError::operational("RESP3 blob offset overflow", false))?;
+                .ok_or_else(|| RespError::operational("RESP3 blob offset overflow", false))?;
             if end_payload > data.len() {
                 return Ok(None);
             }
             if &data[after_line + len_usize..end_payload] != b"\r\n" {
-                return Err(ValkeyError::operational(
+                return Err(RespError::operational(
                     "Missing CRLF terminator after RESP3 blob error",
                     false,
                 ));
@@ -311,29 +308,29 @@ fn parse_at(
         b'=' => {
             let len = parse_i64(line, "RESP3 verbatim string length")?;
             if len < 4 {
-                return Err(ValkeyError::operational(
+                return Err(RespError::operational(
                     "RESP3 verbatim string must be at least 4 bytes",
                     false,
                 ));
             }
             let len_usize = usize::try_from(len)
-                .map_err(|_| ValkeyError::operational("RESP3 verbatim overflow", false))?;
+                .map_err(|_| RespError::operational("RESP3 verbatim overflow", false))?;
             let end_payload = after_line
                 .checked_add(len_usize)
                 .and_then(|v| v.checked_add(2))
-                .ok_or_else(|| ValkeyError::operational("RESP3 verbatim offset overflow", false))?;
+                .ok_or_else(|| RespError::operational("RESP3 verbatim offset overflow", false))?;
             if end_payload > data.len() {
                 return Ok(None);
             }
             let raw = &data[after_line..after_line + len_usize];
             if raw[3] != b':' {
-                return Err(ValkeyError::operational(
+                return Err(RespError::operational(
                     "Invalid RESP3 verbatim string format prefix",
                     false,
                 ));
             }
             if &data[after_line + len_usize..end_payload] != b"\r\n" {
-                return Err(ValkeyError::operational(
+                return Err(RespError::operational(
                     "Missing CRLF terminator after RESP3 verbatim string",
                     false,
                 ));
@@ -354,7 +351,7 @@ fn parse_at(
                 return Ok(Some((RespValue::Null, after_line)));
             }
             let n = usize::try_from(count)
-                .map_err(|_| ValkeyError::operational("RESP3 aggregate count overflow", false))?;
+                .map_err(|_| RespError::operational("RESP3 aggregate count overflow", false))?;
             let mut items = Vec::with_capacity(n.min(1024));
             let mut cur = after_line;
             for _ in 0..n {
@@ -377,7 +374,7 @@ fn parse_at(
                 return Ok(Some((RespValue::Null, after_line)));
             }
             let n = usize::try_from(count)
-                .map_err(|_| ValkeyError::operational("RESP3 map count overflow", false))?;
+                .map_err(|_| RespError::operational("RESP3 map count overflow", false))?;
             let mut pairs = Vec::with_capacity(n.min(1024));
             let mut cur = after_line;
             for _ in 0..n {
@@ -395,13 +392,13 @@ fn parse_at(
         b'|' => {
             let count = parse_i64(line, "RESP3 attribute pair count")?;
             if count < 0 {
-                return Err(ValkeyError::operational(
+                return Err(RespError::operational(
                     "RESP3 attribute length cannot be negative",
                     false,
                 ));
             }
             let n = usize::try_from(count)
-                .map_err(|_| ValkeyError::operational("RESP3 attribute count overflow", false))?;
+                .map_err(|_| RespError::operational("RESP3 attribute count overflow", false))?;
             let mut attrs = Vec::with_capacity(n.min(64));
             let mut cur = after_line;
             for _ in 0..n {
@@ -425,21 +422,22 @@ fn parse_at(
                 final_cur,
             )))
         }
-        other => Err(ValkeyError::operational(
+        other => Err(RespError::operational(
             format!("Unknown RESP3 frame prefix byte 0x{other:02x}"),
             false,
         )),
     }
 }
 
-fn parse_i64(bytes: &[u8], label: &str) -> Result<i64, ValkeyError> {
+fn parse_i64(bytes: &[u8], label: &str) -> Result<i64, RespError> {
     let s = std::str::from_utf8(bytes)
-        .map_err(|_| ValkeyError::operational(format!("Invalid UTF-8 in {label}"), false))?;
+        .map_err(|_| RespError::operational(format!("Invalid UTF-8 in {label}"), false))?;
     s.parse::<i64>()
-        .map_err(|_| ValkeyError::operational(format!("Invalid {label}: '{s}'"), false))
+        .map_err(|_| RespError::operational(format!("Invalid {label}: '{s}'"), false))
 }
 
 /// Convert a [`RespValue`] into a generic Python object for `eval`, `evalsha`, and `execute_command`.
+#[cfg(feature = "pyo3")]
 pub fn resp_to_py(py: Python<'_>, val: RespValue) -> PyResult<Py<PyAny>> {
     match val.into_unattributed() {
         RespValue::Null => Ok(py.None()),
@@ -495,12 +493,13 @@ pub fn resp_to_py(py: Python<'_>, val: RespValue) -> PyResult<Py<PyAny>> {
             Ok(dict.into_any().unbind())
         }
         RespValue::SimpleError(msg) | RespValue::BulkError(msg) => {
-            Err(ValkeyError::from_server_error(msg).to_py_err(py))
+            Err(RespError::from_server_error(msg).to_py_err(py))
         }
         RespValue::Attribute { .. } => Ok(py.None()),
     }
 }
 
+#[cfg(feature = "pyo3")]
 fn resp_key_to_py(py: Python<'_>, val: RespValue) -> PyResult<Py<PyAny>> {
     match val.into_unattributed() {
         RespValue::SimpleString(b) | RespValue::BulkString(b) => {
@@ -553,9 +552,7 @@ pub fn build_client_capa_redirect() -> Vec<Vec<u8>> {
 }
 
 /// Validate Valkey 9.0 hash-field expiration condition (`None`, `"NX"`, `"XX"`, `"GT"`, `"LT"`).
-pub fn validate_hash_condition(
-    condition: Option<&str>,
-) -> Result<Option<&'static str>, ValkeyError> {
+pub fn validate_hash_condition(condition: Option<&str>) -> Result<Option<&'static str>, RespError> {
     let Some(raw) = condition else {
         return Ok(None);
     };
@@ -564,7 +561,7 @@ pub fn validate_hash_condition(
         "XX" => Ok(Some("XX")),
         "GT" => Ok(Some("GT")),
         "LT" => Ok(Some("LT")),
-        other => Err(ValkeyError::programming(format!(
+        other => Err(RespError::programming(format!(
             "Invalid Valkey hash-field expiration condition '{other}'; expected one of NX, XX, GT, LT"
         ))),
     }
@@ -577,9 +574,9 @@ pub fn build_hash_expire_cmd(
     ttl_value: i64,
     condition: Option<&str>,
     fields: &[Vec<u8>],
-) -> Result<Vec<Vec<u8>>, ValkeyError> {
+) -> Result<Vec<Vec<u8>>, RespError> {
     if fields.is_empty() {
-        return Err(ValkeyError::programming(format!(
+        return Err(RespError::programming(format!(
             "{cmd_name} requires at least one field"
         )));
     }
@@ -604,9 +601,9 @@ pub fn build_hash_field_query_cmd(
     cmd_name: &str,
     key: &[u8],
     fields: &[Vec<u8>],
-) -> Result<Vec<Vec<u8>>, ValkeyError> {
+) -> Result<Vec<Vec<u8>>, RespError> {
     if fields.is_empty() {
-        return Err(ValkeyError::programming(format!(
+        return Err(RespError::programming(format!(
             "{cmd_name} requires at least one field"
         )));
     }
@@ -622,7 +619,7 @@ pub fn build_hash_field_query_cmd(
 }
 
 /// Decode an array of integers (returned by `HEXPIRE`/`HTTL`/`HPERSIST`).
-pub fn decode_int_list(resp: RespValue) -> Result<Vec<i64>, ValkeyError> {
+pub fn decode_int_list(resp: RespValue) -> Result<Vec<i64>, RespError> {
     let val = resp.into_result()?;
     match val {
         RespValue::Array(items) => {
@@ -630,19 +627,19 @@ pub fn decode_int_list(resp: RespValue) -> Result<Vec<i64>, ValkeyError> {
             for item in items {
                 let checked = item.into_result()?;
                 let n = checked.as_i64().ok_or_else(|| {
-                    ValkeyError::data("Expected integer status element in Valkey array response")
+                    RespError::data("Expected integer status element in RESP array response")
                 })?;
                 out.push(n);
             }
             Ok(out)
         }
-        other => Err(ValkeyError::data(format!(
+        other => Err(RespError::data(format!(
             "Expected RESP array of integers, got {other:?}"
         ))),
     }
 }
 
-/// Compute lowercase 40-hex-char SHA-1 digest (RFC 3174) for Valkey `EVALSHA`.
+/// Compute lowercase 40-hex-char SHA-1 digest (RFC 3174) for `EVALSHA`.
 #[must_use]
 pub fn sha1_hex(data: &[u8]) -> String {
     let mut h0: u32 = 0x6745_2301;

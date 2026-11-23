@@ -122,7 +122,7 @@ def build_ci_distributions(
     wheel_dir.mkdir(parents=True, exist_ok=True)
     raw_py = interpreter or Path(sys.executable)
     maturin_bin = _resolve_maturin_executable(raw_py)
-    py_bin = Path(os.path.abspath(raw_py))
+    py_bin = raw_py.resolve()
 
     env = dict(os.environ)
     env["PYO3_PYTHON"] = str(py_bin)

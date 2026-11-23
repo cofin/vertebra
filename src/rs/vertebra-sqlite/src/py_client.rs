@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyDict, PyList, PySequence, PyString, PyTuple};
 use vertebra_core::broker::DIALECT_TAG_SQLITE;
@@ -19,6 +19,7 @@ use vertebra_db::py_async::{
     ReadyAwaitable, RustDbTaskAwaitable, construct_py_arrow_cursor, ready_ok,
     spawn_rust_db_task_with_attr_and_cancel,
 };
+use vertebra_db::py_broker::{BrokerPoolRegistry, next_shm_name};
 use vertebra_db::{
     DbRpcEncodedResponse, DbRpcScalar, PlaceholderStyle, decode_dbrpc_request_frame,
     encode_dbrpc_response_frame, new_broker_engine_pycapsule, normalize_placeholders,
@@ -76,9 +77,8 @@ fn validate_savepoint_name(raw: &str) -> Result<String, SqliteClientError> {
 
 /// Shared-memory broker backend for SQLite (`DIALECT_TAG_SQLITE = 3`).
 pub struct SqliteBrokerBackend {
-    pools: RwLock<HashMap<u64, Arc<SqlitePool>>>,
+    pools: BrokerPoolRegistry<SqlitePool>,
     active_shm: Mutex<HashMap<String, (u64, Arc<ShmRegion>)>>,
-    next_pool_id: std::sync::atomic::AtomicU64,
 }
 
 impl Default for SqliteBrokerBackend {
@@ -92,9 +92,8 @@ impl SqliteBrokerBackend {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            pools: RwLock::new(HashMap::new()),
+            pools: BrokerPoolRegistry::new(),
             active_shm: Mutex::new(HashMap::new()),
-            next_pool_id: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -144,11 +143,7 @@ impl SqliteBrokerBackend {
 
     /// Close all pools and release all retained shared-memory segments.
     pub fn close(&self) {
-        let pools: Vec<Arc<SqlitePool>> =
-            self.pools.write().drain().map(|(_, pool)| pool).collect();
-        for pool in pools {
-            pool.close();
-        }
+        self.pools.clear();
         let shms: Vec<(String, Arc<ShmRegion>)> = self
             .active_shm
             .lock()
@@ -209,19 +204,14 @@ impl BrokerPoolBackend for SqliteBrokerBackend {
         };
 
         let pool = SqlitePool::open(config).map_err(|e| e.to_string())?;
-        let pool_id = self.next_pool_id.fetch_add(1, Ordering::Relaxed);
-        self.pools.write().insert(pool_id, pool);
-        Ok(pool_id)
+        Ok(self.pools.register(pool))
     }
 
     fn execute(&self, pool_id: u64, frame: &[u8]) -> Result<Vec<u8>, String> {
-        let pool = {
-            let guard = self.pools.read();
-            guard
-                .get(&pool_id)
-                .cloned()
-                .ok_or_else(|| format!("unknown SQLite broker pool_id {pool_id}"))?
-        };
+        let pool = self
+            .pools
+            .get(pool_id)
+            .ok_or_else(|| format!("unknown SQLite broker pool_id {pool_id}"))?;
 
         let req = decode_dbrpc_request_frame(frame)
             .map_err(|e| format!("DBRPC request decode error: {e:?}"))?;
@@ -375,10 +365,7 @@ impl BrokerPoolBackend for SqliteBrokerBackend {
                     row_count,
                     ..
                 }) => {
-                    static INLINE_BROKER_SEQ: std::sync::atomic::AtomicU64 =
-                        std::sync::atomic::AtomicU64::new(1);
-                    let seq = INLINE_BROKER_SEQ.fetch_add(1, Ordering::Relaxed);
-                    let candidate = format!("/vtb_sqlite_bkr_{}_{seq}", std::process::id());
+                    let candidate = next_shm_name("/vtb_sqlite_bkr", '_');
                     match write_shm_arrow_region_unregistered(&candidate, &ipc_bytes) {
                         Ok((name, _, region)) => {
                             let retained_name = self.retain_shm(pool_id, &name, region);
@@ -419,7 +406,7 @@ impl BrokerPoolBackend for SqliteBrokerBackend {
     }
 
     fn close_pool(&self, pool_id: u64) {
-        if let Some(pool) = self.pools.write().remove(&pool_id) {
+        if let Some(pool) = self.pools.remove(pool_id) {
             pool.close();
         }
         self.release_pool_shm(pool_id);
@@ -525,10 +512,7 @@ fn arrow_payload_to_py_cursor(py: Python<'_>, payload: ArrowResultPayload) -> Py
             row_count,
             ..
         } => {
-            static INLINE_CURSOR_SEQ: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(1);
-            let seq = INLINE_CURSOR_SEQ.fetch_add(1, Ordering::Relaxed);
-            let shm_name = format!("/vtb_sqlite_inline_{}_{seq}", std::process::id());
+            let shm_name = next_shm_name("/vtb_sqlite_inline", '_');
             let (name, len, region) = write_shm_arrow_region_unregistered(&shm_name, &ipc_bytes)
                 .map_err(SqliteClientError::ShmArrow)
                 .map_err(|e| e.into_py_err(py))?;
@@ -2266,6 +2250,6 @@ mod tests {
         backend
             .execute(pool_id, &make_dbrpc_frame(DbRpcOp::Close, 11, None, None))
             .unwrap();
-        assert!(backend.pools.read().is_empty());
+        assert!(backend.pools.is_empty());
     }
 }

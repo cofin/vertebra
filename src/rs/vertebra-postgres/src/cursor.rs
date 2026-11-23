@@ -22,6 +22,8 @@ use vertebra_db::py_async::{
     ReadyAwaitable, RustDbTaskAwaitable, block_on_db, ready_err, ready_ok,
     spawn_rust_db_task_with_attr_and_cancel,
 };
+use vertebra_db::py_cursor::{BufferedCursorState, build_description_7tuple};
+pub(crate) use vertebra_db::py_errors::cursor_interface_err;
 
 use crate::Parameter;
 use crate::async_client::POSTGRES_COMPLETION_DRAINER_ATTR;
@@ -47,149 +49,17 @@ pub(crate) enum CursorSource {
     Pool(Arc<PostgresPool>),
 }
 
-/// Buffered result set and PEP 249 state shared by sync and async PostgreSQL cursors.
-pub(crate) struct CursorState {
-    pub(crate) rows: Vec<Py<PyTuple>>,
-    pub(crate) pos: usize,
-    pub(crate) description: Option<Py<PyTuple>>,
-    pub(crate) rowcount: i64,
-    pub(crate) lastrowid: Option<Py<PyAny>>,
-    pub(crate) arraysize: usize,
-    pub(crate) executed: bool,
-    pub(crate) closed: bool,
-}
-
-impl CursorState {
-    /// Construct a fresh, unexecuted cursor state (`rowcount = -1`, `arraysize = 1`).
-    pub(crate) const fn new() -> Self {
-        Self {
-            rows: Vec::new(),
-            pos: 0,
-            description: None,
-            rowcount: -1,
-            lastrowid: None,
-            arraysize: 1,
-            executed: false,
-            closed: false,
-        }
-    }
-
-    /// Return `InterfaceError` when the cursor has been closed.
-    pub(crate) fn ensure_open(&self, py: Python<'_>) -> PyResult<()> {
-        if self.closed {
-            return Err(cursor_interface_err(py, "cursor is closed"));
-        }
-        Ok(())
-    }
-
-    /// Replace the buffered statement result and discard any previously unread rows.
-    pub(crate) fn store(
-        &mut self,
-        description: Option<Py<PyTuple>>,
-        rows: Vec<Py<PyTuple>>,
-        rowcount: i64,
-        lastrowid: Option<Py<PyAny>>,
-    ) {
-        self.rows = rows;
-        self.pos = 0;
-        self.description = description;
-        self.rowcount = rowcount;
-        self.lastrowid = lastrowid;
-        self.executed = true;
-    }
-
-    /// Reset buffered rows and statement metadata (used on failed execute and close).
-    pub(crate) fn clear(&mut self) {
-        self.rows.clear();
-        self.pos = 0;
-        self.description = None;
-        self.rowcount = -1;
-        self.lastrowid = None;
-    }
-
-    /// Return the next row tuple, or `None` when no result set is active or rows are exhausted.
-    pub(crate) fn fetchone(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(None);
-        }
-        let row = self.rows[self.pos].clone_ref(py);
-        self.pos += 1;
-        Ok(Some(row))
-    }
-
-    /// Return up to `size.unwrap_or(self.arraysize)` remaining row tuples.
-    pub(crate) fn fetchmany(
-        &mut self,
-        py: Python<'_>,
-        size: Option<usize>,
-    ) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        let limit = size.unwrap_or(self.arraysize);
-        if self.description.is_none() || limit == 0 || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let end = self.pos.saturating_add(limit).min(self.rows.len());
-        let out = self.rows[self.pos..end]
-            .iter()
-            .map(|row| row.clone_ref(py))
-            .collect();
-        self.pos = end;
-        Ok(out)
-    }
-
-    /// Return all remaining row tuples and mark the result set exhausted.
-    pub(crate) fn fetchall(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let out = self.rows[self.pos..]
-            .iter()
-            .map(|row| row.clone_ref(py))
-            .collect();
-        self.pos = self.rows.len();
-        Ok(out)
-    }
-
-    /// Validate and update `arraysize` (`>= 1`), raising `ProgrammingError` otherwise.
-    pub(crate) fn set_arraysize(&mut self, py: Python<'_>, value: i64) -> PyResult<()> {
-        if value < 1 {
-            return Err(cursor_programming_err(py, "arraysize must be at least 1"));
-        }
-        self.arraysize = usize::try_from(value)
-            .map_err(|_| cursor_programming_err(py, "arraysize must be at least 1"))?;
-        Ok(())
-    }
-
-    /// Close the cursor and release buffered rows. Idempotent.
-    pub(crate) fn close(&mut self) {
-        self.closed = true;
-        self.clear();
-    }
-}
-
 /// Build the PEP 249 `description` tuple of 7-item `(name, type_oid, None, None, None, None, None)` tuples.
 pub(crate) fn describe_columns(py: Python<'_>, columns: &[Column]) -> PyResult<Py<PyTuple>> {
     let mut entries = Vec::with_capacity(columns.len());
     for col in columns {
-        let name = PyString::new(py, &col.name).into_any();
-        let type_oid = col.type_oid.into_pyobject(py)?.into_any();
-        let entry = PyTuple::new(
-            py,
-            [
-                name,
-                type_oid,
-                py.None().into_bound(py),
-                py.None().into_bound(py),
-                py.None().into_bound(py),
-                py.None().into_bound(py),
-                py.None().into_bound(py),
-            ],
-        )?;
-        entries.push(entry);
+        entries.push((
+            col.name.as_str(),
+            Some(col.type_oid.into_pyobject(py)?.into_any().unbind()),
+            None,
+        ));
     }
-    Ok(PyTuple::new(py, entries)?.unbind())
+    build_description_7tuple(py, entries)
 }
 
 /// Return `true` when `raw` is an RFC 8259 JSON `null` literal with optional JSON whitespace.
@@ -319,22 +189,6 @@ pub(crate) fn rowcount_for_result(result: &QueryResult) -> i64 {
         return i64::try_from(result.affected_rows).unwrap_or(i64::MAX);
     }
     -1
-}
-
-/// Construct a cursor `InterfaceError` from the shared `errors.rs` exception cache.
-pub(crate) fn cursor_interface_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_py_exceptions(py) {
-        Ok(types) => instantiate_exc(py, &types.interface, message, None, false),
-        Err(err) => err,
-    }
-}
-
-/// Construct a cursor `ProgrammingError` from the shared `errors.rs` exception cache.
-pub(crate) fn cursor_programming_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_py_exceptions(py) {
-        Ok(types) => instantiate_exc(py, &types.programming, message, None, false),
-        Err(err) => err,
-    }
 }
 
 /// Construct a cursor `NotFoundError` from the shared `errors.rs` exception cache.
@@ -555,6 +409,135 @@ fn build_cursor_result(py: Python<'_>, result: &QueryResult) -> PyResult<BuiltCu
     })
 }
 
+fn store_if_open(
+    state: &mut BufferedCursorState,
+    description: Option<Py<PyTuple>>,
+    rows: Vec<Py<PyTuple>>,
+    rowcount: i64,
+) {
+    if state.closed {
+        state.clear_result();
+    } else {
+        state.store(description, rows, rowcount, None);
+    }
+}
+
+fn prepare_param_batches(
+    py: Python<'_>,
+    sql: &str,
+    seq_of_params: &Bound<'_, PyAny>,
+) -> PyResult<(String, Vec<Vec<Parameter>>)> {
+    let plan = plan_for(sql).map_err(|e| postgres_error_to_py(py, e))?;
+    let iter = seq_of_params
+        .try_iter()
+        .map_err(|e| convert_param_err(py, e))?;
+    let mut param_batches = Vec::new();
+    for entry in iter {
+        let item = entry.map_err(|e| convert_param_err(py, e))?;
+        let (bound_params, _) = extract_cursor_parameters(py, &plan, &item, None)?;
+        param_batches.push(bound_params);
+    }
+    Ok((plan.sql.to_string(), param_batches))
+}
+
+async fn run_executemany_cancellable(
+    source: CursorSource,
+    sql_owned: String,
+    param_batches: Vec<Vec<Parameter>>,
+    lazy_begin: bool,
+    control: Option<Arc<AsyncOpControl>>,
+) -> Result<Option<i64>, PostgresError> {
+    if control.as_deref().is_some_and(AsyncOpControl::is_cancelled) {
+        return Ok(None);
+    }
+    match source {
+        CursorSource::Session(session) => {
+            if lazy_begin && session.transaction_status() == TransactionStatus::Idle {
+                let begin_gen = session.reserve_operation_generation();
+                if let Some(ctrl) = control.as_deref()
+                    && !ctrl.register_op_gen(begin_gen)
+                {
+                    session.unreserve_operation_generation(begin_gen);
+                    return Ok(None);
+                }
+                let begin_res = session.begin_as_with_generation(begin_gen, None).await;
+                if let Some(ctrl) = control.as_deref() {
+                    ctrl.clear_op_gen();
+                }
+                begin_res?;
+                if control.as_deref().is_some_and(AsyncOpControl::is_cancelled) {
+                    return Ok(None);
+                }
+            }
+            let mut total_rows: i64 = 0;
+            for params in &param_batches {
+                if control.as_deref().is_some_and(AsyncOpControl::is_cancelled) {
+                    return Ok(None);
+                }
+                let op_gen = session.reserve_operation_generation();
+                if let Some(ctrl) = control.as_deref()
+                    && !ctrl.register_op_gen(op_gen)
+                {
+                    session.unreserve_operation_generation(op_gen);
+                    return Ok(None);
+                }
+                let budget = match CommandBudget::start_from_duration(None) {
+                    Ok(b) => b,
+                    Err(err) => {
+                        if let Some(ctrl) = control.as_deref() {
+                            ctrl.clear_op_gen();
+                        }
+                        session.unreserve_operation_generation(op_gen);
+                        return Err(err);
+                    }
+                };
+                let query_res = session
+                    .query_as_with_generation_and_budget(
+                        op_gen, None, &sql_owned, params, None, budget,
+                    )
+                    .await;
+                if let Some(ctrl) = control.as_deref() {
+                    ctrl.clear_op_gen();
+                }
+                let query_result = query_res?;
+                let count = rowcount_for_result(&query_result);
+                if count > 0 {
+                    total_rows = total_rows.saturating_add(count);
+                }
+            }
+            Ok(Some(total_rows))
+        }
+        CursorSource::Pool(pool) => {
+            let mut lease = pool.acquire().await?;
+            let mut total_rows: i64 = 0;
+            for params in &param_batches {
+                if control.as_deref().is_some_and(AsyncOpControl::is_cancelled) {
+                    lease.mark_retire();
+                    let _ = lease.release().await;
+                    return Ok(None);
+                }
+                match lease.query(&sql_owned, params, None).await {
+                    Ok(query_result) => {
+                        let count = rowcount_for_result(&query_result);
+                        if count > 0 {
+                            total_rows = total_rows.saturating_add(count);
+                        }
+                    }
+                    Err(err) => {
+                        if lease.is_closed() {
+                            lease.mark_retire();
+                        }
+                        let _ = lease.release().await;
+                        return Err(err);
+                    }
+                }
+            }
+            let _ = lease.release().await;
+            Ok(Some(total_rows))
+        }
+    }
+}
+
 /// Synchronous PEP 249 cursor over a [`SessionHandle`] or [`PostgresPool`]
 /// (`vertebra._postgres.SyncPostgresCursor`).
 #[pyclass(
@@ -565,7 +548,7 @@ fn build_cursor_result(py: Python<'_>, result: &QueryResult) -> PyResult<BuiltCu
 )]
 pub struct PySyncPostgresCursor {
     source: CursorSource,
-    state: Mutex<CursorState>,
+    state: Mutex<BufferedCursorState>,
     execute_lock: Arc<tokio::sync::Mutex<()>>,
     lazy_begin: bool,
 }
@@ -575,7 +558,7 @@ impl PySyncPostgresCursor {
     pub(crate) fn new(session: Arc<SessionHandle>, lazy_begin: bool) -> Self {
         Self {
             source: CursorSource::Session(session),
-            state: Mutex::new(CursorState::new()),
+            state: Mutex::new(BufferedCursorState::new()),
             execute_lock: Arc::new(tokio::sync::Mutex::new(())),
             lazy_begin,
         }
@@ -585,20 +568,18 @@ impl PySyncPostgresCursor {
     pub(crate) fn from_pool(pool: Arc<PostgresPool>) -> Self {
         Self {
             source: CursorSource::Pool(pool),
-            state: Mutex::new(CursorState::new()),
+            state: Mutex::new(BufferedCursorState::new()),
             execute_lock: Arc::new(tokio::sync::Mutex::new(())),
             lazy_begin: false,
         }
     }
 
-    fn lock_state(&self) -> std::sync::MutexGuard<'_, CursorState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, BufferedCursorState> {
+        lock_cursor_state(&self.state)
     }
 
     fn clear_state(&self) {
-        self.lock_state().clear();
+        self.lock_state().clear_result();
     }
 }
 
@@ -683,12 +664,12 @@ impl PySyncPostgresCursor {
         let outcome = match res {
             Ok(query_result) => match build_cursor_result(py, &query_result) {
                 Ok(built) => {
-                    let mut state = this.lock_state();
-                    if state.closed {
-                        state.clear();
-                    } else {
-                        state.store(built.description, built.rows, built.rowcount, None);
-                    }
+                    store_if_open(
+                        &mut this.lock_state(),
+                        built.description,
+                        built.rows,
+                        built.rowcount,
+                    );
                     Ok(())
                 }
                 Err(err) => {
@@ -716,138 +697,46 @@ impl PySyncPostgresCursor {
         let this = slf.get();
         this.lock_state().ensure_open(py)?;
 
-        let plan = plan_for(sql).map_err(|e| {
-            this.clear_state();
-            postgres_error_to_py(py, e)
-        })?;
-        let iter = seq_of_params.try_iter().map_err(|e| {
-            this.clear_state();
-            convert_param_err(py, e)
-        })?;
-        let mut param_batches: Vec<Vec<Parameter>> = Vec::new();
-        for entry in iter {
-            let item = entry.map_err(|e| {
+        let (sql_owned, param_batches) = prepare_param_batches(py, sql, seq_of_params)
+            .inspect_err(|_| {
                 this.clear_state();
-                convert_param_err(py, e)
             })?;
-            let (bound_params, _) =
-                extract_cursor_parameters(py, &plan, &item, None).inspect_err(|_| {
-                    this.clear_state();
-                })?;
-            param_batches.push(bound_params);
-        }
 
         if param_batches.is_empty() {
-            let mut state = this.lock_state();
-            if state.closed {
-                state.clear();
-            } else {
-                state.store(None, Vec::new(), 0, None);
-            }
+            store_if_open(&mut this.lock_state(), None, Vec::new(), 0);
             return Ok(slf.clone());
         }
 
-        match &this.source {
-            CursorSource::Session(session) => {
-                session.ensure_ordinary_reservable().map_err(|e| {
-                    this.clear_state();
-                    postgres_error_to_py(py, e)
-                })?;
-            }
-            CursorSource::Pool(pool) => {
-                if pool.is_closed() {
-                    this.clear_state();
-                    return Err(cursor_interface_err(
-                        py,
-                        "cannot execute on a cursor whose pool is closed",
-                    ));
-                }
-            }
-        }
+        ensure_source_ready(
+            py,
+            &this.source,
+            "cannot execute on a cursor whose pool is closed",
+        )
+        .inspect_err(|_| {
+            this.clear_state();
+        })?;
 
         let source = this.source.clone();
         let exec_lock = Arc::clone(&this.execute_lock);
         let lazy_begin = this.lazy_begin;
-        let sql_owned = plan.sql.to_string();
         let (gate, res) = py.detach(move || {
             block_on_db(async move {
                 let gate = exec_lock.lock_owned().await;
-                let outcome = match source {
-                    CursorSource::Session(session) => {
-                        if lazy_begin && session.transaction_status() == TransactionStatus::Idle {
-                            let begin_gen = session.reserve_operation_generation();
-                            if let Err(err) =
-                                session.begin_as_with_generation(begin_gen, None).await
-                            {
-                                return (gate, Err(err));
-                            }
-                        }
-                        let mut total_rows: i64 = 0;
-                        for params in &param_batches {
-                            let op_gen = session.reserve_operation_generation();
-                            let budget = match CommandBudget::start_from_duration(None) {
-                                Ok(b) => b,
-                                Err(err) => {
-                                    session.unreserve_operation_generation(op_gen);
-                                    return (gate, Err(err));
-                                }
-                            };
-                            match session
-                                .query_as_with_generation_and_budget(
-                                    op_gen, None, &sql_owned, params, None, budget,
-                                )
-                                .await
-                            {
-                                Ok(query_result) => {
-                                    let count = rowcount_for_result(&query_result);
-                                    if count > 0 {
-                                        total_rows = total_rows.saturating_add(count);
-                                    }
-                                }
-                                Err(err) => return (gate, Err(err)),
-                            }
-                        }
-                        Ok::<i64, PostgresError>(total_rows)
-                    }
-                    CursorSource::Pool(pool) => {
-                        let mut lease = match pool.acquire().await {
-                            Ok(l) => l,
-                            Err(err) => return (gate, Err(err)),
-                        };
-                        let mut total_rows: i64 = 0;
-                        for params in &param_batches {
-                            match lease.query(&sql_owned, params, None).await {
-                                Ok(query_result) => {
-                                    let count = rowcount_for_result(&query_result);
-                                    if count > 0 {
-                                        total_rows = total_rows.saturating_add(count);
-                                    }
-                                }
-                                Err(err) => {
-                                    if lease.is_closed() {
-                                        lease.mark_retire();
-                                    }
-                                    let _ = lease.release().await;
-                                    return (gate, Err(err));
-                                }
-                            }
-                        }
-                        let _ = lease.release().await;
-                        Ok::<i64, PostgresError>(total_rows)
-                    }
-                };
+                let outcome =
+                    run_executemany_cancellable(source, sql_owned, param_batches, lazy_begin, None)
+                        .await;
                 (gate, outcome)
             })
         });
 
         let outcome = match res {
-            Ok(total_rows) => {
-                let mut state = this.lock_state();
-                if state.closed {
-                    state.clear();
-                } else {
-                    state.store(None, Vec::new(), total_rows, None);
-                }
+            Ok(maybe_total) => {
+                store_if_open(
+                    &mut this.lock_state(),
+                    None,
+                    Vec::new(),
+                    maybe_total.unwrap_or(0),
+                );
                 Ok(())
             }
             Err(err) => {
@@ -867,24 +756,12 @@ impl PySyncPostgresCursor {
 
     /// Return up to `size` (or `arraysize` when `size` is `None`) buffered row tuples.
     #[pyo3(signature = (size = None))]
-    pub fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Vec<Py<PyTuple>>> {
-        let mut state = self.lock_state();
-        state.ensure_open(py)?;
-        let count = match size {
-            Some(n) if n < 0 => {
-                return Err(cursor_programming_err(
-                    py,
-                    "fetchmany size must be non-negative",
-                ));
-            }
-            Some(n) => Some(usize::try_from(n).unwrap_or(usize::MAX)),
-            None => None,
-        };
-        state.fetchmany(py, count)
+    pub fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<PyList>> {
+        self.lock_state().fetchmany(py, size)
     }
 
     /// Return all remaining buffered row tuples and leave the cursor exhausted.
-    pub fn fetchall(&self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
+    pub fn fetchall(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         self.lock_state().fetchall(py)
     }
 
@@ -894,7 +771,9 @@ impl PySyncPostgresCursor {
     }
 }
 
-fn lock_cursor_state(state: &Mutex<CursorState>) -> std::sync::MutexGuard<'_, CursorState> {
+fn lock_cursor_state(
+    state: &Mutex<BufferedCursorState>,
+) -> std::sync::MutexGuard<'_, BufferedCursorState> {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1610,7 +1489,7 @@ impl Drop for ExecReleaseGuard {
 )]
 pub struct PyAsyncPostgresCursor {
     source: CursorSource,
-    state: Arc<Mutex<CursorState>>,
+    state: Arc<Mutex<BufferedCursorState>>,
     execute_lock: Arc<tokio::sync::Mutex<()>>,
     in_flight: Arc<Mutex<Option<u64>>>,
     next_exec_id: AtomicU64,
@@ -1622,7 +1501,7 @@ impl PyAsyncPostgresCursor {
     pub(crate) fn new(session: Arc<SessionHandle>, lazy_begin: bool) -> Self {
         Self {
             source: CursorSource::Session(session),
-            state: Arc::new(Mutex::new(CursorState::new())),
+            state: Arc::new(Mutex::new(BufferedCursorState::new())),
             execute_lock: Arc::new(tokio::sync::Mutex::new(())),
             in_flight: Arc::new(Mutex::new(None)),
             next_exec_id: AtomicU64::new(1),
@@ -1634,7 +1513,7 @@ impl PyAsyncPostgresCursor {
     pub(crate) fn from_pool(pool: Arc<PostgresPool>) -> Self {
         Self {
             source: CursorSource::Pool(pool),
-            state: Arc::new(Mutex::new(CursorState::new())),
+            state: Arc::new(Mutex::new(BufferedCursorState::new())),
             execute_lock: Arc::new(tokio::sync::Mutex::new(())),
             in_flight: Arc::new(Mutex::new(None)),
             next_exec_id: AtomicU64::new(1),
@@ -1642,12 +1521,12 @@ impl PyAsyncPostgresCursor {
         }
     }
 
-    fn lock_state(&self) -> std::sync::MutexGuard<'_, CursorState> {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, BufferedCursorState> {
         lock_cursor_state(&self.state)
     }
 
     fn clear_state(&self) {
-        self.lock_state().clear();
+        self.lock_state().clear_result();
     }
 
     fn ensure_not_executing(&self, py: Python<'_>) -> PyResult<()> {
@@ -1675,6 +1554,30 @@ impl PyAsyncPostgresCursor {
             in_flight: Arc::clone(&self.in_flight),
             exec_id,
         })
+    }
+
+    fn cancel_session(&self) -> Option<Arc<SessionHandle>> {
+        match &self.source {
+            CursorSource::Session(s) => Some(Arc::clone(s)),
+            CursorSource::Pool(_) => None,
+        }
+    }
+}
+
+fn cancel_async_cursor_op(
+    control: &AsyncOpControl,
+    cancel_session: Option<&SessionHandle>,
+    in_flight: &Mutex<Option<u64>>,
+    state: &Mutex<BufferedCursorState>,
+    exec_id: u64,
+) {
+    control.cancel(cancel_session);
+    let mut slot = in_flight
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *slot == Some(exec_id) {
+        *slot = None;
+        lock_cursor_state(state).clear_result();
     }
 }
 
@@ -1758,10 +1661,7 @@ impl PyAsyncPostgresCursor {
         };
 
         let source = this.source.clone();
-        let cancel_session = match &this.source {
-            CursorSource::Session(s) => Some(Arc::clone(s)),
-            CursorSource::Pool(_) => None,
-        };
+        let cancel_session = this.cancel_session();
         let exec_lock = Arc::clone(&this.execute_lock);
         let state_ok = Arc::clone(&this.state);
         let state_err = Arc::clone(&this.state);
@@ -1791,18 +1691,17 @@ impl PyAsyncPostgresCursor {
                 }
                 match build_cursor_result(py, &query_result) {
                     Ok(built) => {
-                        let mut state = lock_cursor_state(&state_ok);
-                        if state.closed {
-                            state.clear();
-                        } else {
-                            state.store(built.description, built.rows, built.rowcount, None);
-                        }
-                        drop(state);
+                        store_if_open(
+                            &mut lock_cursor_state(&state_ok),
+                            built.description,
+                            built.rows,
+                            built.rowcount,
+                        );
                         drop(guard);
                         Ok(cursor_py.into_any())
                     }
                     Err(err) => {
-                        lock_cursor_state(&state_ok).clear();
+                        lock_cursor_state(&state_ok).clear_result();
                         drop(guard);
                         Err(err)
                     }
@@ -1810,20 +1709,19 @@ impl PyAsyncPostgresCursor {
             },
             move |py, (err, guard)| {
                 if guard.is_active() {
-                    lock_cursor_state(&state_err).clear();
+                    lock_cursor_state(&state_err).clear_result();
                 }
                 drop(guard);
                 postgres_error_to_py(py, err)
             },
             move || {
-                control_cancel.cancel(cancel_session.as_deref());
-                let mut slot = in_flight_cancel
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if *slot == Some(exec_id) {
-                    *slot = None;
-                    lock_cursor_state(&state_cancel).clear();
-                }
+                cancel_async_cursor_op(
+                    &control_cancel,
+                    cancel_session.as_deref(),
+                    &in_flight_cancel,
+                    &state_cancel,
+                    exec_id,
+                );
             },
             POSTGRES_COMPLETION_DRAINER_ATTR,
         )
@@ -1840,54 +1738,26 @@ impl PyAsyncPostgresCursor {
         this.lock_state().ensure_open(py)?;
         this.ensure_not_executing(py)?;
 
-        let plan = plan_for(sql).map_err(|e| {
-            this.clear_state();
-            postgres_error_to_py(py, e)
-        })?;
-        let iter = seq_of_params.try_iter().map_err(|e| {
-            this.clear_state();
-            convert_param_err(py, e)
-        })?;
-        let mut param_batches: Vec<Vec<Parameter>> = Vec::new();
-        for entry in iter {
-            let item = entry.map_err(|e| {
+        let (sql_owned, param_batches) = prepare_param_batches(py, sql, seq_of_params)
+            .inspect_err(|_| {
                 this.clear_state();
-                convert_param_err(py, e)
             })?;
-            let (bound_params, _) =
-                extract_cursor_parameters(py, &plan, &item, None).inspect_err(|_| {
-                    this.clear_state();
-                })?;
-            param_batches.push(bound_params);
-        }
 
         if !param_batches.is_empty() {
-            match &this.source {
-                CursorSource::Session(session) => {
-                    session.ensure_ordinary_reservable().map_err(|e| {
-                        this.clear_state();
-                        postgres_error_to_py(py, e)
-                    })?;
-                }
-                CursorSource::Pool(pool) => {
-                    if pool.is_closed() {
-                        this.clear_state();
-                        return Err(cursor_interface_err(
-                            py,
-                            "cannot execute on a cursor whose pool is closed",
-                        ));
-                    }
-                }
-            }
+            ensure_source_ready(
+                py,
+                &this.source,
+                "cannot execute on a cursor whose pool is closed",
+            )
+            .inspect_err(|_| {
+                this.clear_state();
+            })?;
         }
 
         let guard = this.try_claim_execute(py)?;
         let exec_id = guard.exec_id;
         let source = this.source.clone();
-        let cancel_session = match &this.source {
-            CursorSource::Session(s) => Some(Arc::clone(s)),
-            CursorSource::Pool(_) => None,
-        };
+        let cancel_session = this.cancel_session();
         let exec_lock = Arc::clone(&this.execute_lock);
         let state_ok = Arc::clone(&this.state);
         let state_err = Arc::clone(&this.state);
@@ -1897,7 +1767,6 @@ impl PyAsyncPostgresCursor {
         let control_ok = Arc::clone(&control);
         let control_cancel = Arc::clone(&control);
         let lazy_begin = this.lazy_begin;
-        let sql_owned = plan.sql.to_string();
         let cursor_py: Py<Self> = slf.clone().unbind();
 
         spawn_rust_db_task_with_attr_and_cancel(
@@ -1907,93 +1776,17 @@ impl PyAsyncPostgresCursor {
                     return Ok((Some(0i64), guard));
                 }
                 let _wire_gate = exec_lock.lock_owned().await;
-                if control.is_cancelled() {
-                    return Ok((None, guard));
-                }
-                match source {
-                    CursorSource::Session(session) => {
-                        if lazy_begin && session.transaction_status() == TransactionStatus::Idle {
-                            let begin_gen = session.reserve_operation_generation();
-                            if !control.register_op_gen(begin_gen) {
-                                session.unreserve_operation_generation(begin_gen);
-                                return Ok((None, guard));
-                            }
-                            let begin_res = session.begin_as_with_generation(begin_gen, None).await;
-                            control.clear_op_gen();
-                            if let Err(err) = begin_res {
-                                return Err((err, guard));
-                            }
-                            if control.is_cancelled() {
-                                return Ok((None, guard));
-                            }
-                        }
-                        let mut total_rows: i64 = 0;
-                        for params in &param_batches {
-                            if control.is_cancelled() {
-                                return Ok((None, guard));
-                            }
-                            let op_gen = session.reserve_operation_generation();
-                            if !control.register_op_gen(op_gen) {
-                                session.unreserve_operation_generation(op_gen);
-                                return Ok((None, guard));
-                            }
-                            let budget = match CommandBudget::start_from_duration(None) {
-                                Ok(b) => b,
-                                Err(err) => {
-                                    control.clear_op_gen();
-                                    session.unreserve_operation_generation(op_gen);
-                                    return Err((err, guard));
-                                }
-                            };
-                            let query_res = session
-                                .query_as_with_generation_and_budget(
-                                    op_gen, None, &sql_owned, params, None, budget,
-                                )
-                                .await;
-                            control.clear_op_gen();
-                            match query_res {
-                                Ok(query_result) => {
-                                    let count = rowcount_for_result(&query_result);
-                                    if count > 0 {
-                                        total_rows = total_rows.saturating_add(count);
-                                    }
-                                }
-                                Err(err) => return Err((err, guard)),
-                            }
-                        }
-                        Ok((Some(total_rows), guard))
-                    }
-                    CursorSource::Pool(pool) => {
-                        let mut lease = match pool.acquire().await {
-                            Ok(l) => l,
-                            Err(err) => return Err((err, guard)),
-                        };
-                        let mut total_rows: i64 = 0;
-                        for params in &param_batches {
-                            if control.is_cancelled() {
-                                lease.mark_retire();
-                                let _ = lease.release().await;
-                                return Ok((None, guard));
-                            }
-                            match lease.query(&sql_owned, params, None).await {
-                                Ok(query_result) => {
-                                    let count = rowcount_for_result(&query_result);
-                                    if count > 0 {
-                                        total_rows = total_rows.saturating_add(count);
-                                    }
-                                }
-                                Err(err) => {
-                                    if lease.is_closed() {
-                                        lease.mark_retire();
-                                    }
-                                    let _ = lease.release().await;
-                                    return Err((err, guard));
-                                }
-                            }
-                        }
-                        let _ = lease.release().await;
-                        Ok((Some(total_rows), guard))
-                    }
+                match run_executemany_cancellable(
+                    source,
+                    sql_owned,
+                    param_batches,
+                    lazy_begin,
+                    Some(control),
+                )
+                .await
+                {
+                    Ok(maybe_total) => Ok((maybe_total, guard)),
+                    Err(err) => Err((err, guard)),
                 }
             },
             move |_py, (maybe_total, guard)| {
@@ -2003,32 +1796,30 @@ impl PyAsyncPostgresCursor {
                 if control_ok.is_cancelled() || !guard.is_active() {
                     return Ok(cursor_py.into_any());
                 }
-                let mut state = lock_cursor_state(&state_ok);
-                if state.closed {
-                    state.clear();
-                } else {
-                    state.store(None, Vec::new(), total_rows, None);
-                }
-                drop(state);
+                store_if_open(
+                    &mut lock_cursor_state(&state_ok),
+                    None,
+                    Vec::new(),
+                    total_rows,
+                );
                 drop(guard);
                 Ok(cursor_py.into_any())
             },
             move |py, (err, guard)| {
                 if guard.is_active() {
-                    lock_cursor_state(&state_err).clear();
+                    lock_cursor_state(&state_err).clear_result();
                 }
                 drop(guard);
                 postgres_error_to_py(py, err)
             },
             move || {
-                control_cancel.cancel(cancel_session.as_deref());
-                let mut slot = in_flight_cancel
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if *slot == Some(exec_id) {
-                    *slot = None;
-                    lock_cursor_state(&state_cancel).clear();
-                }
+                cancel_async_cursor_op(
+                    &control_cancel,
+                    cancel_session.as_deref(),
+                    &in_flight_cancel,
+                    &state_cancel,
+                    exec_id,
+                );
             },
             POSTGRES_COMPLETION_DRAINER_ATTR,
         )
@@ -2045,31 +1836,17 @@ impl PyAsyncPostgresCursor {
     /// Return up to `size` (or `arraysize` when `size` is `None`) buffered row tuples without I/O.
     #[pyo3(signature = (size = None))]
     pub fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<ReadyAwaitable>> {
-        let outcome = (|| -> PyResult<Py<PyAny>> {
-            let mut locked = lock_cursor_state(&self.state);
-            locked.ensure_open(py)?;
-            let count = match size {
-                Some(n) if n < 0 => {
-                    return Err(cursor_programming_err(
-                        py,
-                        "fetchmany size must be non-negative",
-                    ));
-                }
-                Some(n) => Some(usize::try_from(n).unwrap_or(usize::MAX)),
-                None => None,
-            };
-            let rows = locked.fetchmany(py, count)?;
-            Ok(rows.into_pyobject(py)?.into_any().unbind())
-        })();
+        let outcome = lock_cursor_state(&self.state)
+            .fetchmany(py, size)
+            .map(Py::into_any);
         ready_from(py, outcome)
     }
 
     /// Return all remaining buffered row tuples and leave the cursor exhausted without I/O.
     pub fn fetchall(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
-        let outcome = (|| -> PyResult<Py<PyAny>> {
-            let rows = lock_cursor_state(&self.state).fetchall(py)?;
-            Ok(rows.into_pyobject(py)?.into_any().unbind())
-        })();
+        let outcome = lock_cursor_state(&self.state)
+            .fetchall(py)
+            .map(Py::into_any);
         ready_from(py, outcome)
     }
 
@@ -2085,6 +1862,7 @@ mod tests {
     use super::*;
     use crate::errors::{PostgresError, postgres_error_to_py};
     use crate::result::{Format, TransactionStatus};
+    use vertebra_db::py_errors::cursor_programming_err;
 
     fn sample_rows(py: Python<'_>, count: i64) -> Vec<Py<PyTuple>> {
         (1..=count)
@@ -2108,7 +1886,7 @@ mod tests {
 
     #[test]
     fn cursor_fresh_state_defaults() {
-        let state = CursorState::new();
+        let state = BufferedCursorState::new();
         assert_eq!(state.rowcount, -1);
         assert_eq!(state.arraysize, 1);
         assert!(state.description.is_none());
@@ -2120,7 +1898,7 @@ mod tests {
     #[test]
     fn cursor_fetch_before_execute_returns_empty() {
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             assert!(
                 state
                     .fetchone(py)
@@ -2131,12 +1909,14 @@ mod tests {
                 state
                     .fetchmany(py, None)
                     .expect("fetchmany before execute")
+                    .bind(py)
                     .is_empty()
             );
             assert!(
                 state
                     .fetchall(py)
                     .expect("fetchall before execute")
+                    .bind(py)
                     .is_empty()
             );
         });
@@ -2145,7 +1925,7 @@ mod tests {
     #[test]
     fn cursor_fetch_after_command_returns_empty_and_preserves_rowcount() {
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             state.store(None, Vec::new(), 3, None);
             assert_eq!(state.rowcount, 3);
             assert!(state.description.is_none());
@@ -2159,6 +1939,7 @@ mod tests {
                 state
                     .fetchall(py)
                     .expect("fetchall after command")
+                    .bind(py)
                     .is_empty()
             );
             assert_eq!(state.rowcount, 3);
@@ -2168,39 +1949,39 @@ mod tests {
     #[test]
     fn cursor_empty_result_set_returns_empty_with_description() {
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             let desc = sample_description(py);
             state.store(Some(desc), Vec::new(), 0, None);
             assert!(state.description.is_some());
             assert_eq!(state.rowcount, 0);
             let rows = state.fetchall(py).expect("fetchall on empty result set");
-            assert!(rows.is_empty());
+            assert!(rows.bind(py).is_empty());
         });
     }
 
     #[test]
     fn cursor_fetchmany_default_uses_arraysize() {
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             state.set_arraysize(py, 2).expect("arraysize 2");
             let desc = sample_description(py);
             state.store(Some(desc), sample_rows(py, 5), 5, None);
 
             let b1 = state.fetchmany(py, None).expect("batch 1");
-            assert_eq!(b1.len(), 2);
+            assert_eq!(b1.bind(py).len(), 2);
             let b2 = state.fetchmany(py, None).expect("batch 2");
-            assert_eq!(b2.len(), 2);
+            assert_eq!(b2.bind(py).len(), 2);
             let b3 = state.fetchmany(py, None).expect("batch 3");
-            assert_eq!(b3.len(), 1);
+            assert_eq!(b3.bind(py).len(), 1);
             let b4 = state.fetchmany(py, None).expect("batch 4");
-            assert!(b4.is_empty());
+            assert!(b4.bind(py).is_empty());
         });
     }
 
     #[test]
     fn cursor_fetchall_returns_remainder_then_empty() {
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             let desc = sample_description(py);
             state.store(Some(desc), sample_rows(py, 5), 5, None);
 
@@ -2216,11 +1997,13 @@ mod tests {
             );
 
             let rest = state.fetchall(py).expect("fetchall remainder");
-            assert_eq!(rest.len(), 4);
-            let vals: Vec<i64> = rest
+            let rest_bound = rest.bind(py);
+            assert_eq!(rest_bound.len(), 4);
+            let vals: Vec<i64> = rest_bound
                 .iter()
                 .map(|r| {
-                    r.bind(py)
+                    r.cast::<PyTuple>()
+                        .expect("row tuple")
                         .get_item(0)
                         .expect("item")
                         .extract::<i64>()
@@ -2230,14 +2013,14 @@ mod tests {
             assert_eq!(vals, vec![2, 3, 4, 5]);
 
             let exhausted = state.fetchall(py).expect("fetchall exhausted");
-            assert!(exhausted.is_empty());
+            assert!(exhausted.bind(py).is_empty());
         });
     }
 
     #[test]
     fn cursor_close_raises_interface_error_and_is_idempotent() {
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             state.close();
             assert!(state.closed);
             state.close();

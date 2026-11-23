@@ -4,8 +4,10 @@ use std::fmt;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyTuple, PyType};
+use pyo3::types::{PyTuple, PyType};
+use vertebra_db::py_errors::{
+    DbPyExceptionTypes, instantiate_db_exc_str_vendor, resolve_db_exceptions,
+};
 
 /// Sanitized PostgreSQL backend `ErrorResponse` record retaining 5-byte ASCII SQLSTATE and raw diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,106 +127,8 @@ impl PostgresError {
     }
 }
 
-pub(crate) struct PostgresPyExceptionTypes {
-    database: Py<PyType>,
-    pub(crate) interface: Py<PyType>,
-    data: Py<PyType>,
-    pub(crate) not_found: Py<PyType>,
-    operational: Py<PyType>,
-    pool_exhausted: Py<PyType>,
-    integrity: Py<PyType>,
-    pub(crate) programming: Py<PyType>,
-    not_supported: Py<PyType>,
-    connection_failure: Py<PyType>,
-    query_cancelled: Py<PyType>,
-    serialization_failure: Py<PyType>,
-    google_cloud_auth: Py<PyType>,
-}
-
-static POSTGRES_PY_EXCEPTIONS: PyOnceLock<PostgresPyExceptionTypes> = PyOnceLock::new();
-
-fn new_stand_in_class<'py>(
-    py: Python<'py>,
-    name: &str,
-    bases: &Bound<'py, PyTuple>,
-) -> PyResult<Py<PyType>> {
-    let dict = PyDict::new(py);
-    dict.set_item("__module__", "vertebra.db.driver")?;
-    let ty = py
-        .get_type::<PyType>()
-        .call1((name, bases, dict))?
-        .cast_into::<PyType>()?;
-    Ok(ty.unbind())
-}
-
-fn build_stand_in_py_exceptions(py: Python<'_>) -> PyResult<PostgresPyExceptionTypes> {
-    let root = py.get_type::<pyo3::exceptions::PyException>();
-    let database = new_stand_in_class(py, "DatabaseError", &PyTuple::new(py, [&root])?)?;
-    let db_bound = database.bind(py);
-    let interface = new_stand_in_class(py, "InterfaceError", &PyTuple::new(py, [db_bound])?)?;
-    let data = new_stand_in_class(py, "DataError", &PyTuple::new(py, [db_bound])?)?;
-    let data_bound = data.bind(py);
-    let not_found = new_stand_in_class(py, "NotFoundError", &PyTuple::new(py, [data_bound])?)?;
-    let operational = new_stand_in_class(py, "OperationalError", &PyTuple::new(py, [db_bound])?)?;
-    let op_bound = operational.bind(py);
-    let pool_exhausted =
-        new_stand_in_class(py, "PoolExhaustedError", &PyTuple::new(py, [op_bound])?)?;
-    let integrity = new_stand_in_class(py, "IntegrityError", &PyTuple::new(py, [db_bound])?)?;
-    let programming = new_stand_in_class(py, "ProgrammingError", &PyTuple::new(py, [db_bound])?)?;
-    let not_supported =
-        new_stand_in_class(py, "NotSupportedError", &PyTuple::new(py, [db_bound])?)?;
-    let connection_failure =
-        new_stand_in_class(py, "ConnectionFailure", &PyTuple::new(py, [op_bound])?)?;
-    let query_cancelled =
-        new_stand_in_class(py, "QueryCancelledError", &PyTuple::new(py, [op_bound])?)?;
-    let serialization_failure =
-        new_stand_in_class(py, "SerializationFailure", &PyTuple::new(py, [op_bound])?)?;
-    let google_cloud_auth =
-        new_stand_in_class(py, "GoogleCloudAuthError", &PyTuple::new(py, [db_bound])?)?;
-    Ok(PostgresPyExceptionTypes {
-        database,
-        interface,
-        data,
-        not_found,
-        operational,
-        pool_exhausted,
-        integrity,
-        programming,
-        not_supported,
-        connection_failure,
-        query_cancelled,
-        serialization_failure,
-        google_cloud_auth,
-    })
-}
-
-fn load_py_exceptions_from_core(py: Python<'_>) -> PyResult<PostgresPyExceptionTypes> {
-    let core_mod = py.import("vertebra._vertebra")?;
-    let get_ty = |name: &str| -> PyResult<Py<PyType>> {
-        Ok(core_mod.getattr(name)?.cast_into::<PyType>()?.unbind())
-    };
-    Ok(PostgresPyExceptionTypes {
-        database: get_ty("DatabaseError")?,
-        interface: get_ty("InterfaceError")?,
-        data: get_ty("DataError")?,
-        not_found: get_ty("NotFoundError")?,
-        operational: get_ty("OperationalError")?,
-        pool_exhausted: get_ty("PoolExhaustedError")?,
-        integrity: get_ty("IntegrityError")?,
-        programming: get_ty("ProgrammingError")?,
-        not_supported: get_ty("NotSupportedError")?,
-        connection_failure: get_ty("ConnectionFailure")?,
-        query_cancelled: get_ty("QueryCancelledError")?,
-        serialization_failure: get_ty("SerializationFailure")?,
-        google_cloud_auth: get_ty("GoogleCloudAuthError")?,
-    })
-}
-
-pub(crate) fn resolve_py_exceptions(py: Python<'_>) -> PyResult<&'static PostgresPyExceptionTypes> {
-    POSTGRES_PY_EXCEPTIONS.get_or_try_init(py, || match load_py_exceptions_from_core(py) {
-        Ok(types) => Ok(types),
-        Err(_) => build_stand_in_py_exceptions(py),
-    })
+pub(crate) fn resolve_py_exceptions(py: Python<'_>) -> PyResult<&'static DbPyExceptionTypes> {
+    resolve_db_exceptions(py)
 }
 
 pub(crate) fn instantiate_exc(
@@ -234,21 +138,9 @@ pub(crate) fn instantiate_exc(
     sqlstate: Option<&str>,
     is_transient: bool,
 ) -> PyErr {
-    match ty.bind(py).call1((message,)) {
-        Ok(inst) => {
-            if let Some(code) = sqlstate {
-                let _ = inst.setattr("sqlstate", code);
-                let _ = inst.setattr("vendor_code", code);
-            } else {
-                let _ = inst.setattr("sqlstate", py.None());
-                let _ = inst.setattr("vendor_code", py.None());
-            }
-            let _ = inst.setattr("is_transient", is_transient);
-            let _ = inst.setattr("completed_result", py.None());
-            PyErr::from_value(inst)
-        }
-        Err(err) => err,
-    }
+    let err = instantiate_db_exc_str_vendor(py, ty, message, sqlstate, sqlstate, is_transient);
+    let _ = err.value(py).setattr("completed_result", py.None());
+    err
 }
 
 fn attach_server_diagnostics(py: Python<'_>, inst: &Bound<'_, PyAny>, srv: &ServerError) {

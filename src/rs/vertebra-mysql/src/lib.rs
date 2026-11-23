@@ -9,9 +9,7 @@ pub mod errors;
 pub mod loopback;
 pub mod protocol;
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use mysql_async::{Params, Value};
 use pyo3::prelude::*;
@@ -19,6 +17,8 @@ use pyo3::types::PyCapsule;
 use vertebra_core::broker::DIALECT_TAG_MYSQL;
 use vertebra_core::dbrpc::DbRpcOp;
 use vertebra_db::py_async::block_on_db;
+use vertebra_db::py_broker::BrokerPoolRegistry;
+pub use vertebra_db::py_broker::FREE_THREADED;
 use vertebra_db::{
     BrokerEngineBackend, BrokerPoolBackend, DbRpcEncodedResponse, DbRpcScalar,
     decode_dbrpc_request_frame, encode_dbrpc_response_frame, new_broker_engine_pycapsule,
@@ -43,11 +43,6 @@ pub use protocol::{
     encrypt_caching_sha2_rsa, encrypt_caching_sha2_rsa_password, normalize_mysql_placeholders,
     split_sql_statements,
 };
-
-#[cfg(Py_GIL_DISABLED)]
-pub const FREE_THREADED: bool = true;
-#[cfg(not(Py_GIL_DISABLED))]
-pub const FREE_THREADED: bool = false;
 
 fn scalar_to_mysql_value(scalar: &DbRpcScalar) -> Value {
     match scalar {
@@ -94,8 +89,7 @@ fn encode_mysql_err(request_id: u64, err: &MySQLError) -> Vec<u8> {
 
 /// Shared-memory broker backend managing broker-hosted MySQL pools (`DIALECT_TAG_MYSQL = 2`).
 pub struct MySQLBrokerBackend {
-    pools: RwLock<HashMap<u64, Arc<MySQLClientCore>>>,
-    next_pool_id: AtomicU64,
+    pools: BrokerPoolRegistry<MySQLClientCore>,
 }
 
 impl Default for MySQLBrokerBackend {
@@ -109,8 +103,7 @@ impl MySQLBrokerBackend {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            pools: RwLock::new(HashMap::new()),
-            next_pool_id: AtomicU64::new(1),
+            pools: BrokerPoolRegistry::new(),
         }
     }
 }
@@ -171,24 +164,14 @@ impl BrokerPoolBackend for MySQLBrokerBackend {
         )
         .map_err(|e| e.to_string())?;
         let core = MySQLClientCore::new(config);
-        let pool_id = self.next_pool_id.fetch_add(1, Ordering::Relaxed);
-        let mut guard = self
-            .pools
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.insert(pool_id, core);
-        Ok(pool_id)
+        Ok(self.pools.register(core))
     }
 
     fn execute(&self, pool_id: u64, frame: &[u8]) -> Result<Vec<u8>, String> {
-        let core = {
-            let guard = self
-                .pools
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.get(&pool_id).cloned()
-        }
-        .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
+        let core = self
+            .pools
+            .get(pool_id)
+            .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
 
         let req = decode_dbrpc_request_frame(frame)?;
         let req_id = req.request_id;
@@ -288,14 +271,7 @@ impl BrokerPoolBackend for MySQLBrokerBackend {
     }
 
     fn close_pool(&self, pool_id: u64) {
-        let removed = {
-            let mut guard = self
-                .pools
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.remove(&pool_id)
-        };
-        if let Some(core) = removed {
+        if let Some(core) = self.pools.remove(pool_id) {
             let _ = block_on_db(async move { core.close().await });
         }
     }

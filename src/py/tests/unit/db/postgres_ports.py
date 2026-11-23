@@ -10,7 +10,7 @@ import struct
 import threading
 from collections import deque
 from collections.abc import Buffer, Callable, Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 
@@ -663,16 +663,10 @@ class FakeSyncPostgresArrowStream:
         return False
 
 
-class FakeSyncPostgresCursor:
-    """Protocol-faithful synchronous ``SyncPostgresCursor`` double backed by a client or pool."""
+class _BaseFakePostgresCursor:
+    """Shared buffer, metadata, and fetch cursor state for sync/async Postgres fake cursors."""
 
-    def __init__(
-        self,
-        *,
-        client: FakeSyncPostgresClient | None = None,
-        pool: FakeSyncPostgresPool | None = None,
-        lazy_begin: bool = False,
-    ) -> None:
+    def __init__(self, *, client: Any = None, pool: Any = None, lazy_begin: bool = False) -> None:
         self._client = client
         self._pool = pool
         self._lazy_begin = lazy_begin
@@ -688,41 +682,7 @@ class FakeSyncPostgresCursor:
             msg = "Cursor is closed"
             raise InterfaceError(msg)
 
-    def execute(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = (),
-        *,
-        parameter_oids: Sequence[int] | None = None,
-        timeout: float | None = None,
-    ) -> FakeSyncPostgresCursor:
-        self._ensure_open()
-        compiled = compile_postgres_binds(sql, params)
-        compiled_params = compiled.params if compiled.params else None
-        if self._client is not None:
-            if self._lazy_begin and not self._client.in_transaction:
-                self._client.begin()
-            res = self._client.query(
-                compiled.sql,
-                compiled_params,
-                parameter_oids=parameter_oids,
-                timeout=timeout,
-            )
-        else:
-            assert self._pool is not None
-            client = self._pool.acquire()
-            try:
-                res = client.query(
-                    compiled.sql,
-                    compiled_params,
-                    parameter_oids=parameter_oids,
-                    timeout=timeout,
-                )
-            except BaseException:
-                self._pool.evict(client)
-                raise
-            else:
-                client.close()
+    def _apply_result(self, res: Any) -> None:
         self._rows = [
             tuple(None if isinstance(cell, PgJson) and cell.value is None else cell for cell in row) for row in res.rows
         ]
@@ -733,25 +693,14 @@ class FakeSyncPostgresCursor:
             else None
         )
         self._rowcount = len(self._rows) if res.columns else int(res.affected_rows)
-        return self
 
-    def executemany(
-        self,
-        sql: str,
-        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
-    ) -> FakeSyncPostgresCursor:
-        self._ensure_open()
-        total = 0
-        for item in seq_of_params:
-            self.execute(sql, item)
-            total += max(self._rowcount, 0)
+    def _reset_many(self, total: int) -> None:
         self._rows = []
         self._pos = 0
         self._description = None
         self._rowcount = total
-        return self
 
-    def fetchone(self) -> tuple[Any, ...] | None:
+    def _fetchone_sync(self) -> tuple[Any, ...] | None:
         self._ensure_open()
         if self._pos >= len(self._rows):
             return None
@@ -759,7 +708,7 @@ class FakeSyncPostgresCursor:
         self._pos += 1
         return row
 
-    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+    def _fetchmany_sync(self, size: int | None = None) -> list[tuple[Any, ...]]:
         self._ensure_open()
         count = self._arraysize if size is None else size
         if count <= 0:
@@ -769,13 +718,13 @@ class FakeSyncPostgresCursor:
         self._pos = end
         return batch
 
-    def fetchall(self) -> list[tuple[Any, ...]]:
+    def _fetchall_sync(self) -> list[tuple[Any, ...]]:
         self._ensure_open()
         remaining = self._rows[self._pos :]
         self._pos = len(self._rows)
         return remaining
 
-    def close(self) -> None:
+    def _close_sync(self) -> None:
         self._closed = True
         self._rows.clear()
         self._pos = 0
@@ -802,6 +751,63 @@ class FakeSyncPostgresCursor:
             msg = "arraysize must be >= 1"
             raise ValueError(msg)
         self._arraysize = value
+
+
+class FakeSyncPostgresCursor(_BaseFakePostgresCursor):
+    """Protocol-faithful synchronous ``SyncPostgresCursor`` double backed by a client or pool."""
+
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> FakeSyncPostgresCursor:
+        self._ensure_open()
+        compiled = compile_postgres_binds(sql, params)
+        compiled_params = compiled.params if compiled.params else None
+        if self._client is not None:
+            if self._lazy_begin and not self._client.in_transaction:
+                self._client.begin()
+            res = self._client.query(compiled.sql, compiled_params, parameter_oids=parameter_oids, timeout=timeout)
+        else:
+            assert self._pool is not None
+            client = self._pool.acquire()
+            try:
+                res = client.query(compiled.sql, compiled_params, parameter_oids=parameter_oids, timeout=timeout)
+            except BaseException:
+                self._pool.evict(client)
+                raise
+            else:
+                client.close()
+        self._apply_result(res)
+        return self
+
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> FakeSyncPostgresCursor:
+        self._ensure_open()
+        total = 0
+        for item in seq_of_params:
+            self.execute(sql, item)
+            total += max(self._rowcount, 0)
+        self._reset_many(total)
+        return self
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._fetchone_sync()
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        return self._fetchmany_sync(size)
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._fetchall_sync()
+
+    def close(self) -> None:
+        self._close_sync()
 
 
 class FakeSyncPostgresClient(_BaseFakeSession):
@@ -1008,17 +1014,67 @@ class FakeSyncPostgresClient(_BaseFakeSession):
         self._pipeline_finish_sync(scope_id, success)
 
 
-class FakeSyncPostgresPool:
-    """Bounded synchronous ``SyncPostgresPool`` double tracking leases, idle state, and eviction."""
+class _BaseFakePostgresPool:
+    """Shared pool state, release, eviction, and close helpers for sync/async Postgres fake pools."""
+
+    _pool_label: str = "FakePostgresPool"
 
     def __init__(self, cluster: FakePostgresCluster | None = None, *, max_size: int = 4) -> None:
         self.cluster = cluster or FakePostgresCluster()
         self.max_size = max_size
-        self.idle: list[FakeSyncPostgresClient] = []
-        self.active: list[FakeSyncPostgresClient] = []
-        self.evicted: list[FakeSyncPostgresClient] = []
+        self.idle: list[Any] = []
+        self.active: list[Any] = []
+        self.evicted: list[Any] = []
         self.closed = False
+        self.acquire_calls = 0
         self.reset_count = 0
+
+    def _acquire_client(self, client_cls: type[Any]) -> Any:
+        if self.closed:
+            raise InterfaceError(f"{self._pool_label} is closed")
+        self.acquire_calls += 1
+        if self.idle:
+            client = self.idle.pop()
+            client.closed = False
+            self.active.append(client)
+            return client
+        if len(self.active) >= self.max_size:
+            raise PoolExhaustedError(f"{self._pool_label} capacity exhausted")
+        client = client_cls(self.cluster, release_hook=self._release_client)
+        self.active.append(client)
+        return client
+
+    def _release_client(self, client: Any) -> None:
+        if client in self.active:
+            self.active.remove(client)
+        if self.closed or client.evicted:
+            client.closed = True
+            return
+        client.reset_for_pool_reuse()
+        self.reset_count += 1
+        self.idle.append(client)
+
+    def _evict_client(self, client: Any) -> None:
+        client.evicted = True
+        client.closed = True
+        if client in self.active:
+            self.active.remove(client)
+        if client in self.idle:
+            self.idle.remove(client)
+        self.evicted.append(client)
+
+    def _close_pool(self) -> None:
+        self.closed = True
+        for client in [*self.active, *self.idle]:
+            client.closed = True
+        self.active.clear()
+        self.idle.clear()
+
+
+class FakeSyncPostgresPool(_BaseFakePostgresPool):
+    """Bounded synchronous ``SyncPostgresPool`` double tracking leases, idle state, and eviction."""
+
+    _pool_label = "FakeSyncPostgresPool"
 
     def cursor(self, *, lazy_begin: bool = False) -> FakeSyncPostgresCursor:
         if self.closed:
@@ -1104,45 +1160,14 @@ class FakeSyncPostgresPool:
             cur.close()
 
     def acquire(self) -> FakeSyncPostgresClient:
-        if self.closed:
-            raise InterfaceError("FakeSyncPostgresPool is closed")
-        if self.idle:
-            client = self.idle.pop()
-            client.closed = False
-            self.active.append(client)
-            return client
-        if len(self.active) >= self.max_size:
-            raise PoolExhaustedError("FakeSyncPostgresPool capacity exhausted")
-        client = FakeSyncPostgresClient(self.cluster, release_hook=self._release_client)
-        self.active.append(client)
-        return client
-
-    def _release_client(self, client: FakeSyncPostgresClient) -> None:
-        if client in self.active:
-            self.active.remove(client)
-        if self.closed or client.evicted:
-            client.closed = True
-            return
-        client.reset_for_pool_reuse()
-        self.reset_count += 1
-        self.idle.append(client)
+        return cast("FakeSyncPostgresClient", self._acquire_client(FakeSyncPostgresClient))
 
     def evict(self, client: FakeSyncPostgresClient) -> None:
         """Permanently discard a tainted connection from the pool."""
-        client.evicted = True
-        client.closed = True
-        if client in self.active:
-            self.active.remove(client)
-        if client in self.idle:
-            self.idle.remove(client)
-        self.evicted.append(client)
+        self._evict_client(client)
 
     def close(self) -> None:
-        self.closed = True
-        for client in [*self.active, *self.idle]:
-            client.closed = True
-        self.active.clear()
-        self.idle.clear()
+        self._close_pool()
 
 
 class FakeAsyncPostgresCopyOut(FakeSyncPostgresCopyOut):
@@ -1351,30 +1376,8 @@ class FakeAsyncPostgresReplication:
         await self.aclose()
 
 
-class FakeAsyncPostgresCursor:
+class FakeAsyncPostgresCursor(_BaseFakePostgresCursor):
     """Protocol-faithful asynchronous ``AsyncPostgresCursor`` double backed by a client or pool."""
-
-    def __init__(
-        self,
-        *,
-        client: FakeAsyncPostgresClient | None = None,
-        pool: FakeAsyncPostgresPool | None = None,
-        lazy_begin: bool = False,
-    ) -> None:
-        self._client = client
-        self._pool = pool
-        self._lazy_begin = lazy_begin
-        self._rows: list[tuple[Any, ...]] = []
-        self._pos = 0
-        self._description: tuple[tuple[str, int, None, None, None, None, None], ...] | None = None
-        self._rowcount = -1
-        self._arraysize = 1
-        self._closed = False
-
-    def _ensure_open(self) -> None:
-        if self._closed:
-            msg = "Cursor is closed"
-            raise InterfaceError(msg)
 
     async def execute(
         self,
@@ -1391,36 +1394,19 @@ class FakeAsyncPostgresCursor:
             if self._lazy_begin and not self._client.in_transaction:
                 await self._client.begin()
             res = await self._client.query(
-                compiled.sql,
-                compiled_params,
-                parameter_oids=parameter_oids,
-                timeout=timeout,
+                compiled.sql, compiled_params, parameter_oids=parameter_oids, timeout=timeout
             )
         else:
             assert self._pool is not None
             client = await self._pool.acquire()
             try:
-                res = await client.query(
-                    compiled.sql,
-                    compiled_params,
-                    parameter_oids=parameter_oids,
-                    timeout=timeout,
-                )
+                res = await client.query(compiled.sql, compiled_params, parameter_oids=parameter_oids, timeout=timeout)
             except BaseException:
                 await self._pool.evict(client)
                 raise
             else:
                 await client.close()
-        self._rows = [
-            tuple(None if isinstance(cell, PgJson) and cell.value is None else cell for cell in row) for row in res.rows
-        ]
-        self._pos = 0
-        self._description = (
-            tuple((col.name, col.type_oid, None, None, None, None, None) for col in res.columns)
-            if res.columns
-            else None
-        )
-        self._rowcount = len(self._rows) if res.columns else int(res.affected_rows)
+        self._apply_result(res)
         return self
 
     async def executemany(
@@ -1433,63 +1419,20 @@ class FakeAsyncPostgresCursor:
         for item in seq_of_params:
             await self.execute(sql, item)
             total += max(self._rowcount, 0)
-        self._rows = []
-        self._pos = 0
-        self._description = None
-        self._rowcount = total
+        self._reset_many(total)
         return self
 
     async def fetchone(self) -> tuple[Any, ...] | None:
-        self._ensure_open()
-        if self._pos >= len(self._rows):
-            return None
-        row = self._rows[self._pos]
-        self._pos += 1
-        return row
+        return self._fetchone_sync()
 
     async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
-        self._ensure_open()
-        count = self._arraysize if size is None else size
-        if count <= 0:
-            return []
-        end = min(self._pos + count, len(self._rows))
-        batch = self._rows[self._pos : end]
-        self._pos = end
-        return batch
+        return self._fetchmany_sync(size)
 
     async def fetchall(self) -> list[tuple[Any, ...]]:
-        self._ensure_open()
-        remaining = self._rows[self._pos :]
-        self._pos = len(self._rows)
-        return remaining
+        return self._fetchall_sync()
 
     async def close(self) -> None:
-        self._closed = True
-        self._rows.clear()
-        self._pos = 0
-
-    @property
-    def description(self) -> tuple[tuple[str, int, None, None, None, None, None], ...] | None:
-        return self._description
-
-    @property
-    def rowcount(self) -> int:
-        return self._rowcount
-
-    @property
-    def lastrowid(self) -> Any | None:
-        return None
-
-    @property
-    def arraysize(self) -> int:
-        return self._arraysize
-
-    @arraysize.setter
-    def arraysize(self, value: int) -> None:
-        if value < 1:
-            msg = "arraysize must be >= 1"
-            raise ValueError(msg)
-        self._arraysize = value
+        self._close_sync()
 
 
 class FakeAsyncPostgresClient(_BaseFakeSession):
@@ -1751,18 +1694,10 @@ class FakeAsyncPostgresClient(_BaseFakeSession):
         )
 
 
-class FakeAsyncPostgresPool:
+class FakeAsyncPostgresPool(_BaseFakePostgresPool):
     """Bounded asynchronous ``AsyncPostgresPool`` double tracking leases and eviction."""
 
-    def __init__(self, cluster: FakePostgresCluster | None = None, *, max_size: int = 4) -> None:
-        self.cluster = cluster or FakePostgresCluster()
-        self.max_size = max_size
-        self.idle: list[FakeAsyncPostgresClient] = []
-        self.active: list[FakeAsyncPostgresClient] = []
-        self.evicted: list[FakeAsyncPostgresClient] = []
-        self.closed = False
-        self.acquire_calls = 0
-        self.reset_count = 0
+    _pool_label = "FakeAsyncPostgresPool"
 
     def cursor(self, *, lazy_begin: bool = False) -> FakeAsyncPostgresCursor:
         if self.closed:
@@ -1848,46 +1783,14 @@ class FakeAsyncPostgresPool:
             await cur.close()
 
     async def acquire(self) -> FakeAsyncPostgresClient:
-        if self.closed:
-            raise InterfaceError("FakeAsyncPostgresPool is closed")
-        self.acquire_calls += 1
-        if self.idle:
-            client = self.idle.pop()
-            client.closed = False
-            self.active.append(client)
-            return client
-        if len(self.active) >= self.max_size:
-            raise PoolExhaustedError("FakeAsyncPostgresPool capacity exhausted")
-        client = FakeAsyncPostgresClient(self.cluster, release_hook=self._release_client)
-        self.active.append(client)
-        return client
-
-    def _release_client(self, client: FakeAsyncPostgresClient) -> None:
-        if client in self.active:
-            self.active.remove(client)
-        if self.closed or client.evicted:
-            client.closed = True
-            return
-        client.reset_for_pool_reuse()
-        self.reset_count += 1
-        self.idle.append(client)
+        return cast("FakeAsyncPostgresClient", self._acquire_client(FakeAsyncPostgresClient))
 
     async def evict(self, client: FakeAsyncPostgresClient) -> None:
         """Permanently discard a tainted connection from the async pool."""
-        client.evicted = True
-        client.closed = True
-        if client in self.active:
-            self.active.remove(client)
-        if client in self.idle:
-            self.idle.remove(client)
-        self.evicted.append(client)
+        self._evict_client(client)
 
     async def close(self) -> None:
-        self.closed = True
-        for client in [*self.active, *self.idle]:
-            client.closed = True
-        self.active.clear()
-        self.idle.clear()
+        self._close_pool()
 
 
 class FakeDirectClientFactory:

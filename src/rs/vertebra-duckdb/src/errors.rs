@@ -2,130 +2,8 @@
 //! `vertebra.db.DatabaseError` subclasses resolved from `vertebra._vertebra`.
 
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyTuple, PyType};
 use thiserror::Error;
-
-/// Cached Python exception types from `vertebra._vertebra`.
-pub struct DuckDBExceptionTypes {
-    pub database: Py<PyType>,
-    pub interface: Py<PyType>,
-    pub operational: Py<PyType>,
-    pub integrity: Py<PyType>,
-    pub programming: Py<PyType>,
-    pub data: Py<PyType>,
-    pub not_found: Py<PyType>,
-    pub transaction: Py<PyType>,
-    pub query_timeout: Py<PyType>,
-    pub pool_exhausted: Py<PyType>,
-    pub not_supported: Py<PyType>,
-}
-
-static DUCKDB_EXCEPTION_TYPES: PyOnceLock<DuckDBExceptionTypes> = PyOnceLock::new();
-
-fn new_stand_in_class<'py>(
-    py: Python<'py>,
-    name: &str,
-    bases: &Bound<'py, PyTuple>,
-) -> PyResult<Py<PyType>> {
-    let dict = PyDict::new(py);
-    dict.set_item("__module__", "vertebra._vertebra")?;
-    let ty = py
-        .get_type::<PyType>()
-        .call1((name, bases, dict))?
-        .cast_into::<PyType>()?;
-    Ok(ty.unbind())
-}
-
-fn stand_in_exception_types(py: Python<'_>) -> PyResult<DuckDBExceptionTypes> {
-    let root = match py
-        .import("vertebra._typing")
-        .and_then(|m| m.getattr("VertebraError"))
-        .and_then(|v| v.cast_into::<PyType>().map_err(Into::into))
-    {
-        Ok(ty) => ty,
-        Err(_) => py.get_type::<pyo3::exceptions::PyException>(),
-    };
-    let database = new_stand_in_class(py, "DatabaseError", &PyTuple::new(py, [&root])?)?;
-    let db_base = PyTuple::new(py, [database.bind(py)])?;
-    let interface = new_stand_in_class(py, "InterfaceError", &db_base)?;
-    let operational = new_stand_in_class(py, "OperationalError", &db_base)?;
-    let op_base = PyTuple::new(py, [operational.bind(py)])?;
-    let integrity = new_stand_in_class(py, "IntegrityError", &db_base)?;
-    let programming = new_stand_in_class(py, "ProgrammingError", &db_base)?;
-    let data = new_stand_in_class(py, "DataError", &db_base)?;
-    let data_base = PyTuple::new(py, [data.bind(py)])?;
-    let not_found = new_stand_in_class(py, "NotFoundError", &data_base)?;
-    let transaction = new_stand_in_class(py, "SerializationFailure", &op_base)?;
-    let query_timeout = new_stand_in_class(py, "QueryCancelledError", &op_base)?;
-    let pool_exhausted = new_stand_in_class(py, "PoolExhaustedError", &op_base)?;
-    let not_supported = new_stand_in_class(py, "NotSupportedError", &db_base)?;
-    Ok(DuckDBExceptionTypes {
-        database,
-        interface,
-        operational,
-        integrity,
-        programming,
-        data,
-        not_found,
-        transaction,
-        query_timeout,
-        pool_exhausted,
-        not_supported,
-    })
-}
-
-fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static DuckDBExceptionTypes> {
-    DUCKDB_EXCEPTION_TYPES.get_or_try_init(py, || match py.import("vertebra._vertebra") {
-        Ok(core_mod) => Ok(DuckDBExceptionTypes {
-            database: core_mod
-                .getattr("DatabaseError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            interface: core_mod
-                .getattr("InterfaceError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            operational: core_mod
-                .getattr("OperationalError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            integrity: core_mod
-                .getattr("IntegrityError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            programming: core_mod
-                .getattr("ProgrammingError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            data: core_mod
-                .getattr("DataError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            not_found: core_mod
-                .getattr("NotFoundError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            transaction: core_mod
-                .getattr("SerializationFailure")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            query_timeout: core_mod
-                .getattr("QueryCancelledError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            pool_exhausted: core_mod
-                .getattr("PoolExhaustedError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            not_supported: core_mod
-                .getattr("NotSupportedError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-        }),
-        Err(_) => stand_in_exception_types(py),
-    })
-}
+use vertebra_db::py_errors::{instantiate_db_exc, resolve_db_exceptions};
 
 /// Classified error emitted by the native DuckDB client.
 #[derive(Debug, Error)]
@@ -333,9 +211,9 @@ impl DuckDBClientError {
     pub fn into_py_err(self, py: Python<'_>) -> PyErr {
         let msg = self.to_string();
         let sqlstate = self.sqlstate();
-        let vendor_code = self.vendor_code();
+        let vendor_code = self.vendor_code().map(i64::from);
         let is_transient = self.is_transient();
-        let Ok(types) = resolve_exception_types(py) else {
+        let Ok(types) = resolve_db_exceptions(py) else {
             return pyo3::exceptions::PyRuntimeError::new_err(msg);
         };
         let ty = match self {
@@ -345,17 +223,12 @@ impl DuckDBClientError {
             Self::Integrity(_) => &types.integrity,
             Self::Data(_) => &types.data,
             Self::NotFound(_) => &types.not_found,
-            Self::Transaction(_) => &types.transaction,
-            Self::QueryTimeout(_) => &types.query_timeout,
+            Self::Transaction(_) => &types.serialization_failure,
+            Self::QueryTimeout(_) => &types.query_cancelled,
             Self::PoolExhausted(_) => &types.pool_exhausted,
             Self::NotSupported(_) => &types.not_supported,
         };
-        let py_err = PyErr::from_type(ty.bind(py).clone(), (msg,));
-        let inst = py_err.value(py);
-        let _ = inst.setattr("sqlstate", sqlstate);
-        let _ = inst.setattr("vendor_code", vendor_code);
-        let _ = inst.setattr("is_transient", is_transient);
-        py_err
+        instantiate_db_exc(py, ty, &msg, sqlstate, vendor_code, is_transient)
     }
 }
 

@@ -1,6 +1,7 @@
 import { inject, type MaybeRefOrGetter, provide, ref, toValue, watch } from "vue";
 import { HttpClient } from "../client/client";
 import type { ClientConfig } from "../client/types";
+import { createSequencedRunner, runTrackedMutation } from "../internal/async_runner";
 
 const VERTEBRA_SYMBOL = Symbol("vertebra");
 
@@ -32,29 +33,26 @@ export function useQuery<TInput = unknown, TOutput = unknown>(
   const data = ref<TOutput | null>(null);
   const loading = ref(false);
   const error = ref<Error | null>(null);
-  let requestSeq = 0;
 
-  const fetchData = async () => {
-    if (!toValue(options.enabled ?? true)) return;
-
-    const seq = ++requestSeq;
-    loading.value = true;
-    error.value = null;
-    try {
-      const result = await client.call<TInput, TOutput>(method, path, toValue(input));
-      if (seq === requestSeq) {
+  const fetchData = createSequencedRunner<TOutput>(
+    () => client.call<TInput, TOutput>(method, path, toValue(input)),
+    {
+      onStart: () => {
+        loading.value = true;
+        error.value = null;
+      },
+      onSuccess: (result) => {
         data.value = result;
-      }
-    } catch (err: unknown) {
-      if (seq === requestSeq) {
-        error.value = err instanceof Error ? err : new Error(String(err));
-      }
-    } finally {
-      if (seq === requestSeq) {
+      },
+      onError: (err) => {
+        error.value = err;
+      },
+      onFinish: () => {
         loading.value = false;
-      }
-    }
-  };
+      },
+    },
+    () => Boolean(toValue(options.enabled ?? true)),
+  );
 
   // Watch for input changes
   watch(() => toValue(input), fetchData, { immediate: true });
@@ -76,19 +74,14 @@ export function useMutation<TInput = unknown, TOutput = unknown>(method: string,
   const loading = ref(false);
   const error = ref<Error | null>(null);
 
-  const mutate = async (input?: TInput) => {
-    loading.value = true;
-    error.value = null;
-    try {
-      const result = await client.call<TInput, TOutput>(method, path, input);
-      return result;
-    } catch (err: unknown) {
-      error.value = err instanceof Error ? err : new Error(String(err));
-      throw err;
-    } finally {
-      loading.value = false;
-    }
-  };
+  const mutate = (input?: TInput) =>
+    runTrackedMutation(
+      () => client.call<TInput, TOutput>(method, path, input),
+      (isLoading, err) => {
+        loading.value = isLoading;
+        error.value = err;
+      },
+    );
 
   return { mutate, loading, error };
 }

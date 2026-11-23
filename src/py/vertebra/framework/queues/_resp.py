@@ -754,3 +754,89 @@ class RESPStreamQueueBackend:
         )
         client_cls = getattr(mod, cls._DIALECT.sync_client_attr)
         return cls._wrap_sync_client(client_cls(config.backend_url))
+
+
+def _decode_str(val: Any) -> str:
+    return val.decode("utf-8") if isinstance(val, bytes) else str(val)
+
+
+def _decode_stream_entries(raw: Any) -> list[tuple[str, dict[str, Any]]]:
+    entries: list[tuple[str, dict[str, Any]]] = []
+    if not raw:
+        return entries
+    for item in raw:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            entries.append((_decode_str(item[0]), _normalize_stream_fields(item[1])))
+    return entries
+
+
+class _BaseRESPStreamAdapter:
+    """Shared async adapter bridging a native Redis/Valkey client to `RESPStreamClient`."""
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def xgroup_create(self, stream: str, group: str, id: str = "$", mkstream: bool = False) -> Any:
+        """Create consumer group on stream."""
+        return await self._client.xgroup_create(stream, group, id=id, mkstream=mkstream)
+
+    async def xack(self, stream: str, group: str, *ids: str) -> int:
+        """Acknowledge processed stream entries."""
+        return int(await self._client.xack(stream, group, list(ids)))
+
+    async def xautoclaim(
+        self,
+        stream: str,
+        group: str,
+        consumer: str,
+        min_idle_time: int,
+        start_id: str = "0-0",
+        count: int | None = None,
+    ) -> tuple[str, list[tuple[str, dict[str, Any]]], list[str]]:
+        """Reclaim pending entries exceeding idle time."""
+        res = await self._client.xautoclaim(stream, group, consumer, min_idle_time, start_id=start_id, count=count)
+        if not res or len(res) < 3:
+            return "0-0", [], []
+        next_id, raw_entries, deleted = res
+        return _decode_str(next_id), _decode_stream_entries(raw_entries), [_decode_str(d) for d in deleted]
+
+    async def xdel(self, stream: str, *ids: str) -> int:
+        """Delete stream entries by ID."""
+        return int(await self._client.xdel(stream, list(ids)))
+
+    async def set(self, key: str, value: str, nx: bool = False, px: int | None = None) -> Any:
+        """Set key with optional NX and PX options."""
+        return await self._client.set(key, value, nx=nx, px=px)
+
+    async def get(self, key: str) -> str | None:
+        """Get string value by key."""
+        raw = await self._client.get(key)
+        return None if raw is None else _decode_str(raw)
+
+
+class _BaseSyncRESPStreamAdapter:
+    """Shared sync adapter bridging a native Redis/Valkey client to `SyncRESPStreamClient`."""
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def set(self, key: str, value: str, nx: bool = False, px: int | None = None) -> Any:
+        """Set key with optional NX and PX options."""
+        return self._client.set(key, value, nx=nx, px=px)
+
+    def get(self, key: str) -> str | None:
+        """Get string value by key."""
+        raw = self._client.get(key)
+        return None if raw is None else _decode_str(raw)
+
+    def publish(self, channel: str, message: Any) -> int:
+        """Publish message to channel."""
+        return int(self._client.publish(channel, message))
+
+    def close(self) -> None:
+        """Close client connection."""
+        self._client.close()

@@ -1,7 +1,6 @@
 //! Zero-copy VTBARROW shared-memory Arrow IPC streaming and bulk Arrow table ingestion.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder,
@@ -13,11 +12,10 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use rusqlite::types::ValueRef;
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::arrow_shm::write_shm_arrow_region_unregistered;
+use vertebra_db::py_broker::next_shm_name;
 
 use crate::errors::SqliteClientError;
 use crate::value::{BoundParams, SqliteValue};
-
-static ARROW_SHM_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Payload representation of an Arrow query result set.
 #[derive(Clone, Debug)]
@@ -316,8 +314,7 @@ pub fn execute_select_to_arrow(
         SqliteClientError::ShmArrow(format!("failed to finalize Arrow IPC stream: {e}"))
     })?;
 
-    let shm_seq = ARROW_SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let shm_name = format!("/vtb_sqlite_{}_{}", std::process::id(), shm_seq);
+    let shm_name = next_shm_name("/vtb_sqlite", '_');
     let (norm_name, byte_len, region) = write_shm_arrow_region_unregistered(&shm_name, &ipc_buffer)
         .map_err(SqliteClientError::ShmArrow)?;
 

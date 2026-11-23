@@ -31,11 +31,7 @@ use crate::errors::spanner_error_to_py;
 
 pub(crate) const SPANNER_COMPLETION_DRAINER_ATTR: &str = "_vertebra_spanner_completion_drainer";
 
-/// Whether this build targets free-threaded Python (3.14t+).
-#[cfg(Py_GIL_DISABLED)]
-pub const FREE_THREADED: bool = true;
-#[cfg(not(Py_GIL_DISABLED))]
-pub const FREE_THREADED: bool = false;
+pub use vertebra_db::py_broker::FREE_THREADED;
 
 fn parse_staleness(mode: &str, ms_or_micros: i64) -> SpannerStaleness {
     match mode.trim().to_ascii_lowercase().as_str() {

@@ -5,12 +5,10 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, NotRequired, TypedDict, cast
 
 from sqlspec.config import ADKConfig
 from sqlspec.extensions.adk import (
-    BaseAsyncADKStore,
-    BaseSyncADKStore,
     StoredEvent,
     StoredSession,
     normalize_session_list_options,
@@ -18,6 +16,17 @@ from sqlspec.extensions.adk import (
 from sqlspec.utils.logging import get_logger
 from sqlspec.utils.serializers import from_json, to_json
 
+from vertebra.extensions.sqlspec._adk import (
+    AdapterAsyncADKArtifactStore,
+    AdapterAsyncADKMemoryStore,
+    AdapterAsyncADKStore,
+    AdapterSyncADKArtifactStore,
+    AdapterSyncADKMemoryStore,
+    AdapterSyncADKStore,
+    StoredArtifact,
+    StoredMemory,
+    merge_scoped_state,
+)
 from vertebra.extensions.sqlspec.adapters.duckdb.core import (
     build_duckdb_scope_where,
     duckdb_json_dict,
@@ -32,26 +41,11 @@ from vertebra.utils.module_loader import ensure_module
 if TYPE_CHECKING:
     from sqlspec.extensions.adk import SessionOrderBy, StoredMemory
     from sqlspec.extensions.adk.artifact import StoredArtifact
-    from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore as _BaseAsyncADKArtifactStore
-    from sqlspec.extensions.adk.artifact.store import BaseSyncADKArtifactStore as _BaseSyncADKArtifactStore
     from sqlspec.extensions.adk.converters import merge_scoped_state
-    from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore as _BaseAsyncADKMemoryStore
-    from sqlspec.extensions.adk.memory.store import BaseSyncADKMemoryStore as _BaseSyncADKMemoryStore
 
     from vertebra.extensions.sqlspec.adapters.duckdb.config import DuckDBAsyncConfig, DuckDBSyncConfig
 else:
-    _memory_store_mod = ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
-    _artifact_store_mod = ensure_module("sqlspec.extensions.adk.artifact.store", package="google-adk", extra="adk")
-    _converters_mod = ensure_module("sqlspec.extensions.adk.converters", package="google-adk", extra="adk")
-    _artifact_types_mod = ensure_module("sqlspec.extensions.adk.artifact", package="google-adk", extra="adk")
-    _memory_types_mod = ensure_module("sqlspec.extensions.adk.memory", package="google-adk", extra="adk")
-    _BaseAsyncADKMemoryStore = _memory_store_mod.BaseAsyncADKMemoryStore
-    _BaseSyncADKMemoryStore = _memory_store_mod.BaseSyncADKMemoryStore
-    _BaseAsyncADKArtifactStore = _artifact_store_mod.BaseAsyncADKArtifactStore
-    _BaseSyncADKArtifactStore = _artifact_store_mod.BaseSyncADKArtifactStore
-    merge_scoped_state = _converters_mod.merge_scoped_state
-    StoredArtifact = _artifact_types_mod.StoredArtifact
-    StoredMemory = _memory_types_mod.StoredMemory
+    ensure_module("sqlspec.extensions.adk.memory.store", package="google-adk", extra="adk")
 
 __all__ = (
     "DuckDBADKConfig",
@@ -699,8 +693,53 @@ class _DuckDBADKSessionSQLMixin:
             f"INSERT INTO {meta_ref} (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
         )
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_duckdb_table_missing(exc)
 
-class DuckDBSyncADKStore(_DuckDBADKSessionSQLMixin, BaseSyncADKStore["DuckDBSyncConfig"]):
+    def _decode_session_row(
+        self,
+        row: Any,
+        *,
+        app_state: dict[str, Any] | None = None,
+        user_state: dict[str, Any] | None = None,
+        merge_scopes: bool = False,
+    ) -> StoredSession:
+        deserializer = getattr(self, "_json_deserializer", None) or from_json
+        rec = _row_to_session(row, deserializer=deserializer)
+        if merge_scopes:
+            rec["state"] = merge_scoped_state(rec["state"], app_state, user_state)
+        return rec
+
+    def _decode_event_row(self, row: Any) -> StoredEvent:
+        deserializer = getattr(self, "_json_deserializer", None) or from_json
+        return _row_to_event(row, deserializer=deserializer)
+
+    def _delete_session_sqls_and_params(
+        self, app_name: str, user_id: str, session_id: str
+    ) -> list[tuple[str, tuple[str, str, str]]]:
+        delete_events_sql, delete_session_sql = self._delete_session_sqls()
+        return [
+            (delete_events_sql, (app_name, user_id, session_id)),
+            (delete_session_sql, (app_name, user_id, session_id)),
+        ]
+
+    def _upsert_app_state_sql_and_params(self, app_name: str, state: dict[str, Any]) -> tuple[str, tuple[Any, ...]]:
+        sql = self._upsert_state_sql(self._app_state_table, ("app_name",))
+        serializer = getattr(self, "_json_serializer", None) or to_json
+        return sql, (app_name, serializer(state))
+
+    def _upsert_user_state_sql_and_params(
+        self, app_name: str, user_id: str, state: dict[str, Any]
+    ) -> tuple[str, tuple[Any, ...]]:
+        sql = self._upsert_state_sql(self._user_state_table, ("app_name", "user_id"))
+        serializer = getattr(self, "_json_serializer", None) or to_json
+        return sql, (app_name, user_id, serializer(state))
+
+    def _set_metadata_sql_and_params(self, key: str, value: str) -> tuple[str, tuple[str, str]]:
+        return self._set_metadata_sql(), (key, value)
+
+
+class DuckDBSyncADKStore(_DuckDBADKSessionSQLMixin, AdapterSyncADKStore):
     """Synchronous DuckDB ADK session and event store over Vertebra `DuckDBSyncDriver`."""
 
     __slots__ = ()
@@ -712,21 +751,6 @@ class DuckDBSyncADKStore(_DuckDBADKSessionSQLMixin, BaseSyncADKStore["DuckDBSync
     def __init__(self, config: DuckDBSyncConfig, *, read_config: DuckDBSyncConfig | None = None) -> None:
         """Initialize the synchronous DuckDB ADK session store."""
         super().__init__(config, read_config=read_config)
-
-    def _sessions_table_ddl(self) -> str:
-        return self._build_sessions_ddl()
-
-    def _events_table_ddl(self) -> str:
-        return self._build_events_ddl()
-
-    def _app_states_table_ddl(self) -> str:
-        return self._build_app_states_ddl()
-
-    def _user_states_table_ddl(self) -> str:
-        return self._build_user_states_ddl()
-
-    def _metadata_table_ddl(self) -> str:
-        return self._build_metadata_ddl()
 
     def reconcile_companion_objects_sync(self, driver: Any) -> None:
         """Create missing session and event companion indexes without committing."""
@@ -863,64 +887,6 @@ class DuckDBSyncADKStore(_DuckDBADKSessionSQLMixin, BaseSyncADKStore["DuckDBSync
                 return None
             raise
 
-    def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Update stored session JSON state synchronously."""
-        sql, params = self._update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List stored ADK sessions synchronously."""
-        built = self._list_sessions_sql_and_params(app_name, user_id, order_by, descending, limit, offset)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-            return [_row_to_session(row, deserializer=from_json) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-    def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete a session and its associated events synchronously."""
-        delete_events_sql, delete_session_sql = self._delete_session_sqls()
-        with self._config.provide_session() as driver:
-            driver.begin()
-            try:
-                driver.execute(delete_events_sql, app_name, user_id, session_id)
-                driver.execute(delete_session_sql, app_name, user_id, session_id)
-                driver.commit()
-            except BaseException:
-                with contextlib.suppress(Exception):
-                    driver.rollback()
-                raise
-
-    def append_event(self, event_record: StoredEvent) -> None:
-        """Append a single ADK event synchronously after verifying owning session existence."""
-        sql, params = self._append_event_sql_and_params(event_record)
-        with self._config.provide_session() as driver:
-            inserted = driver.select_one_or_none(sql, *params)
-            driver.commit()
-        if inserted is None:
-            msg = (
-                f"Session {event_record['session_id']} not found "
-                f"for app={event_record['app_name']!r}, user={event_record['user_id']!r}"
-            )
-            raise ValueError(msg)
-
     def append_event_and_update_state(
         self,
         event_record: StoredEvent,
@@ -974,51 +940,6 @@ class DuckDBSyncADKStore(_DuckDBADKSessionSQLMixin, BaseSyncADKStore["DuckDBSync
         session_record["state"] = merge_scoped_state(session_record["state"], merged_app, merged_user)
         return session_record
 
-    def get_events(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[StoredEvent]:
-        """Fetch ADK events for a session ordered ascending by timestamp."""
-        if limit == 0:
-            return []
-        sql, params = self._get_events_sql_and_params(app_name, user_id, session_id, after_timestamp, limit)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-            if limit is not None:
-                rows = list(reversed(rows))
-            return [_row_to_event(row, deserializer=from_json) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-    def _delete_by_cutoff(
-        self,
-        table_name: str,
-        column: str,
-        cutoff: datetime,
-        app_name: str | None,
-    ) -> int:
-        sql, params = self._delete_before_sql_and_params(table_name, column, cutoff, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                rows = driver.select(sql, *params)
-                driver.commit()
-            return len(rows)
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return 0
-            raise
-
-    def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete events older than `before` synchronously."""
-        return self._delete_by_cutoff(self._events_table, "timestamp", before, app_name)
-
     def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
         """Delete sessions (and child events) whose `update_time` predates `updated_before`."""
         delete_events_sql, delete_sessions_sql, params = self._delete_idle_sessions_sqls_and_params(
@@ -1040,10 +961,6 @@ class DuckDBSyncADKStore(_DuckDBADKSessionSQLMixin, BaseSyncADKStore["DuckDBSync
             if is_duckdb_table_missing(exc):
                 return 0
             raise
-
-    def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete user state rows whose `update_time` predates `updated_before`."""
-        return self._delete_by_cutoff(self._user_state_table, "update_time", updated_before, app_name)
 
     def get_app_state(self, app_name: str) -> dict[str, Any] | None:
         """Return app-scoped ADK state dictionary synchronously."""
@@ -1069,20 +986,6 @@ class DuckDBSyncADKStore(_DuckDBADKSessionSQLMixin, BaseSyncADKStore["DuckDBSync
                 return None
             raise
 
-    def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Insert or update app-scoped ADK state synchronously."""
-        sql = self._upsert_state_sql(self._app_state_table, ("app_name",))
-        with self._config.provide_session() as driver:
-            driver.execute(sql, app_name, to_json(state), datetime.now(UTC).isoformat())
-            driver.commit()
-
-    def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Insert or update user-scoped ADK state synchronously."""
-        sql = self._upsert_state_sql(self._user_state_table, ("app_name", "user_id"))
-        with self._config.provide_session() as driver:
-            driver.execute(sql, app_name, user_id, to_json(state), datetime.now(UTC).isoformat())
-            driver.commit()
-
     def get_metadata(self, key: str) -> str | None:
         """Fetch an internal ADK metadata string synchronously."""
         try:
@@ -1094,14 +997,8 @@ class DuckDBSyncADKStore(_DuckDBADKSessionSQLMixin, BaseSyncADKStore["DuckDBSync
                 return None
             raise
 
-    def set_metadata(self, key: str, value: str) -> None:
-        """Store or overwrite an internal ADK metadata entry synchronously."""
-        with self._config.provide_session() as driver:
-            driver.execute(self._set_metadata_sql(), key, value)
-            driver.commit()
 
-
-class DuckDBAsyncADKStore(_DuckDBADKSessionSQLMixin, BaseAsyncADKStore["DuckDBAsyncConfig"]):
+class DuckDBAsyncADKStore(_DuckDBADKSessionSQLMixin, AdapterAsyncADKStore):
     """Asynchronous DuckDB ADK session and event store over Vertebra `DuckDBAsyncDriver`."""
 
     __slots__ = ()
@@ -1113,21 +1010,6 @@ class DuckDBAsyncADKStore(_DuckDBADKSessionSQLMixin, BaseAsyncADKStore["DuckDBAs
     def __init__(self, config: DuckDBAsyncConfig, *, read_config: DuckDBAsyncConfig | None = None) -> None:
         """Initialize the asynchronous DuckDB ADK session store."""
         super().__init__(config, read_config=read_config)
-
-    async def _sessions_table_ddl(self) -> str:
-        return self._build_sessions_ddl()
-
-    async def _events_table_ddl(self) -> str:
-        return self._build_events_ddl()
-
-    async def _app_states_table_ddl(self) -> str:
-        return self._build_app_states_ddl()
-
-    async def _user_states_table_ddl(self) -> str:
-        return self._build_user_states_ddl()
-
-    async def _metadata_table_ddl(self) -> str:
-        return self._build_metadata_ddl()
 
     async def reconcile_companion_objects_async(self, driver: Any) -> None:
         """Create missing session and event companion indexes without committing."""
@@ -1264,64 +1146,6 @@ class DuckDBAsyncADKStore(_DuckDBADKSessionSQLMixin, BaseAsyncADKStore["DuckDBAs
                 return None
             raise
 
-    async def update_session_state(self, app_name: str, user_id: str, session_id: str, state: dict[str, Any]) -> None:
-        """Update stored session JSON state asynchronously."""
-        sql, params = self._update_session_state_sql_and_params(app_name, user_id, session_id, state)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def list_sessions(
-        self,
-        app_name: str,
-        user_id: str | None = None,
-        *,
-        order_by: SessionOrderBy = "update_time",
-        descending: bool = True,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> list[StoredSession]:
-        """List stored ADK sessions asynchronously."""
-        built = self._list_sessions_sql_and_params(app_name, user_id, order_by, descending, limit, offset)
-        if built is None:
-            return []
-        sql, params = built
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-            return [_row_to_session(row, deserializer=from_json) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-    async def delete_session(self, app_name: str, user_id: str, session_id: str) -> None:
-        """Delete a session and its associated events asynchronously."""
-        delete_events_sql, delete_session_sql = self._delete_session_sqls()
-        async with self._config.provide_session() as driver:
-            await driver.begin()
-            try:
-                await driver.execute(delete_events_sql, app_name, user_id, session_id)
-                await driver.execute(delete_session_sql, app_name, user_id, session_id)
-                await driver.commit()
-            except BaseException:
-                with contextlib.suppress(Exception):
-                    await driver.rollback()
-                raise
-
-    async def append_event(self, event_record: StoredEvent) -> None:
-        """Append a single ADK event asynchronously after verifying owning session existence."""
-        sql, params = self._append_event_sql_and_params(event_record)
-        async with self._config.provide_session() as driver:
-            inserted = await driver.select_one_or_none(sql, *params)
-            await driver.commit()
-        if inserted is None:
-            msg = (
-                f"Session {event_record['session_id']} not found "
-                f"for app={event_record['app_name']!r}, user={event_record['user_id']!r}"
-            )
-            raise ValueError(msg)
-
     async def append_event_and_update_state(
         self,
         event_record: StoredEvent,
@@ -1375,51 +1199,6 @@ class DuckDBAsyncADKStore(_DuckDBADKSessionSQLMixin, BaseAsyncADKStore["DuckDBAs
         session_record["state"] = merge_scoped_state(session_record["state"], merged_app, merged_user)
         return session_record
 
-    async def get_events(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        after_timestamp: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[StoredEvent]:
-        """Fetch ADK events asynchronously ordered ascending by timestamp."""
-        if limit == 0:
-            return []
-        sql, params = self._get_events_sql_and_params(app_name, user_id, session_id, after_timestamp, limit)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-            if limit is not None:
-                rows = list(reversed(rows))
-            return [_row_to_event(row, deserializer=from_json) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-    async def _delete_by_cutoff(
-        self,
-        table_name: str,
-        column: str,
-        cutoff: datetime,
-        app_name: str | None,
-    ) -> int:
-        sql, params = self._delete_before_sql_and_params(table_name, column, cutoff, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                rows = await driver.select(sql, *params)
-                await driver.commit()
-            return len(rows)
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_expired_events(self, before: datetime, app_name: str | None = None) -> int:
-        """Delete events older than `before` asynchronously."""
-        return await self._delete_by_cutoff(self._events_table, "timestamp", before, app_name)
-
     async def delete_idle_sessions(self, updated_before: datetime, app_name: str | None = None) -> int:
         """Delete sessions (and child events) whose `update_time` predates `updated_before`."""
         delete_events_sql, delete_sessions_sql, params = self._delete_idle_sessions_sqls_and_params(
@@ -1441,10 +1220,6 @@ class DuckDBAsyncADKStore(_DuckDBADKSessionSQLMixin, BaseAsyncADKStore["DuckDBAs
             if is_duckdb_table_missing(exc):
                 return 0
             raise
-
-    async def delete_idle_user_states(self, updated_before: datetime, app_name: str | None = None) -> int:
-        """Delete user state rows whose `update_time` predates `updated_before`."""
-        return await self._delete_by_cutoff(self._user_state_table, "update_time", updated_before, app_name)
 
     async def get_app_state(self, app_name: str) -> dict[str, Any] | None:
         """Return app-scoped ADK state dictionary asynchronously."""
@@ -1470,20 +1245,6 @@ class DuckDBAsyncADKStore(_DuckDBADKSessionSQLMixin, BaseAsyncADKStore["DuckDBAs
                 return None
             raise
 
-    async def upsert_app_state(self, app_name: str, state: dict[str, Any]) -> None:
-        """Insert or update app-scoped ADK state asynchronously."""
-        sql = self._upsert_state_sql(self._app_state_table, ("app_name",))
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, app_name, to_json(state), datetime.now(UTC).isoformat())
-            await driver.commit()
-
-    async def upsert_user_state(self, app_name: str, user_id: str, state: dict[str, Any]) -> None:
-        """Insert or update user-scoped ADK state asynchronously."""
-        sql = self._upsert_state_sql(self._user_state_table, ("app_name", "user_id"))
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, app_name, user_id, to_json(state), datetime.now(UTC).isoformat())
-            await driver.commit()
-
     async def get_metadata(self, key: str) -> str | None:
         """Fetch an internal ADK metadata string asynchronously."""
         try:
@@ -1494,12 +1255,6 @@ class DuckDBAsyncADKStore(_DuckDBADKSessionSQLMixin, BaseAsyncADKStore["DuckDBAs
             if is_duckdb_table_missing(exc):
                 return None
             raise
-
-    async def set_metadata(self, key: str, value: str) -> None:
-        """Store or overwrite an internal ADK metadata entry asynchronously."""
-        async with self._config.provide_session() as driver:
-            await driver.execute(self._set_metadata_sql(), key, value)
-            await driver.commit()
 
 
 class _DuckDBADKMemorySQLMixin:
@@ -1735,8 +1490,11 @@ class _DuckDBADKMemorySQLMixin:
         sql = f"DELETE FROM {table_ref} WHERE {' AND '.join(clauses)} RETURNING 1 AS deleted"
         return sql, tuple(params)
 
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_duckdb_table_missing(exc)
 
-class DuckDBSyncADKMemoryStore(_DuckDBADKMemorySQLMixin, _BaseSyncADKMemoryStore["DuckDBSyncConfig"]):
+
+class DuckDBSyncADKMemoryStore(_DuckDBADKMemorySQLMixin, AdapterSyncADKMemoryStore):
     """Synchronous DuckDB ADK memory store with `list_cosine_similarity` vector ranking and BM25 `fts`."""
 
     __slots__ = ("_enable_vector",)
@@ -1895,46 +1653,8 @@ class DuckDBSyncADKMemoryStore(_DuckDBADKMemorySQLMixin, _BaseSyncADKMemoryStore
 
         return [_row_to_memory(row, deserializer=from_json) for row in (rows or ())]
 
-    def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete memory entries for `session_id` owned by `app_name` and `user_id` synchronously."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            with self._config.provide_session() as driver:
-                rows = driver.select(sql, *params)
-                driver.commit()
-                count = len(rows)
-                if self._use_fts and count > 0:
-                    self._refresh_fts_index(driver, overwrite=True)
-                return count
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return 0
-            raise
 
-    def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete memory entries older than `days` days synchronously."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            with self._config.provide_session() as driver:
-                rows = driver.select(sql, *params)
-                driver.commit()
-                count = len(rows)
-                if self._use_fts and count > 0:
-                    self._refresh_fts_index(driver, overwrite=True)
-                return count
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return 0
-            raise
-
-
-class DuckDBAsyncADKMemoryStore(_DuckDBADKMemorySQLMixin, _BaseAsyncADKMemoryStore["DuckDBAsyncConfig"]):
+class DuckDBAsyncADKMemoryStore(_DuckDBADKMemorySQLMixin, AdapterAsyncADKMemoryStore):
     """Asynchronous DuckDB ADK memory store with `list_cosine_similarity` vector ranking and BM25 `fts`."""
 
     __slots__ = ("_enable_vector",)
@@ -2093,44 +1813,6 @@ class DuckDBAsyncADKMemoryStore(_DuckDBADKMemorySQLMixin, _BaseAsyncADKMemorySto
                 raise
 
         return [_row_to_memory(row, deserializer=from_json) for row in (rows or ())]
-
-    async def delete_entries_by_session(self, session_id: str, app_name: str, user_id: str) -> int:
-        """Delete memory entries for `session_id` owned by `app_name` and `user_id` asynchronously."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_by_session_sql_and_params(session_id, app_name, user_id)
-        try:
-            async with self._config.provide_session() as driver:
-                rows = await driver.select(sql, *params)
-                await driver.commit()
-                count = len(rows)
-                if self._use_fts and count > 0:
-                    await self._refresh_fts_index(driver, overwrite=True)
-                return count
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_entries_older_than(self, days: int, app_name: str | None = None, scope: str | None = None) -> int:
-        """Delete memory entries older than `days` days asynchronously."""
-        if not self._enabled:
-            msg = "Memory store is disabled"
-            raise RuntimeError(msg)
-        sql, params = self._delete_older_than_sql_and_params(days, app_name, scope)
-        try:
-            async with self._config.provide_session() as driver:
-                rows = await driver.select(sql, *params)
-                await driver.commit()
-                count = len(rows)
-                if self._use_fts and count > 0:
-                    await self._refresh_fts_index(driver, overwrite=True)
-                return count
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return 0
-            raise
 
 
 class _DuckDBADKArtifactSQLMixin:
@@ -2313,9 +1995,25 @@ class _DuckDBADKArtifactSQLMixin:
         delete_sql = f"DELETE FROM {table_ref} WHERE created_at < ?"
         return select_sql, delete_sql, (cutoff,)
 
+    _include_ref_cols_kwarg = False
 
-class DuckDBSyncADKArtifactStore(_DuckDBADKArtifactSQLMixin, _BaseSyncADKArtifactStore["DuckDBSyncConfig"]):
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_duckdb_table_missing(exc)
+
+    def _build_artifact_table_ddl(self) -> str:
+        return self._artifact_table_ddl()
+
+    def _decode_artifact_row(self, row: Any) -> StoredArtifact:
+        return _row_to_artifact_record(row)
+
+    def _decode_artifact_ref_row(self, row: Any) -> ArtifactReference:
+        return _row_to_artifact_reference(row)
+
+
+class DuckDBSyncADKArtifactStore(_DuckDBADKArtifactSQLMixin, AdapterSyncADKArtifactStore):
     """Synchronous DuckDB ADK artifact metadata store backed by `ArtifactReference`."""
+
+    _transactional_artifact_delete: ClassVar[bool] = True
 
     __slots__ = ()
 
@@ -2326,173 +2024,11 @@ class DuckDBSyncADKArtifactStore(_DuckDBADKArtifactSQLMixin, _BaseSyncADKArtifac
         """Initialize the synchronous DuckDB ADK artifact store."""
         super().__init__(config, read_config=read_config)
 
-    def create_table(self) -> None:
-        """Create the DuckDB artifact metadata table if absent."""
-        with self._config.provide_session() as driver:
-            driver.execute_script(self._artifact_table_ddl())
-            driver.commit()
 
-    def insert_artifact(self, record: StoredArtifact) -> None:
-        """Insert a `StoredArtifact` metadata record synchronously."""
-        sql, params = self._insert_artifact_sql_and_params(record)
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def insert_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        reference: ArtifactReference,
-        *,
-        session_id: str | None = None,
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Persist an artifact version backed by `ArtifactReference` synchronously."""
-        sql, params = self._insert_artifact_ref_sql_and_params(
-            app_name, user_id, filename, reference, session_id, custom_metadata
-        )
-        with self._config.provide_session() as driver:
-            driver.execute(sql, *params)
-            driver.commit()
-
-    def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Fetch an artifact revision as an `ArtifactReference` struct synchronously."""
-        sql, params = self._get_artifact_sql_and_params(app_name, user_id, filename, session_id, version)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, *params)
-            return _row_to_artifact_reference(row) if row is not None else None
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return None
-            raise
-
-    def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch a `StoredArtifact` metadata record synchronously."""
-        sql, params = self._get_artifact_sql_and_params(app_name, user_id, filename, session_id, version)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                row = driver.select_one_or_none(sql, *params)
-            return _row_to_artifact_record(row) if row is not None else None
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return None
-            raise
-
-    def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames within user or session scope synchronously."""
-        sql, params = self._list_artifact_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-            return [str(row["filename"]) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-    def list_artifact_versions(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """List ascending `StoredArtifact` records for a stored artifact synchronously."""
-        sql, params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._provide_replica_session(primary=False) as driver:
-                rows = driver.select(sql, *params)
-            return [_row_to_artifact_record(row) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-    def delete_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete all stored versions of an artifact and return removed records synchronously."""
-        select_sql, select_params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        delete_sql, delete_params = self._delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._config.provide_session() as driver:
-                driver.begin()
-                try:
-                    rows = driver.select(select_sql, *select_params)
-                    driver.execute(delete_sql, *delete_params)
-                    driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        driver.rollback()
-                    raise
-            return [_row_to_artifact_record(row) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-    def get_next_version(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> int:
-        """Compute the next monotonically increasing revision integer synchronously."""
-        sql, params = self._get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            with self._config.provide_session() as driver:
-                max_ver = driver.select_value_or_none(sql, *params)
-            return (int(max_ver) + 1) if max_ver is not None else 0
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return 0
-            raise
-
-    def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Delete artifact rows recorded strictly before ``before`` and return them."""
-        select_sql, delete_sql, params = self._delete_older_than_sqls_and_params(before, app_name)
-        try:
-            with self._config.provide_session() as driver:
-                driver.begin()
-                try:
-                    rows = driver.select(select_sql, *params)
-                    driver.execute(delete_sql, *params)
-                    driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        driver.rollback()
-                    raise
-            return [_row_to_artifact_record(row) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-
-class DuckDBAsyncADKArtifactStore(_DuckDBADKArtifactSQLMixin, _BaseAsyncADKArtifactStore["DuckDBAsyncConfig"]):
+class DuckDBAsyncADKArtifactStore(_DuckDBADKArtifactSQLMixin, AdapterAsyncADKArtifactStore):
     """Asynchronous DuckDB ADK artifact metadata store backed by `ArtifactReference`."""
+
+    _transactional_artifact_delete: ClassVar[bool] = True
 
     __slots__ = ()
 
@@ -2502,167 +2038,3 @@ class DuckDBAsyncADKArtifactStore(_DuckDBADKArtifactSQLMixin, _BaseAsyncADKArtif
     def __init__(self, config: DuckDBAsyncConfig, *, read_config: DuckDBAsyncConfig | None = None) -> None:
         """Initialize the asynchronous DuckDB ADK artifact store."""
         super().__init__(config, read_config=read_config)
-
-    async def create_table(self) -> None:
-        """Create the DuckDB artifact metadata table asynchronously."""
-        async with self._config.provide_session() as driver:
-            await driver.execute_script(self._artifact_table_ddl())
-            await driver.commit()
-
-    async def insert_artifact(self, record: StoredArtifact) -> None:
-        """Insert a `StoredArtifact` metadata record asynchronously."""
-        sql, params = self._insert_artifact_sql_and_params(record)
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def insert_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        reference: ArtifactReference,
-        *,
-        session_id: str | None = None,
-        custom_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Persist an artifact version backed by `ArtifactReference` asynchronously."""
-        sql, params = self._insert_artifact_ref_sql_and_params(
-            app_name, user_id, filename, reference, session_id, custom_metadata
-        )
-        async with self._config.provide_session() as driver:
-            await driver.execute(sql, *params)
-            await driver.commit()
-
-    async def get_artifact_reference(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> ArtifactReference | None:
-        """Fetch an artifact revision as an `ArtifactReference` struct asynchronously."""
-        sql, params = self._get_artifact_sql_and_params(app_name, user_id, filename, session_id, version)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, *params)
-            return _row_to_artifact_reference(row) if row is not None else None
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return None
-            raise
-
-    async def get_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-        version: int | None = None,
-    ) -> StoredArtifact | None:
-        """Fetch a `StoredArtifact` metadata record asynchronously."""
-        sql, params = self._get_artifact_sql_and_params(app_name, user_id, filename, session_id, version)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                row = await driver.select_one_or_none(sql, *params)
-            return _row_to_artifact_record(row) if row is not None else None
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return None
-            raise
-
-    async def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames within user or session scope asynchronously."""
-        sql, params = self._list_artifact_keys_sql_and_params(app_name, user_id, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-            return [str(row["filename"]) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-    async def list_artifact_versions(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """List ascending `StoredArtifact` records for a stored artifact asynchronously."""
-        sql, params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._provide_replica_session(primary=False) as driver:
-                rows = await driver.select(sql, *params)
-            return [_row_to_artifact_record(row) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-    async def delete_artifact(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> list[StoredArtifact]:
-        """Delete all stored versions of an artifact and return removed records asynchronously."""
-        select_sql, select_params = self._list_artifact_versions_sql_and_params(app_name, user_id, filename, session_id)
-        delete_sql, delete_params = self._delete_artifact_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._config.provide_session() as driver:
-                await driver.begin()
-                try:
-                    rows = await driver.select(select_sql, *select_params)
-                    await driver.execute(delete_sql, *delete_params)
-                    await driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        await driver.rollback()
-                    raise
-            return [_row_to_artifact_record(row) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise
-
-    async def get_next_version(
-        self,
-        app_name: str,
-        user_id: str,
-        filename: str,
-        session_id: str | None = None,
-    ) -> int:
-        """Compute the next monotonically increasing revision integer asynchronously."""
-        sql, params = self._get_next_version_sql_and_params(app_name, user_id, filename, session_id)
-        try:
-            async with self._config.provide_session() as driver:
-                max_ver = await driver.select_value_or_none(sql, *params)
-            return (int(max_ver) + 1) if max_ver is not None else 0
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return 0
-            raise
-
-    async def delete_artifacts_older_than(self, before: datetime, app_name: str | None = None) -> list[StoredArtifact]:
-        """Delete artifact rows recorded strictly before ``before`` and return them asynchronously."""
-        select_sql, delete_sql, params = self._delete_older_than_sqls_and_params(before, app_name)
-        try:
-            async with self._config.provide_session() as driver:
-                await driver.begin()
-                try:
-                    rows = await driver.select(select_sql, *params)
-                    await driver.execute(delete_sql, *params)
-                    await driver.commit()
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        await driver.rollback()
-                    raise
-            return [_row_to_artifact_record(row) for row in rows]
-        except Exception as exc:
-            if is_duckdb_table_missing(exc):
-                return []
-            raise

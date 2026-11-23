@@ -1,17 +1,19 @@
-//! Valkey Sentinel primary discovery (`SENTINEL get-master-addr-by-name`, `ROLE`, `+switch-master`).
+//! RESP Sentinel primary discovery (`SENTINEL get-master-addr-by-name`, `ROLE`, `+switch-master`).
 
 use crate::codec::RespValue;
-use crate::error::ValkeyError;
+use crate::error::RespError;
 
-/// Parse a `host[:port]` or `valkey://host:port` Sentinel address specification.
-pub fn parse_sentinel_addr(spec: &str, default_port: u16) -> Result<(String, u16), ValkeyError> {
+/// Parse a `host[:port]`, `valkey://host:port`, or `redis://host:port` Sentinel address specification.
+pub fn parse_sentinel_addr(spec: &str, default_port: u16) -> Result<(String, u16), RespError> {
     let trimmed = spec.trim();
     if trimmed.is_empty() {
-        return Err(ValkeyError::config("Sentinel node address cannot be empty"));
+        return Err(RespError::config("Sentinel node address cannot be empty"));
     }
     let clean = trimmed
         .strip_prefix("valkeys://")
         .or_else(|| trimmed.strip_prefix("valkey://"))
+        .or_else(|| trimmed.strip_prefix("rediss://"))
+        .or_else(|| trimmed.strip_prefix("redis://"))
         .unwrap_or(trimmed);
     let authority = clean.split('/').next().unwrap_or(clean);
     let host_port = authority
@@ -26,12 +28,12 @@ pub fn parse_sentinel_addr(spec: &str, default_port: u16) -> Result<(String, u16
         let port = if let Some(port_part) = rest.strip_prefix(':') {
             port_part
                 .parse::<u16>()
-                .map_err(|_| ValkeyError::config(format!("Invalid Sentinel port in '{spec}'")))?
+                .map_err(|_| RespError::config(format!("Invalid Sentinel port in '{spec}'")))?
         } else {
             default_port
         };
         if host.is_empty() || port == 0 {
-            return Err(ValkeyError::config(format!(
+            return Err(RespError::config(format!(
                 "Invalid Sentinel address '{spec}'"
             )));
         }
@@ -42,15 +44,15 @@ pub fn parse_sentinel_addr(spec: &str, default_port: u16) -> Result<(String, u16
         && !h.contains(':')
     {
         if h.trim().is_empty() {
-            return Err(ValkeyError::config(format!(
+            return Err(RespError::config(format!(
                 "Hostless Sentinel address '{spec}'"
             )));
         }
         let port = p
             .parse::<u16>()
-            .map_err(|_| ValkeyError::config(format!("Invalid Sentinel port in '{spec}'")))?;
+            .map_err(|_| RespError::config(format!("Invalid Sentinel port in '{spec}'")))?;
         if port == 0 {
-            return Err(ValkeyError::config(format!(
+            return Err(RespError::config(format!(
                 "Invalid port 0 in Sentinel address '{spec}'"
             )));
         }
@@ -71,24 +73,24 @@ pub fn build_get_master_addr_cmd(service_name: &str) -> Vec<Vec<u8>> {
 }
 
 /// Parse the 2-element reply from `SENTINEL get-master-addr-by-name`.
-pub fn parse_get_master_addr_reply(resp: &RespValue) -> Result<(String, u16), ValkeyError> {
+pub fn parse_get_master_addr_reply(resp: &RespValue) -> Result<(String, u16), RespError> {
     let val = resp.unattributed();
     if let RespValue::SimpleError(msg) | RespValue::BulkError(msg) = val {
-        return Err(ValkeyError::from_server_error(msg));
+        return Err(RespError::from_server_error(msg));
     }
     if matches!(val, RespValue::Null) {
-        return Err(ValkeyError::operational(
+        return Err(RespError::operational(
             "Sentinel returned null for unknown master service name",
             true,
         ));
     }
     let Some(items) = val.as_slice() else {
-        return Err(ValkeyError::data(
+        return Err(RespError::data(
             "Unexpected non-array response from SENTINEL get-master-addr-by-name",
         ));
     };
     if items.len() < 2 {
-        return Err(ValkeyError::data(
+        return Err(RespError::data(
             "SENTINEL get-master-addr-by-name returned fewer than 2 elements",
         ));
     }
@@ -96,34 +98,34 @@ pub fn parse_get_master_addr_reply(resp: &RespValue) -> Result<(String, u16), Va
         .as_str()
         .map(std::borrow::Cow::into_owned)
         .filter(|h| !h.trim().is_empty())
-        .ok_or_else(|| ValkeyError::data("Invalid master host in Sentinel reply"))?;
+        .ok_or_else(|| RespError::data("Invalid master host in Sentinel reply"))?;
     let port_i64 = items[1]
         .as_i64()
-        .ok_or_else(|| ValkeyError::data("Invalid master port in Sentinel reply"))?;
+        .ok_or_else(|| RespError::data("Invalid master port in Sentinel reply"))?;
     let port = u16::try_from(port_i64)
         .ok()
         .filter(|&p| p > 0)
-        .ok_or_else(|| ValkeyError::data("Out-of-range master port in Sentinel reply"))?;
+        .ok_or_else(|| RespError::data("Out-of-range master port in Sentinel reply"))?;
     Ok((host, port))
 }
 
 /// Verify that a candidate primary responds to `ROLE` with `"master"` or `"primary"`.
-pub fn verify_role_is_primary(resp: &RespValue) -> Result<(), ValkeyError> {
+pub fn verify_role_is_primary(resp: &RespValue) -> Result<(), RespError> {
     let val = resp.unattributed();
     if let RespValue::SimpleError(msg) | RespValue::BulkError(msg) = val {
-        return Err(ValkeyError::from_server_error(msg));
+        return Err(RespError::from_server_error(msg));
     }
     let Some(items) = val.as_slice() else {
-        return Err(ValkeyError::data("Unexpected non-array ROLE reply"));
+        return Err(RespError::data("Unexpected non-array ROLE reply"));
     };
     let role = items
         .first()
         .and_then(RespValue::as_str)
-        .ok_or_else(|| ValkeyError::data("Missing role element in ROLE reply"))?;
+        .ok_or_else(|| RespError::data("Missing role element in ROLE reply"))?;
     if role.eq_ignore_ascii_case("master") || role.eq_ignore_ascii_case("primary") {
         Ok(())
     } else {
-        Err(ValkeyError::operational(
+        Err(RespError::operational(
             format!("Sentinel candidate endpoint has non-primary ROLE '{role}'"),
             true,
         ))

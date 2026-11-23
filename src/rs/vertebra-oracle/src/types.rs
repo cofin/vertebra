@@ -543,13 +543,7 @@ impl OracleCellValue {
                 }
                 let json_slice =
                     decode_oson_payload(&oson_bytes).map_err(OracleError::data_error)?;
-                let ser_mod = py
-                    .import("vertebra.utils.serializers")
-                    .map_err(|e| OracleError::data_error(e.to_string()))?;
-                ser_mod
-                    .getattr("decode_json")
-                    .and_then(|fn_dec| fn_dec.call1((PyBytes::new(py, json_slice),)))
-                    .map_err(|e| OracleError::data_error(e.to_string()))
+                decode_json_bytes_py(py, json_slice)
             }
             Self::Vector(vec_data) => vec_data.into_py_vector_view(py),
         }
@@ -752,15 +746,7 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
     }
 
     if obj.is_instance_of::<PyDict>() {
-        let py = obj.py();
-        let ser_mod = py
-            .import("vertebra.utils.serializers")
-            .map_err(|e| OracleError::data_error(e.to_string()))?;
-        let json_bytes: Vec<u8> = ser_mod
-            .getattr("encode_json_bytes")
-            .and_then(|f| f.call1((obj,)))
-            .and_then(|b| b.extract())
-            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        let json_bytes = encode_json_bytes_py(obj)?;
         return Ok(OracleCellValue::Oson(
             encode_oson_payload(&json_bytes).to_vec(),
         ));
@@ -778,15 +764,7 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
         if is_numeric_vector && let Ok(vals) = obj.extract::<Vec<f32>>() {
             return Ok(OracleCellValue::Vector(OracleVectorData::Float32(vals)));
         }
-        let py = obj.py();
-        let ser_mod = py
-            .import("vertebra.utils.serializers")
-            .map_err(|e| OracleError::data_error(e.to_string()))?;
-        let json_bytes: Vec<u8> = ser_mod
-            .getattr("encode_json_bytes")
-            .and_then(|f| f.call1((obj,)))
-            .and_then(|b| b.extract())
-            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        let json_bytes = encode_json_bytes_py(obj)?;
         return Ok(OracleCellValue::Oson(
             encode_oson_payload(&json_bytes).to_vec(),
         ));
@@ -795,6 +773,38 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
     Err(OracleError::data_error(format!(
         "Unsupported Python bind parameter type: {type_name}"
     )))
+}
+
+fn encode_json_bytes_py(obj: &Bound<'_, PyAny>) -> Result<Vec<u8>, OracleError> {
+    let py = obj.py();
+    let encoded = py
+        .import("vertebra.utils.serializers")
+        .and_then(|m| m.getattr("encode_json_bytes"))
+        .and_then(|f| f.call1((obj,)))
+        .and_then(|b| b.extract())
+        .or_else(|_| {
+            py.import("msgspec.json")
+                .and_then(|m| m.getattr("encode"))
+                .and_then(|f| f.call1((obj,)))
+                .and_then(|b| b.extract())
+        });
+    encoded.map_err(|e| OracleError::data_error(e.to_string()))
+}
+
+fn decode_json_bytes_py<'py>(
+    py: Python<'py>,
+    json_slice: &[u8],
+) -> Result<Bound<'py, PyAny>, OracleError> {
+    let payload = PyBytes::new(py, json_slice);
+    py.import("vertebra.utils.serializers")
+        .and_then(|m| m.getattr("decode_json"))
+        .and_then(|f| f.call1((&payload,)))
+        .or_else(|_| {
+            py.import("msgspec.json")
+                .and_then(|m| m.getattr("decode"))
+                .and_then(|f| f.call1((&payload,)))
+        })
+        .map_err(|e| OracleError::data_error(e.to_string()))
 }
 
 /// Convert an `oracledb::JsonValue` tree into a `serde_json::Value` and wrap in an `OSON` frame.
@@ -1192,7 +1202,6 @@ pub fn normalize_named_bind_map(
 }
 
 /// Return format for decoded Oracle 26ai `VECTOR` cells.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum VectorReturnFormat {
     #[default]
@@ -1203,7 +1212,6 @@ pub enum VectorReturnFormat {
 
 impl VectorReturnFormat {
     /// Parse a string option (`"list"`, `"vector_view"`, or `"bytes"`).
-    #[allow(dead_code)]
     pub fn parse(raw: &str) -> Result<Self, OracleError> {
         match raw {
             "list" => Ok(Self::List),
@@ -1216,7 +1224,6 @@ impl VectorReturnFormat {
     }
 
     /// Return the canonical string name for Python codec interop.
-    #[allow(dead_code)]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::List => "list",
@@ -1227,7 +1234,6 @@ impl VectorReturnFormat {
 }
 
 /// Per-cursor/driver options governing Oracle value coercion on the worker boundary.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OracleValueOptions {
     pub enable_uuid_binary: bool,
@@ -1245,24 +1251,15 @@ impl Default for OracleValueOptions {
     }
 }
 
-#[allow(dead_code)]
 static DECODE_OSON_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static ENCODE_OSON_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static DECODE_VECTOR_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static ENCODE_VECTOR_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static UUID_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static DECIMAL_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static VECTOR_VIEW_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-#[allow(dead_code)]
 static MSGSPEC_STRUCT_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
-#[allow(dead_code)]
 fn cached_oracle_core_callable<'py>(
     py: Python<'py>,
     slot: &'static PyOnceLock<Py<PyAny>>,
@@ -1276,27 +1273,22 @@ fn cached_oracle_core_callable<'py>(
     Ok(obj.bind(py).clone())
 }
 
-#[allow(dead_code)]
 fn cached_decode_oson_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     cached_oracle_core_callable(py, &DECODE_OSON_FN, "decode_oson")
 }
 
-#[allow(dead_code)]
 fn cached_encode_oson_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     cached_oracle_core_callable(py, &ENCODE_OSON_FN, "encode_oson")
 }
 
-#[allow(dead_code)]
 fn cached_decode_vector_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     cached_oracle_core_callable(py, &DECODE_VECTOR_FN, "decode_vector")
 }
 
-#[allow(dead_code)]
 fn cached_encode_vector_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     cached_oracle_core_callable(py, &ENCODE_VECTOR_FN, "encode_vector")
 }
 
-#[allow(dead_code)]
 fn cached_uuid_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     let obj = UUID_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         Ok(py.import("uuid")?.getattr("UUID")?.unbind())
@@ -1304,7 +1296,6 @@ fn cached_uuid_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     Ok(obj.bind(py).clone())
 }
 
-#[allow(dead_code)]
 fn cached_decimal_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     let obj = DECIMAL_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         Ok(py.import("decimal")?.getattr("Decimal")?.unbind())
@@ -1312,7 +1303,6 @@ fn cached_decimal_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     Ok(obj.bind(py).clone())
 }
 
-#[allow(dead_code)]
 fn cached_vector_view_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     let obj = VECTOR_VIEW_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         Ok(py
@@ -1323,7 +1313,6 @@ fn cached_vector_view_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     Ok(obj.bind(py).clone())
 }
 
-#[allow(dead_code)]
 fn cached_msgspec_struct_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     let obj = MSGSPEC_STRUCT_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         Ok(py.import("msgspec")?.getattr("Struct")?.unbind())
@@ -1331,7 +1320,6 @@ fn cached_msgspec_struct_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>
     Ok(obj.bind(py).clone())
 }
 
-#[allow(dead_code)]
 fn column_is_raw_or_unknown(column_type: Option<&str>) -> bool {
     match column_type {
         None => true,
@@ -1340,7 +1328,6 @@ fn column_is_raw_or_unknown(column_type: Option<&str>) -> bool {
 }
 
 /// Coerce an [`OracleCellValue`] into a Python object matching `OracleCore.coerce_row_cell`.
-#[allow(dead_code)]
 pub fn coerce_cell_to_py(
     py: Python<'_>,
     cell: OracleCellValue,
@@ -1389,7 +1376,13 @@ pub fn coerce_cell_to_py(
         OracleCellValue::Str(s) => Ok(PyString::new(py, &s).into_any().unbind()),
         OracleCellValue::Bytes(raw) => {
             if raw.len() >= 8 && &raw[..3] == OSON_MAGIC && raw[3] == 0x01 {
-                let decode_oson = cached_decode_oson_fn(py)?;
+                let Ok(decode_oson) = cached_decode_oson_fn(py) else {
+                    let json = decode_oson_payload(&raw)
+                        .map_err(|e| OracleError::data_error(e).to_py_err(py))?;
+                    return decode_json_bytes_py(py, json)
+                        .map(Bound::unbind)
+                        .map_err(|e| e.to_py_err(py));
+                };
                 return Ok(decode_oson.call1((PyBytes::new(py, &raw),))?.unbind());
             }
             if raw.len() >= 8 && raw[0] == ORACLE_VECTOR_MAGIC && raw[1] == ORACLE_VECTOR_VERSION {
@@ -1433,7 +1426,6 @@ pub fn coerce_cell_to_py(
 }
 
 /// Coerce and extract a Python bind parameter matching `OracleCore.coerce_bind_parameter` followed by [`extract_bind_value`].
-#[allow(dead_code)]
 pub fn coerce_bind_from_py(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -1510,8 +1502,10 @@ pub fn coerce_bind_from_py(
         || cached_msgspec_struct_cls(py)
             .is_ok_and(|struct_cls| value.is_instance(&struct_cls).unwrap_or(false));
     if is_dict_or_struct {
-        let encode_oson =
-            cached_encode_oson_fn(py).map_err(|e| OracleError::data_error(e.to_string()))?;
+        let Ok(encode_oson) = cached_encode_oson_fn(py) else {
+            let json = encode_json_bytes_py(value)?;
+            return Ok(OracleCellValue::Oson(encode_oson_payload(&json).to_vec()));
+        };
         let encoded = encode_oson
             .call1((value,))
             .map_err(|e| OracleError::data_error(e.to_string()))?;
@@ -1801,18 +1795,22 @@ mod tests {
                 other => panic!("expected Oson bind value, got {other:?}"),
             }
 
-            let vec_bytes = OracleVectorData::Float32(vec![1.5, -2.25]).encode_wire_bytes();
-            let decoded_vec = coerce_cell_to_py(
-                py,
-                OracleCellValue::Bytes(vec_bytes),
-                Some("VECTOR"),
-                OracleValueOptions::default(),
-            )
-            .unwrap();
-            assert_eq!(
-                decoded_vec.extract::<Vec<f32>>(py).unwrap(),
-                vec![1.5f32, -2.25f32]
-            );
+            // Vector decoding returns `vertebra._vertebra.VectorView`, which only exists once the
+            // core extension is built; plain `cargo test` runs without it.
+            if py.import("vertebra._vertebra").is_ok() {
+                let vec_bytes = OracleVectorData::Float32(vec![1.5, -2.25]).encode_wire_bytes();
+                let decoded_vec = coerce_cell_to_py(
+                    py,
+                    OracleCellValue::Bytes(vec_bytes),
+                    Some("VECTOR"),
+                    OracleValueOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    decoded_vec.extract::<Vec<f32>>(py).unwrap(),
+                    vec![1.5f32, -2.25f32]
+                );
+            }
         });
     }
 }

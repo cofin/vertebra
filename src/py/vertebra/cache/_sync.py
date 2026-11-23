@@ -7,7 +7,7 @@ import hashlib
 import math
 import threading
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.cache._types import CacheStats
 from vertebra.utils.module_loader import ensure_module
@@ -377,8 +377,8 @@ class _MemoryState:
             self.evictions += 1
 
 
-class SyncCacheStore:
-    """Framework-neutral synchronous cache store supporting memory, SHM, Valkey, Redis, and object storage."""
+class _BaseCacheStore:
+    """Shared cache metadata, stats snapshot, SHM counter, and initialization logic."""
 
     __slots__ = (
         "_capacity",
@@ -402,6 +402,120 @@ class SyncCacheStore:
         "_url",
     )
 
+    _driver: Any
+    _store: Any
+    _l1: Any
+
+    def _init_common(
+        self,
+        *,
+        url: str,
+        l1_url: str | None,
+        capacity: int,
+        default_ttl: float | None,
+        key_prefix: str,
+        clock: Callable[[], float] | None,
+        shared_state: _MemoryState | None = None,
+        l1_store: Any = None,
+    ) -> tuple[str, str]:
+        if capacity < 1:
+            raise ValueError("capacity must be >= 1")
+        scheme = _parse_url_scheme(url)
+        if l1_url is not None:
+            _parse_url_scheme(l1_url)
+        validated_prefix = _validate_key_prefix(key_prefix)
+        self._url = url
+        self._l1_url = l1_url
+        self._scheme = scheme
+        self._capacity = capacity
+        self._default_ttl = default_ttl
+        self._key_prefix = validated_prefix
+        self._raw_clock = clock
+        default_clock = time.time if scheme in _OBJECT_SCHEMES else time.monotonic
+        self._clock: Callable[[], float] = clock if clock is not None else default_clock
+        self._hits = 0
+        self._misses = 0
+        self._expirations = 0
+        self._state: _MemoryState | None = None
+        self._shm: ShmCache | None = None
+        self._shm_name: str | None = None
+        self._shm_ns_prefix = _shm_namespace_prefix(validated_prefix)
+        self._driver = None
+        self._store = None
+        self._ns_dir = _object_store_ns_dir(validated_prefix)
+        self._l1 = l1_store
+        if scheme == "memory":
+            self._state = (
+                shared_state if shared_state is not None else _MemoryState(capacity=capacity, clock=self._clock)
+            )
+        elif scheme == "shm":
+            from vertebra._vertebra import ShmCache
+
+            segment = _shm_segment_name(url)
+            self._shm_name = segment
+            self._shm = ShmCache(segment, capacity_bytes=max(65536, capacity * 1024), max_entries=capacity)
+        return scheme, validated_prefix
+
+    def _stats_snapshot(self) -> CacheStats:
+        if self._state is not None:
+            return self._state.stats()
+        if self._shm is not None:
+            raw = self._shm.stats()
+            return CacheStats(
+                hits=raw.hits,
+                misses=raw.misses,
+                evictions=raw.evictions,
+                expirations=raw.expirations,
+                size=0,
+                capacity=self._capacity,
+            )
+        return CacheStats(
+            hits=self._hits,
+            misses=self._misses,
+            evictions=0,
+            expirations=self._expirations,
+            size=0,
+            capacity=self._capacity,
+        )
+
+    def _effective_ttl(self, ttl: float | None) -> float | None:
+        return self._default_ttl if ttl is None else ttl
+
+    def _driver_key(self, key: str) -> str:
+        return f"{self._key_prefix}{key}"
+
+    def _record_hit(self) -> None:
+        if self._state is not None:
+            self._state.record_hit()
+        else:
+            self._hits += 1
+
+    def _incr_shm(self, key: str, delta: int) -> int:
+        assert self._shm is not None
+        dkey = _encode_shm_key(self._key_prefix, key)
+        while True:
+            existing = self._shm.get(dkey)
+            if existing is not None:
+                _parse_int_bytes(existing, key)
+                return int(self._shm.incr(dkey, delta))
+            if self._default_ttl is not None and self._default_ttl <= 0:
+                return delta
+            if self._default_ttl is None:
+                return int(self._shm.incr(dkey, delta))
+            encoded = str(delta).encode("utf-8")
+            if self._shm.add(dkey, encoded, ttl=self._default_ttl):
+                return delta
+
+
+class SyncCacheStore(_BaseCacheStore):
+    """Framework-neutral synchronous cache store supporting memory, SHM, Valkey, Redis, and object storage."""
+
+    __slots__ = ()
+
+    _driver: SyncValkeyDriver | SyncRedisDriver | None
+    _store: SyncObjectStore | None
+    _l1: SyncCacheStore | None
+
     def __init__(
         self,
         url: str = "memory://",
@@ -412,59 +526,16 @@ class SyncCacheStore:
         key_prefix: str = "vtb:cache:",
         _clock: Callable[[], float] | None = None,
     ) -> None:
-        """Initialize a synchronous cache store for the configured backend URL and optional L1 tier.
-
-        Args:
-            url: Backend URL (``memory://``, ``shm://``, ``valkey(s)://``, ``redis(s)://``,
-                ``s3://``, ``gs://``, ``az://``, ``r2://``, ``oci://``, or ``file://``).
-            l1_url: Optional L1 cache URL paired with an L2 backend (including ``memory://``).
-            capacity: Maximum entry capacity (must be at least 1).
-            default_ttl: Default TTL in seconds applied when per-call ``ttl`` is omitted.
-            key_prefix: Non-empty namespace prefix without glob wildcards.
-            _clock: Optional injectable clock callable returning seconds as ``float``.
-
-        Raises:
-            ValueError: When ``url``, ``l1_url``, ``capacity``, or ``key_prefix`` is invalid.
-            MissingDependencyError: When required optional native modules are unavailable.
-        """
-        if capacity < 1:
-            msg = "capacity must be >= 1"
-            raise ValueError(msg)
-        scheme = _parse_url_scheme(url)
-        if l1_url is not None:
-            _parse_url_scheme(l1_url)
-        validated_prefix = _validate_key_prefix(key_prefix)
-
-        self._url = url
-        self._l1_url = l1_url
-        self._scheme = scheme
-        self._capacity = capacity
-        self._default_ttl = default_ttl
-        self._key_prefix = validated_prefix
-        self._raw_clock = _clock
-        default_clock = time.time if scheme in _OBJECT_SCHEMES else time.monotonic
-        self._clock: Callable[[], float] = _clock if _clock is not None else default_clock
-        self._hits = 0
-        self._misses = 0
-        self._expirations = 0
-        self._state: _MemoryState | None = None
-        self._shm: ShmCache | None = None
-        self._shm_name: str | None = None
-        self._shm_ns_prefix = _shm_namespace_prefix(validated_prefix)
-        self._driver: SyncValkeyDriver | SyncRedisDriver | None = None
-        self._store: SyncObjectStore | None = None
-        self._ns_dir = _object_store_ns_dir(validated_prefix)
-        self._l1: SyncCacheStore | None = None
-
-        if scheme == "memory":
-            self._state = _MemoryState(capacity=capacity, clock=self._clock)
-        elif scheme == "shm":
-            from vertebra._vertebra import ShmCache
-
-            segment = _shm_segment_name(url)
-            self._shm_name = segment
-            self._shm = ShmCache(segment, capacity_bytes=max(65536, capacity * 1024), max_entries=capacity)
-        elif scheme in _VALKEY_SCHEMES:
+        """Initialize a synchronous cache store for the configured backend URL and optional L1 tier."""
+        scheme, validated_prefix = self._init_common(
+            url=url,
+            l1_url=l1_url,
+            capacity=capacity,
+            default_ttl=default_ttl,
+            key_prefix=key_prefix,
+            clock=_clock,
+        )
+        if scheme in _VALKEY_SCHEMES:
             ensure_module("vertebra._valkey", package="vertebra-core[valkey]", extra="valkey")
             from vertebra.db.adapters.valkey import SyncValkeyDriver, ValkeyConfig
 
@@ -703,26 +774,7 @@ class SyncCacheStore:
 
     def stats(self) -> CacheStats:
         """Return a snapshot of hit, miss, eviction, expiration, size, and capacity metrics."""
-        if self._state is not None:
-            return self._state.stats()
-        if self._shm is not None:
-            raw = self._shm.stats()
-            return CacheStats(
-                hits=raw.hits,
-                misses=raw.misses,
-                evictions=raw.evictions,
-                expirations=raw.expirations,
-                size=0,
-                capacity=self._capacity,
-            )
-        return CacheStats(
-            hits=self._hits,
-            misses=self._misses,
-            evictions=0,
-            expirations=self._expirations,
-            size=0,
-            capacity=self._capacity,
-        )
+        return self._stats_snapshot()
 
     def close(self) -> None:
         """Release underlying backend connections or shared-memory handles."""
@@ -734,18 +786,6 @@ class SyncCacheStore:
             self._driver.close()
         if self._store is not None:
             self._store.close()
-
-    def _effective_ttl(self, ttl: float | None) -> float | None:
-        return self._default_ttl if ttl is None else ttl
-
-    def _driver_key(self, key: str) -> str:
-        return f"{self._key_prefix}{key}"
-
-    def _record_hit(self) -> None:
-        if self._state is not None:
-            self._state.record_hit()
-        else:
-            self._hits += 1
 
     def _get_l2_with_ttl(self, key: str) -> tuple[bytes, float | None] | None:
         if self._state is not None:
@@ -832,22 +872,6 @@ class SyncCacheStore:
         if self._store is not None:
             return self._incr_store(key, delta)
         return delta, self._default_ttl
-
-    def _incr_shm(self, key: str, delta: int) -> int:
-        assert self._shm is not None
-        dkey = _encode_shm_key(self._key_prefix, key)
-        while True:
-            existing = self._shm.get(dkey)
-            if existing is not None:
-                _parse_int_bytes(existing, key)
-                return int(self._shm.incr(dkey, delta))
-            if self._default_ttl is not None and self._default_ttl <= 0:
-                return delta
-            if self._default_ttl is None:
-                return int(self._shm.incr(dkey, delta))
-            encoded = str(delta).encode("utf-8")
-            if self._shm.add(dkey, encoded, ttl=self._default_ttl):
-                return delta
 
     def _incr_driver(self, key: str, delta: int) -> int:
         assert self._driver is not None

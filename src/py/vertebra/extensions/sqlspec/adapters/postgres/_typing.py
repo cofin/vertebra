@@ -5,15 +5,18 @@ from __future__ import annotations
 import contextlib
 import inspect
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, TypedDict, cast
 
 from anyio import CancelScope
 
+from vertebra.extensions.sqlspec._driver import (
+    _AdapterAsyncConnectionContext,
+    _AdapterAsyncSessionContext,
+    _AdapterSyncConnectionContext,
+    _AdapterSyncSessionContext,
+)
+
 if TYPE_CHECKING:
-    from types import TracebackType
-
-    from sqlspec.core import StatementConfig
-
     from vertebra.db.driver._cloud_auth import DatabaseTokenProvider
     from vertebra.extensions.sqlspec.adapters.postgres.config import PostgresAsyncConfig, PostgresSyncConfig
     from vertebra.extensions.sqlspec.adapters.postgres.driver import PostgresAsyncDriver, PostgresSyncDriver
@@ -174,325 +177,57 @@ async def _reset_connection_async(conn: Any) -> None:
                 await res
 
 
-class PostgresSyncConnectionContext:
+class PostgresSyncConnectionContext(_AdapterSyncConnectionContext):
     """Synchronous connection context manager acquiring and releasing PostgreSQL leases."""
 
-    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_kwargs", "_tenant_lease")
+    __slots__ = ()
+    _engine_label: ClassVar[str] = "PostgreSQL"
+    _run_on_connection_create: ClassVar[bool] = False
 
     def __init__(self, config: PostgresSyncConfig, *args: Any, **kwargs: Any) -> None:
-        """Store configuration and forwarded connection arguments."""
-        self._config = config
-        self._args = args
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._connection: Any = None
-        self._tenant_lease: Any = None
+        super().__init__(config, *args, **kwargs)
 
-    def __enter__(self) -> Any:
-        """Acquire a native PostgreSQL connection or tenant lease."""
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = self._tenant_lease.acquire()
-            return self._connection
-        pool = self._config.provide_pool()
-        get_conn = getattr(pool, "get_connection", None)
-        if callable(get_conn):
-            self._conn_ctx = get_conn()
-            self._connection = self._conn_ctx.__enter__()
-        else:
-            self._connection = pool
-        return self._connection
+    def _rollback_conn(self, conn: Any) -> None:
+        _rollback_connection_sync(conn)
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Roll back open transactions, optionally reset session state, and release the lease."""
-        conn = self._connection
-        reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-        try:
-            if conn is not None and (exc_type is not None or reset_on_release):
-                _rollback_connection_sync(conn)
-                if reset_on_release:
-                    _reset_connection_sync(conn)
-            if self._tenant_lease is not None:
-                self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-            elif self._conn_ctx is not None:
-                return cast("bool | None", self._conn_ctx.__exit__(exc_type, exc_val, exc_tb))
-        finally:
-            self._connection = None
-            self._conn_ctx = None
-            self._tenant_lease = None
-        return None
+    def _reset_conn(self, conn: Any) -> None:
+        _reset_connection_sync(conn)
 
 
-class PostgresAsyncConnectionContext:
+class PostgresAsyncConnectionContext(_AdapterAsyncConnectionContext):
     """Asynchronous connection context manager acquiring and releasing PostgreSQL leases."""
 
-    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_kwargs", "_tenant_lease")
+    __slots__ = ()
+    _engine_label: ClassVar[str] = "PostgreSQL"
+    _run_on_connection_create: ClassVar[bool] = False
 
     def __init__(self, config: PostgresAsyncConfig, *args: Any, **kwargs: Any) -> None:
-        """Store configuration and forwarded connection arguments."""
-        self._config = config
-        self._args = args
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._connection: Any = None
-        self._tenant_lease: Any = None
+        super().__init__(config, *args, **kwargs)
 
-    async def __aenter__(self) -> Any:
-        """Acquire an asynchronous native PostgreSQL connection or tenant lease."""
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = await self._tenant_lease.acquire()
-            return self._connection
-        pool = await self._config.provide_pool()
-        get_conn = getattr(pool, "get_connection", None)
-        if callable(get_conn):
-            self._conn_ctx = get_conn()
-            self._connection = await self._conn_ctx.__aenter__()
-        else:
-            self._connection = pool
-        return self._connection
+    async def _rollback_conn(self, conn: Any) -> None:
+        await _rollback_connection_async(conn)
 
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Roll back open transactions, optionally reset session state, and release the lease."""
-        conn = self._connection
-        reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-        try:
-            if conn is not None and (exc_type is not None or reset_on_release):
-                await _rollback_connection_async(conn)
-                if reset_on_release:
-                    await _reset_connection_async(conn)
-            if self._tenant_lease is not None:
-                await self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-            elif self._conn_ctx is not None:
-                return cast("bool | None", await self._conn_ctx.__aexit__(exc_type, exc_val, exc_tb))
-        finally:
-            self._connection = None
-            self._conn_ctx = None
-            self._tenant_lease = None
-        return None
+    async def _reset_conn(self, conn: Any) -> None:
+        await _reset_connection_async(conn)
 
 
-class PostgresSyncSessionContext:
+class PostgresSyncSessionContext(_AdapterSyncSessionContext):
     """Synchronous session context manager yielding a fresh `PostgresSyncDriver` per entry."""
 
-    __slots__ = (
-        "_args",
-        "_config",
-        "_conn_ctx",
-        "_connection",
-        "_driver",
-        "_kwargs",
-        "_statement_config",
-        "_tenant_lease",
-    )
-
-    def __init__(
-        self,
-        config: PostgresSyncConfig,
-        *args: Any,
-        statement_config: StatementConfig | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Store configuration, optional statement override, and forwarded session arguments."""
-        self._config = config
-        self._args = args
-        self._statement_config = statement_config
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._connection: Any = None
-        self._driver: PostgresSyncDriver | None = None
-        self._tenant_lease: Any = None
+    __slots__ = ()
+    _connection_context_type: ClassVar[type[_AdapterSyncConnectionContext]] = PostgresSyncConnectionContext
+    _engine_label: ClassVar[str] = "PostgreSQL"
 
     def __enter__(self) -> PostgresSyncDriver:
-        """Acquire a lease, instantiate a fresh `PostgresSyncDriver`, and prepare observability."""
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = self._tenant_lease.acquire()
-        else:
-            pool = self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            if callable(get_conn):
-                self._conn_ctx = get_conn()
-                self._connection = self._conn_ctx.__enter__()
-            else:
-                self._connection = pool
-        try:
-            stmt_cfg = self._statement_config if self._statement_config is not None else self._config.statement_config
-            driver = self._config.driver_type(
-                self._connection,
-                statement_config=stmt_cfg,
-                driver_features=dict(self._config.driver_features),
-                shared_pool=self._config._pool_is_shared,
-            )
-            self._driver = self._config._prepare_driver(driver)
-            return self._driver
-        except BaseException as exc:
-            self.__exit__(type(exc), exc, exc.__traceback__)
-            raise
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Close open streams, roll back open transactions, reset session state, release lease, and mark closed."""
-        driver = self._driver
-        conn = self._connection
-        try:
-            if driver is not None:
-                close_streams_fn = getattr(driver, "_close_open_streams", None)
-                if callable(close_streams_fn):
-                    close_streams_fn(error=exc_type is not None)
-        except BaseException as close_exc:
-            if exc_type is None:
-                exc_type, exc_val, exc_tb = type(close_exc), close_exc, close_exc.__traceback__
-            raise
-        finally:
-            try:
-                reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-                pooled_state = bool(
-                    self._config.share_pool or self._tenant_lease is not None or self._conn_ctx is not None
-                )
-                if driver is not None and (exc_type is not None or pooled_state or reset_on_release):
-                    in_tx_fn = getattr(driver, "_connection_in_transaction", None)
-                    in_tx = bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
-                    if in_tx:
-                        with contextlib.suppress(Exception):
-                            driver.rollback()
-                if conn is not None and reset_on_release:
-                    _reset_connection_sync(conn)
-                if self._tenant_lease is not None:
-                    self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-                elif self._conn_ctx is not None:
-                    self._conn_ctx.__exit__(exc_type, exc_val, exc_tb)
-            finally:
-                self._connection = None
-                self._conn_ctx = None
-                self._tenant_lease = None
-                self._driver = None
-                if driver is not None:
-                    mark_closed_fn = getattr(driver, "_mark_closed", None)
-                    if callable(mark_closed_fn):
-                        mark_closed_fn()
-        return None
+        return cast("PostgresSyncDriver", super().__enter__())
 
 
-class PostgresAsyncSessionContext:
+class PostgresAsyncSessionContext(_AdapterAsyncSessionContext):
     """Asynchronous session context manager yielding a fresh `PostgresAsyncDriver` per entry."""
 
-    __slots__ = (
-        "_args",
-        "_config",
-        "_conn_ctx",
-        "_connection",
-        "_driver",
-        "_kwargs",
-        "_statement_config",
-        "_tenant_lease",
-    )
-
-    def __init__(
-        self,
-        config: PostgresAsyncConfig,
-        *args: Any,
-        statement_config: StatementConfig | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Store configuration, optional statement override, and forwarded session arguments."""
-        self._config = config
-        self._args = args
-        self._statement_config = statement_config
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._connection: Any = None
-        self._driver: PostgresAsyncDriver | None = None
-        self._tenant_lease: Any = None
+    __slots__ = ()
+    _connection_context_type: ClassVar[type[_AdapterAsyncConnectionContext]] = PostgresAsyncConnectionContext
+    _engine_label: ClassVar[str] = "PostgreSQL"
 
     async def __aenter__(self) -> PostgresAsyncDriver:
-        """Acquire a lease, instantiate a fresh `PostgresAsyncDriver`, and prepare observability."""
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = await self._tenant_lease.acquire()
-        else:
-            pool = await self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            if callable(get_conn):
-                self._conn_ctx = get_conn()
-                self._connection = await self._conn_ctx.__aenter__()
-            else:
-                self._connection = pool
-        try:
-            stmt_cfg = self._statement_config if self._statement_config is not None else self._config.statement_config
-            driver = self._config.driver_type(
-                self._connection,
-                statement_config=stmt_cfg,
-                driver_features=dict(self._config.driver_features),
-                shared_pool=self._config._pool_is_shared,
-            )
-            self._driver = self._config._prepare_driver(driver)
-            return self._driver
-        except BaseException as exc:
-            await self.__aexit__(type(exc), exc, exc.__traceback__)
-            raise
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        """Close open streams, roll back open transactions, reset session state, release lease, and mark closed."""
-        driver = self._driver
-        conn = self._connection
-        try:
-            if driver is not None:
-                close_streams_fn = getattr(driver, "_close_open_streams", None)
-                if callable(close_streams_fn):
-                    res: Any = close_streams_fn(error=exc_type is not None)
-                    if inspect.isawaitable(res):
-                        await res
-        except BaseException as close_exc:
-            if exc_type is None:
-                exc_type, exc_val, exc_tb = type(close_exc), close_exc, close_exc.__traceback__
-            raise
-        finally:
-            try:
-                reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-                pooled_state = bool(
-                    self._config.share_pool or self._tenant_lease is not None or self._conn_ctx is not None
-                )
-                if driver is not None and (exc_type is not None or pooled_state or reset_on_release):
-                    in_tx_fn = getattr(driver, "_connection_in_transaction", None)
-                    in_tx = bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
-                    if in_tx:
-                        with CancelScope(shield=True), contextlib.suppress(Exception):
-                            res = driver.rollback()
-                            if hasattr(res, "__await__"):
-                                await res
-                if conn is not None and reset_on_release:
-                    await _reset_connection_async(conn)
-                if self._tenant_lease is not None:
-                    await self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-                elif self._conn_ctx is not None:
-                    await self._conn_ctx.__aexit__(exc_type, exc_val, exc_tb)
-            finally:
-                self._connection = None
-                self._conn_ctx = None
-                self._tenant_lease = None
-                self._driver = None
-                if driver is not None:
-                    mark_closed_fn = getattr(driver, "_mark_closed", None)
-                    if callable(mark_closed_fn):
-                        mark_closed_fn()
-        return None
+        return cast("PostgresAsyncDriver", await super().__aenter__())

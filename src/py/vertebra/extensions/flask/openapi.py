@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import inspect
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import TYPE_CHECKING, Any
 
-import msgspec
-
+from vertebra.extensions._web.wsgi_shared import build_openapi_operation
 from vertebra.extensions.flask.router import convert_werkzeug_rule
 from vertebra.framework.openapi import (
     AsyncAPIDocsConfig,
@@ -21,7 +18,7 @@ from vertebra.framework.openapi import (
     SwaggerDocsConfig,
 )
 from vertebra.utils.module_loader import ensure_module
-from vertebra.utils.serializers import encode_json_bytes, schema_components
+from vertebra.utils.serializers import encode_json_bytes
 
 if TYPE_CHECKING:
     from flask import Flask
@@ -39,30 +36,6 @@ __all__ = (
     "attach_openapi_docs",
     "extract_openapi_schema",
 )
-
-
-def _schema_for_type(tp: Any) -> dict[str, Any]:
-    """Return a JSON Schema snippet for a Python type annotation."""
-    if tp is int:
-        return {"type": "integer"}
-    if tp is float:
-        return {"type": "number"}
-    if tp is bool:
-        return {"type": "boolean"}
-    if tp is str:
-        return {"type": "string"}
-    if isinstance(tp, type) and issubclass(tp, msgspec.Struct):
-        schemas, defs = schema_components((tp,))
-        out = dict(schemas[0])
-        if defs:
-            out["$defs"] = defs
-        return out
-    model_json_schema = getattr(tp, "model_json_schema", None)
-    if isinstance(tp, type) and callable(model_json_schema):
-        schema = model_json_schema()
-        if isinstance(schema, Mapping):
-            return dict(schema)
-    return {"type": "object"}
 
 
 def extract_openapi_schema(
@@ -83,60 +56,19 @@ def extract_openapi_schema(
             view_func = view_functions.get(endpoint)
             if view_func is None:
                 continue
-            rule_str = str(getattr(rule_obj, "rule", "/"))
-            openapi_path, converters = convert_werkzeug_rule(rule_str)
+            openapi_path, converters = convert_werkzeug_rule(str(getattr(rule_obj, "rule", "/")))
             openapi_path = openapi_path.replace("{*", "{")
             raw_methods = getattr(rule_obj, "methods", None) or ("GET",)
-            methods = [str(m).lower() for m in raw_methods if str(m).upper() not in {"HEAD", "OPTIONS"}]
-            try:
-                hints = get_type_hints(view_func)
-            except Exception:
-                hints = {}
-            sig = inspect.signature(view_func)
-            path_param_names = {n for n, _ in converters}
-            parameters: list[dict[str, Any]] = []
-            for p_name, conv in converters:
-                p_type = "integer" if conv == "int" else ("number" if conv == "float" else "string")
-                parameters.append(
-                    {
-                        "name": p_name,
-                        "in": "path",
-                        "required": True,
-                        "schema": {"type": p_type},
-                    }
-                )
-            request_body: dict[str, Any] | None = None
-            for param_name, param in sig.parameters.items():
-                if param_name in path_param_names or param_name == "request":
-                    continue
-                ann = hints.get(param_name, param.annotation)
-                if ann is not inspect.Parameter.empty:
-                    request_body = {
-                        "required": True,
-                        "content": {"application/json": {"schema": _schema_for_type(ann)}},
-                    }
-            return_ann = hints.get("return", sig.return_annotation)
-            response_schema = (
-                _schema_for_type(return_ann) if return_ann is not inspect.Parameter.empty else {"type": "object"}
-            )
             path_item = paths.setdefault(openapi_path, {})
-            for m in methods:
-                op: dict[str, Any] = {
-                    "operationId": f"{endpoint}_{m}",
-                    "summary": (inspect.getdoc(view_func) or endpoint).splitlines()[0],
-                    "responses": {
-                        "200": {
-                            "description": "Successful Response",
-                            "content": {"application/json": {"schema": response_schema}},
-                        }
-                    },
-                }
-                if parameters:
-                    op["parameters"] = parameters
-                if request_body is not None and m in {"post", "put", "patch"}:
-                    op["requestBody"] = request_body
-                path_item[m] = op
-
+            path_item.update(
+                build_openapi_operation(
+                    view_func,
+                    converters,
+                    raw_methods,
+                    operation_prefix=endpoint,
+                    summary_fallback=endpoint,
+                )
+            )
     return {
         "openapi": "3.1.0",
         "info": {"title": title, "version": version},

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from datetime import datetime
+from typing import Any, ClassVar, Literal
 
 from sqlspec.config import LitestarConfig
-from sqlspec.extensions.litestar.store import BaseSQLSpecStore, CompanionIndex
-from sqlspec.migrations.schema import DropStatement, SchemaTarget, metadata_has_index
-from sqlspec.utils.sync_tools import async_
+from sqlspec.extensions.litestar.store import CompanionIndex
+from sqlspec.migrations.schema import SchemaTarget
 
+from vertebra.extensions.sqlspec._litestar import AdapterLitestarStore
 from vertebra.extensions.sqlspec.adapters.spanner.core import (
     farm_fingerprint_shard,
     is_spanner_table_missing,
@@ -28,20 +28,18 @@ class SpannerLitestarConfig(LitestarConfig):
     """Typed extension configuration keys supported by ``SpannerLitestarStore``."""
 
 
-def _coerce_session_bytes(value: Any) -> bytes:
-    if value is None:
-        return b""
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return bytes(value)
-    return str(value).encode("utf-8")
-
-
-class SpannerLitestarStore(BaseSQLSpecStore[Any]):
+class SpannerLitestarStore(AdapterLitestarStore):
     """Cloud Spanner Litestar session store with ``FARM_FINGERPRINT`` sharding and ``expires_at`` TTL."""
 
     __slots__ = ("_shard_count",)
 
     adapter_name = "vertebra_spanner"
+    _commit_after_write: ClassVar[bool] = False
+    _create_uses_script: ClassVar[bool] = False
+    _check_create_schema_enabled: ClassVar[bool] = False
+    _check_expiry_in_python: ClassVar[bool] = True
+    _separate_write_session_on_get: ClassVar[bool] = True
+    _log_writes: ClassVar[bool] = False
 
     def __init__(self, config: Any) -> None:
         super().__init__(config)
@@ -52,18 +50,13 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
             getattr(self._config, "spanner_dialect", None) or getattr(self._config, "dialect", "googlesql")
         )
 
-    def _is_async_config(self) -> bool:
-        return bool(getattr(self._config, "is_async", False))
-
     def _validated_table(self) -> str:
         return validate_spanner_identifier(self.table_name, "session_table")
 
     def _split_table_name(self) -> tuple[str | None, str]:
         table = self._validated_table()
         schema_name, dot, bare_table = table.partition(".")
-        if dot:
-            return schema_name, bare_table
-        return None, table
+        return (schema_name, bare_table) if dot else (None, table)
 
     def _companion_index(self) -> CompanionIndex:
         schema_name, bare_table = self._split_table_name()
@@ -91,17 +84,31 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
 
     def reconcile_companion_objects_sync(self, driver: Any) -> None:
         """Create missing companion indexes on a synchronous driver without committing."""
-        for index in self.get_companion_indexes():
-            rows = driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
-            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
-                driver.execute_script(index.ddl)
+        self._run_companion_reconcile_sync(driver)
 
     async def reconcile_companion_objects_async(self, driver: Any) -> None:
         """Create missing companion indexes on an asynchronous driver without committing."""
-        for index in self.get_companion_indexes():
-            rows = await driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
-            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
-                await driver.execute_script(index.ddl)
+        await self._run_companion_reconcile_async(driver)
+
+    def create_statements(self) -> list[str]:
+        """Return idempotent ``CREATE TABLE IF NOT EXISTS`` and companion index DDL statements."""
+        return [self._table_ddl(), self._companion_index().ddl]
+
+    def drop_statements(self) -> list[str]:
+        """Return idempotent ``DROP INDEX IF EXISTS`` and ``DROP TABLE IF EXISTS`` DDL statements."""
+        return self._drop_table_sql()
+
+    def _create_table_statements(self) -> list[str]:
+        return self.create_statements()
+
+    def _ddl_session_kwargs(self) -> dict[str, Any]:
+        return {"transaction": False}
+
+    def _read_session_kwargs(self) -> dict[str, Any]:
+        return {"transaction": False, "read_only": True}
+
+    def _write_session_kwargs(self) -> dict[str, Any]:
+        return {"transaction": True}
 
     def _table_ddl(self) -> str:
         table = self._validated_table()
@@ -129,272 +136,84 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
         table = self._validated_table()
         idx = self._companion_index()
         qualified_index = f"{idx.schema}.{idx.name}" if idx.schema else idx.name
-        return [
-            f"DROP INDEX IF EXISTS {qualified_index}",
-            f"DROP TABLE IF EXISTS {table}",
-        ]
+        return [f"DROP INDEX IF EXISTS {qualified_index}", f"DROP TABLE IF EXISTS {table}"]
 
-    def downgrade_drops(self) -> list[DropStatement]:
-        """Return index-before-table downgrade drop statements for the Spanner session store."""
-        return [DropStatement(statement) for statement in self._drop_table_sql()]
+    def _is_table_missing(self, exc: Exception) -> bool:
+        return is_spanner_table_missing(exc)
 
-    def _merge_sql(self) -> str:
+    def _encode_expires_at(self, expires_at: datetime | None) -> str | None:
+        return None if expires_at is None else expires_at.isoformat()
+
+    def _decode_expires_at(self, raw: Any) -> datetime | None:
+        return None if raw is None else parse_utc_timestamp(raw)
+
+    def _point_params(self, key: str) -> dict[str, Any]:
+        return {"shard_id": self.compute_shard_id(key), "session_id": key}
+
+    def _get_query(self, key: str) -> tuple[str, tuple[Any, ...]]:
+        table = self._validated_table()
+        return (
+            f"SELECT data, expires_at FROM {table} WHERE shard_id = @shard_id AND session_id = @session_id LIMIT 1",
+            (self._point_params(key),),
+        )
+
+    def _renew_query(self, key: str, encoded_expires_at: Any) -> tuple[str, tuple[Any, ...]]:
+        table = self._validated_table()
+        params = {**self._point_params(key), "expires_at": encoded_expires_at}
+        return (
+            f"UPDATE {table} SET expires_at = @expires_at WHERE shard_id = @shard_id AND session_id = @session_id",
+            (params,),
+        )
+
+    def _set_query(self, key: str, data: bytes, encoded_expires_at: Any) -> tuple[str, tuple[Any, ...]]:
         table = self._validated_table()
         if self._spanner_dialect() == "spangres":
-            return (
+            sql = (
                 f"INSERT INTO {table} (shard_id, session_id, data, expires_at) "
                 "VALUES (@shard_id, @session_id, @data, @expires_at) "
                 "ON CONFLICT (shard_id, session_id) DO UPDATE "
                 "SET data = EXCLUDED.data, expires_at = EXCLUDED.expires_at"
             )
+        else:
+            sql = (
+                f"MERGE INTO {table} AS target "
+                "USING (SELECT @shard_id AS shard_id, @session_id AS session_id, "
+                "@data AS data, @expires_at AS expires_at) AS source "
+                "ON target.shard_id = source.shard_id AND target.session_id = source.session_id "
+                "WHEN MATCHED THEN UPDATE SET data = source.data, expires_at = source.expires_at "
+                "WHEN NOT MATCHED THEN INSERT (shard_id, session_id, data, expires_at) "
+                "VALUES (source.shard_id, source.session_id, source.data, source.expires_at)"
+            )
+        params = {**self._point_params(key), "data": data, "expires_at": encoded_expires_at}
+        return sql, (params,)
+
+    def _delete_query(self, key: str) -> tuple[str, tuple[Any, ...]]:
+        table = self._validated_table()
         return (
-            f"MERGE INTO {table} AS target "
-            "USING (SELECT @shard_id AS shard_id, @session_id AS session_id, "
-            "@data AS data, @expires_at AS expires_at) AS source "
-            "ON target.shard_id = source.shard_id AND target.session_id = source.session_id "
-            "WHEN MATCHED THEN UPDATE SET data = source.data, expires_at = source.expires_at "
-            "WHEN NOT MATCHED THEN INSERT (shard_id, session_id, data, expires_at) "
-            "VALUES (source.shard_id, source.session_id, source.data, source.expires_at)"
+            f"DELETE FROM {table} WHERE shard_id = @shard_id AND session_id = @session_id",
+            (self._point_params(key),),
         )
 
-    async def create_table(self) -> None:
-        """Create the Litestar session table and companion index in Cloud Spanner."""
-        statements = self.create_statements()
-        if self._is_async_config():
-            async with self._config.provide_session(transaction=False) as driver:
-                for stmt in statements:
-                    await driver.execute(stmt)
-            return
+    def _delete_all_query(self) -> tuple[str, tuple[Any, ...]]:
+        return f"DELETE FROM {self._validated_table()} WHERE TRUE", ()
 
-        def _sync_create() -> None:
-            with self._config.provide_session(transaction=False) as driver:
-                for stmt in statements:
-                    driver.execute(stmt)
-
-        await async_(_sync_create)()
-
-    async def get(self, key: str, renew_for: int | timedelta | None = None) -> bytes | None:
-        """Retrieve session bytes for ``key`` via a lock-free snapshot unless expired."""
+    def _exists_query(self, key: str) -> tuple[str, tuple[Any, ...]]:
         table = self._validated_table()
-        shard_id = self.compute_shard_id(key)
-        now = datetime.now(UTC)
-        new_expiry = self._calculate_expires_at(renew_for) if renew_for is not None else None
-        select_sql = (
-            f"SELECT data, expires_at FROM {table} WHERE shard_id = @shard_id AND session_id = @session_id LIMIT 1"
+        return (
+            f"SELECT expires_at FROM {table} WHERE shard_id = @shard_id AND session_id = @session_id LIMIT 1",
+            (self._point_params(key),),
         )
-        point_params = {"shard_id": shard_id, "session_id": key}
 
-        if self._is_async_config():
-            try:
-                async with self._config.provide_session(transaction=False, read_only=True) as driver:
-                    row = await driver.select_one_or_none(select_sql, point_params)
-                if row is None:
-                    return None
-                expires_at = row.get("expires_at")
-                if expires_at is not None and parse_utc_timestamp(expires_at) <= now:
-                    async with self._config.provide_session(transaction=True) as w_driver:
-                        await w_driver.execute(
-                            f"DELETE FROM {table} WHERE shard_id = @shard_id AND session_id = @session_id",
-                            point_params,
-                        )
-                    return None
-                if new_expiry is not None:
-                    async with self._config.provide_session(transaction=True) as w_driver:
-                        await w_driver.execute(
-                            f"UPDATE {table} SET expires_at = @expires_at "
-                            "WHERE shard_id = @shard_id AND session_id = @session_id",
-                            {
-                                "shard_id": shard_id,
-                                "session_id": key,
-                                "expires_at": new_expiry.isoformat(),
-                            },
-                        )
-                return _coerce_session_bytes(row.get("data"))
-            except Exception as exc:
-                if is_spanner_table_missing(exc):
-                    return None
-                raise
-
-        def _sync_get() -> bytes | None:
-            try:
-                with self._config.provide_session(transaction=False, read_only=True) as driver:
-                    row = driver.select_one_or_none(select_sql, point_params)
-                if row is None:
-                    return None
-                expires_at = row.get("expires_at")
-                if expires_at is not None and parse_utc_timestamp(expires_at) <= now:
-                    with self._config.provide_session(transaction=True) as w_driver:
-                        w_driver.execute(
-                            f"DELETE FROM {table} WHERE shard_id = @shard_id AND session_id = @session_id",
-                            point_params,
-                        )
-                    return None
-                if new_expiry is not None:
-                    with self._config.provide_session(transaction=True) as w_driver:
-                        w_driver.execute(
-                            f"UPDATE {table} SET expires_at = @expires_at "
-                            "WHERE shard_id = @shard_id AND session_id = @session_id",
-                            {
-                                "shard_id": shard_id,
-                                "session_id": key,
-                                "expires_at": new_expiry.isoformat(),
-                            },
-                        )
-                return _coerce_session_bytes(row.get("data"))
-            except Exception as exc:
-                if is_spanner_table_missing(exc):
-                    return None
-                raise
-
-        return await async_(_sync_get)()
-
-    async def set(self, key: str, value: str | bytes, expires_in: int | timedelta | None = None) -> None:
-        """Persist session bytes for ``key`` inside a ``ReadWrite`` transaction."""
-        payload = value.encode("utf-8") if isinstance(value, str) else bytes(value)
-        expires_at = self._calculate_expires_at(expires_in) if expires_in is not None else None
-        params = {
-            "shard_id": self.compute_shard_id(key),
-            "session_id": key,
-            "data": payload,
-            "expires_at": expires_at.isoformat() if expires_at is not None else None,
-        }
-        sql = self._merge_sql()
-
-        if self._is_async_config():
-            async with self._config.provide_session(transaction=True) as driver:
-                await driver.execute(sql, params)
-            return
-
-        def _sync_set() -> None:
-            with self._config.provide_session(transaction=True) as driver:
-                driver.execute(sql, params)
-
-        await async_(_sync_set)()
-
-    async def delete(self, key: str) -> None:
-        """Delete the session row matching ``(shard_id, key)``."""
+    def _expires_in_query(self, key: str) -> tuple[str, tuple[Any, ...]]:
         table = self._validated_table()
-        sql = f"DELETE FROM {table} WHERE shard_id = @shard_id AND session_id = @session_id"
-        params = {"shard_id": self.compute_shard_id(key), "session_id": key}
+        return (
+            f"SELECT expires_at FROM {table} WHERE shard_id = @shard_id AND session_id = @session_id LIMIT 1",
+            (self._point_params(key),),
+        )
 
-        if self._is_async_config():
-            async with self._config.provide_session(transaction=True) as driver:
-                await driver.execute(sql, params)
-            return
-
-        def _sync_delete() -> None:
-            with self._config.provide_session(transaction=True) as driver:
-                driver.execute(sql, params)
-
-        await async_(_sync_delete)()
-
-    async def delete_all(self) -> None:
-        """Delete all rows from the Spanner Litestar session table."""
+    def _delete_expired_query(self, now: datetime) -> tuple[str, tuple[Any, ...]]:
         table = self._validated_table()
-        sql = f"DELETE FROM {table} WHERE TRUE"
-        if self._is_async_config():
-            async with self._config.provide_session(transaction=True) as driver:
-                await driver.execute(sql)
-            return
-
-        def _sync_delete_all() -> None:
-            with self._config.provide_session(transaction=True) as driver:
-                driver.execute(sql)
-
-        await async_(_sync_delete_all)()
-
-    async def exists(self, key: str) -> bool:
-        """Return ``True`` if ``key`` exists and has not expired via a lock-free snapshot."""
-        table = self._validated_table()
-        sql = f"SELECT expires_at FROM {table} WHERE shard_id = @shard_id AND session_id = @session_id LIMIT 1"
-        params = {"shard_id": self.compute_shard_id(key), "session_id": key}
-        now = datetime.now(UTC)
-
-        if self._is_async_config():
-            try:
-                async with self._config.provide_session(transaction=False, read_only=True) as driver:
-                    row = await driver.select_one_or_none(sql, params)
-                if row is None:
-                    return False
-                expires_at = row.get("expires_at")
-                return expires_at is None or parse_utc_timestamp(expires_at) > now
-            except Exception as exc:
-                if is_spanner_table_missing(exc):
-                    return False
-                raise
-
-        def _sync_exists() -> bool:
-            try:
-                with self._config.provide_session(transaction=False, read_only=True) as driver:
-                    row = driver.select_one_or_none(sql, params)
-                if row is None:
-                    return False
-                expires_at = row.get("expires_at")
-                return expires_at is None or parse_utc_timestamp(expires_at) > now
-            except Exception as exc:
-                if is_spanner_table_missing(exc):
-                    return False
-                raise
-
-        return await async_(_sync_exists)()
-
-    async def expires_in(self, key: str) -> int | None:
-        """Return remaining lifetime in seconds for ``key`` via a lock-free snapshot."""
-        table = self._validated_table()
-        sql = f"SELECT expires_at FROM {table} WHERE shard_id = @shard_id AND session_id = @session_id LIMIT 1"
-        params = {"shard_id": self.compute_shard_id(key), "session_id": key}
-        now = datetime.now(UTC)
-
-        if self._is_async_config():
-            try:
-                async with self._config.provide_session(transaction=False, read_only=True) as driver:
-                    row = await driver.select_one_or_none(sql, params)
-                if row is None or row.get("expires_at") is None:
-                    return None
-                remaining = int((parse_utc_timestamp(row["expires_at"]) - now).total_seconds())
-                return max(0, remaining)
-            except Exception as exc:
-                if is_spanner_table_missing(exc):
-                    return None
-                raise
-
-        def _sync_expires_in() -> int | None:
-            try:
-                with self._config.provide_session(transaction=False, read_only=True) as driver:
-                    row = driver.select_one_or_none(sql, params)
-                if row is None or row.get("expires_at") is None:
-                    return None
-                remaining = int((parse_utc_timestamp(row["expires_at"]) - now).total_seconds())
-                return max(0, remaining)
-            except Exception as exc:
-                if is_spanner_table_missing(exc):
-                    return None
-                raise
-
-        return await async_(_sync_expires_in)()
-
-    async def delete_expired(self) -> int:
-        """Delete expired session rows and return the affected count."""
-        table = self._validated_table()
-        sql = f"DELETE FROM {table} WHERE expires_at IS NOT NULL AND expires_at <= @now"
-        params = {"now": datetime.now(UTC).isoformat()}
-
-        if self._is_async_config():
-            async with self._config.provide_session(transaction=True) as driver:
-                result = await driver.execute(sql, params)
-            return int(getattr(result, "rows_affected", 0) or getattr(result, "num_rows", 0) or 0)
-
-        def _sync_delete_expired() -> int:
-            with self._config.provide_session(transaction=True) as driver:
-                result = driver.execute(sql, params)
-            return int(getattr(result, "rows_affected", 0) or getattr(result, "num_rows", 0) or 0)
-
-        return await async_(_sync_delete_expired)()
-
-    def create_statements(self) -> list[str]:
-        """Return idempotent ``CREATE TABLE IF NOT EXISTS`` and companion index DDL statements."""
-        return [self._table_ddl(), self._companion_index().ddl]
-
-    def drop_statements(self) -> list[str]:
-        """Return idempotent ``DROP INDEX IF EXISTS`` and ``DROP TABLE IF EXISTS`` DDL statements."""
-        return self._drop_table_sql()
+        return (
+            f"DELETE FROM {table} WHERE expires_at IS NOT NULL AND expires_at <= @now",
+            ({"now": now.isoformat()},),
+        )

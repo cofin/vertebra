@@ -17,17 +17,11 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 bytes = { workspace = true }
-futures-util = "0.3"
-lru = "0.16"
 parking_lot = "0.12"
 pyo3 = { workspace = true }
-redis = { version = "=1.8.1", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "cluster-async", "connection-manager", "cache-aio", "streams", "script", "acl", "sentinel"] }
-rustls = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
-url = { workspace = true }
-vertebra-core = { path = "../vertebra-core" }
-vertebra-db = { path = "../vertebra-db", features = ["gcp", "pyo3"] }
+vertebra-db = { path = "../vertebra-db", default-features = false, features = ["pyo3", "rustls-ring"] }
+vertebra-resp = { path = "../vertebra-resp", features = ["pyo3"] }
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }

@@ -498,12 +498,27 @@ class EmbeddingBroker:
         """Spawn the sidecar subprocess worker for ``state`` if not already running."""
         if state.subprocess is not None and state.subprocess.returncode is None:
             return state.subprocess
+        env = dict(os.environ)
+        path_entries: list[str] = []
+        seen: set[str] = set()
+        for raw_entry in env.get("PYTHONPATH", "").split(os.pathsep):
+            if raw_entry and raw_entry not in seen:
+                seen.add(raw_entry)
+                path_entries.append(raw_entry)
+        for sys_entry in sys.path:
+            resolved = os.path.abspath(sys_entry) if sys_entry else os.getcwd()
+            if os.path.isdir(resolved) and resolved not in seen:
+                seen.add(resolved)
+                path_entries.append(resolved)
+        if path_entries:
+            env["PYTHONPATH"] = os.pathsep.join(path_entries)
         state.subprocess = await asyncio.create_subprocess_exec(
             sys.executable,
             "-c",
             "from vertebra.embeddings._broker import _run_sidecar_worker_main; _run_sidecar_worker_main()",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
+            env=env,
         )
         return state.subprocess
 

@@ -2,7 +2,6 @@
 //! for `vertebra-mssql`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow_array::{
     ArrayRef, BinaryArray, BooleanArray, Date32Array, Float64Array, Int64Array, RecordBatch,
@@ -14,6 +13,7 @@ use chrono::Datelike;
 use tiberius::ColumnType;
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::arrow_shm::{ShmArrowStreamWriter, write_shm_arrow_region_unregistered};
+use vertebra_db::py_broker::next_shm_name;
 
 use crate::codecs::{MssqlCellValue, MssqlColumnMeta, MssqlQueryResult, format_numeric};
 use crate::errors::MssqlError;
@@ -24,17 +24,13 @@ pub const DEFAULT_MSSQL_ARROW_SHM_CAPACITY: usize = 64 * 1024;
 /// Tuple `(shm_name, payload_len, row_count, Arc<ShmRegion>)` returned by `VTBARROW` materializers.
 pub type ShmArrowBatchPart = (String, usize, usize, Arc<ShmRegion>);
 
-static MSSQL_SHM_COUNTER: AtomicU64 = AtomicU64::new(1);
-
 const UNIX_EPOCH_CE_DAYS: i32 = 719_163;
 
 /// Allocate the next unique process-scoped POSIX shared-memory name (`/vtb-ms-<pid>-<seq>`)
 /// for an MSSQL `VTBARROW` result cursor.
 #[inline]
 pub fn next_mssql_shm_name() -> String {
-    let seq = MSSQL_SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    format!("/vtb-ms-{pid:x}-{seq:x}")
+    next_shm_name("/vtb-ms", '-')
 }
 
 /// Map a [`ColumnType`] and sample column values onto an Arrow [`DataType`].

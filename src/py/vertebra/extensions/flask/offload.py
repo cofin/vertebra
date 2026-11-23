@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any
 
+from vertebra.extensions._web.asgi_starlette import build_openapi_offload_spec
 from vertebra.server._offload import (
     CompressionOffloadSpec,
     CorsOffloadSpec,
@@ -13,7 +13,6 @@ from vertebra.server._offload import (
     OpenApiOffloadSpec,
     StaticMountOffloadSpec,
 )
-from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = (
     "CompressionOffloadSpec",
@@ -89,14 +88,7 @@ def offload_middlewares(
         )
 
     if openapi_schema is not None:
-        schema_bytes = bytes(encode_json_bytes(openapi_schema))
-        digest = hashlib.sha256(schema_bytes).hexdigest()[:16]
-        openapi_spec = OpenApiOffloadSpec(
-            schema_path=openapi_path,
-            body=schema_bytes,
-            etag=f'"{digest}"',
-            content_type="application/json",
-        )
+        openapi_spec = build_openapi_offload_spec(openapi_path, openapi_schema)
 
     return OffloadPlan(
         cors=cors_spec,

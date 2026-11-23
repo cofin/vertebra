@@ -2621,6 +2621,81 @@ impl AsgiBatchLoopCallback {
     }
 }
 
+enum CoroStep<'py> {
+    Return(Bound<'py, PyAny>),
+    Error(PyErr),
+    Yielded(Py<PyAny>),
+}
+
+fn step_coro_once<'py>(py: Python<'py>, coro: &Bound<'py, PyAny>) -> CoroStep<'py> {
+    let mut yielded: *mut ffi::PyObject = std::ptr::null_mut();
+    // SAFETY: GIL is attached (`py`); `coro.as_ptr()` and `Py_None()` stay borrowed for
+    // `PyIter_Send`, which writes a fresh owned `PyObject*` into `yielded` on `PYGEN_NEXT`/`PYGEN_RETURN`.
+    match unsafe { ffi::PyIter_Send(coro.as_ptr(), ffi::Py_None(), &mut yielded) } {
+        ffi::PySendResult::PYGEN_RETURN => {
+            let ret = if yielded.is_null() {
+                py.None().into_bound(py)
+            } else {
+                // SAFETY: `PYGEN_RETURN` with non-null `yielded` transfers a freshly owned `PyObject*`.
+                unsafe { Bound::from_owned_ptr(py, yielded) }
+            };
+            CoroStep::Return(ret)
+        }
+        ffi::PySendResult::PYGEN_ERROR => CoroStep::Error(PyErr::fetch(py)),
+        ffi::PySendResult::PYGEN_NEXT => {
+            // SAFETY: `PYGEN_NEXT` guarantees `yielded` is a non-null freshly owned `PyObject*`.
+            CoroStep::Yielded(unsafe { Bound::from_owned_ptr(py, yielded) }.unbind())
+        }
+    }
+}
+
+fn resolve_inline_loop<'py>(
+    py: Python<'py>,
+    active_loop: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    match active_loop {
+        Some(l) => Ok(l.clone()),
+        None => py
+            .import(pyo3::intern!(py, "asyncio"))?
+            .call_method0(pyo3::intern!(py, "get_running_loop")),
+    }
+}
+
+fn flush_and_gather_inline(
+    py: Python<'_>,
+    ready_responses: &[FlushedProtocolResponse],
+    spawned_tasks: &[Bound<'_, PyAny>],
+    active_loop: Option<&Bound<'_, PyAny>>,
+    drive_until_complete: bool,
+) -> PyResult<()> {
+    if !ready_responses.is_empty() {
+        let items: Vec<(u64, u16, &[u8], &[u8])> = ready_responses
+            .iter()
+            .map(|r| {
+                (
+                    r.request_id,
+                    r.status,
+                    r.headers_raw.as_slice(),
+                    r.body.as_slice(py),
+                )
+            })
+            .collect();
+        ResponseSubmitter::submit_batch_raw_inner(py, &items)?;
+    }
+
+    if drive_until_complete
+        && !spawned_tasks.is_empty()
+        && let Some(lp) = active_loop
+    {
+        let asyncio = py.import(pyo3::intern!(py, "asyncio"))?;
+        let gather = asyncio.getattr(pyo3::intern!(py, "gather"))?;
+        let args = PyTuple::new(py, spawned_tasks)?;
+        let gathered = gather.call1(args)?;
+        lp.call_method1(pyo3::intern!(py, "run_until_complete"), (gathered,))?;
+    }
+    Ok(())
+}
+
 fn drive_asgi_targets_inline(
     py: Python<'_>,
     app: &Bound<'_, PyAny>,
@@ -2656,8 +2731,7 @@ fn drive_asgi_targets_inline(
         let proto_bound = proto_py.bind(py);
         let receive_fn = proto_bound.getattr(pyo3::intern!(py, "receive"))?;
 
-        let call_res = app.call1((scope_py.bind(py), receive_fn, proto_bound));
-        let coro = match call_res {
+        let coro = match app.call1((scope_py.bind(py), receive_fn, proto_bound)) {
             Ok(c) => c,
             Err(err) => {
                 log_app_exception(py, "ASGI", &err);
@@ -2669,45 +2743,25 @@ fn drive_asgi_targets_inline(
             }
         };
 
-        let mut yielded: *mut ffi::PyObject = std::ptr::null_mut();
-        // SAFETY: GIL is attached (`py`); `coro.as_ptr()` and `Py_None()` stay borrowed for
-        // `PyIter_Send`, which writes a fresh owned `PyObject*` into `yielded` on `PYGEN_NEXT`/`PYGEN_RETURN`.
-        let send_res = unsafe { ffi::PyIter_Send(coro.as_ptr(), ffi::Py_None(), &mut yielded) };
-        match send_res {
-            ffi::PySendResult::PYGEN_RETURN => {
-                if !yielded.is_null() {
-                    // SAFETY: `PYGEN_RETURN` with non-null `yielded` transfers a fresh owned
-                    // `PyObject*`; adopting and dropping it prevents a refcount leak.
-                    unsafe {
-                        let _ = Bound::from_owned_ptr(py, yielded);
-                    }
-                }
+        match step_coro_once(py, &coro) {
+            CoroStep::Return(_) => {
                 if let Some(resp) = proto_bound.get().take_completed_for_batch(py, true)? {
                     ready_responses.push(resp);
                 }
                 completed_inline += 1;
             }
-            ffi::PySendResult::PYGEN_ERROR => {
-                let err = PyErr::fetch(py);
+            CoroStep::Error(err) => {
                 log_app_exception(py, "ASGI", &err);
                 if let Some(err_resp) = proto_bound.get().take_error_for_batch(py) {
                     ready_responses.push(err_resp);
                 }
                 completed_inline += 1;
             }
-            ffi::PySendResult::PYGEN_NEXT => {
-                // SAFETY: `PYGEN_NEXT` guarantees `yielded` is a non-null freshly owned `PyObject*`
-                // produced by `PyIter_Send` while the GIL is attached.
-                let first_yielded = unsafe { Bound::from_owned_ptr(py, yielded) }.unbind();
+            CoroStep::Yielded(first_yielded) => {
                 if let Some(resp) = proto_bound.get().take_completed_for_batch(py, false)? {
                     ready_responses.push(resp);
                 }
-                let lp = match active_loop {
-                    Some(l) => l.clone(),
-                    None => py
-                        .import(pyo3::intern!(py, "asyncio"))?
-                        .call_method0(pyo3::intern!(py, "get_running_loop"))?,
-                };
+                let lp = resolve_inline_loop(py, active_loop)?;
                 let task = spawn_stepped_coroutine(
                     py,
                     &lp,
@@ -2724,31 +2778,13 @@ fn drive_asgi_targets_inline(
         Ok(())
     })?;
 
-    if !ready_responses.is_empty() {
-        let items: Vec<(u64, u16, &[u8], &[u8])> = ready_responses
-            .iter()
-            .map(|r| {
-                (
-                    r.request_id,
-                    r.status,
-                    r.headers_raw.as_slice(),
-                    r.body.as_slice(py),
-                )
-            })
-            .collect();
-        ResponseSubmitter::submit_batch_raw_inner(py, &items)?;
-    }
-
-    if drive_until_complete
-        && !spawned_tasks.is_empty()
-        && let Some(lp) = active_loop
-    {
-        let asyncio = py.import(pyo3::intern!(py, "asyncio"))?;
-        let gather = asyncio.getattr(pyo3::intern!(py, "gather"))?;
-        let args = PyTuple::new(py, &spawned_tasks)?;
-        let gathered = gather.call1(args)?;
-        lp.call_method1(pyo3::intern!(py, "run_until_complete"), (gathered,))?;
-    }
+    flush_and_gather_inline(
+        py,
+        &ready_responses,
+        &spawned_tasks,
+        active_loop,
+        drive_until_complete,
+    )?;
 
     Ok(completed_inline)
 }
@@ -2852,61 +2888,23 @@ fn drive_native_items_inline(
             200
         };
 
-        let mut yielded: *mut ffi::PyObject = std::ptr::null_mut();
-        // SAFETY: GIL is attached (`py`); `coro.as_ptr()` and `Py_None()` stay borrowed for
-        // `PyIter_Send`, which writes a fresh owned `PyObject*` into `yielded` on `PYGEN_NEXT`/`PYGEN_RETURN`.
-        let send_res = unsafe { ffi::PyIter_Send(coro.as_ptr(), ffi::Py_None(), &mut yielded) };
-        match send_res {
-            ffi::PySendResult::PYGEN_RETURN => {
-                let ret_bound = if yielded.is_null() {
-                    py.None().into_bound(py)
-                } else {
-                    // SAFETY: `PYGEN_RETURN` with non-null `yielded` transfers a freshly owned
-                    // `PyObject*` return value from `PyIter_Send` with the GIL attached.
-                    unsafe { Bound::from_owned_ptr(py, yielded) }
-                };
+        match step_coro_once(py, &coro) {
+            CoroStep::Return(ret_bound) => {
                 match try_submit_native_special(py, request_id, default_status, &ret_bound) {
                     Ok(NativeSpecialOutcome::SubmittedInline) => {
                         completed_inline += 1;
                     }
                     Ok(NativeSpecialOutcome::StreamCoro(stream_coro)) => {
-                        let mut stream_yielded: *mut ffi::PyObject = std::ptr::null_mut();
-                        // SAFETY: GIL is attached (`py`); `stream_coro.as_ptr()` and `Py_None()` stay
-                        // borrowed for `PyIter_Send`, writing a fresh owned `PyObject*` to `stream_yielded`.
-                        let stream_send = unsafe {
-                            ffi::PyIter_Send(
-                                stream_coro.as_ptr(),
-                                ffi::Py_None(),
-                                &mut stream_yielded,
-                            )
-                        };
-                        match stream_send {
-                            ffi::PySendResult::PYGEN_RETURN => {
-                                if !stream_yielded.is_null() {
-                                    // SAFETY: `PYGEN_RETURN` with non-null `stream_yielded` transfers a
-                                    // freshly owned `PyObject*`; adopting and dropping prevents a refcount leak.
-                                    unsafe {
-                                        drop(Bound::from_owned_ptr(py, stream_yielded));
-                                    }
-                                }
+                        match step_coro_once(py, &stream_coro) {
+                            CoroStep::Return(_) => {
                                 completed_inline += 1;
                             }
-                            ffi::PySendResult::PYGEN_ERROR => {
-                                let err = PyErr::fetch(py);
+                            CoroStep::Error(err) => {
                                 log_app_exception(py, "NativeStream", &err);
                                 completed_inline += 1;
                             }
-                            ffi::PySendResult::PYGEN_NEXT => {
-                                // SAFETY: `PYGEN_NEXT` guarantees `stream_yielded` is a non-null freshly
-                                // owned `PyObject*` from `PyIter_Send` while the GIL is attached.
-                                let first_yielded =
-                                    unsafe { Bound::from_owned_ptr(py, stream_yielded) }.unbind();
-                                let lp = match active_loop {
-                                    Some(l) => l.clone(),
-                                    None => py
-                                        .import(pyo3::intern!(py, "asyncio"))?
-                                        .call_method0(pyo3::intern!(py, "get_running_loop"))?,
-                                };
+                            CoroStep::Yielded(first_yielded) => {
+                                let lp = resolve_inline_loop(py, active_loop)?;
                                 let task = spawn_stepped_coroutine(
                                     py,
                                     &lp,
@@ -2944,22 +2942,13 @@ fn drive_native_items_inline(
                     }
                 }
             }
-            ffi::PySendResult::PYGEN_ERROR => {
-                let err = PyErr::fetch(py);
+            CoroStep::Error(err) => {
                 log_app_exception(py, "Native", &err);
                 ready_responses.push(prepare_native_error_response(py, request_id, &err));
                 completed_inline += 1;
             }
-            ffi::PySendResult::PYGEN_NEXT => {
-                // SAFETY: `PYGEN_NEXT` guarantees `yielded` is a non-null freshly owned `PyObject*`
-                // produced by `PyIter_Send` while the GIL is attached.
-                let first_yielded = unsafe { Bound::from_owned_ptr(py, yielded) }.unbind();
-                let lp = match active_loop {
-                    Some(l) => l.clone(),
-                    None => py
-                        .import(pyo3::intern!(py, "asyncio"))?
-                        .call_method0(pyo3::intern!(py, "get_running_loop"))?,
-                };
+            CoroStep::Yielded(first_yielded) => {
+                let lp = resolve_inline_loop(py, active_loop)?;
                 let task = spawn_stepped_coroutine(
                     py,
                     &lp,
@@ -2978,31 +2967,13 @@ fn drive_native_items_inline(
         }
     }
 
-    if !ready_responses.is_empty() {
-        let batch_slices: Vec<(u64, u16, &[u8], &[u8])> = ready_responses
-            .iter()
-            .map(|r| {
-                (
-                    r.request_id,
-                    r.status,
-                    r.headers_raw.as_slice(),
-                    r.body.as_slice(py),
-                )
-            })
-            .collect();
-        ResponseSubmitter::submit_batch_raw_inner(py, &batch_slices)?;
-    }
-
-    if drive_until_complete
-        && !spawned_tasks.is_empty()
-        && let Some(lp) = active_loop
-    {
-        let asyncio = py.import(pyo3::intern!(py, "asyncio"))?;
-        let gather = asyncio.getattr(pyo3::intern!(py, "gather"))?;
-        let args = PyTuple::new(py, &spawned_tasks)?;
-        let gathered = gather.call1(args)?;
-        lp.call_method1(pyo3::intern!(py, "run_until_complete"), (gathered,))?;
-    }
+    flush_and_gather_inline(
+        py,
+        &ready_responses,
+        &spawned_tasks,
+        active_loop,
+        drive_until_complete,
+    )?;
 
     Ok(completed_inline)
 }

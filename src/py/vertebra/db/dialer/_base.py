@@ -819,3 +819,142 @@ def _next_connector_error_causes(error: BaseException) -> list[BaseException]:
     if error.__context__ is not None and not error.__suppress_context__:
         causes.append(error.__context__)
     return causes
+
+
+class _BaseTokenDialerMixin:
+    """Shared TLS context, CA PEM, and token-provider accessors for AWS/Azure dialers."""
+
+    __slots__ = ()
+
+    _ca_pem: str | None
+    _database: str
+    _native: Any
+    _ssl_context: ssl.SSLContext
+    _token_provider: Any
+
+    @property
+    def endpoint_host(self) -> str:
+        """Return the normalized database endpoint hostname."""
+        return str(self._native.endpoint_host)
+
+    @property
+    def port(self) -> int:
+        """Return the database TCP server port."""
+        return int(self._native.port)
+
+    @property
+    def database(self) -> str:
+        """Return the default database name used by `connection_kwargs()`."""
+        return self._database
+
+    @property
+    def ssl_context(self) -> ssl.SSLContext:
+        """Return the cached `verify-full` client `ssl.SSLContext`."""
+        return self._ssl_context
+
+    @property
+    def token_provider(self) -> Any:
+        """Return the `DatabaseTokenProvider` minting short-lived database auth tokens."""
+        return self._token_provider
+
+    def build_tls_context(self, *, ca_pem: str | None = None) -> ssl.SSLContext:
+        """Construct a fresh `verify-full` `ssl.SSLContext` seeded with `ca_pem` or the dialer's CA bundle."""
+        return build_verify_full_tls_context(self._ca_pem if ca_pem is None else ca_pem)
+
+    def invalidate_token(self) -> None:
+        """Clear any cached authentication token snapshot."""
+        self._token_provider.invalidate()
+
+    def _resolve_tls_target(
+        self,
+        host: str | None,
+        port: int | None,
+        server_hostname: str | None,
+        ssl_context: ssl.SSLContext | None,
+    ) -> tuple[str, int, str, ssl.SSLContext]:
+        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
+        target_port = self.port if port is None else validate_dialer_port(port)
+        tls_hostname = (
+            self.endpoint_host
+            if server_hostname is None
+            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
+        )
+        return target_host, target_port, tls_hostname, self._ssl_context if ssl_context is None else ssl_context
+
+
+class _SyncTokenDialerMixin(_BaseTokenDialerMixin):
+    """Shared synchronous token resolution, TLS connection, and lifecycle helpers."""
+
+    __slots__ = ()
+
+    def resolve_token(self, *, force_refresh: bool = False) -> str:
+        """Synchronously return a cached or freshly acquired IAM authentication token."""
+        return str(self._token_provider.resolve_sync(force_refresh=force_refresh))
+
+    def connect(
+        self,
+        host: str | None = None,
+        *,
+        port: int | None = None,
+        server_hostname: str | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+        timeout: float = 10.0,
+    ) -> ssl.SSLSocket:
+        """Establish a synchronous `verify-full` TLS socket to the database endpoint."""
+        target_host, target_port, tls_hostname, ctx = self._resolve_tls_target(host, port, server_hostname, ssl_context)
+        raw_sock = socket.create_connection((target_host, target_port), timeout=timeout)
+        try:
+            return ctx.wrap_socket(raw_sock, server_hostname=tls_hostname)
+        except BaseException:
+            raw_sock.close()
+            raise
+
+    def close(self) -> None:
+        """Clear cached authentication token state."""
+        self.invalidate_token()
+
+    def __call__(
+        self,
+        host: str | None = None,
+        *,
+        port: int | None = None,
+        server_hostname: str | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+        timeout: float = 10.0,
+    ) -> ssl.SSLSocket:
+        """Callable dialer entrypoint returning a verified synchronous TLS socket."""
+        return self.connect(
+            host,
+            port=port,
+            server_hostname=server_hostname,
+            ssl_context=ssl_context,
+            timeout=timeout,
+        )
+
+
+class _AsyncTokenDialerMixin(_BaseTokenDialerMixin):
+    """Shared asynchronous token resolution, TLS stream connection, and lifecycle helpers."""
+
+    __slots__ = ()
+
+    async def resolve_token(self, *, force_refresh: bool = False) -> str:
+        """Asynchronously return a cached or freshly acquired token without blocking the event loop."""
+        return str(await self._token_provider.resolve_async(force_refresh=force_refresh))
+
+    async def connect(
+        self,
+        host: str | None = None,
+        *,
+        port: int | None = None,
+        server_hostname: str | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+        timeout: float = 10.0,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Establish an asynchronous `verify-full` TLS stream pair to the database endpoint."""
+        target_host, target_port, tls_hostname, ctx = self._resolve_tls_target(host, port, server_hostname, ssl_context)
+        async with asyncio.timeout(timeout):
+            return await asyncio.open_connection(target_host, target_port, ssl=ctx, server_hostname=tls_hostname)
+
+    async def close(self) -> None:
+        """Clear cached authentication token state."""
+        self.invalidate_token()

@@ -2,67 +2,29 @@
 //! and sync/async cursor classes for `vertebra-bigquery`.
 
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyList, PyMapping, PyString, PyTuple, PyType};
+use pyo3::types::{PyDict, PyList, PyMapping, PyString, PyTuple};
 use vertebra_db::py_async::{
     ReadyAwaitable, RustDbTaskAwaitable, block_on_db, ready_ok, spawn_rust_db_task_with_attr,
 };
+use vertebra_db::py_cursor::{BufferedCursorState, build_description_7tuple};
+#[cfg(test)]
+use vertebra_db::py_errors::cursor_programming_err;
+pub(crate) use vertebra_db::py_errors::{cursor_interface_err, cursor_not_supported_err};
 
 use crate::client::{BigQueryClient as NativeBigQueryClient, BigQueryError};
 use crate::codec::{
     BigQueryFieldSchema, BigQueryQueryOptions, BigQueryQueryParameter, BigQueryQueryResult,
     parse_query_parameters_json,
 };
-use crate::errors::{bigquery_error_to_py, resolve_exception_types};
+use crate::errors::bigquery_error_to_py;
 use crate::{BIGQUERY_COMPLETION_DRAINER_ATTR, cell_to_py};
 
 const NEED_ENCODER_MSG: &str = "BigQuery cursor needs encoded parameters or a param_encoder";
-
-/// Build an `InterfaceError` from the shared exception cache in `errors.rs`.
-pub(crate) fn cursor_interface_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py) {
-        Ok(types) => PyErr::from_type(types.interface.bind(py).clone(), (message.to_string(),)),
-        Err(py_err) => py_err,
-    }
-}
-
-/// Build a `ProgrammingError` from the shared exception cache in `errors.rs`.
-pub(crate) fn cursor_programming_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py) {
-        Ok(types) => PyErr::from_type(types.programming.bind(py).clone(), (message.to_string(),)),
-        Err(py_err) => py_err,
-    }
-}
-
-/// Build a `NotSupportedError` from `vertebra._vertebra` (with a local stand-in for Rust unit tests).
-pub(crate) fn cursor_not_supported_err(py: Python<'_>, message: &str) -> PyErr {
-    static NOT_SUPPORTED_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-    let ty = NOT_SUPPORTED_ERROR.get_or_try_init(py, || match py.import("vertebra._vertebra") {
-        Ok(core_mod) => Ok(core_mod
-            .getattr("NotSupportedError")?
-            .cast_into::<PyType>()?
-            .unbind()),
-        Err(err) if err.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py) => {
-            let base = py.get_type::<pyo3::exceptions::PyException>();
-            let dict = PyDict::new(py);
-            dict.set_item("__module__", "vertebra._vertebra")?;
-            let ty = py
-                .get_type::<PyType>()
-                .call1(("NotSupportedError", (base,), dict))?
-                .cast_into::<PyType>()?;
-            Ok(ty.unbind())
-        }
-        Err(err) => Err(err),
-    });
-    match ty {
-        Ok(ty) => PyErr::from_type(ty.bind(py).clone(), (message.to_string(),)),
-        Err(py_err) => py_err,
-    }
-}
 
 /// Extract a Python `Mapping[str, str] | None` into a Rust `HashMap<String, String>`.
 pub(crate) fn extract_labels(obj: Option<&Bound<'_, PyAny>>) -> PyResult<HashMap<String, String>> {
@@ -91,30 +53,31 @@ pub(crate) fn extract_labels(obj: Option<&Bound<'_, PyAny>>) -> PyResult<HashMap
 
 /// Buffered result and PEP 249 state shared by `SyncBigQueryCursor` and `AsyncBigQueryCursor`.
 pub(crate) struct CursorState {
-    pub(crate) rows: Vec<Py<PyTuple>>,
-    pub(crate) pos: usize,
-    pub(crate) description: Option<Py<PyTuple>>,
-    pub(crate) rowcount: i64,
-    pub(crate) lastrowid: Option<Py<PyAny>>,
-    pub(crate) arraysize: usize,
-    pub(crate) executed: bool,
-    pub(crate) closed: bool,
+    pub(crate) buf: BufferedCursorState,
     pub(crate) session_id: Option<String>,
     pub(crate) query_metadata: Option<Py<PyDict>>,
 }
 
+impl Deref for CursorState {
+    type Target = BufferedCursorState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.buf
+    }
+}
+
+impl DerefMut for CursorState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.buf
+    }
+}
+
 impl CursorState {
     /// Construct a fresh, open cursor state with `rowcount = -1` and `arraysize = 1`.
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self {
-            rows: Vec::new(),
-            pos: 0,
-            description: None,
-            rowcount: -1,
-            lastrowid: None,
-            arraysize: 1,
-            executed: false,
-            closed: false,
+            buf: BufferedCursorState::new(),
             session_id: None,
             query_metadata: None,
         }
@@ -122,43 +85,17 @@ impl CursorState {
 
     /// Construct a fresh, open cursor state with an optional initial BigQuery session ID.
     pub(crate) fn with_session_id(session_id: Option<String>) -> Self {
-        let mut state = Self::new();
-        state.session_id = session_id;
-        state
-    }
-
-    /// Return `InterfaceError` if the cursor has been closed.
-    pub(crate) fn ensure_open(&self, py: Python<'_>) -> PyResult<()> {
-        if self.closed {
-            return Err(cursor_interface_err(py, "cursor is closed"));
+        Self {
+            buf: BufferedCursorState::new(),
+            session_id,
+            query_metadata: None,
         }
-        Ok(())
     }
 
     /// Clear buffered rows and reset statement metadata after a failed call or `close()`.
     pub(crate) fn clear_result(&mut self) {
-        self.rows.clear();
-        self.pos = 0;
-        self.description = None;
-        self.rowcount = -1;
-        self.lastrowid = None;
+        self.buf.clear_result();
         self.query_metadata = None;
-    }
-
-    /// Replace the buffered result set and update statement attributes.
-    pub(crate) fn store(
-        &mut self,
-        description: Option<Py<PyTuple>>,
-        rows: Vec<Py<PyTuple>>,
-        rowcount: i64,
-        lastrowid: Option<Py<PyAny>>,
-    ) {
-        self.description = description;
-        self.rows = rows;
-        self.pos = 0;
-        self.rowcount = rowcount;
-        self.lastrowid = lastrowid;
-        self.executed = true;
     }
 
     /// Store a decoded [`BigQueryQueryResult`] using BigQuery's schema, DML count, and metadata.
@@ -188,64 +125,10 @@ impl CursorState {
         Ok(())
     }
 
-    /// Fetch the next buffered row, or `None` when no result set exists or rows are exhausted.
-    pub(crate) fn fetchone(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(None);
-        }
-        let row = self.rows[self.pos].clone_ref(py);
-        self.pos += 1;
-        Ok(Some(row))
-    }
-
-    /// Fetch up to `size` (or `arraysize` when `None`) buffered rows.
-    pub(crate) fn fetchmany(
-        &mut self,
-        py: Python<'_>,
-        size: Option<usize>,
-    ) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        let wanted = size.unwrap_or(self.arraysize);
-        if self.description.is_none() || wanted == 0 || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let end = self.pos.saturating_add(wanted).min(self.rows.len());
-        let out = self.rows[self.pos..end]
-            .iter()
-            .map(|r| r.clone_ref(py))
-            .collect();
-        self.pos = end;
-        Ok(out)
-    }
-
-    /// Fetch all remaining buffered rows and leave the cursor exhausted.
-    pub(crate) fn fetchall(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let out = self.rows[self.pos..]
-            .iter()
-            .map(|r| r.clone_ref(py))
-            .collect();
-        self.pos = self.rows.len();
-        Ok(out)
-    }
-
-    /// Update `arraysize`, rejecting values below `1` with `ProgrammingError`.
-    pub(crate) fn set_arraysize(&mut self, py: Python<'_>, value: i64) -> PyResult<()> {
-        if value < 1 {
-            return Err(cursor_programming_err(py, "arraysize must be at least 1"));
-        }
-        self.arraysize = value as usize;
-        Ok(())
-    }
-
     /// Close the cursor idempotently and release buffered rows.
     pub(crate) fn close(&mut self) {
-        self.closed = true;
-        self.clear_result();
+        self.buf.close();
+        self.query_metadata = None;
     }
 }
 
@@ -254,32 +137,19 @@ pub(crate) fn describe_fields(
     py: Python<'_>,
     schema: &[BigQueryFieldSchema],
 ) -> PyResult<Py<PyTuple>> {
-    let mut entries: Vec<Py<PyTuple>> = Vec::with_capacity(schema.len());
+    let mut cols = Vec::with_capacity(schema.len());
     for field in schema {
-        let name = PyString::new(py, &field.name).into_any();
-        let type_name = PyString::new(py, &field.field_type).into_any();
-        let null_ok: Py<PyAny> = if field.mode.eq_ignore_ascii_case("NULLABLE") {
-            true.into_pyobject(py)?.to_owned().into_any().unbind()
+        let type_code = PyString::new(py, &field.field_type).into_any().unbind();
+        let null_ok = if field.mode.eq_ignore_ascii_case("NULLABLE") {
+            Some(true)
         } else if field.mode.eq_ignore_ascii_case("REQUIRED") {
-            false.into_pyobject(py)?.to_owned().into_any().unbind()
+            Some(false)
         } else {
-            py.None()
+            None
         };
-        let col = PyTuple::new(
-            py,
-            [
-                name.unbind(),
-                type_name.unbind(),
-                py.None(),
-                py.None(),
-                py.None(),
-                py.None(),
-                null_ok,
-            ],
-        )?;
-        entries.push(col.unbind());
+        cols.push((field.name.as_str(), Some(type_code), null_ok));
     }
-    Ok(PyTuple::new(py, entries)?.unbind())
+    build_description_7tuple(py, cols)
 }
 
 /// Convert every decoded row in a [`BigQueryQueryResult`] into a Python tuple once.
@@ -435,17 +305,6 @@ fn encode_executemany_statements(
         statements.push(encode_sql_and_params(py, sql, Some(&item), encoder)?);
     }
     Ok(statements)
-}
-
-fn parse_fetchmany_size(py: Python<'_>, size: Option<i64>) -> PyResult<Option<usize>> {
-    match size {
-        None => Ok(None),
-        Some(n) if n < 0 => Err(cursor_programming_err(
-            py,
-            "fetchmany size must not be negative",
-        )),
-        Some(n) => Ok(Some(n as usize)),
-    }
 }
 
 fn lock_state(state: &Mutex<CursorState>) -> MutexGuard<'_, CursorState> {
@@ -690,14 +549,11 @@ impl PySyncBigQueryCursor {
     }
 
     #[pyo3(signature = (size=None))]
-    fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Vec<Py<PyTuple>>> {
-        let mut state = self.state();
-        state.ensure_open(py)?;
-        let wanted = parse_fetchmany_size(py, size)?;
-        state.fetchmany(py, wanted)
+    fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<PyList>> {
+        self.state().fetchmany(py, size)
     }
 
-    fn fetchall(&self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
+    fn fetchall(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         self.state().fetchall(py)
     }
 
@@ -924,18 +780,13 @@ impl PyAsyncBigQueryCursor {
 
     #[pyo3(signature = (size=None))]
     fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<ReadyAwaitable>> {
-        let rows = {
-            let mut state = self.state();
-            state.ensure_open(py)?;
-            let wanted = parse_fetchmany_size(py, size)?;
-            state.fetchmany(py, wanted)?
-        };
-        ready_ok(py, PyList::new(py, rows)?.into_any().unbind())
+        let rows = self.state().fetchmany(py, size)?;
+        ready_ok(py, rows.into_any())
     }
 
     fn fetchall(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
         let rows = self.state().fetchall(py)?;
-        ready_ok(py, PyList::new(py, rows)?.into_any().unbind())
+        ready_ok(py, rows.into_any())
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
@@ -1013,14 +864,14 @@ mod tests {
             assert!(!state.closed);
 
             assert!(state.fetchone(py).unwrap().is_none());
-            assert!(state.fetchmany(py, None).unwrap().is_empty());
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert!(state.fetchmany(py, None).unwrap().bind(py).is_empty());
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
 
             state.store(None, Vec::new(), 3, None);
             assert_eq!(state.rowcount, 3);
             assert!(state.executed);
             assert!(state.fetchone(py).unwrap().is_none());
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
         });
     }
 
@@ -1033,7 +884,7 @@ mod tests {
             state.store(Some(desc), Vec::new(), 0, None);
             assert!(state.description.is_some());
             assert_eq!(state.rowcount, 0);
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
             assert!(state.fetchone(py).unwrap().is_none());
         });
     }
@@ -1049,11 +900,11 @@ mod tests {
             state.set_arraysize(py, 2).unwrap();
             state.store(Some(desc.clone_ref(py)), rows, 5, None);
 
-            assert!(state.fetchmany(py, Some(0)).unwrap().is_empty());
-            assert_eq!(state.fetchmany(py, None).unwrap().len(), 2);
-            assert_eq!(state.fetchmany(py, None).unwrap().len(), 2);
-            assert_eq!(state.fetchmany(py, None).unwrap().len(), 1);
-            assert!(state.fetchmany(py, None).unwrap().is_empty());
+            assert!(state.fetchmany(py, Some(0)).unwrap().bind(py).is_empty());
+            assert_eq!(state.fetchmany(py, None).unwrap().bind(py).len(), 2);
+            assert_eq!(state.fetchmany(py, None).unwrap().bind(py).len(), 2);
+            assert_eq!(state.fetchmany(py, None).unwrap().bind(py).len(), 1);
+            assert!(state.fetchmany(py, None).unwrap().bind(py).is_empty());
 
             let rows2 = (1..=5).map(|i| make_row(py, i)).collect();
             state.store(Some(desc), rows2, 5, None);
@@ -1068,8 +919,8 @@ mod tests {
                 1
             );
             let rest = state.fetchall(py).unwrap();
-            assert_eq!(rest.len(), 4);
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert_eq!(rest.bind(py).len(), 4);
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
 
             let err = state.set_arraysize(py, 0).unwrap_err();
             assert_eq!(
@@ -1245,7 +1096,7 @@ mod tests {
             assert_eq!(state.rowcount, 2);
             assert!(state.description.is_some());
             assert!(state.lastrowid.is_none());
-            assert_eq!(state.fetchall(py).unwrap().len(), 2);
+            assert_eq!(state.fetchall(py).unwrap().bind(py).len(), 2);
         });
     }
 

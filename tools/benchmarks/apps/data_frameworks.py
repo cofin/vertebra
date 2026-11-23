@@ -14,6 +14,7 @@ import inspect
 import os
 import sys
 import types
+from collections.abc import Callable
 from typing import Annotated, Any, Final
 
 from tools.benchmarks.apps._data_backend import (
@@ -56,21 +57,472 @@ _DJANGO_URLCONF_NAME: Final[str] = "_vertebra_bench_django_urls"
 _DJANGO_WSGI_URLCONF_NAME: Final[str] = "_vertebra_bench_django_wsgi_urls"
 _DJANGO_BOLT_SETTINGS_KEY: Final[str] = "test-token-placeholder"
 
+type ResponseFactory = Callable[[bytes, int, str], Any]
+
+
+class _DataEndpointBundle:
+    """Shared async/sync endpoint handler constructors across benchmark web frameworks."""
+
+    __slots__ = ("_backend", "_make_response")
+
+    def __init__(self, backend: DataBackend, make_response: ResponseFactory) -> None:
+        self._backend = backend
+        self._make_response = make_response
+
+    def make_async_core(self) -> dict[str, Any]:
+        """Build independent async handler closures for signature-bound frameworks."""
+        backend = self._backend
+        resp = self._make_response
+
+        async def json_endpoint() -> Any:
+            return resp(JSON_HELLO_PAYLOAD, 200, _JSON_MEDIA_TYPE)
+
+        async def db_endpoint() -> Any:
+            return resp(encode_json_bytes(await backend.get_world()), 200, _JSON_MEDIA_TYPE)
+
+        async def queries_endpoint(queries: str | None = None) -> Any:
+            return resp(encode_json_bytes(await backend.get_worlds(clamp_query_count(queries))), 200, _JSON_MEDIA_TYPE)
+
+        async def updates_endpoint(queries: str | None = None) -> Any:
+            return resp(
+                encode_json_bytes(await backend.update_worlds(clamp_query_count(queries))), 200, _JSON_MEDIA_TYPE
+            )
+
+        async def cached_queries_endpoint(count: str | None = None) -> Any:
+            return resp(
+                encode_json_bytes(await backend.get_cached_worlds(clamp_query_count(count))), 200, _JSON_MEDIA_TYPE
+            )
+
+        async def get_object_endpoint(key: str) -> Any:
+            payload = await backend.get_object(key)
+            if payload is None:
+                return resp(b"Not Found", 404, _TEXT_MEDIA_TYPE)
+            return resp(payload, 200, _BINARY_MEDIA_TYPE)
+
+        async def health_endpoint() -> Any:
+            return resp(b"ok", 200, _TEXT_MEDIA_TYPE)
+
+        return {
+            "json": json_endpoint,
+            "db": db_endpoint,
+            "queries": queries_endpoint,
+            "updates": updates_endpoint,
+            "cached": cached_queries_endpoint,
+            "get_object": get_object_endpoint,
+            "health": health_endpoint,
+        }
+
+    async def put_payload_async(self, key: str, data: bytes) -> Any:
+        """Persist an object asynchronously and return a JSON response."""
+        size = await self._backend.put_object(key, data)
+        return self._make_response(encode_json_bytes({"key": key, "size": size}), 200, _JSON_MEDIA_TYPE)
+
+    def make_get_object_sync(self, key: str) -> Any:
+        """Fetch an object synchronously and format HTTP 200/404 response."""
+        payload = self._backend.get_object_sync(key)
+        if payload is None:
+            return self._make_response(b"Not Found", 404, _TEXT_MEDIA_TYPE)
+        return self._make_response(payload, 200, _BINARY_MEDIA_TYPE)
+
+    def put_payload_sync(self, key: str, data: bytes) -> Any:
+        """Persist an object synchronously and return a JSON response."""
+        size = self._backend.put_object_sync(key, data)
+        return self._make_response(encode_json_bytes({"key": key, "size": size}), 200, _JSON_MEDIA_TYPE)
+
+
+def build_django_bolt_command(host: str, port: int, workers: int) -> list[str]:
+    """Build the ``django-bolt`` ``runbolt`` command invocation."""
+    return [
+        sys.executable,
+        "-m",
+        "django",
+        "runbolt",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--processes",
+        str(max(1, workers)),
+    ]
+
+
+def create_django_bolt_app(backend: DataBackend | None = None) -> Any:
+    """Create a ``django-bolt`` ``BoltAPI`` app backed by ``DataBackend``."""
+    django_bolt = _require_framework("django_bolt", "django-bolt", "bench-comparators")
+    _ensure_django_settings(installed_apps=["django_bolt"])
+    api = django_bolt.BoltAPI()
+    response_cls = getattr(django_bolt, "Response", None)
+
+    def _make_response(content: bytes, status_code: int, media_type: str) -> Any:
+        if response_cls is not None:
+            return response_cls(content, status_code=status_code, media_type=media_type)
+        return content
+
+    bundle = _DataEndpointBundle(_resolve_backend(backend), _make_response)
+    handlers = bundle.make_async_core()
+
+    async def put_object_endpoint(key: str, request: Any) -> Any:
+        raw_body: Any = getattr(request, "body", b"")
+        if callable(raw_body):
+            raw_body = raw_body()
+        if inspect.isawaitable(raw_body):
+            raw_body = await raw_body
+        data = raw_body if isinstance(raw_body, bytes) else bytes(raw_body)
+        return await bundle.put_payload_async(key, data)
+
+    _register_decorator_routes(api, handlers, put_object_endpoint)
+    return api
+
+
+def create_litestar_app(backend: DataBackend | None = None) -> Any:
+    """Create a Litestar ASGI application backed by ``DataBackend``."""
+    litestar_mod = _require_framework("litestar", "litestar", "bench-comparators")
+    litestar_params = import_optional("litestar.params")
+    response_cls = litestar_mod.Response
+    request_cls = litestar_mod.Request
+    bundle = _DataEndpointBundle(
+        _resolve_backend(backend),
+        lambda content, status_code, media_type: response_cls(
+            content=content, status_code=status_code, media_type=media_type
+        ),
+    )
+    handlers = bundle.make_async_core()
+
+    async def put_object_endpoint(key: str, request: Any) -> Any:
+        return await bundle.put_payload_async(key, await request.body())
+
+    parameter_cls: Any = getattr(litestar_params, "QueryParameter", None) if litestar_params is not None else None
+    path_parameter_cls: Any = getattr(litestar_params, "PathParameter", None) if litestar_params is not None else None
+    if parameter_cls is not None:
+        handlers["queries"].__annotations__ = {
+            "queries": Annotated[str | None, parameter_cls(name="queries", required=False)],
+            "return": Any,
+        }
+        handlers["updates"].__annotations__ = {
+            "queries": Annotated[str | None, parameter_cls(name="queries", required=False)],
+            "return": Any,
+        }
+        handlers["cached"].__annotations__ = {
+            "count": Annotated[str | None, parameter_cls(name="count", required=False)],
+            "return": Any,
+        }
+    key_annotation: Any = Annotated[str, path_parameter_cls()] if path_parameter_cls is not None else str
+    handlers["get_object"].__annotations__ = {"key": key_annotation, "return": Any}
+    put_object_endpoint.__annotations__ = {"key": key_annotation, "request": request_cls, "return": Any}
+
+    return litestar_mod.Litestar(
+        route_handlers=[
+            litestar_mod.get("/json")(handlers["json"]),
+            litestar_mod.get("/db")(handlers["db"]),
+            litestar_mod.get("/queries")(handlers["queries"]),
+            litestar_mod.get("/updates")(handlers["updates"]),
+            litestar_mod.get("/cached-queries")(handlers["cached"]),
+            litestar_mod.get("/object/{key:str}")(handlers["get_object"]),
+            litestar_mod.put("/object/{key:str}")(put_object_endpoint),
+            litestar_mod.get("/health")(handlers["health"]),
+        ],
+        openapi_config=None,
+    )
+
+
+def create_fastapi_app(backend: DataBackend | None = None) -> Any:
+    """Create a FastAPI ASGI application backed by ``DataBackend``."""
+    fastapi_mod = _require_framework("fastapi", "fastapi", "bench-comparators")
+    app = fastapi_mod.FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    response_cls = fastapi_mod.Response
+    bundle = _DataEndpointBundle(
+        _resolve_backend(backend),
+        lambda content, status_code, media_type: response_cls(
+            content=content, status_code=status_code, media_type=media_type
+        ),
+    )
+    handlers = bundle.make_async_core()
+
+    async def put_object_endpoint(key: str, request: Any) -> Any:
+        return await bundle.put_payload_async(key, await request.body())
+
+    put_object_endpoint.__annotations__ = {"key": str, "request": fastapi_mod.Request, "return": Any}
+    _register_decorator_routes(app, handlers, put_object_endpoint)
+    return app
+
+
+def create_django_app(backend: DataBackend | None = None) -> Any:
+    """Create a standard Django ASGI application backed by ``DataBackend``."""
+    return _create_django_interface_app(backend, is_async=True)
+
+
+def create_django_wsgi_app(backend: DataBackend | None = None) -> Any:
+    """Create a standard sync Django WSGI application backed by ``DataBackend``."""
+    return _create_django_interface_app(backend, is_async=False)
+
+
+def create_flask_app(backend: DataBackend | None = None) -> Any:
+    """Create a Flask WSGI application backed by ``DataBackend`` sync methods."""
+    flask_mod = _require_framework("flask", "flask", "bench-comparators")
+    resolved_backend = _resolve_backend(backend)
+    app = flask_mod.Flask("vertebra_bench_flask")
+    response_cls = flask_mod.Response
+    flask_request = flask_mod.request
+    bundle = _DataEndpointBundle(
+        resolved_backend,
+        lambda content, status_code, media_type: response_cls(content, status=status_code, mimetype=media_type),
+    )
+
+    app.add_url_rule(
+        "/json",
+        "json_endpoint",
+        lambda: response_cls(JSON_HELLO_PAYLOAD, status=200, mimetype=_JSON_MEDIA_TYPE),
+    )
+    app.add_url_rule(
+        "/db",
+        "db_endpoint",
+        lambda: response_cls(
+            encode_json_bytes(resolved_backend.get_world_sync()), status=200, mimetype=_JSON_MEDIA_TYPE
+        ),
+    )
+    app.add_url_rule(
+        "/queries",
+        "queries_endpoint",
+        lambda: response_cls(
+            encode_json_bytes(resolved_backend.get_worlds_sync(clamp_query_count(flask_request.args.get("queries")))),
+            status=200,
+            mimetype=_JSON_MEDIA_TYPE,
+        ),
+    )
+    app.add_url_rule(
+        "/updates",
+        "updates_endpoint",
+        lambda: response_cls(
+            encode_json_bytes(
+                resolved_backend.update_worlds_sync(clamp_query_count(flask_request.args.get("queries")))
+            ),
+            status=200,
+            mimetype=_JSON_MEDIA_TYPE,
+        ),
+    )
+    app.add_url_rule(
+        "/cached-queries",
+        "cached_queries_endpoint",
+        lambda: response_cls(
+            encode_json_bytes(
+                resolved_backend.get_cached_worlds_sync(clamp_query_count(flask_request.args.get("count")))
+            ),
+            status=200,
+            mimetype=_JSON_MEDIA_TYPE,
+        ),
+    )
+    app.add_url_rule("/object/<key>", "get_object_endpoint", bundle.make_get_object_sync, methods=["GET"])
+    app.add_url_rule(
+        "/object/<key>",
+        "put_object_endpoint",
+        lambda key: bundle.put_payload_sync(key, flask_request.get_data()),
+        methods=["PUT"],
+    )
+    app.add_url_rule(
+        "/health",
+        "health_endpoint",
+        lambda: response_cls(b"ok", status=200, mimetype=_TEXT_MEDIA_TYPE),
+    )
+    return app
+
+
+def create_spikard_data_app(backend: DataBackend | None = None) -> Any:
+    """Create a Spikard application backed by ``DataBackend``."""
+    spikard_mod = _require_framework("spikard", "spikard", "bench")
+    response_cls = spikard_mod.Response
+    app = spikard_mod.App(
+        config=spikard_mod.ServerConfig(
+            host=os.environ.get("SPIKARD_HOST", "127.0.0.1"),
+            port=int(os.environ.get("SPIKARD_PORT", "8005")),
+            compression=None,
+            enable_request_id=False,
+            rate_limit=None,
+        )
+    )
+
+    def _spikard_response(content: bytes, status_code: int, media_type: str) -> Any:
+        text = content.decode("latin1") if media_type == _BINARY_MEDIA_TYPE else content.decode("utf-8")
+        return response_cls(content=text, status_code=status_code, headers={"content-type": media_type})
+
+    bundle = _DataEndpointBundle(_resolve_backend(backend), _spikard_response)
+    handlers = bundle.make_async_core()
+
+    async def put_object_endpoint(key: str, body: bytes = b"") -> Any:
+        data = body if isinstance(body, bytes) else str(body).encode("latin1")
+        return await bundle.put_payload_async(key, data)
+
+    _register_decorator_routes(app, handlers, put_object_endpoint)
+    return app
+
+
+def create_blacksheep_app(backend: DataBackend | None = None) -> Any:
+    """Create a BlackSheep ASGI application backed by ``DataBackend``."""
+    blacksheep_mod = _require_framework("blacksheep", "blacksheep", "bench-comparators")
+    router_cls = getattr(blacksheep_mod, "Router", None)
+    app = blacksheep_mod.Application(router=router_cls()) if router_cls is not None else blacksheep_mod.Application()
+    response_cls = blacksheep_mod.Response
+    content_cls = blacksheep_mod.Content
+    bundle = _DataEndpointBundle(
+        _resolve_backend(backend),
+        lambda content, status_code, media_type: response_cls(
+            status_code, content=content_cls(media_type.encode("ascii"), content)
+        ),
+    )
+    handlers = bundle.make_async_core()
+
+    async def put_object_endpoint(key: str, request: Any) -> Any:
+        body = await request.read() or b""
+        return await bundle.put_payload_async(key, body)
+
+    put_object_endpoint.__annotations__ = {"key": str, "request": blacksheep_mod.Request, "return": Any}
+    app.router.add_get("/json", handlers["json"])
+    app.router.add_get("/db", handlers["db"])
+    app.router.add_get("/queries", handlers["queries"])
+    app.router.add_get("/updates", handlers["updates"])
+    app.router.add_get("/cached-queries", handlers["cached"])
+    app.router.add_get("/object/{key}", handlers["get_object"])
+    app.router.add_put("/object/{key}", put_object_endpoint)
+    app.router.add_get("/health", handlers["health"])
+    return app
+
+
+def _register_decorator_routes(app: Any, handlers: dict[str, Any], put_object_endpoint: Any) -> None:
+    app.get("/json")(handlers["json"])
+    app.get("/db")(handlers["db"])
+    app.get("/queries")(handlers["queries"])
+    app.get("/updates")(handlers["updates"])
+    app.get("/cached-queries")(handlers["cached"])
+    app.get("/object/{key}")(handlers["get_object"])
+    app.put("/object/{key}")(put_object_endpoint)
+    app.get("/health")(handlers["health"])
+
+
+def _create_django_interface_app(backend: DataBackend | None, *, is_async: bool) -> Any:
+    django_mod = _require_framework("django", "django", "bench-comparators")
+    django_http = _require_framework("django.http", "django", "bench-comparators")
+    django_urls = _require_framework("django.urls", "django", "bench-comparators")
+    resolved_backend = _resolve_backend(backend)
+    http_response = django_http.HttpResponse
+    urlconf_name = _DJANGO_URLCONF_NAME if is_async else _DJANGO_WSGI_URLCONF_NAME
+
+    if is_async:
+        django_iface = _require_framework("django.core.asgi", "django", "bench-comparators")
+
+        async def json_view(_request: Any) -> Any:
+            return http_response(JSON_HELLO_PAYLOAD, status=200, content_type=_JSON_MEDIA_TYPE)
+
+        async def db_view(_request: Any) -> Any:
+            return http_response(
+                encode_json_bytes(await resolved_backend.get_world()), status=200, content_type=_JSON_MEDIA_TYPE
+            )
+
+        async def queries_view(request: Any) -> Any:
+            rows = await resolved_backend.get_worlds(clamp_query_count(request.GET.get("queries")))
+            return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
+
+        async def updates_view(request: Any) -> Any:
+            rows = await resolved_backend.update_worlds(clamp_query_count(request.GET.get("queries")))
+            return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
+
+        async def cached_queries_view(request: Any) -> Any:
+            rows = await resolved_backend.get_cached_worlds(clamp_query_count(request.GET.get("count")))
+            return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
+
+        async def object_view(request: Any, key: str) -> Any:
+            if request.method == "PUT":
+                size = await resolved_backend.put_object(key, bytes(request.body))
+                return http_response(
+                    encode_json_bytes({"key": key, "size": size}), status=200, content_type=_JSON_MEDIA_TYPE
+                )
+            if request.method == "GET":
+                payload = await resolved_backend.get_object(key)
+                if payload is None:
+                    return http_response(b"Not Found", status=404, content_type=_TEXT_MEDIA_TYPE)
+                return http_response(payload, status=200, content_type=_BINARY_MEDIA_TYPE)
+            return http_response(b"Method Not Allowed", status=405, content_type=_TEXT_MEDIA_TYPE)
+
+        async def health_view(_request: Any) -> Any:
+            return http_response(b"ok", status=200, content_type=_TEXT_MEDIA_TYPE)
+
+        urls = [
+            django_urls.path("json", json_view),
+            django_urls.path("db", db_view),
+            django_urls.path("queries", queries_view),
+            django_urls.path("updates", updates_view),
+            django_urls.path("cached-queries", cached_queries_view),
+            django_urls.path("object/<str:key>", object_view),
+            django_urls.path("health", health_view),
+        ]
+    else:
+        django_iface = _require_framework("django.core.wsgi", "django", "bench-comparators")
+
+        def s_object_view(request: Any, key: str) -> Any:
+            if request.method == "PUT":
+                size = resolved_backend.put_object_sync(key, bytes(request.body))
+                return http_response(
+                    encode_json_bytes({"key": key, "size": size}), status=200, content_type=_JSON_MEDIA_TYPE
+                )
+            if request.method == "GET":
+                payload = resolved_backend.get_object_sync(key)
+                if payload is None:
+                    return http_response(b"Not Found", status=404, content_type=_TEXT_MEDIA_TYPE)
+                return http_response(payload, status=200, content_type=_BINARY_MEDIA_TYPE)
+            return http_response(b"Method Not Allowed", status=405, content_type=_TEXT_MEDIA_TYPE)
+
+        urls = [
+            django_urls.path(
+                "json", lambda _r: http_response(JSON_HELLO_PAYLOAD, status=200, content_type=_JSON_MEDIA_TYPE)
+            ),
+            django_urls.path(
+                "db",
+                lambda _r: http_response(
+                    encode_json_bytes(resolved_backend.get_world_sync()), status=200, content_type=_JSON_MEDIA_TYPE
+                ),
+            ),
+            django_urls.path(
+                "queries",
+                lambda r: http_response(
+                    encode_json_bytes(resolved_backend.get_worlds_sync(clamp_query_count(r.GET.get("queries")))),
+                    status=200,
+                    content_type=_JSON_MEDIA_TYPE,
+                ),
+            ),
+            django_urls.path(
+                "updates",
+                lambda r: http_response(
+                    encode_json_bytes(resolved_backend.update_worlds_sync(clamp_query_count(r.GET.get("queries")))),
+                    status=200,
+                    content_type=_JSON_MEDIA_TYPE,
+                ),
+            ),
+            django_urls.path(
+                "cached-queries",
+                lambda r: http_response(
+                    encode_json_bytes(resolved_backend.get_cached_worlds_sync(clamp_query_count(r.GET.get("count")))),
+                    status=200,
+                    content_type=_JSON_MEDIA_TYPE,
+                ),
+            ),
+            django_urls.path("object/<str:key>", s_object_view),
+            django_urls.path("health", lambda _r: http_response(b"ok", status=200, content_type=_TEXT_MEDIA_TYPE)),
+        ]
+
+    class _DjangoURLConfModule(types.ModuleType):
+        urlpatterns: list[Any]
+
+    urlconf_module = _DjangoURLConfModule(urlconf_name)
+    urlconf_module.urlpatterns = urls
+    sys.modules[urlconf_name] = urlconf_module
+
+    _ensure_django_settings(root_urlconf=urlconf_name)
+    django_apps = _require_framework("django.apps", "django", "bench-comparators")
+    if not django_apps.apps.ready:
+        django_mod.setup()
+    django_urls.clear_url_caches()
+    return django_iface.get_asgi_application() if is_async else django_iface.get_wsgi_application()
+
 
 def _require_framework(module_name: str, package_name: str, dependency_group: str) -> Any:
-    """Import an optional framework module or raise an actionable ``ImportError``.
-
-    Args:
-        module_name: Python import path to load via ``import_optional``.
-        package_name: Distribution or package name to surface in the error.
-        dependency_group: ``uv`` dependency group that provides the package.
-
-    Returns:
-        Imported module object.
-
-    Raises:
-        ImportError: When the optional framework package is not installed.
-    """
     module = import_optional(module_name)
     if module is None:
         msg = (
@@ -82,7 +534,6 @@ def _require_framework(module_name: str, package_name: str, dependency_group: st
 
 
 def _resolve_backend(backend: DataBackend | None) -> DataBackend:
-    """Return the provided ``DataBackend`` or the process-local default."""
     return get_default_backend() if backend is None else backend
 
 
@@ -91,15 +542,6 @@ def _ensure_django_settings(
     installed_apps: list[str] | None = None,
     root_urlconf: str | None = None,
 ) -> Any:
-    """Configure minimal in-memory Django settings if not already configured.
-
-    Args:
-        installed_apps: Optional list of Django ``INSTALLED_APPS`` entries.
-        root_urlconf: Optional ``ROOT_URLCONF`` module path.
-
-    Returns:
-        Django's ``settings`` object.
-    """
     django_conf = _require_framework("django.conf", "django", "bench-comparators")
     settings = django_conf.settings
     if not settings.configured:
@@ -116,761 +558,6 @@ def _ensure_django_settings(
     elif root_urlconf is not None:
         settings.ROOT_URLCONF = root_urlconf
     return settings
-
-
-def build_django_bolt_command(host: str, port: int, workers: int) -> list[str]:
-    """Build the ``django-bolt`` ``runbolt`` command invocation.
-
-    Args:
-        host: Bind address for the server.
-        port: Bind TCP port for the server.
-        workers: Number of worker processes to spawn.
-
-    Returns:
-        Command argv list invoking Django's ``runbolt`` management command with
-        ``--host``, ``--port``, and ``--processes`` flags.
-    """
-    resolved_workers = max(1, workers)
-    return [
-        sys.executable,
-        "-m",
-        "django",
-        "runbolt",
-        "--host",
-        host,
-        "--port",
-        str(port),
-        "--processes",
-        str(resolved_workers),
-    ]
-
-
-def create_django_bolt_app(backend: DataBackend | None = None) -> Any:
-    """Create a ``django-bolt`` ``BoltAPI`` app backed by ``DataBackend``.
-
-    Args:
-        backend: Optional ``DataBackend`` instance. Uses the process-local
-            default backend when omitted.
-
-    Returns:
-        Configured ``django_bolt.BoltAPI`` instance.
-
-    Raises:
-        ImportError: If ``django-bolt`` or ``django`` is not installed.
-    """
-    django_bolt = _require_framework("django_bolt", "django-bolt", "bench-comparators")
-    _ensure_django_settings(installed_apps=["django_bolt"])
-    resolved_backend = _resolve_backend(backend)
-    api = django_bolt.BoltAPI()
-    response_cls = getattr(django_bolt, "Response", None)
-
-    def _make_response(content: bytes, status_code: int, media_type: str) -> Any:
-        if response_cls is not None:
-            return response_cls(content, status_code=status_code, media_type=media_type)
-        return content
-
-    async def json_endpoint() -> Any:
-        """Return the TechEmpower JSON hello payload."""
-        return _make_response(JSON_HELLO_PAYLOAD, 200, _JSON_MEDIA_TYPE)
-
-    async def db_endpoint() -> Any:
-        """Return a single randomly selected World row as JSON."""
-        row = await resolved_backend.get_world()
-        return _make_response(encode_json_bytes(row), 200, _JSON_MEDIA_TYPE)
-
-    async def queries_endpoint(queries: str | None = None) -> Any:
-        """Return ``queries`` randomly selected World rows as JSON."""
-        count = clamp_query_count(queries)
-        rows = await resolved_backend.get_worlds(count)
-        return _make_response(encode_json_bytes(rows), 200, _JSON_MEDIA_TYPE)
-
-    async def updates_endpoint(queries: str | None = None) -> Any:
-        """Read and update ``queries`` random World rows and return them as JSON."""
-        count = clamp_query_count(queries)
-        rows = await resolved_backend.update_worlds(count)
-        return _make_response(encode_json_bytes(rows), 200, _JSON_MEDIA_TYPE)
-
-    async def cached_queries_endpoint(count: str | None = None) -> Any:
-        """Return ``count`` cached World rows as JSON."""
-        resolved_count = clamp_query_count(count)
-        rows = await resolved_backend.get_cached_worlds(resolved_count)
-        return _make_response(encode_json_bytes(rows), 200, _JSON_MEDIA_TYPE)
-
-    async def get_object_endpoint(key: str) -> Any:
-        """Fetch an object payload by key or return HTTP 404 when absent."""
-        payload = await resolved_backend.get_object(key)
-        if payload is None:
-            return _make_response(b"Not Found", 404, _TEXT_MEDIA_TYPE)
-        return _make_response(payload, 200, _BINARY_MEDIA_TYPE)
-
-    async def put_object_endpoint(key: str, request: Any) -> Any:
-        """Store an object payload by key and return its persisted byte length."""
-        raw_body: Any = getattr(request, "body", b"")
-        if callable(raw_body):
-            raw_body = raw_body()
-        if inspect.isawaitable(raw_body):
-            raw_body = await raw_body
-        data = raw_body if isinstance(raw_body, bytes) else bytes(raw_body)
-        size = await resolved_backend.put_object(key, data)
-        return _make_response(encode_json_bytes({"key": key, "size": size}), 200, _JSON_MEDIA_TYPE)
-
-    async def health_endpoint() -> Any:
-        """Return a lightweight readiness payload."""
-        return _make_response(b"ok", 200, _TEXT_MEDIA_TYPE)
-
-    api.get("/json")(json_endpoint)
-    api.get("/db")(db_endpoint)
-    api.get("/queries")(queries_endpoint)
-    api.get("/updates")(updates_endpoint)
-    api.get("/cached-queries")(cached_queries_endpoint)
-    api.get("/object/{key}")(get_object_endpoint)
-    api.put("/object/{key}")(put_object_endpoint)
-    api.get("/health")(health_endpoint)
-    return api
-
-
-def create_litestar_app(backend: DataBackend | None = None) -> Any:
-    """Create a Litestar ASGI application backed by ``DataBackend``.
-
-    Args:
-        backend: Optional ``DataBackend`` instance. Uses the process-local
-            default backend when omitted.
-
-    Returns:
-        Configured ``litestar.Litestar`` ASGI application.
-
-    Raises:
-        ImportError: If ``litestar`` is not installed.
-    """
-    litestar_mod = _require_framework("litestar", "litestar", "bench-comparators")
-    litestar_params = import_optional("litestar.params")
-    resolved_backend = _resolve_backend(backend)
-    litestar_cls = litestar_mod.Litestar
-    response_cls = litestar_mod.Response
-    request_cls = litestar_mod.Request
-    get_decorator = litestar_mod.get
-    put_decorator = litestar_mod.put
-    parameter_cls: Any = getattr(litestar_params, "QueryParameter", None) if litestar_params is not None else None
-    path_parameter_cls: Any = getattr(litestar_params, "PathParameter", None) if litestar_params is not None else None
-
-    async def json_endpoint() -> Any:
-        """Return the TechEmpower JSON hello payload."""
-        return response_cls(content=JSON_HELLO_PAYLOAD, status_code=200, media_type=_JSON_MEDIA_TYPE)
-
-    async def db_endpoint() -> Any:
-        """Return a single randomly selected World row as JSON."""
-        row = await resolved_backend.get_world()
-        return response_cls(content=encode_json_bytes(row), status_code=200, media_type=_JSON_MEDIA_TYPE)
-
-    async def queries_endpoint(queries: str | None = None) -> Any:
-        """Return ``queries`` randomly selected World rows as JSON."""
-        count = clamp_query_count(queries)
-        rows = await resolved_backend.get_worlds(count)
-        return response_cls(content=encode_json_bytes(rows), status_code=200, media_type=_JSON_MEDIA_TYPE)
-
-    async def updates_endpoint(queries: str | None = None) -> Any:
-        """Read and update ``queries`` random World rows and return them as JSON."""
-        count = clamp_query_count(queries)
-        rows = await resolved_backend.update_worlds(count)
-        return response_cls(content=encode_json_bytes(rows), status_code=200, media_type=_JSON_MEDIA_TYPE)
-
-    async def cached_queries_endpoint(count: str | None = None) -> Any:
-        """Return ``count`` cached World rows as JSON."""
-        resolved_count = clamp_query_count(count)
-        rows = await resolved_backend.get_cached_worlds(resolved_count)
-        return response_cls(content=encode_json_bytes(rows), status_code=200, media_type=_JSON_MEDIA_TYPE)
-
-    async def get_object_endpoint(key: str) -> Any:
-        """Fetch an object payload by key or return HTTP 404 when absent."""
-        payload = await resolved_backend.get_object(key)
-        if payload is None:
-            return response_cls(content=b"Not Found", status_code=404, media_type=_TEXT_MEDIA_TYPE)
-        return response_cls(content=payload, status_code=200, media_type=_BINARY_MEDIA_TYPE)
-
-    async def put_object_endpoint(key: str, request: Any) -> Any:
-        """Store an object payload by key and return its persisted byte length."""
-        body = await request.body()
-        size = await resolved_backend.put_object(key, body)
-        return response_cls(
-            content=encode_json_bytes({"key": key, "size": size}),
-            status_code=200,
-            media_type=_JSON_MEDIA_TYPE,
-        )
-
-    async def health_endpoint() -> Any:
-        """Return a lightweight readiness payload."""
-        return response_cls(content=b"ok", status_code=200, media_type=_TEXT_MEDIA_TYPE)
-
-    if parameter_cls is not None:
-        queries_endpoint.__annotations__ = {
-            "queries": Annotated[str | None, parameter_cls(name="queries", required=False)],
-            "return": Any,
-        }
-        updates_endpoint.__annotations__ = {
-            "queries": Annotated[str | None, parameter_cls(name="queries", required=False)],
-            "return": Any,
-        }
-        cached_queries_endpoint.__annotations__ = {
-            "count": Annotated[str | None, parameter_cls(name="count", required=False)],
-            "return": Any,
-        }
-    key_annotation: Any = Annotated[str, path_parameter_cls()] if path_parameter_cls is not None else str
-    get_object_endpoint.__annotations__ = {"key": key_annotation, "return": Any}
-    put_object_endpoint.__annotations__ = {"key": key_annotation, "request": request_cls, "return": Any}
-
-    return litestar_cls(
-        route_handlers=[
-            get_decorator("/json")(json_endpoint),
-            get_decorator("/db")(db_endpoint),
-            get_decorator("/queries")(queries_endpoint),
-            get_decorator("/updates")(updates_endpoint),
-            get_decorator("/cached-queries")(cached_queries_endpoint),
-            get_decorator("/object/{key:str}")(get_object_endpoint),
-            put_decorator("/object/{key:str}")(put_object_endpoint),
-            get_decorator("/health")(health_endpoint),
-        ],
-        openapi_config=None,
-    )
-
-
-def create_fastapi_app(backend: DataBackend | None = None) -> Any:
-    """Create a FastAPI ASGI application backed by ``DataBackend``.
-
-    Args:
-        backend: Optional ``DataBackend`` instance. Uses the process-local
-            default backend when omitted.
-
-    Returns:
-        Configured ``fastapi.FastAPI`` ASGI application.
-
-    Raises:
-        ImportError: If ``fastapi`` is not installed.
-    """
-    fastapi_mod = _require_framework("fastapi", "fastapi", "bench-comparators")
-    resolved_backend = _resolve_backend(backend)
-    app = fastapi_mod.FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    response_cls = fastapi_mod.Response
-    request_cls = fastapi_mod.Request
-
-    async def json_endpoint() -> Any:
-        """Return the TechEmpower JSON hello payload."""
-        return response_cls(content=JSON_HELLO_PAYLOAD, status_code=200, media_type=_JSON_MEDIA_TYPE)
-
-    async def db_endpoint() -> Any:
-        """Return a single randomly selected World row as JSON."""
-        row = await resolved_backend.get_world()
-        return response_cls(content=encode_json_bytes(row), status_code=200, media_type=_JSON_MEDIA_TYPE)
-
-    async def queries_endpoint(queries: str | None = None) -> Any:
-        """Return ``queries`` randomly selected World rows as JSON."""
-        count = clamp_query_count(queries)
-        rows = await resolved_backend.get_worlds(count)
-        return response_cls(content=encode_json_bytes(rows), status_code=200, media_type=_JSON_MEDIA_TYPE)
-
-    async def updates_endpoint(queries: str | None = None) -> Any:
-        """Read and update ``queries`` random World rows and return them as JSON."""
-        count = clamp_query_count(queries)
-        rows = await resolved_backend.update_worlds(count)
-        return response_cls(content=encode_json_bytes(rows), status_code=200, media_type=_JSON_MEDIA_TYPE)
-
-    async def cached_queries_endpoint(count: str | None = None) -> Any:
-        """Return ``count`` cached World rows as JSON."""
-        resolved_count = clamp_query_count(count)
-        rows = await resolved_backend.get_cached_worlds(resolved_count)
-        return response_cls(content=encode_json_bytes(rows), status_code=200, media_type=_JSON_MEDIA_TYPE)
-
-    async def get_object_endpoint(key: str) -> Any:
-        """Fetch an object payload by key or return HTTP 404 when absent."""
-        payload = await resolved_backend.get_object(key)
-        if payload is None:
-            return response_cls(content=b"Not Found", status_code=404, media_type=_TEXT_MEDIA_TYPE)
-        return response_cls(content=payload, status_code=200, media_type=_BINARY_MEDIA_TYPE)
-
-    async def put_object_endpoint(key: str, request: Any) -> Any:
-        """Store an object payload by key and return its persisted byte length."""
-        body = await request.body()
-        size = await resolved_backend.put_object(key, body)
-        return response_cls(
-            content=encode_json_bytes({"key": key, "size": size}),
-            status_code=200,
-            media_type=_JSON_MEDIA_TYPE,
-        )
-
-    async def health_endpoint() -> Any:
-        """Return a lightweight readiness payload."""
-        return response_cls(content=b"ok", status_code=200, media_type=_TEXT_MEDIA_TYPE)
-
-    put_object_endpoint.__annotations__ = {"key": str, "request": request_cls, "return": Any}
-    app.get("/json")(json_endpoint)
-    app.get("/db")(db_endpoint)
-    app.get("/queries")(queries_endpoint)
-    app.get("/updates")(updates_endpoint)
-    app.get("/cached-queries")(cached_queries_endpoint)
-    app.get("/object/{key}")(get_object_endpoint)
-    app.put("/object/{key}")(put_object_endpoint)
-    app.get("/health")(health_endpoint)
-    return app
-
-
-def create_django_app(backend: DataBackend | None = None) -> Any:
-    """Create a standard Django ASGI application backed by ``DataBackend``.
-
-    Args:
-        backend: Optional ``DataBackend`` instance. Uses the process-local
-            default backend when omitted.
-
-    Returns:
-        Django ASGI application callable with identical benchmark routes.
-
-    Raises:
-        ImportError: If ``django`` is not installed.
-    """
-    django_mod = _require_framework("django", "django", "bench-comparators")
-    django_http = _require_framework("django.http", "django", "bench-comparators")
-    django_urls = _require_framework("django.urls", "django", "bench-comparators")
-    django_asgi = _require_framework("django.core.asgi", "django", "bench-comparators")
-    resolved_backend = _resolve_backend(backend)
-    http_response = django_http.HttpResponse
-
-    async def json_view(_request: Any) -> Any:
-        """Return the TechEmpower JSON hello payload."""
-        return http_response(JSON_HELLO_PAYLOAD, status=200, content_type=_JSON_MEDIA_TYPE)
-
-    async def db_view(_request: Any) -> Any:
-        """Return a single randomly selected World row as JSON."""
-        row = await resolved_backend.get_world()
-        return http_response(encode_json_bytes(row), status=200, content_type=_JSON_MEDIA_TYPE)
-
-    async def queries_view(request: Any) -> Any:
-        """Return ``queries`` randomly selected World rows as JSON."""
-        count = clamp_query_count(request.GET.get("queries"))
-        rows = await resolved_backend.get_worlds(count)
-        return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
-
-    async def updates_view(request: Any) -> Any:
-        """Read and update ``queries`` random World rows and return them as JSON."""
-        count = clamp_query_count(request.GET.get("queries"))
-        rows = await resolved_backend.update_worlds(count)
-        return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
-
-    async def cached_queries_view(request: Any) -> Any:
-        """Return ``count`` cached World rows as JSON."""
-        resolved_count = clamp_query_count(request.GET.get("count"))
-        rows = await resolved_backend.get_cached_worlds(resolved_count)
-        return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
-
-    async def object_view(request: Any, key: str) -> Any:
-        """Handle ``GET`` and ``PUT`` object-storage operations for ``key``."""
-        if request.method == "PUT":
-            size = await resolved_backend.put_object(key, bytes(request.body))
-            return http_response(
-                encode_json_bytes({"key": key, "size": size}),
-                status=200,
-                content_type=_JSON_MEDIA_TYPE,
-            )
-        if request.method == "GET":
-            payload = await resolved_backend.get_object(key)
-            if payload is None:
-                return http_response(b"Not Found", status=404, content_type=_TEXT_MEDIA_TYPE)
-            return http_response(payload, status=200, content_type=_BINARY_MEDIA_TYPE)
-        return http_response(b"Method Not Allowed", status=405, content_type=_TEXT_MEDIA_TYPE)
-
-    async def health_view(_request: Any) -> Any:
-        """Return a lightweight readiness payload."""
-        return http_response(b"ok", status=200, content_type=_TEXT_MEDIA_TYPE)
-
-    class _DjangoURLConfModule(types.ModuleType):
-        """Dynamic module carrying Django ``urlpatterns`` for benchmark routing."""
-
-        urlpatterns: list[Any]
-
-    urlconf_module = _DjangoURLConfModule(_DJANGO_URLCONF_NAME)
-    urlconf_module.urlpatterns = [
-        django_urls.path("json", json_view),
-        django_urls.path("db", db_view),
-        django_urls.path("queries", queries_view),
-        django_urls.path("updates", updates_view),
-        django_urls.path("cached-queries", cached_queries_view),
-        django_urls.path("object/<str:key>", object_view),
-        django_urls.path("health", health_view),
-    ]
-    sys.modules[_DJANGO_URLCONF_NAME] = urlconf_module
-
-    _ensure_django_settings(root_urlconf=_DJANGO_URLCONF_NAME)
-    django_apps = _require_framework("django.apps", "django", "bench-comparators")
-    if not django_apps.apps.ready:
-        django_mod.setup()
-    django_urls.clear_url_caches()
-    return django_asgi.get_asgi_application()
-
-
-def create_django_wsgi_app(backend: DataBackend | None = None) -> Any:
-    """Create a standard sync Django WSGI application backed by ``DataBackend``.
-
-    Args:
-        backend: Optional ``DataBackend`` instance. Uses the process-local
-            default backend when omitted.
-
-    Returns:
-        Django WSGI application callable with identical benchmark routes.
-
-    Raises:
-        ImportError: If ``django`` is not installed.
-    """
-    django_mod = _require_framework("django", "django", "bench-comparators")
-    django_http = _require_framework("django.http", "django", "bench-comparators")
-    django_urls = _require_framework("django.urls", "django", "bench-comparators")
-    django_wsgi = _require_framework("django.core.wsgi", "django", "bench-comparators")
-    resolved_backend = _resolve_backend(backend)
-    http_response = django_http.HttpResponse
-
-    def json_view(_request: Any) -> Any:
-        """Return the TechEmpower JSON hello payload."""
-        return http_response(JSON_HELLO_PAYLOAD, status=200, content_type=_JSON_MEDIA_TYPE)
-
-    def db_view(_request: Any) -> Any:
-        """Return a single randomly selected World row as JSON."""
-        row = resolved_backend.get_world_sync()
-        return http_response(encode_json_bytes(row), status=200, content_type=_JSON_MEDIA_TYPE)
-
-    def queries_view(request: Any) -> Any:
-        """Return ``queries`` randomly selected World rows as JSON."""
-        count = clamp_query_count(request.GET.get("queries"))
-        rows = resolved_backend.get_worlds_sync(count)
-        return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
-
-    def updates_view(request: Any) -> Any:
-        """Read and update ``queries`` random World rows and return them as JSON."""
-        count = clamp_query_count(request.GET.get("queries"))
-        rows = resolved_backend.update_worlds_sync(count)
-        return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
-
-    def cached_queries_view(request: Any) -> Any:
-        """Return ``count`` cached World rows as JSON."""
-        resolved_count = clamp_query_count(request.GET.get("count"))
-        rows = resolved_backend.get_cached_worlds_sync(resolved_count)
-        return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
-
-    def object_view(request: Any, key: str) -> Any:
-        """Handle ``GET`` and ``PUT`` object-storage operations for ``key``."""
-        if request.method == "PUT":
-            size = resolved_backend.put_object_sync(key, bytes(request.body))
-            return http_response(
-                encode_json_bytes({"key": key, "size": size}),
-                status=200,
-                content_type=_JSON_MEDIA_TYPE,
-            )
-        if request.method == "GET":
-            payload = resolved_backend.get_object_sync(key)
-            if payload is None:
-                return http_response(b"Not Found", status=404, content_type=_TEXT_MEDIA_TYPE)
-            return http_response(payload, status=200, content_type=_BINARY_MEDIA_TYPE)
-        return http_response(b"Method Not Allowed", status=405, content_type=_TEXT_MEDIA_TYPE)
-
-    def health_view(_request: Any) -> Any:
-        """Return a lightweight readiness payload."""
-        return http_response(b"ok", status=200, content_type=_TEXT_MEDIA_TYPE)
-
-    class _DjangoWsgiURLConfModule(types.ModuleType):
-        """Dynamic module carrying sync Django WSGI ``urlpatterns``."""
-
-        urlpatterns: list[Any]
-
-    urlconf_module = _DjangoWsgiURLConfModule(_DJANGO_WSGI_URLCONF_NAME)
-    urlconf_module.urlpatterns = [
-        django_urls.path("json", json_view),
-        django_urls.path("db", db_view),
-        django_urls.path("queries", queries_view),
-        django_urls.path("updates", updates_view),
-        django_urls.path("cached-queries", cached_queries_view),
-        django_urls.path("object/<str:key>", object_view),
-        django_urls.path("health", health_view),
-    ]
-    sys.modules[_DJANGO_WSGI_URLCONF_NAME] = urlconf_module
-
-    _ensure_django_settings(root_urlconf=_DJANGO_WSGI_URLCONF_NAME)
-    django_apps = _require_framework("django.apps", "django", "bench-comparators")
-    if not django_apps.apps.ready:
-        django_mod.setup()
-    django_urls.clear_url_caches()
-    return django_wsgi.get_wsgi_application()
-
-
-def create_flask_app(backend: DataBackend | None = None) -> Any:
-    """Create a Flask WSGI application backed by ``DataBackend`` sync methods.
-
-    Args:
-        backend: Optional ``DataBackend`` instance. Uses the process-local
-            default backend when omitted.
-
-    Returns:
-        Configured ``flask.Flask`` WSGI application.
-
-    Raises:
-        ImportError: If ``flask`` is not installed.
-    """
-    flask_mod = _require_framework("flask", "flask", "bench-comparators")
-    resolved_backend = _resolve_backend(backend)
-    app = flask_mod.Flask("vertebra_bench_flask")
-    response_cls = flask_mod.Response
-    flask_request = flask_mod.request
-
-    def json_endpoint() -> Any:
-        """Return the TechEmpower JSON hello payload."""
-        return response_cls(JSON_HELLO_PAYLOAD, status=200, mimetype=_JSON_MEDIA_TYPE)
-
-    def db_endpoint() -> Any:
-        """Return a single randomly selected World row as JSON."""
-        row = resolved_backend.get_world_sync()
-        return response_cls(encode_json_bytes(row), status=200, mimetype=_JSON_MEDIA_TYPE)
-
-    def queries_endpoint() -> Any:
-        """Return ``queries`` randomly selected World rows as JSON."""
-        count = clamp_query_count(flask_request.args.get("queries"))
-        rows = resolved_backend.get_worlds_sync(count)
-        return response_cls(encode_json_bytes(rows), status=200, mimetype=_JSON_MEDIA_TYPE)
-
-    def updates_endpoint() -> Any:
-        """Read and update ``queries`` random World rows and return them as JSON."""
-        count = clamp_query_count(flask_request.args.get("queries"))
-        rows = resolved_backend.update_worlds_sync(count)
-        return response_cls(encode_json_bytes(rows), status=200, mimetype=_JSON_MEDIA_TYPE)
-
-    def cached_queries_endpoint() -> Any:
-        """Return ``count`` cached World rows as JSON."""
-        resolved_count = clamp_query_count(flask_request.args.get("count"))
-        rows = resolved_backend.get_cached_worlds_sync(resolved_count)
-        return response_cls(encode_json_bytes(rows), status=200, mimetype=_JSON_MEDIA_TYPE)
-
-    def get_object_endpoint(key: str) -> Any:
-        """Fetch an object payload by key or return HTTP 404 when absent."""
-        payload = resolved_backend.get_object_sync(key)
-        if payload is None:
-            return response_cls(b"Not Found", status=404, mimetype=_TEXT_MEDIA_TYPE)
-        return response_cls(payload, status=200, mimetype=_BINARY_MEDIA_TYPE)
-
-    def put_object_endpoint(key: str) -> Any:
-        """Store an object payload by key and return its persisted byte length."""
-        size = resolved_backend.put_object_sync(key, flask_request.get_data())
-        return response_cls(
-            encode_json_bytes({"key": key, "size": size}),
-            status=200,
-            mimetype=_JSON_MEDIA_TYPE,
-        )
-
-    def health_endpoint() -> Any:
-        """Return a lightweight readiness payload."""
-        return response_cls(b"ok", status=200, mimetype=_TEXT_MEDIA_TYPE)
-
-    app.get("/json")(json_endpoint)
-    app.get("/db")(db_endpoint)
-    app.get("/queries")(queries_endpoint)
-    app.get("/updates")(updates_endpoint)
-    app.get("/cached-queries")(cached_queries_endpoint)
-    app.get("/object/<key>")(get_object_endpoint)
-    app.put("/object/<key>")(put_object_endpoint)
-    app.get("/health")(health_endpoint)
-    return app
-
-
-def create_spikard_data_app(backend: DataBackend | None = None) -> Any:
-    """Create a Spikard application backed by ``DataBackend``.
-
-    Args:
-        backend: Optional ``DataBackend`` instance. Uses the process-local
-            default backend when omitted.
-
-    Returns:
-        Configured ``spikard.App`` instance with standardized data routes.
-
-    Raises:
-        ImportError: If ``spikard`` is not installed.
-    """
-    spikard_mod = _require_framework("spikard", "spikard", "bench")
-    resolved_backend = _resolve_backend(backend)
-    app_cls = spikard_mod.App
-    response_cls = spikard_mod.Response
-    server_config_cls = spikard_mod.ServerConfig
-
-    app = app_cls(
-        config=server_config_cls(
-            host=os.environ.get("SPIKARD_HOST", "127.0.0.1"),
-            port=int(os.environ.get("SPIKARD_PORT", "8005")),
-            compression=None,
-            enable_request_id=False,
-            rate_limit=None,
-        )
-    )
-
-    async def json_endpoint() -> Any:
-        """Return the TechEmpower JSON hello payload."""
-        return response_cls(
-            content=JSON_HELLO_PAYLOAD.decode("utf-8"),
-            status_code=200,
-            headers={"content-type": _JSON_MEDIA_TYPE},
-        )
-
-    async def db_endpoint() -> Any:
-        """Return a single randomly selected World row as JSON."""
-        row = await resolved_backend.get_world()
-        return response_cls(
-            content=encode_json_bytes(row).decode("utf-8"),
-            status_code=200,
-            headers={"content-type": _JSON_MEDIA_TYPE},
-        )
-
-    async def queries_endpoint(queries: str | None = None) -> Any:
-        """Return ``queries`` randomly selected World rows as JSON."""
-        count = clamp_query_count(queries)
-        rows = await resolved_backend.get_worlds(count)
-        return response_cls(
-            content=encode_json_bytes(rows).decode("utf-8"),
-            status_code=200,
-            headers={"content-type": _JSON_MEDIA_TYPE},
-        )
-
-    async def updates_endpoint(queries: str | None = None) -> Any:
-        """Read and update ``queries`` random World rows and return them as JSON."""
-        count = clamp_query_count(queries)
-        rows = await resolved_backend.update_worlds(count)
-        return response_cls(
-            content=encode_json_bytes(rows).decode("utf-8"),
-            status_code=200,
-            headers={"content-type": _JSON_MEDIA_TYPE},
-        )
-
-    async def cached_queries_endpoint(count: str | None = None) -> Any:
-        """Return ``count`` cached World rows as JSON."""
-        resolved_count = clamp_query_count(count)
-        rows = await resolved_backend.get_cached_worlds(resolved_count)
-        return response_cls(
-            content=encode_json_bytes(rows).decode("utf-8"),
-            status_code=200,
-            headers={"content-type": _JSON_MEDIA_TYPE},
-        )
-
-    async def get_object_endpoint(key: str) -> Any:
-        """Fetch an object payload by key or return HTTP 404 when absent."""
-        payload = await resolved_backend.get_object(key)
-        if payload is None:
-            return response_cls(
-                content="Not Found",
-                status_code=404,
-                headers={"content-type": _TEXT_MEDIA_TYPE},
-            )
-        return response_cls(
-            content=payload.decode("latin1"),
-            status_code=200,
-            headers={"content-type": _BINARY_MEDIA_TYPE},
-        )
-
-    async def put_object_endpoint(key: str, body: bytes = b"") -> Any:
-        """Store an object payload by key and return its persisted byte length."""
-        data = body if isinstance(body, bytes) else str(body).encode("latin1")
-        size = await resolved_backend.put_object(key, data)
-        return response_cls(
-            content=encode_json_bytes({"key": key, "size": size}).decode("utf-8"),
-            status_code=200,
-            headers={"content-type": _JSON_MEDIA_TYPE},
-        )
-
-    async def health_endpoint() -> Any:
-        """Return a lightweight readiness payload."""
-        return response_cls(
-            content="ok",
-            status_code=200,
-            headers={"content-type": _TEXT_MEDIA_TYPE},
-        )
-
-    app.get("/json")(json_endpoint)
-    app.get("/db")(db_endpoint)
-    app.get("/queries")(queries_endpoint)
-    app.get("/updates")(updates_endpoint)
-    app.get("/cached-queries")(cached_queries_endpoint)
-    app.get("/object/{key}")(get_object_endpoint)
-    app.put("/object/{key}")(put_object_endpoint)
-    app.get("/health")(health_endpoint)
-    return app
-
-
-def create_blacksheep_app(backend: DataBackend | None = None) -> Any:
-    """Create a BlackSheep ASGI application backed by ``DataBackend``.
-
-    Args:
-        backend: Optional ``DataBackend`` instance. Uses the process-local
-            default backend when omitted.
-
-    Returns:
-        Configured ``blacksheep.Application`` ASGI application.
-
-    Raises:
-        ImportError: If ``blacksheep`` is not installed.
-    """
-    blacksheep_mod = _require_framework("blacksheep", "blacksheep", "bench-comparators")
-    resolved_backend = _resolve_backend(backend)
-    router_cls = getattr(blacksheep_mod, "Router", None)
-    app = blacksheep_mod.Application(router=router_cls()) if router_cls is not None else blacksheep_mod.Application()
-    response_cls = blacksheep_mod.Response
-    content_cls = blacksheep_mod.Content
-    request_cls = blacksheep_mod.Request
-
-    async def json_endpoint() -> Any:
-        """Return the TechEmpower JSON hello payload."""
-        return response_cls(200, content=content_cls(b"application/json", JSON_HELLO_PAYLOAD))
-
-    async def db_endpoint() -> Any:
-        """Return a single randomly selected World row as JSON."""
-        row = await resolved_backend.get_world()
-        return response_cls(200, content=content_cls(b"application/json", encode_json_bytes(row)))
-
-    async def queries_endpoint(queries: str | None = None) -> Any:
-        """Return ``queries`` randomly selected World rows as JSON."""
-        count = clamp_query_count(queries)
-        rows = await resolved_backend.get_worlds(count)
-        return response_cls(200, content=content_cls(b"application/json", encode_json_bytes(rows)))
-
-    async def updates_endpoint(queries: str | None = None) -> Any:
-        """Read and update ``queries`` random World rows and return them as JSON."""
-        count = clamp_query_count(queries)
-        rows = await resolved_backend.update_worlds(count)
-        return response_cls(200, content=content_cls(b"application/json", encode_json_bytes(rows)))
-
-    async def cached_queries_endpoint(count: str | None = None) -> Any:
-        """Return ``count`` cached World rows as JSON."""
-        resolved_count = clamp_query_count(count)
-        rows = await resolved_backend.get_cached_worlds(resolved_count)
-        return response_cls(200, content=content_cls(b"application/json", encode_json_bytes(rows)))
-
-    async def get_object_endpoint(key: str) -> Any:
-        """Fetch an object payload by key or return HTTP 404 when absent."""
-        payload = await resolved_backend.get_object(key)
-        if payload is None:
-            return response_cls(404, content=content_cls(b"text/plain", b"Not Found"))
-        return response_cls(200, content=content_cls(b"application/octet-stream", payload))
-
-    async def put_object_endpoint(key: str, request: Any) -> Any:
-        """Store an object payload by key and return its persisted byte length."""
-        body = await request.read() or b""
-        size = await resolved_backend.put_object(key, body)
-        return response_cls(
-            200,
-            content=content_cls(b"application/json", encode_json_bytes({"key": key, "size": size})),
-        )
-
-    async def health_endpoint() -> Any:
-        """Return a lightweight readiness payload."""
-        return response_cls(200, content=content_cls(b"text/plain", b"ok"))
-
-    put_object_endpoint.__annotations__ = {"key": str, "request": request_cls, "return": Any}
-    app.router.add_get("/json", json_endpoint)
-    app.router.add_get("/db", db_endpoint)
-    app.router.add_get("/queries", queries_endpoint)
-    app.router.add_get("/updates", updates_endpoint)
-    app.router.add_get("/cached-queries", cached_queries_endpoint)
-    app.router.add_get("/object/{key}", get_object_endpoint)
-    app.router.add_put("/object/{key}", put_object_endpoint)
-    app.router.add_get("/health", health_endpoint)
-    return app
 
 
 _LAZY_APP_FACTORIES: Final[dict[str, Any]] = {

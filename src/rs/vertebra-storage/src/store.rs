@@ -1339,17 +1339,25 @@ pub struct ObjectStoreEngine {
 }
 
 impl ObjectStoreEngine {
+    fn from_store(inner: Arc<dyn ObjectStore>, scheme: &str, supports_atomic_rename: bool) -> Self {
+        Self {
+            inner,
+            local_fs: None,
+            scheme: scheme.to_string(),
+            supports_atomic_rename,
+            local_metadata: None,
+            gcs_compose: None,
+        }
+    }
+
     pub fn new(config: BackendConfig) -> Result<Self, StorageError> {
         let supports_atomic_rename = config.supports_atomic_rename();
         match config {
-            BackendConfig::Memory => Ok(Self {
-                inner: Arc::new(InMemory::new()),
-                local_fs: None,
-                scheme: "memory".to_string(),
+            BackendConfig::Memory => Ok(Self::from_store(
+                Arc::new(InMemory::new()),
+                "memory",
                 supports_atomic_rename,
-                local_metadata: None,
-                gcs_compose: None,
-            }),
+            )),
             BackendConfig::Local { root } => {
                 std::fs::create_dir_all(&root).map_err(|e| {
                     StorageError::InvalidUrl(
@@ -1411,14 +1419,11 @@ impl ObjectStoreEngine {
                 if let Some(ep) = resolved_endpoint {
                     builder = builder.with_endpoint(ep);
                 }
-                Ok(Self {
-                    inner: Arc::new(builder.build()?),
-                    local_fs: None,
-                    scheme: "s3".to_string(),
+                Ok(Self::from_store(
+                    Arc::new(builder.build()?),
+                    "s3",
                     supports_atomic_rename,
-                    local_metadata: None,
-                    gcs_compose: None,
-                })
+                ))
             }
             BackendConfig::Gcs {
                 bucket,
@@ -1585,14 +1590,11 @@ impl ObjectStoreEngine {
                 if let Some(ep) = endpoint {
                     builder = builder.with_endpoint(ep);
                 }
-                Ok(Self {
-                    inner: Arc::new(builder.build()?),
-                    local_fs: None,
-                    scheme: "az".to_string(),
+                Ok(Self::from_store(
+                    Arc::new(builder.build()?),
+                    "az",
                     supports_atomic_rename,
-                    local_metadata: None,
-                    gcs_compose: None,
-                })
+                ))
             }
             BackendConfig::Oci {
                 bucket,
@@ -1602,14 +1604,11 @@ impl ObjectStoreEngine {
                 credentials,
             } => {
                 let store = OciObjectStore::new(namespace, bucket, region, endpoint, credentials)?;
-                Ok(Self {
-                    inner: Arc::new(store),
-                    local_fs: None,
-                    scheme: "oci".to_string(),
+                Ok(Self::from_store(
+                    Arc::new(store),
+                    "oci",
                     supports_atomic_rename,
-                    local_metadata: None,
-                    gcs_compose: None,
-                })
+                ))
             }
             BackendConfig::R2 {
                 bucket,
@@ -1653,14 +1652,11 @@ impl ObjectStoreEngine {
                 if let Some(secret) = secret_access_key {
                     builder = builder.with_secret_access_key(secret);
                 }
-                Ok(Self {
-                    inner: Arc::new(builder.build()?),
-                    local_fs: None,
-                    scheme: "r2".to_string(),
+                Ok(Self::from_store(
+                    Arc::new(builder.build()?),
+                    "r2",
                     supports_atomic_rename,
-                    local_metadata: None,
-                    gcs_compose: None,
-                })
+                ))
             }
             BackendConfig::Http {
                 url,
@@ -1692,14 +1688,11 @@ impl ObjectStoreEngine {
                     .with_url(url)
                     .with_client_options(client_opts)
                     .build()?;
-                Ok(Self {
-                    inner: Arc::new(store),
-                    local_fs: None,
-                    scheme: "http".to_string(),
+                Ok(Self::from_store(
+                    Arc::new(store),
+                    "http",
                     supports_atomic_rename,
-                    local_metadata: None,
-                    gcs_compose: None,
-                })
+                ))
             }
         }
     }

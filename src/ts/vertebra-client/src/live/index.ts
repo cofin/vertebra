@@ -193,8 +193,9 @@ export class LiveStateClient<TState extends Record<string, unknown>> {
     if (delta.stateId !== this.stateId) {
       return false;
     }
+    const isSet = delta.opcode === StateOpcode.FieldSet || delta.opcode === StateOpcode.ObjectReplace;
     if (
-      (delta.opcode === StateOpcode.FieldSet || delta.opcode === StateOpcode.ObjectReplace) &&
+      (isSet || delta.opcode === StateOpcode.FieldDelete) &&
       delta.fieldId !== undefined &&
       delta.timestampNs !== undefined
     ) {
@@ -206,23 +207,13 @@ export class LiveStateClient<TState extends Record<string, unknown>> {
       this.fieldTimestamps.set(delta.fieldId, delta.timestampNs);
       const key = this.fieldIdToKey.get(delta.fieldId);
       if (key !== undefined) {
-        this.state = { ...this.state, [key]: delta.value };
-        this.notify();
-      }
-      return true;
-    }
-    if (delta.opcode === StateOpcode.FieldDelete && delta.fieldId !== undefined && delta.timestampNs !== undefined) {
-      const currentTs = this.fieldTimestamps.get(delta.fieldId) ?? 0n;
-      if (delta.timestampNs < currentTs) {
-        return false;
-      }
-      this.hlc.receive(delta.timestampNs);
-      this.fieldTimestamps.set(delta.fieldId, delta.timestampNs);
-      const key = this.fieldIdToKey.get(delta.fieldId);
-      if (key !== undefined) {
-        const nextState = { ...this.state };
-        delete nextState[key];
-        this.state = nextState;
+        if (isSet) {
+          this.state = { ...this.state, [key]: delta.value };
+        } else {
+          const nextState = { ...this.state };
+          delete nextState[key];
+          this.state = nextState;
+        }
         this.notify();
       }
       return true;

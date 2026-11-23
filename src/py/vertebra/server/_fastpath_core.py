@@ -489,107 +489,70 @@ def _is_loaded_instance(app: Any, module_name: str, attr_name: str) -> bool:
     return isinstance(cls, type) and isinstance(app, cls)
 
 
-class _LitestarFastPathProvider:
-    """Lazy FastPath provider for Litestar v2/v3 applications."""
+class _LazyFastPathProvider:
+    """Data-driven lazy FastPath provider delegating detection and extension loading."""
 
-    name = "litestar"
+    __slots__ = ("_detector", "_module_path", "name")
 
-    def detect(self, app: Any) -> bool:
-        """Detect Litestar applications via loaded class check or structural Litestar attributes."""
-        if _is_loaded_instance(app, "litestar", "Litestar"):
-            return True
-        return hasattr(app, "routes") and (hasattr(app, "compression_config") or hasattr(app, "response_cache_config"))
-
-    def build(self, app: Any, *, mount_prefix: str = "") -> Any:
-        """Build ``vertebra.extensions.litestar.fastpath.FastPath`` lazily."""
-        mod = import_optional("vertebra.extensions.litestar.fastpath")
-        if mod is None:
-            return None
-        return mod.FastPath.from_app(app, mount_prefix=mount_prefix)
-
-
-class _FastAPIFastPathProvider:
-    """Lazy FastPath provider for FastAPI applications."""
-
-    name = "fastapi"
+    def __init__(self, name: str, module_path: str, detector: Callable[[Any], bool]) -> None:
+        self.name = name
+        self._module_path = module_path
+        self._detector = detector
 
     def detect(self, app: Any) -> bool:
-        """Detect FastAPI applications before Starlette via ``dependency_overrides``."""
-        if _is_loaded_instance(app, "fastapi", "FastAPI"):
-            return True
-        return hasattr(app, "routes") and hasattr(app, "dependency_overrides")
+        """Return True when ``app`` matches this framework provider."""
+        return self._detector(app)
 
     def build(self, app: Any, *, mount_prefix: str = "") -> Any:
-        """Build ``vertebra.extensions.fastapi.fastpath.FastPath`` lazily."""
-        mod = import_optional("vertebra.extensions.fastapi.fastpath")
-        if mod is None:
-            return None
-        return mod.FastPath.from_app(app, mount_prefix=mount_prefix)
-
-
-class _StarletteFastPathProvider:
-    """Lazy FastPath provider for Starlette applications."""
-
-    name = "starlette"
-
-    def detect(self, app: Any) -> bool:
-        """Detect Starlette applications that are not FastAPI subclasses."""
-        if hasattr(app, "dependency_overrides"):
-            return False
-        if _is_loaded_instance(app, "starlette.applications", "Starlette"):
-            return True
-        return hasattr(app, "routes") and hasattr(app, "user_middleware")
-
-    def build(self, app: Any, *, mount_prefix: str = "") -> Any:
-        """Build ``vertebra.extensions.starlette.fastpath.FastPath`` lazily."""
-        mod = import_optional("vertebra.extensions.starlette.fastpath")
-        if mod is None:
-            return None
-        return mod.FastPath.from_app(app, mount_prefix=mount_prefix)
-
-
-class _FlaskFastPathProvider:
-    """Lazy FastPath provider for Flask applications."""
-
-    name = "flask"
-
-    def detect(self, app: Any) -> bool:
-        """Detect Flask applications via loaded class check or ``url_map`` + ``view_functions``."""
-        if _is_loaded_instance(app, "flask", "Flask"):
-            return True
-        return hasattr(app, "url_map") and hasattr(app, "view_functions")
-
-    def build(self, app: Any, *, mount_prefix: str = "") -> Any:
-        """Build ``vertebra.extensions.flask.fastpath.FastPath`` lazily."""
-        mod = import_optional("vertebra.extensions.flask.fastpath")
-        if mod is None:
-            return None
-        return mod.FastPath.from_app(app, mount_prefix=mount_prefix)
-
-
-class _DjangoFastPathProvider:
-    """Lazy FastPath provider for Django WSGI/ASGI handlers and URL configurations."""
-
-    name = "django"
-
-    def detect(self, app: Any) -> bool:
-        """Detect Django handlers or URL configuration namespaces."""
-        if _is_loaded_instance(app, "django.core.handlers.base", "BaseHandler"):
-            return True
-        return hasattr(app, "urlpatterns") or hasattr(app, "urlconf")
-
-    def build(self, app: Any, *, mount_prefix: str = "") -> Any:
-        """Build ``vertebra.extensions.django.fastpath.FastPath`` lazily."""
-        mod = import_optional("vertebra.extensions.django.fastpath")
-        if mod is None:
-            return None
-        return mod.FastPath.from_app(app, mount_prefix=mount_prefix)
+        """Lazily import the framework extension module and build its ``FastPath`` wrapper."""
+        mod = import_optional(self._module_path)
+        return None if mod is None else mod.FastPath.from_app(app, mount_prefix=mount_prefix)
 
 
 _PROVIDERS: list[FastPathProvider] = [
-    _LitestarFastPathProvider(),
-    _FastAPIFastPathProvider(),
-    _StarletteFastPathProvider(),
-    _FlaskFastPathProvider(),
-    _DjangoFastPathProvider(),
+    _LazyFastPathProvider(
+        "litestar",
+        "vertebra.extensions.litestar.fastpath",
+        lambda app: (
+            _is_loaded_instance(app, "litestar", "Litestar")
+            or (
+                hasattr(app, "routes") and (hasattr(app, "compression_config") or hasattr(app, "response_cache_config"))
+            )
+        ),
+    ),
+    _LazyFastPathProvider(
+        "fastapi",
+        "vertebra.extensions.fastapi.fastpath",
+        lambda app: (
+            _is_loaded_instance(app, "fastapi", "FastAPI")
+            or (hasattr(app, "routes") and hasattr(app, "dependency_overrides"))
+        ),
+    ),
+    _LazyFastPathProvider(
+        "starlette",
+        "vertebra.extensions.starlette.fastpath",
+        lambda app: (
+            not hasattr(app, "dependency_overrides")
+            and (
+                _is_loaded_instance(app, "starlette.applications", "Starlette")
+                or (hasattr(app, "routes") and hasattr(app, "user_middleware"))
+            )
+        ),
+    ),
+    _LazyFastPathProvider(
+        "flask",
+        "vertebra.extensions.flask.fastpath",
+        lambda app: (
+            _is_loaded_instance(app, "flask", "Flask") or (hasattr(app, "url_map") and hasattr(app, "view_functions"))
+        ),
+    ),
+    _LazyFastPathProvider(
+        "django",
+        "vertebra.extensions.django.fastpath",
+        lambda app: (
+            _is_loaded_instance(app, "django.core.handlers.base", "BaseHandler")
+            or hasattr(app, "urlpatterns")
+            or hasattr(app, "urlconf")
+        ),
+    ),
 ]

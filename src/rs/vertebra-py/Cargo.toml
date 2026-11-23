@@ -9,7 +9,18 @@ description = "PyO3 bindings for Vertebra native extension"
 
 [dependencies]
 vertebra-core = { path = "../vertebra-core" }
-vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }
+vertebra-db = { path = "../vertebra-db", default-features = false, features = [
+    "arrow-shm",
+    "broker",
+    "codecs-duckdb",
+    "codecs-mssql",
+    "codecs-oracle",
+    "codecs-pg",
+    "dialer",
+    "pyo3",
+    "rustls-ring",
+    "transport",
+] }
 arrow-array = { workspace = true, features = ["ffi"] }
 arrow-buffer = { workspace = true }
 arrow-ipc = { workspace = true }

@@ -1,25 +1,21 @@
 //! Shared-memory `VTBARROW` Arrow IPC segment naming and framing helpers for `vertebra-spanner`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::arrow_shm::{ShmArrowStreamWriter, write_shm_arrow_region_unregistered};
+use vertebra_db::py_broker::next_shm_name;
 
 use crate::client::SpannerError;
 
 /// Default initial byte capacity (`64 KiB`) when opening a Spanner `VTBARROW` stream writer.
 pub const DEFAULT_SPANNER_ARROW_SHM_CAPACITY: usize = 64 * 1024;
 
-static SHM_COUNTER: AtomicU64 = AtomicU64::new(1);
-
 /// Allocate the next unique process-scoped POSIX shared-memory name (`/vtb-sp-<pid>-<seq>`)
 /// for a Spanner `VTBARROW` result cursor.
 #[inline]
 pub fn next_spanner_shm_name() -> String {
-    let seq = SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    format!("/vtb-sp-{pid:x}-{seq:x}")
+    next_shm_name("/vtb-sp", '-')
 }
 
 /// Open a [`ShmArrowStreamWriter`] backed by a fresh `/vtb-sp-*` POSIX shared-memory segment

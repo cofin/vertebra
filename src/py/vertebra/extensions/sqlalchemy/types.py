@@ -868,18 +868,14 @@ def _compile_vector_bigquery(element: Vector, compiler: Any, **kw: Any) -> str:
     return "ARRAY<FLOAT64>"
 
 
-@compiles(Vector, "spanner")
-def _compile_vector_spanner(element: Vector, compiler: Any, **kw: Any) -> str:
-    _ = (compiler, kw)
-    elem_type = "FLOAT64" if element.precision == "float64" else "FLOAT32"
-    if element.dimensions is not None:
-        return f"ARRAY<{elem_type}>(vector_length=>{element.dimensions})"
-    return f"ARRAY<{elem_type}>"
-
-
 @compiles(Vector, "postgresql")
 @compiles(Vector, "spangres")
-def _compile_vector_postgresql(element: Vector, compiler: Any, **kw: Any) -> str:
+@compiles(Vector, "mysql")
+@compiles(Vector, "duckdb")
+@compiles(Vector, "mssql")
+@compiles(PgVector, "postgresql")
+@compiles(PgVector, "spangres")
+def _compile_vector_dim(element: Vector | PgVector, compiler: Any, **kw: Any) -> str:
     _ = (compiler, kw)
     return f"VECTOR({element.dimensions})" if element.dimensions is not None else "VECTOR"
 
@@ -893,40 +889,13 @@ def _compile_vector_oracle(element: Vector, compiler: Any, **kw: Any) -> str:
         "int8": "INT8",
         "binary": "BINARY",
     }.get(element.precision, "FLOAT32")
-    if element.dimensions is None:
-        return f"VECTOR(*, {ora_fmt})"
-    return f"VECTOR({element.dimensions}, {ora_fmt})"
-
-
-@compiles(Vector, "mysql")
-def _compile_vector_mysql(element: Vector, compiler: Any, **kw: Any) -> str:
-    _ = (compiler, kw)
-    return f"VECTOR({element.dimensions})" if element.dimensions is not None else "VECTOR"
+    return f"VECTOR(*, {ora_fmt})" if element.dimensions is None else f"VECTOR({element.dimensions}, {ora_fmt})"
 
 
 @compiles(Vector, "sqlite")
 def _compile_vector_sqlite(element: Vector, compiler: Any, **kw: Any) -> str:
     _ = (element, compiler, kw)
     return "BLOB"
-
-
-@compiles(Vector, "duckdb")
-def _compile_vector_duckdb(element: Vector, compiler: Any, **kw: Any) -> str:
-    _ = (compiler, kw)
-    return f"VECTOR({element.dimensions})" if element.dimensions is not None else "VECTOR"
-
-
-@compiles(Vector, "mssql")
-def _compile_vector_mssql(element: Vector, compiler: Any, **kw: Any) -> str:
-    _ = (compiler, kw)
-    return f"VECTOR({element.dimensions})" if element.dimensions is not None else "VECTOR"
-
-
-@compiles(PgVector, "postgresql")
-@compiles(PgVector, "spangres")
-def _compile_pgvector(element: PgVector, compiler: Any, **kw: Any) -> str:
-    _ = (compiler, kw)
-    return f"VECTOR({element.dimensions})" if element.dimensions is not None else "VECTOR"
 
 
 @compiles(HalfVector, "postgresql")
@@ -945,13 +914,12 @@ def _compile_sparsevector(element: SparseVector, compiler: Any, **kw: Any) -> st
 def _compile_oracle_vector(element: OracleVector, compiler: Any, **kw: Any) -> str:
     _ = (compiler, kw)
     ora_fmt = element.precision.upper()
-    if element.dimensions is None:
-        return f"VECTOR(*, {ora_fmt})"
-    return f"VECTOR({element.dimensions}, {ora_fmt})"
+    return f"VECTOR(*, {ora_fmt})" if element.dimensions is None else f"VECTOR({element.dimensions}, {ora_fmt})"
 
 
+@compiles(Vector, "spanner")
 @compiles(SpannerVector, "spanner")
-def _compile_spanner_vector(element: SpannerVector, compiler: Any, **kw: Any) -> str:
+def _compile_spanner_vector(element: Vector | SpannerVector, compiler: Any, **kw: Any) -> str:
     _ = (compiler, kw)
     elem_type = "FLOAT64" if element.precision == "float64" else "FLOAT32"
     if element.dimensions is not None:

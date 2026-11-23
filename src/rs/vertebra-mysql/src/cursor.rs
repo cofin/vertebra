@@ -2,12 +2,11 @@
 //! and PEP 249 cursor classes (`SyncMySQLCursor`, `AsyncMySQLCursor`) for `vertebra-mysql`.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use mysql_async::Params;
-use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
@@ -16,171 +15,47 @@ use pyo3::types::{
 use vertebra_db::py_async::{
     ReadyAwaitable, RustDbTaskAwaitable, block_on_db, ready_ok, spawn_rust_db_task_with_attr,
 };
+use vertebra_db::py_cursor::{
+    BufferedCursorState, DEFAULT_PLAN_CACHE_CAPACITY, PlanLruCache, build_description_7tuple,
+};
+use vertebra_db::py_errors::{cursor_interface_err, cursor_programming_err};
 
 use crate::client::{
     DecodedCell, DecodedResultSet, MYSQL_COMPLETION_DRAINER_ATTR, MySQLClientCore,
     py_param_to_mysql_value,
 };
-use crate::errors::{MySQLError, resolve_exception_types};
+use crate::errors::MySQLError;
 
-/// Maximum number of compiled named-parameter plans retained in the LRU cache.
-pub(crate) const CURSOR_PLAN_CACHE_CAPACITY: usize = 512;
-
-/// Buffered result and PEP 249 state shared by `SyncMySQLCursor` and `AsyncMySQLCursor`.
-pub(crate) struct CursorState {
-    pub(crate) rows: Vec<Py<PyTuple>>,
-    pub(crate) pos: usize,
-    pub(crate) description: Option<Py<PyTuple>>,
-    pub(crate) rowcount: i64,
-    pub(crate) lastrowid: Option<Py<PyAny>>,
-    pub(crate) arraysize: usize,
-    pub(crate) executed: bool,
-    pub(crate) closed: bool,
-}
-
-impl CursorState {
-    /// Construct a fresh cursor state with `rowcount = -1` and `arraysize = 1`.
-    pub(crate) const fn new() -> Self {
-        Self {
-            rows: Vec::new(),
-            pos: 0,
-            description: None,
-            rowcount: -1,
-            lastrowid: None,
-            arraysize: 1,
-            executed: false,
-            closed: false,
-        }
+/// Convert a [`DecodedResultSet`] into buffered cursor state according to PEP 249 rules.
+pub(crate) fn store_result_set(
+    state: &mut BufferedCursorState,
+    py: Python<'_>,
+    rs: DecodedResultSet,
+) -> PyResult<()> {
+    let lastrowid = match rs.last_insert_id {
+        Some(id) if id > 0 => Some(id.into_pyobject(py)?.into_any().unbind()),
+        _ => None,
+    };
+    if rs.columns.is_empty() {
+        let rowcount = i64::try_from(rs.affected_rows).unwrap_or(i64::MAX);
+        state.store(None, Vec::new(), rowcount, lastrowid);
+    } else {
+        let description = describe_columns(py, &rs.columns)?;
+        let rowcount = i64::try_from(rs.rows.len()).unwrap_or(i64::MAX);
+        let rows = rows_to_tuples(py, rs.rows)?;
+        state.store(Some(description), rows, rowcount, lastrowid);
     }
-
-    /// Return `InterfaceError` when the cursor has been closed.
-    pub(crate) fn ensure_open(&self, py: Python<'_>) -> PyResult<()> {
-        if self.closed {
-            Err(cursor_interface_err(py, "cursor is closed"))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Replace the buffered result with a new execution outcome.
-    pub(crate) fn store(
-        &mut self,
-        description: Option<Py<PyTuple>>,
-        rows: Vec<Py<PyTuple>>,
-        rowcount: i64,
-        lastrowid: Option<Py<PyAny>>,
-    ) {
-        self.rows = rows;
-        self.pos = 0;
-        self.description = description;
-        self.rowcount = rowcount;
-        self.lastrowid = lastrowid;
-        self.executed = true;
-    }
-
-    /// Convert a [`DecodedResultSet`] into buffered cursor state according to PEP 249 rules.
-    pub(crate) fn store_result_set(
-        &mut self,
-        py: Python<'_>,
-        rs: DecodedResultSet,
-    ) -> PyResult<()> {
-        let lastrowid = match rs.last_insert_id {
-            Some(id) if id > 0 => Some(id.into_pyobject(py)?.into_any().unbind()),
-            _ => None,
-        };
-        if rs.columns.is_empty() {
-            let rowcount = i64::try_from(rs.affected_rows).unwrap_or(i64::MAX);
-            self.store(None, Vec::new(), rowcount, lastrowid);
-        } else {
-            let description = describe_columns(py, &rs.columns)?;
-            let rowcount = i64::try_from(rs.rows.len()).unwrap_or(i64::MAX);
-            let rows = rows_to_tuples(py, rs.rows)?;
-            self.store(Some(description), rows, rowcount, lastrowid);
-        }
-        Ok(())
-    }
-
-    /// Clear any buffered result and reset statement attributes after a failed execute or close.
-    pub(crate) fn clear_result(&mut self) {
-        self.rows.clear();
-        self.pos = 0;
-        self.description = None;
-        self.rowcount = -1;
-        self.lastrowid = None;
-        self.executed = false;
-    }
-
-    /// Fetch the next buffered row, or `None` when no result set is active or rows are exhausted.
-    pub(crate) fn fetchone(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(None);
-        }
-        let row = self.rows[self.pos].clone_ref(py);
-        self.pos += 1;
-        Ok(Some(row))
-    }
-
-    /// Fetch up to `size` rows (or `self.arraysize` when `size` is `None`).
-    pub(crate) fn fetchmany(
-        &mut self,
-        py: Python<'_>,
-        size: Option<usize>,
-    ) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        let count = size.unwrap_or(self.arraysize);
-        if self.description.is_none() || count == 0 || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let end = self.pos.saturating_add(count).min(self.rows.len());
-        let rows = self.rows[self.pos..end]
-            .iter()
-            .map(|row| row.clone_ref(py))
-            .collect();
-        self.pos = end;
-        Ok(rows)
-    }
-
-    /// Fetch all remaining buffered rows and leave the cursor exhausted.
-    pub(crate) fn fetchall(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_open(py)?;
-        if self.description.is_none() || self.pos >= self.rows.len() {
-            return Ok(Vec::new());
-        }
-        let rows = self.rows[self.pos..]
-            .iter()
-            .map(|row| row.clone_ref(py))
-            .collect();
-        self.pos = self.rows.len();
-        Ok(rows)
-    }
-
-    /// Mark the cursor closed and release buffered rows. Idempotent.
-    pub(crate) fn close(&mut self) {
-        self.closed = true;
-        self.clear_result();
-    }
+    Ok(())
 }
 
 /// Build a PEP 249 `description` tuple of 7-item column tuples `(name, type_code, None, None, None, None, None)`.
 pub(crate) fn describe_columns(py: Python<'_>, columns: &[(String, u8)]) -> PyResult<Py<PyTuple>> {
     let mut entries = Vec::with_capacity(columns.len());
     for (name, type_code) in columns {
-        let entry = PyTuple::new(
-            py,
-            [
-                PyString::new(py, name).into_any().unbind(),
-                (*type_code).into_pyobject(py)?.into_any().unbind(),
-                py.None(),
-                py.None(),
-                py.None(),
-                py.None(),
-                py.None(),
-            ],
-        )?;
-        entries.push(entry);
+        let tc = (*type_code).into_pyobject(py)?.into_any().unbind();
+        entries.push((name.as_str(), Some(tc), None));
     }
-    Ok(PyTuple::new(py, entries)?.unbind())
+    build_description_7tuple(py, entries)
 }
 
 /// Convert decoded MySQL rows into Python tuple objects once.
@@ -206,49 +81,8 @@ pub(crate) struct NamedPlan {
     pub(crate) names: Box<[Box<str>]>,
 }
 
-struct PlanLruCache {
-    capacity: usize,
-    clock: u64,
-    entries: HashMap<Box<str>, (Arc<NamedPlan>, u64)>,
-}
-
-impl PlanLruCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            clock: 0,
-            entries: HashMap::with_capacity(capacity),
-        }
-    }
-
-    fn get(&mut self, sql: &str) -> Option<Arc<NamedPlan>> {
-        let entry = self.entries.get_mut(sql)?;
-        self.clock = self.clock.wrapping_add(1);
-        entry.1 = self.clock;
-        Some(Arc::clone(&entry.0))
-    }
-
-    fn insert(&mut self, sql: &str, plan: Arc<NamedPlan>) {
-        if self.capacity == 0 {
-            return;
-        }
-        if !self.entries.contains_key(sql)
-            && self.entries.len() >= self.capacity
-            && let Some(evict_key) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, (_, last_used))| *last_used)
-                .map(|(k, _)| k.clone())
-        {
-            self.entries.remove(&evict_key);
-        }
-        self.clock = self.clock.wrapping_add(1);
-        self.entries.insert(sql.into(), (plan, self.clock));
-    }
-}
-
-static NAMED_PLAN_CACHE: LazyLock<Mutex<PlanLruCache>> =
-    LazyLock::new(|| Mutex::new(PlanLruCache::new(CURSOR_PLAN_CACHE_CAPACITY)));
+static NAMED_PLAN_CACHE: LazyLock<Mutex<PlanLruCache<Arc<NamedPlan>>>> =
+    LazyLock::new(|| Mutex::new(PlanLruCache::new(DEFAULT_PLAN_CACHE_CAPACITY)));
 
 fn consume_literal_or_comment(sql: &str, index: usize) -> Option<usize> {
     let bytes = sql.as_bytes();
@@ -382,11 +216,7 @@ pub(crate) fn named_plan_for(sql: &str) -> Result<Arc<NamedPlan>, MySQLError> {
     let mut cache = NAMED_PLAN_CACHE
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if let Some(existing) = cache.get(sql) {
-        return Ok(existing);
-    }
-    cache.insert(sql, Arc::clone(&plan));
-    Ok(plan)
+    Ok(cache.insert(sql.into(), plan))
 }
 
 struct CoerceTypes {
@@ -617,49 +447,12 @@ pub(crate) fn coerce_value<'py>(
     Ok(value)
 }
 
-/// Construct an `InterfaceError` using the shared class cache in [`crate::errors`].
-pub(crate) fn cursor_interface_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py).and_then(|types| types.interface.bind(py).call1((message,))) {
-        Ok(instance) => PyErr::from_value(instance),
-        Err(_) => PyRuntimeError::new_err(message.to_owned()),
-    }
-}
-
-/// Construct a `ProgrammingError` using the shared class cache in [`crate::errors`].
-pub(crate) fn cursor_programming_err(py: Python<'_>, message: &str) -> PyErr {
-    match resolve_exception_types(py).and_then(|types| types.programming.bind(py).call1((message,)))
-    {
-        Ok(instance) => PyErr::from_value(instance),
-        Err(_) => PyRuntimeError::new_err(message.to_owned()),
-    }
-}
-
 fn remap_param_conversion_err(py: Python<'_>, err: PyErr) -> PyErr {
     if err.is_instance_of::<PyTypeError>(py) || err.is_instance_of::<PyValueError>(py) {
         cursor_interface_err(py, &err.to_string())
     } else {
         err
     }
-}
-
-fn check_fetchmany_size(py: Python<'_>, size: Option<i64>) -> PyResult<Option<usize>> {
-    match size {
-        None => Ok(None),
-        Some(n) if n < 0 => Err(cursor_programming_err(
-            py,
-            "fetchmany size must be non-negative",
-        )),
-        Some(n) => usize::try_from(n)
-            .map(Some)
-            .map_err(|_| cursor_programming_err(py, "fetchmany size must be non-negative")),
-    }
-}
-
-fn validate_arraysize(py: Python<'_>, value: i64) -> PyResult<usize> {
-    if value < 1 {
-        return Err(cursor_programming_err(py, "arraysize must be at least 1"));
-    }
-    usize::try_from(value).map_err(|_| cursor_programming_err(py, "arraysize must be at least 1"))
 }
 
 fn prepare_cursor_params(
@@ -742,7 +535,7 @@ pub fn compile_binds(
 #[pyclass(module = "vertebra._mysql", frozen, immutable_type)]
 pub struct SyncMySQLCursor {
     core: Arc<MySQLClientCore>,
-    state: Mutex<CursorState>,
+    state: Mutex<BufferedCursorState>,
     execute_lock: Mutex<()>,
     lazy_begin: bool,
 }
@@ -751,7 +544,7 @@ impl SyncMySQLCursor {
     pub(crate) const fn new(core: Arc<MySQLClientCore>, lazy_begin: bool) -> Self {
         Self {
             core,
-            state: Mutex::new(CursorState::new()),
+            state: Mutex::new(BufferedCursorState::new()),
             execute_lock: Mutex::new(()),
             lazy_begin,
         }
@@ -801,12 +594,10 @@ impl SyncMySQLCursor {
 
     #[setter]
     pub fn set_arraysize(&self, py: Python<'_>, value: i64) -> PyResult<()> {
-        let validated = validate_arraysize(py, value)?;
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .arraysize = validated;
-        Ok(())
+            .set_arraysize(py, value)
     }
 
     #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
@@ -839,7 +630,7 @@ impl SyncMySQLCursor {
             Ok(rs) => {
                 if state.closed {
                     state.clear_result();
-                } else if let Err(err) = state.store_result_set(py, rs) {
+                } else if let Err(err) = store_result_set(&mut state, py, rs) {
                     state.clear_result();
                     return Err(err);
                 }
@@ -909,16 +700,12 @@ impl SyncMySQLCursor {
     #[pyo3(signature = (size = None))]
     pub fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<PyList>> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.ensure_open(py)?;
-        let checked_size = check_fetchmany_size(py, size)?;
-        let rows = state.fetchmany(py, checked_size)?;
-        Ok(PyList::new(py, rows)?.unbind())
+        state.fetchmany(py, size)
     }
 
     pub fn fetchall(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let rows = state.fetchall(py)?;
-        Ok(PyList::new(py, rows)?.unbind())
+        state.fetchall(py)
     }
 
     pub fn close(&self) {
@@ -946,7 +733,7 @@ impl SyncMySQLCursor {
 }
 
 struct ExecutingGuard {
-    state: Arc<Mutex<CursorState>>,
+    state: Arc<Mutex<BufferedCursorState>>,
     executing: Arc<AtomicBool>,
     settled: bool,
 }
@@ -954,7 +741,7 @@ struct ExecutingGuard {
 impl ExecutingGuard {
     fn try_acquire(
         py: Python<'_>,
-        state: &Arc<Mutex<CursorState>>,
+        state: &Arc<Mutex<BufferedCursorState>>,
         executing: &Arc<AtomicBool>,
     ) -> PyResult<Self> {
         if executing
@@ -972,7 +759,7 @@ impl ExecutingGuard {
 
     fn settle_with<F>(mut self, apply: F) -> PyResult<()>
     where
-        F: FnOnce(&mut CursorState) -> PyResult<()>,
+        F: FnOnce(&mut BufferedCursorState) -> PyResult<()>,
     {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let res = apply(&mut state);
@@ -1006,7 +793,7 @@ impl Drop for ExecutingGuard {
 #[pyclass(module = "vertebra._mysql", frozen, immutable_type)]
 pub struct AsyncMySQLCursor {
     core: Arc<MySQLClientCore>,
-    state: Arc<Mutex<CursorState>>,
+    state: Arc<Mutex<BufferedCursorState>>,
     executing: Arc<AtomicBool>,
     lazy_begin: bool,
 }
@@ -1015,7 +802,7 @@ impl AsyncMySQLCursor {
     pub(crate) fn new(core: Arc<MySQLClientCore>, lazy_begin: bool) -> Self {
         Self {
             core,
-            state: Arc::new(Mutex::new(CursorState::new())),
+            state: Arc::new(Mutex::new(BufferedCursorState::new())),
             executing: Arc::new(AtomicBool::new(false)),
             lazy_begin,
         }
@@ -1059,12 +846,10 @@ impl AsyncMySQLCursor {
 
     #[setter]
     pub fn set_arraysize(&self, py: Python<'_>, value: i64) -> PyResult<()> {
-        let validated = validate_arraysize(py, value)?;
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .arraysize = validated;
-        Ok(())
+            .set_arraysize(py, value)
     }
 
     #[pyo3(signature = (sql, params = None), text_signature = "($self, sql, params=())")]
@@ -1102,7 +887,7 @@ impl AsyncMySQLCursor {
                         state.clear_result();
                         Ok(())
                     } else {
-                        state.store_result_set(py, rs)
+                        store_result_set(state, py, rs)
                     }
                 })?;
                 Ok(cursor_obj)
@@ -1199,11 +984,9 @@ impl AsyncMySQLCursor {
     pub fn fetchmany(&self, py: Python<'_>, size: Option<i64>) -> PyResult<Py<ReadyAwaitable>> {
         let rows = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            state.ensure_open(py)?;
-            let checked_size = check_fetchmany_size(py, size)?;
-            state.fetchmany(py, checked_size)?
+            state.fetchmany(py, size)?
         };
-        ready_ok(py, PyList::new(py, rows)?.into_any().unbind())
+        ready_ok(py, rows.into_any())
     }
 
     pub fn fetchall(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
@@ -1211,7 +994,7 @@ impl AsyncMySQLCursor {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.fetchall(py)?
         };
-        ready_ok(py, PyList::new(py, rows)?.into_any().unbind())
+        ready_ok(py, rows.into_any())
     }
 
     pub fn close(&self, py: Python<'_>) -> PyResult<Py<ReadyAwaitable>> {
@@ -1248,7 +1031,7 @@ mod tests {
     #[test]
     fn test_cursor_state_fresh_and_fetch_before_execute() {
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             assert_eq!(state.rowcount, -1);
             assert_eq!(state.arraysize, 1);
             assert!(state.description.is_none());
@@ -1257,26 +1040,26 @@ mod tests {
             assert!(!state.closed);
 
             assert!(state.fetchone(py).unwrap().is_none());
-            assert!(state.fetchmany(py, None).unwrap().is_empty());
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert!(state.fetchmany(py, None).unwrap().bind(py).is_empty());
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
         });
     }
 
     #[test]
     fn test_cursor_state_fetch_after_command_and_empty_result_set() {
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             state.store(None, Vec::new(), 3, None);
             assert_eq!(state.rowcount, 3);
             assert!(state.fetchone(py).unwrap().is_none());
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
 
             let desc = describe_columns(py, &[("id".to_string(), 3)]).unwrap();
             state.store(Some(desc), Vec::new(), 0, None);
             assert!(state.description.is_some());
             assert_eq!(state.rowcount, 0);
             let rows = state.fetchall(py).unwrap();
-            assert!(rows.is_empty());
+            assert!(rows.bind(py).is_empty());
         });
     }
 
@@ -1286,15 +1069,15 @@ mod tests {
             let desc = describe_columns(py, &[("v".to_string(), 3)]).unwrap();
             let rows: Vec<Py<PyTuple>> = (1..=5).map(|i| make_row(py, i)).collect();
 
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             state.arraysize = 2;
             state.store(Some(desc.clone_ref(py)), rows, 5, None);
 
-            assert_eq!(state.fetchmany(py, Some(0)).unwrap().len(), 0);
-            assert_eq!(state.fetchmany(py, None).unwrap().len(), 2);
-            assert_eq!(state.fetchmany(py, None).unwrap().len(), 2);
-            assert_eq!(state.fetchmany(py, None).unwrap().len(), 1);
-            assert_eq!(state.fetchmany(py, None).unwrap().len(), 0);
+            assert_eq!(state.fetchmany(py, Some(0)).unwrap().bind(py).len(), 0);
+            assert_eq!(state.fetchmany(py, None).unwrap().bind(py).len(), 2);
+            assert_eq!(state.fetchmany(py, None).unwrap().bind(py).len(), 2);
+            assert_eq!(state.fetchmany(py, None).unwrap().bind(py).len(), 1);
+            assert_eq!(state.fetchmany(py, None).unwrap().bind(py).len(), 0);
 
             let rows2: Vec<Py<PyTuple>> = (1..=5).map(|i| make_row(py, i)).collect();
             state.store(Some(desc), rows2, 5, None);
@@ -1309,15 +1092,15 @@ mod tests {
                 1
             );
             let rest = state.fetchall(py).unwrap();
-            assert_eq!(rest.len(), 4);
-            assert!(state.fetchall(py).unwrap().is_empty());
+            assert_eq!(rest.bind(py).len(), 4);
+            assert!(state.fetchall(py).unwrap().bind(py).is_empty());
         });
     }
 
     #[test]
     fn test_cursor_state_closed_is_idempotent_and_rejects_fetch() {
         Python::attach(|py| {
-            let mut state = CursorState::new();
+            let mut state = BufferedCursorState::new();
             state.close();
             state.close();
             assert!(state.closed);
@@ -1385,33 +1168,33 @@ mod tests {
     #[test]
     fn test_cursor_store_result_set_lastrowid_zero_and_nonzero() {
         Python::attach(|py| {
-            let mut state = CursorState::new();
-            state
-                .store_result_set(
-                    py,
-                    DecodedResultSet {
-                        columns: Vec::new(),
-                        rows: Vec::new(),
-                        affected_rows: 2,
-                        last_insert_id: Some(0),
-                    },
-                )
-                .unwrap();
+            let mut state = BufferedCursorState::new();
+            store_result_set(
+                &mut state,
+                py,
+                DecodedResultSet {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    affected_rows: 2,
+                    last_insert_id: Some(0),
+                },
+            )
+            .unwrap();
             assert!(state.description.is_none());
             assert_eq!(state.rowcount, 2);
             assert!(state.lastrowid.is_none());
 
-            state
-                .store_result_set(
-                    py,
-                    DecodedResultSet {
-                        columns: Vec::new(),
-                        rows: Vec::new(),
-                        affected_rows: 1,
-                        last_insert_id: Some(99),
-                    },
-                )
-                .unwrap();
+            store_result_set(
+                &mut state,
+                py,
+                DecodedResultSet {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    affected_rows: 1,
+                    last_insert_id: Some(99),
+                },
+            )
+            .unwrap();
             assert_eq!(
                 state
                     .lastrowid

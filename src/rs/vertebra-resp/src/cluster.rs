@@ -1,11 +1,11 @@
-//! Valkey Cluster topology (`CLUSTER SHARDS` / `CLUSTER SLOTS`), slot routing, `MOVED`/`ASK`, and `READONLY` replicas.
+//! Cluster topology (`CLUSTER SHARDS` / `CLUSTER SLOTS`), slot routing, `MOVED`/`ASK`, and `READONLY` replicas.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::codec::RespValue;
-use crate::error::ValkeyError;
-use crate::valkey_hash_slot;
+use crate::error::RespError;
+use crate::hash_slot;
 
 pub const CLUSTER_SLOTS_COUNT: usize = 16_384;
 
@@ -23,14 +23,14 @@ impl ClusterNodeEndpoint {
     }
 }
 
-/// Primary + healthy online replicas for a Valkey Cluster hash-slot shard.
+/// Primary + healthy online replicas for a Cluster hash-slot shard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShardRoute {
     pub primary: ClusterNodeEndpoint,
     pub replicas: Vec<ClusterNodeEndpoint>,
 }
 
-/// Cached 16384-slot Valkey Cluster topology table.
+/// Cached 16384-slot Cluster topology table.
 #[derive(Debug)]
 pub struct ClusterTopology {
     slots: Vec<Option<usize>>,
@@ -76,16 +76,14 @@ impl ClusterTopology {
         topo
     }
 
-    /// Parse Valkey `CLUSTER SHARDS` response (RESP3 `Array[Map]` or RESP2 flat `Array`).
-    pub fn from_cluster_shards(resp: &RespValue, use_tls: bool) -> Result<Self, ValkeyError> {
+    /// Parse `CLUSTER SHARDS` response (RESP3 `Array[Map]` or RESP2 flat `Array`).
+    pub fn from_cluster_shards(resp: &RespValue, use_tls: bool) -> Result<Self, RespError> {
         let val = resp.unattributed();
         if let RespValue::SimpleError(msg) | RespValue::BulkError(msg) = val {
-            return Err(ValkeyError::from_server_error(msg));
+            return Err(RespError::from_server_error(msg));
         }
         let Some(shard_entries) = val.as_slice() else {
-            return Err(ValkeyError::data(
-                "CLUSTER SHARDS response was not an array",
-            ));
+            return Err(RespError::data("CLUSTER SHARDS response was not an array"));
         };
         let mut topo = Self::empty();
         for entry in shard_entries {
@@ -120,7 +118,7 @@ impl ClusterTopology {
             }
         }
         if topo.shards.is_empty() {
-            return Err(ValkeyError::operational(
+            return Err(RespError::operational(
                 "CLUSTER SHARDS returned zero healthy primary shards",
                 true,
             ));
@@ -129,13 +127,21 @@ impl ClusterTopology {
     }
 
     /// Parse legacy `CLUSTER SLOTS` response into a [`ClusterTopology`].
-    pub fn from_cluster_slots(resp: &RespValue) -> Result<Self, ValkeyError> {
+    pub fn from_cluster_slots(resp: &RespValue) -> Result<Self, RespError> {
+        Self::from_cluster_slots_with_fallback(resp, None)
+    }
+
+    /// Parse legacy `CLUSTER SLOTS` response, substituting `fallback_host` when a node reports an empty host.
+    pub fn from_cluster_slots_with_fallback(
+        resp: &RespValue,
+        fallback_host: Option<&str>,
+    ) -> Result<Self, RespError> {
         let val = resp.unattributed();
         if let RespValue::SimpleError(msg) | RespValue::BulkError(msg) = val {
-            return Err(ValkeyError::from_server_error(msg));
+            return Err(RespError::from_server_error(msg));
         }
         let Some(rows) = val.as_slice() else {
-            return Err(ValkeyError::data("CLUSTER SLOTS response was not an array"));
+            return Err(RespError::data("CLUSTER SLOTS response was not an array"));
         };
         let mut topo = Self::empty();
         let mut primary_index: Vec<(ClusterNodeEndpoint, usize)> = Vec::new();
@@ -150,17 +156,17 @@ impl ClusterTopology {
             let start = cols[0]
                 .as_i64()
                 .and_then(|v| u16::try_from(v).ok())
-                .ok_or_else(|| ValkeyError::data("Invalid CLUSTER SLOTS start slot"))?;
+                .ok_or_else(|| RespError::data("Invalid CLUSTER SLOTS start slot"))?;
             let end = cols[1]
                 .as_i64()
                 .and_then(|v| u16::try_from(v).ok())
-                .ok_or_else(|| ValkeyError::data("Invalid CLUSTER SLOTS end slot"))?;
-            let Some(primary_ep) = parse_slots_node(&cols[2]) else {
+                .ok_or_else(|| RespError::data("Invalid CLUSTER SLOTS end slot"))?;
+            let Some(primary_ep) = parse_slots_node(&cols[2], fallback_host) else {
                 continue;
             };
             let mut replicas = Vec::new();
             for rep_node in &cols[3..] {
-                if let Some(ep) = parse_slots_node(rep_node) {
+                if let Some(ep) = parse_slots_node(rep_node, fallback_host) {
                     replicas.push(ep);
                 }
             }
@@ -185,7 +191,7 @@ impl ClusterTopology {
         }
 
         if topo.shards.is_empty() {
-            return Err(ValkeyError::operational(
+            return Err(RespError::operational(
                 "CLUSTER SLOTS returned zero shards",
                 true,
             ));
@@ -266,7 +272,7 @@ impl ClusterTopology {
         self.shards.len()
     }
 
-    /// Return a mapping from slot index to (primary host, primary port).
+    /// Return a mapping from slot index to `(primary host, primary port)`.
     #[must_use]
     pub fn slot_map(&self) -> std::collections::HashMap<u16, (String, u16)> {
         let mut map = std::collections::HashMap::new();
@@ -295,7 +301,7 @@ type ParsedShardEntry = (Vec<(u16, u16)>, Vec<ParsedShardNode>);
 fn parse_shard_entry(
     entry: &RespValue,
     use_tls: bool,
-) -> Result<Option<ParsedShardEntry>, ValkeyError> {
+) -> Result<Option<ParsedShardEntry>, RespError> {
     let mut slots_val: Option<&RespValue> = None;
     let mut nodes_val: Option<&RespValue> = None;
 
@@ -431,12 +437,20 @@ fn parse_shard_node(val: &RespValue, use_tls: bool) -> Option<ParsedShardNode> {
     })
 }
 
-fn parse_slots_node(val: &RespValue) -> Option<ClusterNodeEndpoint> {
+fn parse_slots_node(val: &RespValue, fallback_host: Option<&str>) -> Option<ClusterNodeEndpoint> {
     let items = val.as_slice()?;
     if items.len() < 2 {
         return None;
     }
-    let host = items[0].as_str()?.into_owned();
+    let raw_host = match items[0].unattributed() {
+        RespValue::Null => String::new(),
+        other => other.as_str()?.into_owned(),
+    };
+    let host = if raw_host.is_empty() {
+        fallback_host.unwrap_or_default().to_string()
+    } else {
+        raw_host
+    };
     if host.is_empty() {
         return None;
     }
@@ -447,16 +461,16 @@ fn parse_slots_node(val: &RespValue) -> Option<ClusterNodeEndpoint> {
     Some(ClusterNodeEndpoint { host, port })
 }
 
-/// Validate that all keys in a multi-key command resolve to the exact same Valkey hash slot.
-pub fn validate_cluster_keys_same_slot(keys: &[&[u8]]) -> Result<Option<u16>, ValkeyError> {
+/// Validate that all keys in a multi-key command resolve to the exact same Cluster hash slot.
+pub fn validate_cluster_keys_same_slot(keys: &[&[u8]]) -> Result<Option<u16>, RespError> {
     let Some(first) = keys.first() else {
         return Ok(None);
     };
-    let slot0 = valkey_hash_slot(first);
+    let slot0 = hash_slot(first);
     for key in &keys[1..] {
-        let slot = valkey_hash_slot(key);
+        let slot = hash_slot(key);
         if slot != slot0 {
-            return Err(ValkeyError::programming(format!(
+            return Err(RespError::programming(format!(
                 "CROSSSLOT Keys in request don't hash to the same slot ({slot0} != {slot})"
             )));
         }
@@ -464,7 +478,7 @@ pub fn validate_cluster_keys_same_slot(keys: &[&[u8]]) -> Result<Option<u16>, Va
     Ok(Some(slot0))
 }
 
-/// Determine whether a Valkey command can safely be dispatched to a `READONLY` replica.
+/// Determine whether a RESP command can safely be dispatched to a `READONLY` replica.
 #[must_use]
 pub fn is_read_only_command(cmd: &[u8]) -> bool {
     let upper = String::from_utf8_lossy(cmd).to_ascii_uppercase();

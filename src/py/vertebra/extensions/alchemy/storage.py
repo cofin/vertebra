@@ -10,19 +10,12 @@ from collections.abc import AsyncIterable, AsyncIterator, Buffer, Callable, Iter
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from vertebra.extensions._storage_common import resolve_object_store_pair
 from vertebra.storage import (
     AsyncGcpTokenCache,
     AsyncObjectStore,
-    AzureConfig,
-    GCSConfig,
-    HTTPConfig,
-    LocalConfig,
-    MemoryConfig,
     ObjectMeta,
-    OCIConfig,
     PutResult,
-    R2Config,
-    S3Config,
     SigningConfig,
     StorageConfig,
     SyncGcpTokenCache,
@@ -50,8 +43,6 @@ __all__ = (
     "ObjectStoreBackend",
     "register_storage_backend",
 )
-
-_STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig)
 
 
 class ObjectStoreBackend(AAStorageBackend):
@@ -91,33 +82,14 @@ class ObjectStoreBackend(AAStorageBackend):
         }
         target = store if store is not None else fs
         self._prefix = self._clean_key(prefix).strip("/")
-        if target is None or isinstance(target, str) and not target.strip():
-            msg = "An explicit object store, storage config, or URI is required"
-            raise ImproperConfigurationError(msg)
-        if isinstance(target, (SyncObjectStore, AsyncObjectStore)) and (signing is not None or token_cache is not None):
-            msg = "signing and token_cache apply only when building a store from a StorageConfig or URI"
-            raise ImproperConfigurationError(msg)
-
-        sync_store: SyncObjectStore
-        async_store: AsyncObjectStore
-
-        if isinstance(target, SyncObjectStore):
-            sync_store = target
-            async_store = target.to_async()
-        elif isinstance(target, AsyncObjectStore):
-            async_store = target
-            sync_store = target.to_sync()
-        elif isinstance(target, _STORAGE_CONFIGS):
-            sync_store = SyncObjectStore(target, signing=signing, token_cache=token_cache)
-            async_store = sync_store.to_async()
-        elif isinstance(target, str):
-            sync_store = SyncObjectStore(
-                target, options=string_options or None, signing=signing, token_cache=token_cache
-            )
-            async_store = sync_store.to_async()
-        else:
-            msg = f"Expected SyncObjectStore, AsyncObjectStore, StorageConfig, or URI string, got {type(target)!r}"
-            raise TypeError(msg)
+        sync_store, async_store = resolve_object_store_pair(
+            target,
+            options=string_options or None,
+            signing=signing,
+            token_cache=token_cache,
+            missing_message="An explicit object store, storage config, or URI is required",
+            strict_uri_type=True,
+        )
 
         super().__init__(key=key, fs=sync_store, **kwargs)
         self._sync_store = sync_store

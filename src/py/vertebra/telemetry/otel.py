@@ -266,6 +266,31 @@ def calculate_percentile(sorted_values: list[float], percentile: float) -> float
     return d0 + d1
 
 
+def _compute_histogram(
+    values: list[float],
+    *,
+    count: int | None = None,
+    total_sum: float | None = None,
+    min_val: float | None = None,
+    max_val: float | None = None,
+    buckets: tuple[HistogramBucket, ...] = (),
+) -> HistogramSnapshot:
+    effective_count = len(values) if count is None else count
+    if effective_count == 0:
+        return HistogramSnapshot(count=0, sum=0.0, min=0.0, max=0.0, buckets=buckets, p50=0.0, p90=0.0, p99=0.0)
+    ordered = sorted(values)
+    return HistogramSnapshot(
+        count=effective_count,
+        sum=sum(ordered) if total_sum is None else total_sum,
+        min=ordered[0] if min_val is None else min_val,
+        max=ordered[-1] if max_val is None else max_val,
+        buckets=buckets,
+        p50=calculate_percentile(ordered, 50.0),
+        p90=calculate_percentile(ordered, 90.0),
+        p99=calculate_percentile(ordered, 99.0),
+    )
+
+
 class GenAiMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """OpenTelemetry gen_ai.* semantic convention metric sample."""
 
@@ -346,30 +371,7 @@ class GenAiRecorder:
         """Calculate statistical duration histogram for a specific operation."""
         with self._lock:
             matching = [s.duration_seconds for s in self._samples if s.operation == operation]
-        if not matching:
-            return HistogramSnapshot(
-                count=0,
-                sum=0.0,
-                min=0.0,
-                max=0.0,
-                p50=0.0,
-                p90=0.0,
-                p99=0.0,
-            )
-
-        sorted_vals = sorted(matching)
-        total_sum = sum(sorted_vals)
-        count = len(sorted_vals)
-
-        return HistogramSnapshot(
-            count=count,
-            sum=total_sum,
-            min=sorted_vals[0],
-            max=sorted_vals[-1],
-            p50=calculate_percentile(sorted_vals, 50.0),
-            p90=calculate_percentile(sorted_vals, 90.0),
-            p99=calculate_percentile(sorted_vals, 99.0),
-        )
+        return _compute_histogram(matching)
 
     def total_cost(self, agent_name: str | None = None) -> float:
         """Return the sum of all recorded USD costs, optionally filtered by agent name."""
@@ -637,28 +639,13 @@ class EventLoopRecorder:
             )
             window_lags = [sample.lag_ms for sample in self._samples]
 
-        if count == 0:
-            return HistogramSnapshot(
-                count=0,
-                sum=0.0,
-                min=0.0,
-                max=0.0,
-                buckets=buckets,
-                p50=0.0,
-                p90=0.0,
-                p99=0.0,
-            )
-
-        sorted_lags = sorted(window_lags)
-        return HistogramSnapshot(
+        return _compute_histogram(
+            window_lags,
             count=count,
-            sum=total_sum,
-            min=min_lag,
-            max=max_lag,
+            total_sum=total_sum,
+            min_val=min_lag,
+            max_val=max_lag,
             buckets=buckets,
-            p50=calculate_percentile(sorted_lags, 50.0),
-            p90=calculate_percentile(sorted_lags, 90.0),
-            p99=calculate_percentile(sorted_lags, 99.0),
         )
 
     def latest_by_shard(self) -> dict[int, EventLoopMetricSample]:

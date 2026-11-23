@@ -17,7 +17,8 @@ use vertebra_db::py_async::{
 };
 
 use crate::arrow_ipc::{
-    decode_arrow_ipc_to_mysql_rows, encode_result_set_to_shm, encode_result_set_to_shm_batches,
+    ShmArrowBatchHandle, decode_arrow_ipc_to_mysql_rows, encode_result_set_to_shm,
+    encode_result_set_to_shm_batches,
 };
 use crate::config::MySQLConnectConfig;
 use crate::cursor::{AsyncMySQLCursor, SyncMySQLCursor};
@@ -1224,6 +1225,252 @@ fn release_lease_slot(slot: &StdMutex<Option<LeaseGuard>>, py: Python<'_>) {
     }
 }
 
+fn compile_many_params(
+    sql: &str,
+    parameter_sets: &Bound<'_, PyAny>,
+) -> PyResult<(String, Vec<Params>)> {
+    let seq = parameter_sets.extract::<Vec<Bound<'_, PyAny>>>()?;
+    let mut compiled_sets = Vec::with_capacity(seq.len());
+    let mut normalized_sql = String::new();
+    for (idx, item) in seq.iter().enumerate() {
+        let (norm, params) = prepare_sql_and_params(sql, Some(item))?;
+        if idx == 0 {
+            normalized_sql = norm;
+        }
+        compiled_sets.push(params);
+    }
+    Ok((normalized_sql, compiled_sets))
+}
+
+fn result_sets_to_py_list(py: Python<'_>, sets: Vec<DecodedResultSet>) -> PyResult<Py<PyAny>> {
+    let outer = PyList::empty(py);
+    for set in sets {
+        outer.append(set.rows_to_py_dicts(py)?)?;
+    }
+    Ok(outer.into_any().unbind())
+}
+
+fn shm_batches_to_py_list(
+    py: Python<'_>,
+    batches: Vec<ShmArrowBatchHandle>,
+) -> PyResult<Py<PyAny>> {
+    let out = PyList::empty(py);
+    for (shm_name, byte_len, row_count, region) in batches {
+        let cursor = construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)?;
+        out.append(cursor.into_bound(py))?;
+    }
+    Ok(out.into_any().unbind())
+}
+
+fn spawn_mysql_task<F, T, M>(py: Python<'_>, fut: F, map_ok: M) -> PyResult<RustDbTaskAwaitable>
+where
+    F: std::future::Future<Output = Result<T, MySQLError>> + Send + 'static,
+    T: Send + 'static,
+    M: FnOnce(Python<'_>, T) -> PyResult<Py<PyAny>> + Send + 'static,
+{
+    spawn_rust_db_task_with_attr(
+        py,
+        fut,
+        map_ok,
+        |py, e: MySQLError| e.to_py_err(py),
+        MYSQL_COMPLETION_DRAINER_ATTR,
+    )
+}
+
+macro_rules! impl_mysql_client_pymethods {
+    (
+        $client:ident,
+        $name:literal,
+        $cursor:ident,
+        $init_lease:expr,
+        { $($extra:tt)* }
+    ) => {
+        #[pymethods]
+        impl $client {
+            #[new]
+            #[pyo3(signature = (
+                dsn = "mysql://root@127.0.0.1:3306/mysql",
+                *,
+                host = None,
+                port = None,
+                user = None,
+                password = None,
+                database = None,
+                unix_socket = None,
+                ssl_mode = "prefer",
+                ssl_ca = None,
+                ssl_cert = None,
+                ssl_key = None,
+                connect_timeout_ms = 10000,
+                read_timeout_ms = 30000,
+                write_timeout_ms = 30000,
+                pool_min_size = 1,
+                pool_max_size = 10,
+                statement_cache_size = 128,
+                charset = "utf8mb4",
+                autocommit = true,
+                init_command = None,
+                cloud_sql_instance = None,
+                cloud_sql_ip_type = "PUBLIC",
+                enable_iam_auth = false,
+                credentials_path = None,
+                credentials_json = None,
+                target_service_account = None,
+            ))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn new(
+                dsn: &str,
+                host: Option<String>,
+                port: Option<u16>,
+                user: Option<String>,
+                password: Option<String>,
+                database: Option<String>,
+                unix_socket: Option<String>,
+                ssl_mode: &str,
+                ssl_ca: Option<String>,
+                ssl_cert: Option<String>,
+                ssl_key: Option<String>,
+                connect_timeout_ms: u64,
+                read_timeout_ms: u64,
+                write_timeout_ms: u64,
+                pool_min_size: usize,
+                pool_max_size: usize,
+                statement_cache_size: usize,
+                charset: &str,
+                autocommit: bool,
+                init_command: Option<String>,
+                cloud_sql_instance: Option<String>,
+                cloud_sql_ip_type: &str,
+                enable_iam_auth: bool,
+                credentials_path: Option<String>,
+                credentials_json: Option<String>,
+                target_service_account: Option<String>,
+            ) -> PyResult<Self> {
+                let config = MySQLConnectConfig::from_dsn_and_kwargs(
+                    dsn,
+                    host,
+                    port,
+                    user,
+                    password,
+                    database,
+                    unix_socket,
+                    Some(ssl_mode),
+                    ssl_ca,
+                    ssl_cert,
+                    ssl_key,
+                    connect_timeout_ms,
+                    read_timeout_ms,
+                    write_timeout_ms,
+                    pool_min_size,
+                    pool_max_size,
+                    statement_cache_size,
+                    charset,
+                    autocommit,
+                    init_command,
+                    cloud_sql_instance,
+                    cloud_sql_ip_type,
+                    enable_iam_auth,
+                    credentials_path,
+                    credentials_json,
+                    target_service_account,
+                )?;
+                Ok(Self {
+                    core: MySQLClientCore::new(config),
+                    lease: $init_lease,
+                })
+            }
+
+            #[pyo3(signature = (*, lazy_begin = false))]
+            pub fn cursor(&self, lazy_begin: bool) -> $cursor {
+                $cursor::new(Arc::clone(&self.core), lazy_begin)
+            }
+
+            pub fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
+                attach_lease_slot(&self.lease, py, release);
+            }
+
+            pub fn release_lease(&self, py: Python<'_>) {
+                release_lease_slot(&self.lease, py);
+            }
+
+            #[getter]
+            pub fn dsn(&self) -> &str {
+                &self.core.config.dsn
+            }
+
+            #[getter]
+            pub fn host(&self) -> &str {
+                &self.core.config.host
+            }
+
+            #[getter]
+            pub fn port(&self) -> u16 {
+                self.core.config.port
+            }
+
+            #[getter]
+            pub fn user(&self) -> &str {
+                &self.core.config.user
+            }
+
+            #[getter]
+            pub fn database(&self) -> &str {
+                &self.core.config.database
+            }
+
+            #[getter]
+            pub fn ssl_mode(&self) -> &str {
+                self.core.config.ssl_mode.as_str()
+            }
+
+            #[getter]
+            pub fn statement_cache_size(&self) -> usize {
+                self.core.config.statement_cache_size
+            }
+
+            #[getter]
+            pub fn enable_iam_auth(&self) -> bool {
+                self.core.config.enable_iam_auth
+            }
+
+            #[getter]
+            pub fn cloud_sql_instance(&self) -> Option<&str> {
+                self.core.config.cloud_sql_instance.as_deref()
+            }
+
+            #[getter]
+            pub fn in_transaction(&self) -> bool {
+                self.core.in_transaction()
+            }
+
+            #[getter]
+            pub fn is_closed(&self) -> bool {
+                self.core.is_closed()
+            }
+
+            #[getter]
+            pub fn connection_id(&self) -> Option<u32> {
+                self.core.connection_id()
+            }
+
+            #[getter]
+            pub fn lastrowid(&self) -> Option<u64> {
+                self.core.lastrowid()
+            }
+
+            pub fn statement_cache_len(&self) -> usize {
+                self.core.statement_cache_len()
+            }
+
+            pub fn __repr__(&self) -> String {
+                self.core.config.redacted_repr($name)
+            }
+
+            $($extra)*
+        }
+    };
+}
+
 /// Synchronous MySQL 8.4/9 and MariaDB client backed by `mysql_async` on the shared Tokio runtime.
 #[pyclass(module = "vertebra._mysql", frozen, immutable_type)]
 pub struct SyncMySQLClient {
@@ -1231,391 +1478,203 @@ pub struct SyncMySQLClient {
     lease: StdMutex<Option<LeaseGuard>>,
 }
 
-#[pymethods]
-impl SyncMySQLClient {
-    #[new]
-    #[pyo3(signature = (
-        dsn = "mysql://root@127.0.0.1:3306/mysql",
-        *,
-        host = None,
-        port = None,
-        user = None,
-        password = None,
-        database = None,
-        unix_socket = None,
-        ssl_mode = "prefer",
-        ssl_ca = None,
-        ssl_cert = None,
-        ssl_key = None,
-        connect_timeout_ms = 10000,
-        read_timeout_ms = 30000,
-        write_timeout_ms = 30000,
-        pool_min_size = 1,
-        pool_max_size = 10,
-        statement_cache_size = 128,
-        charset = "utf8mb4",
-        autocommit = true,
-        init_command = None,
-        cloud_sql_instance = None,
-        cloud_sql_ip_type = "PUBLIC",
-        enable_iam_auth = false,
-        credentials_path = None,
-        credentials_json = None,
-        target_service_account = None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        dsn: &str,
-        host: Option<String>,
-        port: Option<u16>,
-        user: Option<String>,
-        password: Option<String>,
-        database: Option<String>,
-        unix_socket: Option<String>,
-        ssl_mode: &str,
-        ssl_ca: Option<String>,
-        ssl_cert: Option<String>,
-        ssl_key: Option<String>,
-        connect_timeout_ms: u64,
-        read_timeout_ms: u64,
-        write_timeout_ms: u64,
-        pool_min_size: usize,
-        pool_max_size: usize,
-        statement_cache_size: usize,
-        charset: &str,
-        autocommit: bool,
-        init_command: Option<String>,
-        cloud_sql_instance: Option<String>,
-        cloud_sql_ip_type: &str,
-        enable_iam_auth: bool,
-        credentials_path: Option<String>,
-        credentials_json: Option<String>,
-        target_service_account: Option<String>,
-    ) -> PyResult<Self> {
-        let config = MySQLConnectConfig::from_dsn_and_kwargs(
-            dsn,
-            host,
-            port,
-            user,
-            password,
-            database,
-            unix_socket,
-            Some(ssl_mode),
-            ssl_ca,
-            ssl_cert,
-            ssl_key,
-            connect_timeout_ms,
-            read_timeout_ms,
-            write_timeout_ms,
-            pool_min_size,
-            pool_max_size,
-            statement_cache_size,
-            charset,
-            autocommit,
-            init_command,
-            cloud_sql_instance,
-            cloud_sql_ip_type,
-            enable_iam_auth,
-            credentials_path,
-            credentials_json,
-            target_service_account,
-        )?;
-        Ok(Self {
-            core: MySQLClientCore::new(config),
-            lease: StdMutex::new(None),
-        })
-    }
-
-    #[pyo3(signature = (*, lazy_begin = false))]
-    pub fn cursor(&self, lazy_begin: bool) -> SyncMySQLCursor {
-        SyncMySQLCursor::new(Arc::clone(&self.core), lazy_begin)
-    }
-
-    pub fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
-        attach_lease_slot(&self.lease, py, release);
-    }
-
-    pub fn release_lease(&self, py: Python<'_>) {
-        release_lease_slot(&self.lease, py);
-    }
-
-    #[getter]
-    pub fn dsn(&self) -> &str {
-        &self.core.config.dsn
-    }
-
-    #[getter]
-    pub fn host(&self) -> &str {
-        &self.core.config.host
-    }
-
-    #[getter]
-    pub fn port(&self) -> u16 {
-        self.core.config.port
-    }
-
-    #[getter]
-    pub fn user(&self) -> &str {
-        &self.core.config.user
-    }
-
-    #[getter]
-    pub fn database(&self) -> &str {
-        &self.core.config.database
-    }
-
-    #[getter]
-    pub fn ssl_mode(&self) -> &str {
-        self.core.config.ssl_mode.as_str()
-    }
-
-    #[getter]
-    pub fn statement_cache_size(&self) -> usize {
-        self.core.config.statement_cache_size
-    }
-
-    #[getter]
-    pub fn enable_iam_auth(&self) -> bool {
-        self.core.config.enable_iam_auth
-    }
-
-    #[getter]
-    pub fn cloud_sql_instance(&self) -> Option<&str> {
-        self.core.config.cloud_sql_instance.as_deref()
-    }
-
-    #[getter]
-    pub fn in_transaction(&self) -> bool {
-        self.core.in_transaction()
-    }
-
-    #[getter]
-    pub fn is_closed(&self) -> bool {
-        self.core.is_closed()
-    }
-
-    #[getter]
-    pub fn connection_id(&self) -> Option<u32> {
-        self.core.connection_id()
-    }
-
-    #[getter]
-    pub fn lastrowid(&self) -> Option<u64> {
-        self.core.lastrowid()
-    }
-
-    pub fn statement_cache_len(&self) -> usize {
-        self.core.statement_cache_len()
-    }
-
-    pub fn __repr__(&self) -> String {
-        self.core.config.redacted_repr("SyncMySQLClient")
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn execute(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<u64> {
-        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
-        let core = Arc::clone(&self.core);
-        let rs = py.detach(|| {
-            block_on_db(async move { core.execute_result_set(norm_sql, params).await })
-        })?;
-        Ok(rs.affected_rows)
-    }
-
-    pub fn execute_many(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameter_sets: &Bound<'_, PyAny>,
-    ) -> PyResult<u64> {
-        let seq = parameter_sets.extract::<Vec<Bound<'_, PyAny>>>()?;
-        let mut compiled_sets = Vec::with_capacity(seq.len());
-        let mut normalized_sql = String::new();
-        for (idx, item) in seq.iter().enumerate() {
-            let (norm, params) = prepare_sql_and_params(sql, Some(item))?;
-            if idx == 0 {
-                normalized_sql = norm;
-            }
-            compiled_sets.push(params);
+impl_mysql_client_pymethods!(
+    SyncMySQLClient,
+    "SyncMySQLClient",
+    SyncMySQLCursor,
+    StdMutex::new(None),
+    {
+        #[pyo3(signature = (sql, parameters=None))]
+        pub fn execute(
+            &self,
+            py: Python<'_>,
+            sql: &str,
+            parameters: Option<&Bound<'_, PyAny>>,
+        ) -> PyResult<u64> {
+            let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+            let core = Arc::clone(&self.core);
+            let rs = py.detach(|| {
+                block_on_db(async move { core.execute_result_set(norm_sql, params).await })
+            })?;
+            Ok(rs.affected_rows)
         }
-        let core = Arc::clone(&self.core);
-        let affected = py.detach(|| {
-            block_on_db(async move { core.execute_many_batch(normalized_sql, compiled_sets).await })
-        })?;
-        Ok(affected)
-    }
 
-    pub fn execute_script(&self, py: Python<'_>, sql: &str) -> PyResult<u64> {
-        let script = sql.to_string();
-        let core = Arc::clone(&self.core);
-        let affected =
-            py.detach(|| block_on_db(async move { core.execute_script(script).await }))?;
-        Ok(affected)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn fetch_all_sets(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
-        let core = Arc::clone(&self.core);
-        let sets = py
-            .detach(|| block_on_db(async move { core.execute_all_sets(norm_sql, params).await }))?;
-        let outer = PyList::empty(py);
-        for set in sets {
-            outer.append(set.rows_to_py_dicts(py)?)?;
+        pub fn execute_many(
+            &self,
+            py: Python<'_>,
+            sql: &str,
+            parameter_sets: &Bound<'_, PyAny>,
+        ) -> PyResult<u64> {
+            let (normalized_sql, compiled_sets) = compile_many_params(sql, parameter_sets)?;
+            let core = Arc::clone(&self.core);
+            let affected = py.detach(|| {
+                block_on_db(
+                    async move { core.execute_many_batch(normalized_sql, compiled_sets).await },
+                )
+            })?;
+            Ok(affected)
         }
-        Ok(outer.into_any().unbind())
-    }
 
-    #[pyo3(signature = (isolation_level=None, readonly=false))]
-    pub fn begin(
-        &self,
-        py: Python<'_>,
-        isolation_level: Option<String>,
-        readonly: bool,
-    ) -> PyResult<()> {
-        let core = Arc::clone(&self.core);
-        py.detach(|| block_on_db(async move { core.begin(isolation_level, readonly).await }))?;
-        Ok(())
-    }
-
-    pub fn commit(&self, py: Python<'_>) -> PyResult<()> {
-        let core = Arc::clone(&self.core);
-        py.detach(|| block_on_db(async move { core.commit().await }))?;
-        Ok(())
-    }
-
-    pub fn rollback(&self, py: Python<'_>) -> PyResult<()> {
-        let core = Arc::clone(&self.core);
-        py.detach(|| block_on_db(async move { core.rollback().await }))?;
-        Ok(())
-    }
-
-    #[pyo3(signature = (name="vtb_sp"))]
-    pub fn savepoint(&self, py: Python<'_>, name: &str) -> PyResult<String> {
-        let core = Arc::clone(&self.core);
-        let sp = name.to_string();
-        let out = py.detach(|| block_on_db(async move { core.savepoint(sp).await }))?;
-        Ok(out)
-    }
-
-    #[pyo3(signature = (name="vtb_sp"))]
-    pub fn release_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        let core = Arc::clone(&self.core);
-        let sp = name.to_string();
-        py.detach(|| block_on_db(async move { core.release_savepoint(sp).await }))?;
-        Ok(())
-    }
-
-    #[pyo3(signature = (name="vtb_sp"))]
-    pub fn rollback_to_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        let core = Arc::clone(&self.core);
-        let sp = name.to_string();
-        py.detach(|| block_on_db(async move { core.rollback_to_savepoint(sp).await }))?;
-        Ok(())
-    }
-
-    pub fn ping(&self, py: Python<'_>) -> PyResult<bool> {
-        let core = Arc::clone(&self.core);
-        let ok = py.detach(|| block_on_db(async move { core.ping().await }))?;
-        Ok(ok)
-    }
-
-    pub fn cancel(&self, py: Python<'_>) -> PyResult<bool> {
-        let core = Arc::clone(&self.core);
-        let cancelled =
-            py.detach(|| block_on_db(async move { core.cancel_active_query().await }))?;
-        Ok(cancelled)
-    }
-
-    pub fn cancel_query(&self, py: Python<'_>, connection_id: u32) -> PyResult<bool> {
-        let core = Arc::clone(&self.core);
-        let cancelled =
-            py.detach(|| block_on_db(async move { core.cancel_query_by_id(connection_id).await }))?;
-        Ok(cancelled)
-    }
-
-    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
-        let core = Arc::clone(&self.core);
-        let res = py.detach(|| block_on_db(async move { core.close().await }));
-        self.release_lease(py);
-        res?;
-        Ok(())
-    }
-
-    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
-    pub fn select_to_arrow(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-        batch_size: usize,
-    ) -> PyResult<Py<PyAny>> {
-        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
-        let core = Arc::clone(&self.core);
-        let (shm_name, byte_len, row_count, region) = py.detach(|| {
-            block_on_db(async move {
-                let rs = core.execute_result_set(norm_sql, params).await?;
-                encode_result_set_to_shm(&rs.columns, &rs.rows, batch_size)
-            })
-        })?;
-        construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)
-    }
-
-    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
-    pub fn stream_arrow_batches(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-        batch_size: usize,
-    ) -> PyResult<Py<PyAny>> {
-        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
-        let core = Arc::clone(&self.core);
-        let batches = py.detach(|| {
-            block_on_db(async move {
-                let rs = core.execute_result_set(norm_sql, params).await?;
-                encode_result_set_to_shm_batches(&rs.columns, &rs.rows, batch_size)
-            })
-        })?;
-        let out = PyList::empty(py);
-        for (shm_name, byte_len, row_count, region) in batches {
-            let cursor = construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)?;
-            out.append(cursor.into_bound(py))?;
+        pub fn execute_script(&self, py: Python<'_>, sql: &str) -> PyResult<u64> {
+            let script = sql.to_string();
+            let core = Arc::clone(&self.core);
+            let affected =
+                py.detach(|| block_on_db(async move { core.execute_script(script).await }))?;
+            Ok(affected)
         }
-        Ok(out.into_any().unbind())
-    }
 
-    #[pyo3(signature = (table_name, source, *, columns=None, batch_size=1000))]
-    pub fn load_from_arrow(
-        &self,
-        py: Python<'_>,
-        table_name: &str,
-        source: &Bound<'_, PyAny>,
-        columns: Option<Vec<String>>,
-        batch_size: usize,
-    ) -> PyResult<u64> {
-        let (resolved_cols, rows) = extract_arrow_load_payload(py, source, columns)?;
-        let table = table_name.to_string();
-        let core = Arc::clone(&self.core);
-        let inserted = py.detach(|| {
-            block_on_db(async move {
-                core.load_rows_batched(table, resolved_cols, rows, batch_size)
-                    .await
-            })
-        })?;
-        Ok(inserted)
+        #[pyo3(signature = (sql, parameters=None))]
+        pub fn fetch_all_sets(
+            &self,
+            py: Python<'_>,
+            sql: &str,
+            parameters: Option<&Bound<'_, PyAny>>,
+        ) -> PyResult<Py<PyAny>> {
+            let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+            let core = Arc::clone(&self.core);
+            let sets = py.detach(|| {
+                block_on_db(async move { core.execute_all_sets(norm_sql, params).await })
+            })?;
+            result_sets_to_py_list(py, sets)
+        }
+
+        #[pyo3(signature = (isolation_level=None, readonly=false))]
+        pub fn begin(
+            &self,
+            py: Python<'_>,
+            isolation_level: Option<String>,
+            readonly: bool,
+        ) -> PyResult<()> {
+            let core = Arc::clone(&self.core);
+            py.detach(|| block_on_db(async move { core.begin(isolation_level, readonly).await }))?;
+            Ok(())
+        }
+
+        pub fn commit(&self, py: Python<'_>) -> PyResult<()> {
+            let core = Arc::clone(&self.core);
+            py.detach(|| block_on_db(async move { core.commit().await }))?;
+            Ok(())
+        }
+
+        pub fn rollback(&self, py: Python<'_>) -> PyResult<()> {
+            let core = Arc::clone(&self.core);
+            py.detach(|| block_on_db(async move { core.rollback().await }))?;
+            Ok(())
+        }
+
+        #[pyo3(signature = (name="vtb_sp"))]
+        pub fn savepoint(&self, py: Python<'_>, name: &str) -> PyResult<String> {
+            let core = Arc::clone(&self.core);
+            let sp = name.to_string();
+            let out = py.detach(|| block_on_db(async move { core.savepoint(sp).await }))?;
+            Ok(out)
+        }
+
+        #[pyo3(signature = (name="vtb_sp"))]
+        pub fn release_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+            let core = Arc::clone(&self.core);
+            let sp = name.to_string();
+            py.detach(|| block_on_db(async move { core.release_savepoint(sp).await }))?;
+            Ok(())
+        }
+
+        #[pyo3(signature = (name="vtb_sp"))]
+        pub fn rollback_to_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+            let core = Arc::clone(&self.core);
+            let sp = name.to_string();
+            py.detach(|| block_on_db(async move { core.rollback_to_savepoint(sp).await }))?;
+            Ok(())
+        }
+
+        pub fn ping(&self, py: Python<'_>) -> PyResult<bool> {
+            let core = Arc::clone(&self.core);
+            let ok = py.detach(|| block_on_db(async move { core.ping().await }))?;
+            Ok(ok)
+        }
+
+        pub fn cancel(&self, py: Python<'_>) -> PyResult<bool> {
+            let core = Arc::clone(&self.core);
+            let cancelled =
+                py.detach(|| block_on_db(async move { core.cancel_active_query().await }))?;
+            Ok(cancelled)
+        }
+
+        pub fn cancel_query(&self, py: Python<'_>, connection_id: u32) -> PyResult<bool> {
+            let core = Arc::clone(&self.core);
+            let cancelled = py.detach(|| {
+                block_on_db(async move { core.cancel_query_by_id(connection_id).await })
+            })?;
+            Ok(cancelled)
+        }
+
+        pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+            let core = Arc::clone(&self.core);
+            let res = py.detach(|| block_on_db(async move { core.close().await }));
+            self.release_lease(py);
+            res?;
+            Ok(())
+        }
+
+        #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+        pub fn select_to_arrow(
+            &self,
+            py: Python<'_>,
+            sql: &str,
+            parameters: Option<&Bound<'_, PyAny>>,
+            batch_size: usize,
+        ) -> PyResult<Py<PyAny>> {
+            let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+            let core = Arc::clone(&self.core);
+            let (shm_name, byte_len, row_count, region) = py.detach(|| {
+                block_on_db(async move {
+                    let rs = core.execute_result_set(norm_sql, params).await?;
+                    encode_result_set_to_shm(&rs.columns, &rs.rows, batch_size)
+                })
+            })?;
+            construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)
+        }
+
+        #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+        pub fn stream_arrow_batches(
+            &self,
+            py: Python<'_>,
+            sql: &str,
+            parameters: Option<&Bound<'_, PyAny>>,
+            batch_size: usize,
+        ) -> PyResult<Py<PyAny>> {
+            let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+            let core = Arc::clone(&self.core);
+            let batches = py.detach(|| {
+                block_on_db(async move {
+                    let rs = core.execute_result_set(norm_sql, params).await?;
+                    encode_result_set_to_shm_batches(&rs.columns, &rs.rows, batch_size)
+                })
+            })?;
+            shm_batches_to_py_list(py, batches)
+        }
+
+        #[pyo3(signature = (table_name, source, *, columns=None, batch_size=1000))]
+        pub fn load_from_arrow(
+            &self,
+            py: Python<'_>,
+            table_name: &str,
+            source: &Bound<'_, PyAny>,
+            columns: Option<Vec<String>>,
+            batch_size: usize,
+        ) -> PyResult<u64> {
+            let (resolved_cols, rows) = extract_arrow_load_payload(py, source, columns)?;
+            let table = table_name.to_string();
+            let core = Arc::clone(&self.core);
+            let inserted = py.detach(|| {
+                block_on_db(async move {
+                    core.load_rows_batched(table, resolved_cols, rows, batch_size)
+                        .await
+                })
+            })?;
+            Ok(inserted)
+        }
     }
-}
+);
 
 /// Asynchronous MySQL 8.4/9 and MariaDB client backed by `mysql_async` and `vertebra_db::py_async`
 /// (`_vertebra_mysql_completion_drainer`).
@@ -1625,486 +1684,253 @@ pub struct AsyncMySQLClient {
     lease: Arc<StdMutex<Option<LeaseGuard>>>,
 }
 
-#[pymethods]
-impl AsyncMySQLClient {
-    #[new]
-    #[pyo3(signature = (
-        dsn = "mysql://root@127.0.0.1:3306/mysql",
-        *,
-        host = None,
-        port = None,
-        user = None,
-        password = None,
-        database = None,
-        unix_socket = None,
-        ssl_mode = "prefer",
-        ssl_ca = None,
-        ssl_cert = None,
-        ssl_key = None,
-        connect_timeout_ms = 10000,
-        read_timeout_ms = 30000,
-        write_timeout_ms = 30000,
-        pool_min_size = 1,
-        pool_max_size = 10,
-        statement_cache_size = 128,
-        charset = "utf8mb4",
-        autocommit = true,
-        init_command = None,
-        cloud_sql_instance = None,
-        cloud_sql_ip_type = "PUBLIC",
-        enable_iam_auth = false,
-        credentials_path = None,
-        credentials_json = None,
-        target_service_account = None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        dsn: &str,
-        host: Option<String>,
-        port: Option<u16>,
-        user: Option<String>,
-        password: Option<String>,
-        database: Option<String>,
-        unix_socket: Option<String>,
-        ssl_mode: &str,
-        ssl_ca: Option<String>,
-        ssl_cert: Option<String>,
-        ssl_key: Option<String>,
-        connect_timeout_ms: u64,
-        read_timeout_ms: u64,
-        write_timeout_ms: u64,
-        pool_min_size: usize,
-        pool_max_size: usize,
-        statement_cache_size: usize,
-        charset: &str,
-        autocommit: bool,
-        init_command: Option<String>,
-        cloud_sql_instance: Option<String>,
-        cloud_sql_ip_type: &str,
-        enable_iam_auth: bool,
-        credentials_path: Option<String>,
-        credentials_json: Option<String>,
-        target_service_account: Option<String>,
-    ) -> PyResult<Self> {
-        let config = MySQLConnectConfig::from_dsn_and_kwargs(
-            dsn,
-            host,
-            port,
-            user,
-            password,
-            database,
-            unix_socket,
-            Some(ssl_mode),
-            ssl_ca,
-            ssl_cert,
-            ssl_key,
-            connect_timeout_ms,
-            read_timeout_ms,
-            write_timeout_ms,
-            pool_min_size,
-            pool_max_size,
-            statement_cache_size,
-            charset,
-            autocommit,
-            init_command,
-            cloud_sql_instance,
-            cloud_sql_ip_type,
-            enable_iam_auth,
-            credentials_path,
-            credentials_json,
-            target_service_account,
-        )?;
-        Ok(Self {
-            core: MySQLClientCore::new(config),
-            lease: Arc::new(StdMutex::new(None)),
-        })
-    }
-
-    #[pyo3(signature = (*, lazy_begin = false))]
-    pub fn cursor(&self, lazy_begin: bool) -> AsyncMySQLCursor {
-        AsyncMySQLCursor::new(Arc::clone(&self.core), lazy_begin)
-    }
-
-    pub fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
-        attach_lease_slot(&self.lease, py, release);
-    }
-
-    pub fn release_lease(&self, py: Python<'_>) {
-        release_lease_slot(&self.lease, py);
-    }
-
-    #[getter]
-    pub fn dsn(&self) -> &str {
-        &self.core.config.dsn
-    }
-
-    #[getter]
-    pub fn host(&self) -> &str {
-        &self.core.config.host
-    }
-
-    #[getter]
-    pub fn port(&self) -> u16 {
-        self.core.config.port
-    }
-
-    #[getter]
-    pub fn user(&self) -> &str {
-        &self.core.config.user
-    }
-
-    #[getter]
-    pub fn database(&self) -> &str {
-        &self.core.config.database
-    }
-
-    #[getter]
-    pub fn ssl_mode(&self) -> &str {
-        self.core.config.ssl_mode.as_str()
-    }
-
-    #[getter]
-    pub fn statement_cache_size(&self) -> usize {
-        self.core.config.statement_cache_size
-    }
-
-    #[getter]
-    pub fn enable_iam_auth(&self) -> bool {
-        self.core.config.enable_iam_auth
-    }
-
-    #[getter]
-    pub fn cloud_sql_instance(&self) -> Option<&str> {
-        self.core.config.cloud_sql_instance.as_deref()
-    }
-
-    #[getter]
-    pub fn in_transaction(&self) -> bool {
-        self.core.in_transaction()
-    }
-
-    #[getter]
-    pub fn is_closed(&self) -> bool {
-        self.core.is_closed()
-    }
-
-    #[getter]
-    pub fn connection_id(&self) -> Option<u32> {
-        self.core.connection_id()
-    }
-
-    #[getter]
-    pub fn lastrowid(&self) -> Option<u64> {
-        self.core.lastrowid()
-    }
-
-    pub fn statement_cache_len(&self) -> usize {
-        self.core.statement_cache_len()
-    }
-
-    pub fn __repr__(&self) -> String {
-        self.core.config.redacted_repr("AsyncMySQLClient")
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn execute(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                let rs = core.execute_result_set(norm_sql, params).await?;
-                Ok(rs.affected_rows)
-            },
-            |py, n: u64| Ok(n.into_pyobject(py)?.into_any().unbind()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    pub fn execute_many(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameter_sets: &Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let seq = parameter_sets.extract::<Vec<Bound<'_, PyAny>>>()?;
-        let mut compiled_sets = Vec::with_capacity(seq.len());
-        let mut normalized_sql = String::new();
-        for (idx, item) in seq.iter().enumerate() {
-            let (norm, params) = prepare_sql_and_params(sql, Some(item))?;
-            if idx == 0 {
-                normalized_sql = norm;
-            }
-            compiled_sets.push(params);
+impl_mysql_client_pymethods!(
+    AsyncMySQLClient,
+    "AsyncMySQLClient",
+    AsyncMySQLCursor,
+    Arc::new(StdMutex::new(None)),
+    {
+        #[pyo3(signature = (sql, parameters=None))]
+        pub fn execute(
+            &self,
+            py: Python<'_>,
+            sql: &str,
+            parameters: Option<&Bound<'_, PyAny>>,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(
+                py,
+                async move {
+                    let rs = core.execute_result_set(norm_sql, params).await?;
+                    Ok(rs.affected_rows)
+                },
+                |py, n: u64| Ok(n.into_pyobject(py)?.into_any().unbind()),
+            )
         }
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.execute_many_batch(normalized_sql, compiled_sets).await },
-            |py, n: u64| Ok(n.into_pyobject(py)?.into_any().unbind()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
 
-    pub fn execute_script(&self, py: Python<'_>, sql: &str) -> PyResult<RustDbTaskAwaitable> {
-        let script = sql.to_string();
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.execute_script(script).await },
-            |py, n: u64| Ok(n.into_pyobject(py)?.into_any().unbind()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
+        pub fn execute_many(
+            &self,
+            py: Python<'_>,
+            sql: &str,
+            parameter_sets: &Bound<'_, PyAny>,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let (normalized_sql, compiled_sets) = compile_many_params(sql, parameter_sets)?;
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(
+                py,
+                async move { core.execute_many_batch(normalized_sql, compiled_sets).await },
+                |py, n: u64| Ok(n.into_pyobject(py)?.into_any().unbind()),
+            )
+        }
 
-    #[pyo3(signature = (sql, parameters=None))]
-    pub fn fetch_all_sets(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.execute_all_sets(norm_sql, params).await },
-            |py, list: Vec<DecodedResultSet>| {
-                let outer = PyList::empty(py);
-                for s in list {
-                    outer.append(s.rows_to_py_dicts(py)?)?;
-                }
-                Ok(outer.into_any().unbind())
-            },
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
+        pub fn execute_script(&self, py: Python<'_>, sql: &str) -> PyResult<RustDbTaskAwaitable> {
+            let script = sql.to_string();
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(
+                py,
+                async move { core.execute_script(script).await },
+                |py, n: u64| Ok(n.into_pyobject(py)?.into_any().unbind()),
+            )
+        }
 
-    #[pyo3(signature = (isolation_level=None, readonly=false))]
-    pub fn begin(
-        &self,
-        py: Python<'_>,
-        isolation_level: Option<String>,
-        readonly: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.begin(isolation_level, readonly).await },
-            |py, (): ()| Ok(py.None()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
+        #[pyo3(signature = (sql, parameters=None))]
+        pub fn fetch_all_sets(
+            &self,
+            py: Python<'_>,
+            sql: &str,
+            parameters: Option<&Bound<'_, PyAny>>,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(
+                py,
+                async move { core.execute_all_sets(norm_sql, params).await },
+                result_sets_to_py_list,
+            )
+        }
 
-    pub fn commit(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.commit().await },
-            |py, (): ()| Ok(py.None()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
+        #[pyo3(signature = (isolation_level=None, readonly=false))]
+        pub fn begin(
+            &self,
+            py: Python<'_>,
+            isolation_level: Option<String>,
+            readonly: bool,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(
+                py,
+                async move { core.begin(isolation_level, readonly).await },
+                |py, ()| Ok(py.None()),
+            )
+        }
 
-    pub fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.rollback().await },
-            |py, (): ()| Ok(py.None()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (name="vtb_sp"))]
-    pub fn savepoint(&self, py: Python<'_>, name: &str) -> PyResult<RustDbTaskAwaitable> {
-        let core = Arc::clone(&self.core);
-        let sp = name.to_string();
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.savepoint(sp).await },
-            |py, s: String| Ok(PyString::new(py, &s).into_any().unbind()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (name="vtb_sp"))]
-    pub fn release_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<RustDbTaskAwaitable> {
-        let core = Arc::clone(&self.core);
-        let sp = name.to_string();
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.release_savepoint(sp).await },
-            |py, (): ()| Ok(py.None()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (name="vtb_sp"))]
-    pub fn rollback_to_savepoint(
-        &self,
-        py: Python<'_>,
-        name: &str,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let core = Arc::clone(&self.core);
-        let sp = name.to_string();
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.rollback_to_savepoint(sp).await },
-            |py, (): ()| Ok(py.None()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    pub fn ping(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.ping().await },
-            |py, b: bool| Ok(PyBool::new(py, b).to_owned().into_any().unbind()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    pub fn cancel(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.cancel_active_query().await },
-            |py, b: bool| Ok(PyBool::new(py, b).to_owned().into_any().unbind()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    pub fn cancel_query(
-        &self,
-        py: Python<'_>,
-        connection_id: u32,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.cancel_query_by_id(connection_id).await },
-            |py, b: bool| Ok(PyBool::new(py, b).to_owned().into_any().unbind()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let core = Arc::clone(&self.core);
-        let lease_ok = Arc::clone(&self.lease);
-        let lease_err = Arc::clone(&self.lease);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { core.close().await },
-            move |py, (): ()| {
-                release_lease_slot(&lease_ok, py);
+        pub fn commit(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(py, async move { core.commit().await }, |py, ()| {
                 Ok(py.None())
-            },
-            move |py, e: MySQLError| {
-                release_lease_slot(&lease_err, py);
-                e.to_py_err(py)
-            },
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
+            })
+        }
 
-    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
-    pub fn select_to_arrow(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-        batch_size: usize,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                let rs = core.execute_result_set(norm_sql, params).await?;
-                encode_result_set_to_shm(&rs.columns, &rs.rows, batch_size)
-            },
-            |py, (shm_name, byte_len, row_count, region)| {
-                construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)
-            },
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
+        pub fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(py, async move { core.rollback().await }, |py, ()| {
+                Ok(py.None())
+            })
+        }
 
-    #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
-    pub fn stream_arrow_batches(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-        batch_size: usize,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                let rs = core.execute_result_set(norm_sql, params).await?;
-                encode_result_set_to_shm_batches(&rs.columns, &rs.rows, batch_size)
-            },
-            |py, batches| {
-                let out = PyList::empty(py);
-                for (shm_name, byte_len, row_count, region) in batches {
-                    let cursor =
-                        construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)?;
-                    out.append(cursor.into_bound(py))?;
-                }
-                Ok(out.into_any().unbind())
-            },
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
+        #[pyo3(signature = (name="vtb_sp"))]
+        pub fn savepoint(&self, py: Python<'_>, name: &str) -> PyResult<RustDbTaskAwaitable> {
+            let core = Arc::clone(&self.core);
+            let sp = name.to_string();
+            spawn_mysql_task(py, async move { core.savepoint(sp).await }, |py, s| {
+                Ok(PyString::new(py, &s).into_any().unbind())
+            })
+        }
 
-    #[pyo3(signature = (table_name, source, *, columns=None, batch_size=1000))]
-    pub fn load_from_arrow(
-        &self,
-        py: Python<'_>,
-        table_name: &str,
-        source: &Bound<'_, PyAny>,
-        columns: Option<Vec<String>>,
-        batch_size: usize,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (resolved_cols, rows) = extract_arrow_load_payload(py, source, columns)?;
-        let table = table_name.to_string();
-        let core = Arc::clone(&self.core);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move {
-                core.load_rows_batched(table, resolved_cols, rows, batch_size)
-                    .await
-            },
-            |py, n: u64| Ok(n.into_pyobject(py)?.into_any().unbind()),
-            |py, e: MySQLError| e.to_py_err(py),
-            MYSQL_COMPLETION_DRAINER_ATTR,
-        )
+        #[pyo3(signature = (name="vtb_sp"))]
+        pub fn release_savepoint(
+            &self,
+            py: Python<'_>,
+            name: &str,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let core = Arc::clone(&self.core);
+            let sp = name.to_string();
+            spawn_mysql_task(
+                py,
+                async move { core.release_savepoint(sp).await },
+                |py, ()| Ok(py.None()),
+            )
+        }
+
+        #[pyo3(signature = (name="vtb_sp"))]
+        pub fn rollback_to_savepoint(
+            &self,
+            py: Python<'_>,
+            name: &str,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let core = Arc::clone(&self.core);
+            let sp = name.to_string();
+            spawn_mysql_task(
+                py,
+                async move { core.rollback_to_savepoint(sp).await },
+                |py, ()| Ok(py.None()),
+            )
+        }
+
+        pub fn ping(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(py, async move { core.ping().await }, |py, b| {
+                Ok(PyBool::new(py, b).to_owned().into_any().unbind())
+            })
+        }
+
+        pub fn cancel(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(
+                py,
+                async move { core.cancel_active_query().await },
+                |py, b| Ok(PyBool::new(py, b).to_owned().into_any().unbind()),
+            )
+        }
+
+        pub fn cancel_query(
+            &self,
+            py: Python<'_>,
+            connection_id: u32,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(
+                py,
+                async move { core.cancel_query_by_id(connection_id).await },
+                |py, b| Ok(PyBool::new(py, b).to_owned().into_any().unbind()),
+            )
+        }
+
+        pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+            let core = Arc::clone(&self.core);
+            let lease_ok = Arc::clone(&self.lease);
+            let lease_err = Arc::clone(&self.lease);
+            spawn_rust_db_task_with_attr(
+                py,
+                async move { core.close().await },
+                move |py, (): ()| {
+                    release_lease_slot(&lease_ok, py);
+                    Ok(py.None())
+                },
+                move |py, e: MySQLError| {
+                    release_lease_slot(&lease_err, py);
+                    e.to_py_err(py)
+                },
+                MYSQL_COMPLETION_DRAINER_ATTR,
+            )
+        }
+
+        #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+        pub fn select_to_arrow(
+            &self,
+            py: Python<'_>,
+            sql: &str,
+            parameters: Option<&Bound<'_, PyAny>>,
+            batch_size: usize,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(
+                py,
+                async move {
+                    let rs = core.execute_result_set(norm_sql, params).await?;
+                    encode_result_set_to_shm(&rs.columns, &rs.rows, batch_size)
+                },
+                |py, (shm_name, byte_len, row_count, region)| {
+                    construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)
+                },
+            )
+        }
+
+        #[pyo3(signature = (sql, parameters=None, *, batch_size=65536))]
+        pub fn stream_arrow_batches(
+            &self,
+            py: Python<'_>,
+            sql: &str,
+            parameters: Option<&Bound<'_, PyAny>>,
+            batch_size: usize,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(
+                py,
+                async move {
+                    let rs = core.execute_result_set(norm_sql, params).await?;
+                    encode_result_set_to_shm_batches(&rs.columns, &rs.rows, batch_size)
+                },
+                shm_batches_to_py_list,
+            )
+        }
+
+        #[pyo3(signature = (table_name, source, *, columns=None, batch_size=1000))]
+        pub fn load_from_arrow(
+            &self,
+            py: Python<'_>,
+            table_name: &str,
+            source: &Bound<'_, PyAny>,
+            columns: Option<Vec<String>>,
+            batch_size: usize,
+        ) -> PyResult<RustDbTaskAwaitable> {
+            let (resolved_cols, rows) = extract_arrow_load_payload(py, source, columns)?;
+            let table = table_name.to_string();
+            let core = Arc::clone(&self.core);
+            spawn_mysql_task(
+                py,
+                async move {
+                    core.load_rows_batched(table, resolved_cols, rows, batch_size)
+                        .await
+                },
+                |py, n: u64| Ok(n.into_pyobject(py)?.into_any().unbind()),
+            )
+        }
     }
-}
+);
 
 #[cfg(test)]
 mod tests {

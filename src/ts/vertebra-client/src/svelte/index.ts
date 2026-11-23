@@ -2,6 +2,7 @@ import { getContext, setContext } from "svelte";
 import { derived, type Readable, writable } from "svelte/store";
 import { HttpClient } from "../client/client";
 import type { ClientConfig } from "../client/types";
+import { createSequencedRunner, runTrackedMutation } from "../internal/async_runner";
 
 const VERTEBRA_KEY = Symbol("vertebra");
 
@@ -58,41 +59,19 @@ export function createQuery<TInput = unknown, TOutput = unknown>(
     loading: false,
     error: null,
   });
-  let requestSeq = 0;
+  const resolveInput = (): TInput | undefined => (typeof input === "function" ? (input as () => TInput)() : input);
+  const isEnabled = (): boolean =>
+    options.enabled === undefined ? true : typeof options.enabled === "function" ? options.enabled() : options.enabled;
 
-  const resolveInput = (): TInput | undefined => {
-    if (typeof input === "function") {
-      return (input as () => TInput)();
-    }
-    return input;
-  };
-
-  const isEnabled = (): boolean => {
-    if (options.enabled === undefined) {
-      return true;
-    }
-    return typeof options.enabled === "function" ? options.enabled() : options.enabled;
-  };
-
-  async function refresh(): Promise<void> {
-    if (!isEnabled()) {
-      return;
-    }
-
-    const seq = ++requestSeq;
-    state.update((prev) => ({ ...prev, loading: true, error: null }));
-    try {
-      const result = await client.call<TInput, TOutput>(method, path, resolveInput());
-      if (seq === requestSeq) {
-        state.set({ data: result, loading: false, error: null });
-      }
-    } catch (err: unknown) {
-      if (seq === requestSeq) {
-        const normalizedError = err instanceof Error ? err : new Error(String(err));
-        state.update((prev) => ({ ...prev, loading: false, error: normalizedError }));
-      }
-    }
-  }
+  const refresh = createSequencedRunner<TOutput>(
+    () => client.call<TInput, TOutput>(method, path, resolveInput()),
+    {
+      onStart: () => state.update((prev) => ({ ...prev, loading: true, error: null })),
+      onSuccess: (result) => state.set({ data: result, loading: false, error: null }),
+      onError: (err) => state.update((prev) => ({ ...prev, loading: false, error: err })),
+    },
+    isEnabled,
+  );
 
   void refresh();
 
@@ -118,18 +97,11 @@ export function createMutation<TInput = unknown, TOutput = unknown>(
     error: null,
   });
 
-  async function mutate(input?: TInput): Promise<TOutput> {
-    state.set({ loading: true, error: null });
-    try {
-      const result = await client.call<TInput, TOutput>(method, path, input);
-      state.set({ loading: false, error: null });
-      return result;
-    } catch (err: unknown) {
-      const normalizedError = err instanceof Error ? err : new Error(String(err));
-      state.set({ loading: false, error: normalizedError });
-      throw err;
-    }
-  }
+  const mutate = (input?: TInput): Promise<TOutput> =>
+    runTrackedMutation(
+      () => client.call<TInput, TOutput>(method, path, input),
+      (loading, error) => state.set({ loading, error }),
+    );
 
   return {
     subscribe: state.subscribe,

@@ -97,6 +97,19 @@ class DataFusionCore:
         raise TypeError(msg)
 
     @staticmethod
+    def register_arrow_source(ctx: Any, name: str, arrow_table: Any) -> None:
+        """Register an in-memory ``pyarrow.Table`` on a DataFusion ``SessionContext``."""
+        from_arrow = getattr(ctx, "from_arrow", None)
+        if callable(from_arrow):
+            table_exist = getattr(ctx, "table_exist", None)
+            deregister_table = getattr(ctx, "deregister_table", None)
+            if callable(table_exist) and callable(deregister_table) and table_exist(name):
+                deregister_table(name)
+            from_arrow(arrow_table, name=name)
+            return
+        ctx.register_table(name, arrow_table)
+
+    @staticmethod
     def resolve_local_path(uri: str) -> str:
         """Convert a ``file://`` URI or filesystem path into a normalized local path string."""
         parsed = urlparse(uri)
@@ -126,7 +139,7 @@ class DataFusionCore:
                 return
             local_path = DataFusionCore.resolve_local_path(registration.uri)
             pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
-            ctx.register_table(registration.name, pq.read_table(local_path))
+            DataFusionCore.register_arrow_source(ctx, registration.name, pq.read_table(local_path))
             return
 
         if fmt == "csv":
@@ -141,7 +154,7 @@ class DataFusionCore:
                 return
             local_path = DataFusionCore.resolve_local_path(registration.uri)
             pa_csv = ensure_module("pyarrow.csv", package="pyarrow", extra="arrow")
-            ctx.register_table(registration.name, pa_csv.read_csv(local_path))
+            DataFusionCore.register_arrow_source(ctx, registration.name, pa_csv.read_csv(local_path))
             return
 
         if fmt == "ndjson":
@@ -152,11 +165,18 @@ class DataFusionCore:
                     if registration.uri.startswith("file://")
                     else registration.uri
                 )
-                register_json(registration.name, target)
+                suffix = Path(target).suffix
+                if suffix and suffix.lower() != ".json":
+                    try:
+                        register_json(registration.name, target, file_extension=suffix)
+                    except TypeError:
+                        register_json(registration.name, target)
+                else:
+                    register_json(registration.name, target)
                 return
             local_path = DataFusionCore.resolve_local_path(registration.uri)
             pa_json = ensure_module("pyarrow.json", package="pyarrow", extra="arrow")
-            ctx.register_table(registration.name, pa_json.read_json(local_path))
+            DataFusionCore.register_arrow_source(ctx, registration.name, pa_json.read_json(local_path))
             return
 
         msg = f"Unsupported DataFusion source format {fmt!r} for table {registration.name!r}"
@@ -181,7 +201,7 @@ class DataFusionCore:
                     return reg, None
                 pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
                 arrow_table = pq.read_table(local_path)
-                ctx.register_table(name, arrow_table)
+                DataFusionCore.register_arrow_source(ctx, name, arrow_table)
                 return reg, arrow_table
             return reg, None
 
@@ -190,7 +210,7 @@ class DataFusionCore:
         payload = store.get(key)
         arrow_table = pq.read_table(pa.BufferReader(payload))
         if ctx is not None:
-            ctx.register_table(name, arrow_table)
+            DataFusionCore.register_arrow_source(ctx, name, arrow_table)
         return reg, arrow_table
 
     @staticmethod

@@ -44,10 +44,7 @@ use crate::params::{prepare_many_sql_and_params, prepare_sql_and_params};
 pub const MSSQL_COMPLETION_DRAINER_ATTR: &str = "_vertebra_mssql_completion_drainer";
 
 /// Whether this build targets free-threaded Python (3.14t+).
-#[cfg(Py_GIL_DISABLED)]
-pub const FREE_THREADED: bool = true;
-#[cfg(not(Py_GIL_DISABLED))]
-pub const FREE_THREADED: bool = false;
+pub use vertebra_db::py_broker::FREE_THREADED;
 
 /// Drive a Rust future synchronously while releasing the Python GIL and signaling completion
 /// through a [`SyncCompletionQueue`].

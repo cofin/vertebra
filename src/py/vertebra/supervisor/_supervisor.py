@@ -198,6 +198,19 @@ def find_server_binary() -> str:
     if env_path := os.getenv("VERTEBRA_SERVER_BINARY"):
         return env_path
 
+    target_dirs: list[Path] = []
+    cargo_target = os.getenv("CARGO_TARGET_DIR")
+    if cargo_target:
+        cargo_dir = Path(cargo_target)
+        for profile in ("release", "debug"):
+            explicit_bin = cargo_dir / profile / "vertebra-server"
+            if explicit_bin.exists():
+                return str(explicit_bin)
+            explicit_exe = explicit_bin.with_suffix(".exe")
+            if explicit_exe.exists():
+                return str(explicit_exe)
+        target_dirs.append(cargo_dir)
+
     pkg_bin = Path(__file__).resolve().parent.parent / "bin" / "vertebra-server"
     if pkg_bin.exists():
         return str(pkg_bin)
@@ -205,15 +218,6 @@ def find_server_binary() -> str:
     pkg_bin_exe = pkg_bin.with_suffix(".exe")
     if pkg_bin_exe.exists():
         return str(pkg_bin_exe)
-
-    target_dirs: list[Path] = []
-    cargo_target = os.getenv("CARGO_TARGET_DIR")
-    if cargo_target:
-        cargo_dir = Path(cargo_target)
-        explicit_release = cargo_dir / "release" / "vertebra-server"
-        if explicit_release.exists():
-            return str(explicit_release)
-        target_dirs.append(cargo_dir)
 
     repo_root = find_repo_root(Path(__file__).resolve())
     if repo_root:

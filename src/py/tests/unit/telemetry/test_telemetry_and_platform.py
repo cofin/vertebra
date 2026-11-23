@@ -1462,8 +1462,12 @@ def _live_embedded_zpages_server(
             try:
                 status, _, _ = _http_request_sync("127.0.0.1", port, "GET", "/healthz")
                 if status == 200:
-                    break
-                last_error = f"unexpected /healthz status {status}"
+                    ping_status, _, _ = _http_request_sync("127.0.0.1", port, "GET", "/ping")
+                    if ping_status == 200:
+                        break
+                    last_error = f"unexpected /ping status {ping_status}"
+                else:
+                    last_error = f"unexpected /healthz status {status}"
             except OSError as exc:
                 last_error = repr(exc)
             time.sleep(0.05)

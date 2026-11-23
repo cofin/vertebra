@@ -29,8 +29,8 @@ tiberius = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
-vertebra-core = { path = "../vertebra-core" }
-vertebra-db = { path = "../vertebra-db", features = ["gcp", "pyo3"] }
+vertebra-core = { path = "../vertebra-core", default-features = false }
+vertebra-db = { path = "../vertebra-db", default-features = false, features = ["arrow-shm", "broker", "codecs-mssql", "pyo3", "transport"] }
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }

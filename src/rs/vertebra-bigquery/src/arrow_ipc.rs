@@ -1,12 +1,12 @@
 //! BigQuery Storage Read/Write shared-memory `VTBARROW` IPC writers and Arrow frame planners.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use google_cloud_bigquery::model as bq_model;
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::arrow_shm::{ARROW_IPC_EOS_MARKER, ShmArrowStreamWriter};
+use vertebra_db::py_broker::next_shm_name;
 
 use crate::client::BigQueryError;
 use crate::codec::BigQueryWriteMode;
@@ -14,13 +14,9 @@ use crate::codec::BigQueryWriteMode;
 /// Maximum Arrow payload size per `AppendRowsRequest` message (`9 MiB` safe bound under `10 MiB` limit).
 pub const MAX_APPEND_ROWS_CHUNK_BYTES: usize = 9 * 1024 * 1024;
 
-static SHM_COUNTER: AtomicU64 = AtomicU64::new(1);
-
 /// Generate a unique process-scoped shared-memory segment name for BigQuery `VTBARROW` transfers.
 pub fn next_bigquery_shm_name() -> String {
-    let seq = SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    format!("/vtb-bq-{pid:x}-{seq:x}")
+    next_shm_name("/vtb-bq", '-')
 }
 
 #[allow(deprecated)]

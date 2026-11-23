@@ -195,7 +195,37 @@ def _prepare_native_export(
     return export_sql, native_uri, params, telemetry_payload
 
 
-class BigQuerySyncDriver(BaseSyncDriver):
+class _BigQueryDriverMixin:
+    """Shared dialect helpers inherited by synchronous and asynchronous drivers."""
+
+    __slots__ = ()
+
+    if TYPE_CHECKING:
+        native_driver: Any
+        _cached_fetch_rows: Callable[..., Any]
+        _cached_run_dml: Callable[..., Any]
+
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
+        """Build default BigQuery ``StatementConfig`` targeting ``@name`` GoogleSQL binds."""
+        return default_statement_config()
+
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the metadata-recording callables the cache-hit executor calls, or `None` to register no executor."""
+        if not callable(getattr(self.native_driver, "cursor", None)):
+            return None
+        return self._cached_fetch_rows, self._cached_run_dml
+
+    def _map_exception(self, exc: BaseException) -> Exception | None:
+        return map_bigquery_exception(exc)
+
+    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
+        """Return `None` so cached `INSERT` paths stay aligned with BigQuery `dispatch_execute`."""
+        _ = cursor
+        return None
+
+
+class BigQuerySyncDriver(_BigQueryDriverMixin, BaseSyncDriver):
     """BigQuery synchronous SQLSpec driver over ``SyncBigQueryDriver`` and ``BigQueryConnectionShim``."""
 
     __slots__ = ("_data_dictionary",)
@@ -225,11 +255,6 @@ class BigQuerySyncDriver(BaseSyncDriver):
         )
         self._data_dictionary: BigQuerySyncDataDictionary | None = None
 
-    @classmethod
-    def _default_statement_config(cls) -> StatementConfig:
-        """Build default BigQuery ``StatementConfig`` targeting ``@name`` GoogleSQL binds."""
-        return default_statement_config()
-
     @property
     def data_dictionary(self) -> BigQuerySyncDataDictionary:
         """Return the BigQuery synchronous data dictionary."""
@@ -240,12 +265,6 @@ class BigQuerySyncDriver(BaseSyncDriver):
     def _cache_hit_owner(self) -> type[BaseSyncDriver]:
         """Return `BigQuerySyncDriver` because it overrides `with_cursor` and `resolve_last_inserted_id`."""
         return BigQuerySyncDriver
-
-    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
-        """Return the metadata-recording callables the cache-hit executor calls, or `None` to register no executor."""
-        if not callable(getattr(self.native_driver, "cursor", None)):
-            return None
-        return self._cached_fetch_rows, self._cached_run_dml
 
     def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Run a cached row-returning statement on one cursor, record its metadata, and return `(rows, names)`."""
@@ -270,9 +289,6 @@ class BigQuerySyncDriver(BaseSyncDriver):
         finally:
             cursor.close()
 
-    def _map_exception(self, exc: BaseException) -> Exception | None:
-        return map_bigquery_exception(exc)
-
     def prepare_statement(
         self,
         statement: Any,
@@ -294,11 +310,6 @@ class BigQuerySyncDriver(BaseSyncDriver):
             yield cursor
         finally:
             cursor.close()
-
-    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
-        """Return `None` so cached `INSERT` paths stay aligned with BigQuery `dispatch_execute`."""
-        _ = cursor
-        return None
 
     def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a compiled BigQuery statement through the native cursor."""
@@ -593,7 +604,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         raise NotImplementedError(msg)
 
 
-class BigQueryAsyncDriver(BaseAsyncDriver):
+class BigQueryAsyncDriver(_BigQueryDriverMixin, BaseAsyncDriver):
     """BigQuery asynchronous SQLSpec driver over ``AsyncBigQueryDriver``."""
 
     __slots__ = ("_data_dictionary",)
@@ -623,11 +634,6 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         )
         self._data_dictionary: BigQueryAsyncDataDictionary | None = None
 
-    @classmethod
-    def _default_statement_config(cls) -> StatementConfig:
-        """Build default BigQuery ``StatementConfig`` targeting ``@name`` GoogleSQL binds."""
-        return default_statement_config()
-
     @property
     def data_dictionary(self) -> BigQueryAsyncDataDictionary:
         """Return the BigQuery asynchronous data dictionary."""
@@ -638,12 +644,6 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     def _cache_hit_owner(self) -> type[BaseAsyncDriver]:
         """Return `BigQueryAsyncDriver` because it overrides `with_cursor` and `resolve_last_inserted_id`."""
         return BigQueryAsyncDriver
-
-    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
-        """Return the metadata-recording callables the cache-hit executor calls, or `None` to register no executor."""
-        if not callable(getattr(self.native_driver, "cursor", None)):
-            return None
-        return self._cached_fetch_rows, self._cached_run_dml
 
     async def _cached_fetch_rows(self, sql: str, params: Any = ()) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Run a cached row-returning statement on one cursor, record its metadata, and return `(rows, names)`."""
@@ -668,9 +668,6 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         finally:
             await cursor.close()
 
-    def _map_exception(self, exc: BaseException) -> Exception | None:
-        return map_bigquery_exception(exc)
-
     def prepare_statement(
         self,
         statement: Any,
@@ -692,11 +689,6 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
             yield cursor
         finally:
             await cursor.close()
-
-    def resolve_last_inserted_id(self, cursor: Any) -> int | str | None:
-        """Return `None` so async cached `INSERT` paths stay aligned with BigQuery `dispatch_execute`."""
-        _ = cursor
-        return None
 
     async def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a compiled BigQuery statement asynchronously through the native cursor."""

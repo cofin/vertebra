@@ -124,42 +124,15 @@ class PostgresClientOptions(msgspec.Struct, frozen=True):
         if not self.targets:
             return self
         target = self.targets[index]
-        return PostgresClientOptions(
-            user=self.user,
-            database=self.database,
+        return msgspec.structs.replace(
+            self,
             host=target.host,
             port=target.port,
-            password=self.password,
             unix_socket=target.unix_socket,
             sslmode=target.sslmode,
-            ca_pem=self.ca_pem,
-            client_cert_pem=self.client_cert_pem,
-            client_key_pem=self.client_key_pem,
-            server_name=self.server_name,
-            channel_binding=self.channel_binding,
-            connect_timeout=self.connect_timeout,
-            application_name=self.application_name,
             session_gucs=dict(self.session_gucs),
-            keepalives=self.keepalives,
-            keepalives_idle=self.keepalives_idle,
-            keepalives_interval=self.keepalives_interval,
-            keepalives_count=self.keepalives_count,
-            cloud_sql_instance=self.cloud_sql_instance,
-            cloud_sql_ip_type=self.cloud_sql_ip_type,
-            alloydb_instance_uri=self.alloydb_instance_uri,
-            alloydb_ip_type=self.alloydb_ip_type,
-            enable_iam_auth=self.enable_iam_auth,
             cloud_auth_options=dict(self.cloud_auth_options),
             iam_auth_options=dict(self.iam_auth_options),
-            pooler_mode=self.pooler_mode,
-            protocol_level_pooler_cache=self.protocol_level_pooler_cache,
-            statement_cache_size=self.statement_cache_size,
-            min_size=self.min_size,
-            max_size=self.max_size,
-            acquire_timeout=self.acquire_timeout,
-            reset_timeout=self.reset_timeout,
-            close_timeout=self.close_timeout,
-            targets=self.targets,
         )
 
     def to_client_kwargs(self) -> dict[str, Any]:

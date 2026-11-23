@@ -1,6 +1,7 @@
 import { effect, Injectable, inject, signal, untracked } from "@angular/core";
 import { HttpClient } from "../client/client";
 import type { ClientConfig } from "../client/types";
+import { createSequencedRunner, runTrackedMutation } from "../internal/async_runner";
 
 @Injectable({
   providedIn: "root",
@@ -33,29 +34,20 @@ export function injectQuery<TInput = unknown, TOutput = unknown>(
   const data = signal<TOutput | null>(null);
   const loading = signal(false);
   const error = signal<Error | null>(null);
-  let requestSeq = 0;
 
-  const fetch = async () => {
-    if (options.enabled && !options.enabled()) return;
-
-    const seq = ++requestSeq;
-    loading.set(true);
-    error.set(null);
-    try {
-      const result = await service.getClient().call<TInput, TOutput>(method, path, input());
-      if (seq === requestSeq) {
-        data.set(result);
-      }
-    } catch (err: unknown) {
-      if (seq === requestSeq) {
-        error.set(err instanceof Error ? err : new Error(String(err)));
-      }
-    } finally {
-      if (seq === requestSeq) {
-        loading.set(false);
-      }
-    }
-  };
+  const fetch = createSequencedRunner<TOutput>(
+    () => service.getClient().call<TInput, TOutput>(method, path, input()),
+    {
+      onStart: () => {
+        loading.set(true);
+        error.set(null);
+      },
+      onSuccess: (result) => data.set(result),
+      onError: (err) => error.set(err),
+      onFinish: () => loading.set(false),
+    },
+    () => !options.enabled || options.enabled(),
+  );
 
   // Run effect when input changes
   effect(() => {
@@ -79,18 +71,14 @@ export function injectMutation<TInput = unknown, TOutput = unknown>(method: stri
   const loading = signal(false);
   const error = signal<Error | null>(null);
 
-  const mutate = async (input?: TInput) => {
-    loading.set(true);
-    error.set(null);
-    try {
-      return await service.getClient().call<TInput, TOutput>(method, path, input);
-    } catch (err: unknown) {
-      error.set(err instanceof Error ? err : new Error(String(err)));
-      throw err;
-    } finally {
-      loading.set(false);
-    }
-  };
+  const mutate = (input?: TInput) =>
+    runTrackedMutation(
+      () => service.getClient().call<TInput, TOutput>(method, path, input),
+      (isLoading, err) => {
+        loading.set(isLoading);
+        error.set(err);
+      },
+    );
 
   return {
     mutate,

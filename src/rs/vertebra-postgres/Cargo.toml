@@ -37,8 +37,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 url = { workspace = true }
-vertebra-core = { path = "../vertebra-core" }
-vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }
+vertebra-core = { path = "../vertebra-core", default-features = false, features = ["gcp-auth"] }
+vertebra-db = { path = "../vertebra-db", default-features = false, features = ["arrow-shm", "broker", "codecs-pg", "dialer", "pyo3", "transport"] }
 x509-parser = { version = "=0.18.1", default-features = false }
 
 [build-dependencies]

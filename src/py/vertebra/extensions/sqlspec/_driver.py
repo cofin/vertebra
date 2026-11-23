@@ -1487,32 +1487,152 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         return BaseSyncDriver._hydrate_rows_schema(rows, schema_type)
 
 
+def _record_exit_exception(primary: BaseException | None, secondary: BaseException, label: str) -> BaseException:
+    """Promote `secondary` or chain it onto `primary` via `add_note`."""
+    if primary is None:
+        return secondary
+    primary.add_note(f"{label}: {secondary!r}")
+    return primary
+
+
 class _AdapterSyncConnectionContext:
     """Default synchronous connection context manager for `SyncAdapterConfig`."""
 
-    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_kwargs", "_tenant_lease")
+    __slots__ = (
+        "_acquired_pool",
+        "_args",
+        "_config",
+        "_conn_ctx",
+        "_connection",
+        "_created_unshared",
+        "_kwargs",
+        "_tenant_lease",
+    )
 
-    def __init__(self, config: SyncAdapterConfig[Any, Any, Any, Any], *args: Any, **kwargs: Any) -> None:
+    _engine_label: ClassVar[str] = "Adapter"
+    _strict_cleanup: ClassVar[bool] = False
+    _run_on_connection_create: ClassVar[bool] = True
+
+    def __init__(self, config: Any, *args: Any, **kwargs: Any) -> None:
+        """Store configuration and forwarded connection arguments."""
         self._config = config
         self._args = args
         self._kwargs = kwargs
+        self._acquired_pool: Any = None
         self._conn_ctx: Any = None
         self._connection: Any = None
+        self._created_unshared: bool = False
         self._tenant_lease: Any = None
 
+    def _unwrap_connection(self, raw_conn: Any) -> Any:
+        """Adapt or unwrap the acquired connection before running hooks."""
+        return raw_conn
+
+    def _on_first_acquire(self, conn: Any) -> None:
+        """Run one-time per-connection setup before `on_connection_create`."""
+        _ = conn
+
+    def _on_acquire(self, conn: Any) -> Any:
+        """Run per-acquisition and one-time connection initialization hooks."""
+        if not self._run_on_connection_create:
+            return conn
+        initialized_ids: set[int] | None = getattr(self._config, "_initialized_conn_ids", None)
+        conn_id = id(conn)
+        if initialized_ids is None or conn_id not in initialized_ids:
+            self._on_first_acquire(conn)
+            hook = self._config.driver_features.get("on_connection_create")
+            if callable(hook):
+                replacement = hook(conn)
+                if replacement is not None:
+                    conn = replacement
+                    conn_id = id(conn)
+            if initialized_ids is not None:
+                initialized_ids.add(conn_id)
+        return conn
+
+    def _needs_cleanup(self, exc_type: type[BaseException] | None, reset_on_release: bool) -> bool:
+        """Return whether release rollback/reset cleanup should execute."""
+        return exc_type is not None or reset_on_release
+
+    def _should_reset(self, reset_on_release: bool) -> bool:
+        """Return whether session reset should execute during release cleanup."""
+        return reset_on_release
+
+    def _rollback_conn(self, conn: Any) -> None:
+        """Roll back any open transaction on `conn`."""
+        in_tx = getattr(conn, "in_transaction", False)
+        if callable(in_tx):
+            in_tx = in_tx()
+        if not in_tx:
+            return
+        rollback_fn = getattr(conn, "rollback", None)
+        if callable(rollback_fn):
+            rollback_fn()
+
+    def _reset_conn(self, conn: Any) -> None:
+        """Reset session state on `conn` prior to returning it to the pool."""
+        reset_fn = getattr(conn, "reset_session", None) or getattr(conn, "reset", None)
+        if callable(reset_fn):
+            reset_fn()
+
+    def _cleanup_enter_failure(self, exc: BaseException) -> None:
+        """Release any partially acquired connection when `__enter__` fails."""
+        conn = self._connection
+        created_unshared = self._created_unshared
+        try:
+            self.__exit__(type(exc), exc, exc.__traceback__)
+        except BaseException as cleanup_exc:
+            if cleanup_exc is not exc:
+                exc.add_note(f"{self._engine_label} connection enter cleanup failed: {cleanup_exc!r}")
+        if created_unshared and conn is not None:
+            close_fn = getattr(conn, "close", None)
+            if callable(close_fn):
+                with contextlib.suppress(Exception):
+                    close_fn()
+            if self._config.connection_instance is conn:
+                self._config.connection_instance = None
+
     def __enter__(self) -> Any:
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = self._tenant_lease.acquire()
-            return self._connection
-        pool = self._config.provide_pool()
-        get_conn = getattr(pool, "get_connection", None)
-        if callable(get_conn):
-            self._conn_ctx = get_conn()
-            self._connection = self._conn_ctx.__enter__()
+        """Acquire a native connection or tenant lease and run initialization hooks."""
+        lease = self._config._create_tenant_lease()
+        if lease is not None:
+            self._tenant_lease = lease
+            try:
+                raw_conn = lease.acquire()
+            except BaseException:
+                self._tenant_lease = None
+                raise
         else:
-            self._connection = pool
-        return self._connection
+            had_instance = self._config.connection_instance is not None
+            pool = self._config.provide_pool()
+            get_conn = getattr(pool, "get_connection", None)
+            lease_fn = getattr(pool, "lease", None)
+            acquire_fn = getattr(pool, "acquire", None)
+            release_fn = getattr(pool, "release", None)
+            if callable(get_conn):
+                conn_ctx: Any = get_conn()
+                raw_conn = conn_ctx.__enter__()
+                self._conn_ctx = conn_ctx
+            elif callable(lease_fn):
+                conn_ctx = lease_fn()
+                raw_conn = conn_ctx.__enter__()
+                self._conn_ctx = conn_ctx
+            elif callable(acquire_fn) and callable(release_fn):
+                self._acquired_pool = pool
+                raw_conn = acquire_fn()
+            else:
+                raw_conn = pool
+                self._created_unshared = not had_instance and not self._config.share_pool
+        self._connection = self._unwrap_connection(raw_conn)
+        try:
+            self._connection = self._on_acquire(self._connection)
+            return self._connection
+        except BaseException as exc:
+            if self._strict_cleanup:
+                self._cleanup_enter_failure(exc)
+            else:
+                self.__exit__(type(exc), exc, exc.__traceback__)
+            raise
 
     def __exit__(
         self,
@@ -1520,73 +1640,114 @@ class _AdapterSyncConnectionContext:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> bool | None:
+        """Roll back open transactions, optionally reset session state, and release the lease."""
         conn = self._connection
         reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
+        primary_exc: BaseException | None = exc_val
+        suppressed: bool | None = None
         try:
-            if conn is not None and (exc_type is not None or reset_on_release):
-                if getattr(conn, "in_transaction", False):
-                    rollback_fn = getattr(conn, "rollback", None)
-                    if callable(rollback_fn):
+            if conn is not None and self._needs_cleanup(exc_type, reset_on_release):
+                if self._strict_cleanup:
+                    try:
+                        self._rollback_conn(conn)
+                    except BaseException as rb_exc:
+                        primary_exc = _record_exit_exception(
+                            primary_exc, rb_exc, f"{self._engine_label} connection rollback failed"
+                        )
+                    if self._should_reset(reset_on_release):
+                        try:
+                            self._reset_conn(conn)
+                        except BaseException as reset_exc:
+                            primary_exc = _record_exit_exception(
+                                primary_exc, reset_exc, f"{self._engine_label} session reset failed"
+                            )
+                else:
+                    with contextlib.suppress(Exception):
+                        self._rollback_conn(conn)
+                    if self._should_reset(reset_on_release):
                         with contextlib.suppress(Exception):
-                            rollback_fn()
-                if reset_on_release:
-                    reset_fn = getattr(conn, "reset_session", None) or getattr(conn, "reset", None)
-                    if callable(reset_fn):
-                        with contextlib.suppress(Exception):
-                            reset_fn()
+                            self._reset_conn(conn)
+            rel_type = type(primary_exc) if primary_exc is not None else exc_type
+            rel_val = primary_exc if primary_exc is not None else exc_val
+            rel_tb = primary_exc.__traceback__ if primary_exc is not None else exc_tb
             if self._tenant_lease is not None:
-                self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
+                if self._strict_cleanup:
+                    try:
+                        self._tenant_lease.release(exc_type=rel_type, exc_val=rel_val, exc_tb=rel_tb)
+                    except BaseException as rel_exc:
+                        primary_exc = _record_exit_exception(
+                            primary_exc, rel_exc, f"{self._engine_label} tenant lease release failed"
+                        )
+                else:
+                    self._tenant_lease.release(exc_type=rel_type, exc_val=rel_val, exc_tb=rel_tb)
             elif self._conn_ctx is not None:
-                return cast("bool | None", self._conn_ctx.__exit__(exc_type, exc_val, exc_tb))
+                if self._strict_cleanup:
+                    try:
+                        suppressed = cast("bool | None", self._conn_ctx.__exit__(rel_type, rel_val, rel_tb))
+                    except BaseException as ctx_exc:
+                        primary_exc = _record_exit_exception(
+                            primary_exc, ctx_exc, f"{self._engine_label} connection release failed"
+                        )
+                else:
+                    suppressed = cast("bool | None", self._conn_ctx.__exit__(rel_type, rel_val, rel_tb))
+            elif self._acquired_pool is not None and conn is not None:
+                self._acquired_pool.release(conn)
         finally:
+            self._acquired_pool = None
             self._connection = None
             self._conn_ctx = None
+            self._created_unshared = False
             self._tenant_lease = None
-        return None
+        if primary_exc is not None and primary_exc is not exc_val:
+            raise primary_exc
+        return suppressed
 
 
 class _AdapterSyncSessionContext:
     """Default synchronous session context manager creating a fresh driver per session entry."""
 
-    __slots__ = (
-        "_args",
-        "_config",
-        "_conn_ctx",
-        "_connection",
-        "_driver",
-        "_kwargs",
-        "_statement_config",
-        "_tenant_lease",
-    )
+    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_driver", "_kwargs", "_statement_config")
+
+    _connection_context_type: ClassVar[type[_AdapterSyncConnectionContext]] = _AdapterSyncConnectionContext
+    _engine_label: ClassVar[str] = "Adapter"
+    _strict_cleanup: ClassVar[bool] = False
 
     def __init__(
         self,
-        config: SyncAdapterConfig[Any, Any, Any, Any],
+        config: Any,
         *args: Any,
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
     ) -> None:
+        """Store configuration, optional statement override, and forwarded session arguments."""
         self._config = config
         self._args = args
         self._statement_config = statement_config
         self._kwargs = kwargs
-        self._conn_ctx: Any = None
+        self._conn_ctx: _AdapterSyncConnectionContext | None = None
         self._connection: Any = None
         self._driver: Any = None
-        self._tenant_lease: Any = None
+
+    def _driver_in_transaction(self, driver: Any) -> bool:
+        """Return whether `driver` currently holds an uncommitted transaction."""
+        in_tx_fn = getattr(driver, "_connection_in_transaction", None)
+        return bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
+
+    def _needs_tx_rollback(
+        self,
+        exc_type: type[BaseException] | None,
+        primary_exc: BaseException | None,
+        pooled_state: bool,
+        reset_on_release: bool,
+    ) -> bool:
+        """Return whether uncommitted driver transactions should roll back on session exit."""
+        return exc_type is not None or primary_exc is not None or pooled_state or reset_on_release
 
     def __enter__(self) -> Any:
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = self._tenant_lease.acquire()
-        else:
-            pool = self._config.provide_pool()
-            get_conn = getattr(pool, "get_connection", None)
-            if callable(get_conn):
-                self._conn_ctx = get_conn()
-                self._connection = self._conn_ctx.__enter__()
-            else:
-                self._connection = pool
+        """Acquire a leased connection and instantiate a fresh prepared driver."""
+        conn_ctx = self._connection_context_type(self._config, *self._args, **self._kwargs)
+        self._connection = conn_ctx.__enter__()
+        self._conn_ctx = conn_ctx
         try:
             stmt_cfg = self._statement_config if self._statement_config is not None else self._config.statement_config
             driver = self._config.driver_type(
@@ -1595,10 +1756,18 @@ class _AdapterSyncSessionContext:
                 driver_features=dict(self._config.driver_features),
                 shared_pool=self._config._pool_is_shared,
             )
+            self._driver = driver
             self._driver = self._config._prepare_driver(driver)
             return self._driver
         except BaseException as exc:
-            self.__exit__(type(exc), exc, exc.__traceback__)
+            if self._strict_cleanup:
+                try:
+                    self.__exit__(type(exc), exc, exc.__traceback__)
+                except BaseException as cleanup_exc:
+                    if cleanup_exc is not exc:
+                        exc.add_note(f"{self._engine_label} session enter cleanup failed: {cleanup_exc!r}")
+            else:
+                self.__exit__(type(exc), exc, exc.__traceback__)
             raise
 
     def __exit__(
@@ -1607,166 +1776,232 @@ class _AdapterSyncSessionContext:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> bool | None:
+        """Close open streams, roll back uncommitted work, release lease, and mark driver closed."""
         driver = self._driver
-        conn = self._connection
+        conn_ctx = self._conn_ctx
+        primary_exc: BaseException | None = exc_val
+        suppressed: bool | None = None
         try:
             if driver is not None:
                 close_streams_fn = getattr(driver, "_close_open_streams", None)
                 if callable(close_streams_fn):
-                    close_streams_fn(error=exc_type is not None)
+                    if self._strict_cleanup:
+                        try:
+                            close_streams_fn(error=exc_type is not None)
+                        except BaseException as close_exc:
+                            primary_exc = _record_exit_exception(
+                                primary_exc, close_exc, f"{self._engine_label} stream close failed"
+                            )
+                    else:
+                        close_streams_fn(error=exc_type is not None)
         except BaseException as close_exc:
             if exc_type is None:
                 exc_type, exc_val, exc_tb = type(close_exc), close_exc, close_exc.__traceback__
-                raise
+                primary_exc = close_exc
+            raise
         finally:
             try:
                 reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
                 pooled_state = bool(
-                    self._config.share_pool or self._tenant_lease is not None or self._conn_ctx is not None
+                    self._config.share_pool
+                    or (
+                        conn_ctx is not None
+                        and (
+                            conn_ctx._tenant_lease is not None
+                            or conn_ctx._conn_ctx is not None
+                            or conn_ctx._acquired_pool is not None
+                        )
+                    )
                 )
-                if driver is not None and (exc_type is not None or pooled_state or reset_on_release):
-                    in_tx_fn = getattr(driver, "_connection_in_transaction", None)
-                    in_tx = bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
-                    if in_tx:
+                if (
+                    driver is not None
+                    and self._needs_tx_rollback(exc_type, primary_exc, pooled_state, reset_on_release)
+                    and self._driver_in_transaction(driver)
+                ):
+                    if self._strict_cleanup:
+                        try:
+                            driver.rollback()
+                        except BaseException as rb_exc:
+                            primary_exc = _record_exit_exception(
+                                primary_exc, rb_exc, f"{self._engine_label} session rollback failed"
+                            )
+                    else:
                         with contextlib.suppress(Exception):
                             driver.rollback()
-                if conn is not None and reset_on_release:
-                    reset_fn = getattr(conn, "reset_session", None) or getattr(conn, "reset", None)
-                    if callable(reset_fn):
-                        with contextlib.suppress(Exception):
-                            reset_fn()
-                if self._tenant_lease is not None:
-                    self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-                elif self._conn_ctx is not None:
-                    self._conn_ctx.__exit__(exc_type, exc_val, exc_tb)
+                if conn_ctx is not None:
+                    rel_type = type(primary_exc) if primary_exc is not None else exc_type
+                    rel_val = primary_exc if primary_exc is not None else exc_val
+                    rel_tb = primary_exc.__traceback__ if primary_exc is not None else exc_tb
+                    if self._strict_cleanup:
+                        try:
+                            suppressed = conn_ctx.__exit__(rel_type, rel_val, rel_tb)
+                        except BaseException as rel_exc:
+                            primary_exc = _record_exit_exception(
+                                primary_exc, rel_exc, f"{self._engine_label} connection context exit failed"
+                            )
+                    else:
+                        suppressed = conn_ctx.__exit__(rel_type, rel_val, rel_tb)
             finally:
                 self._connection = None
                 self._conn_ctx = None
-                self._tenant_lease = None
                 self._driver = None
                 if driver is not None:
                     mark_closed_fn = getattr(driver, "_mark_closed", None)
                     if callable(mark_closed_fn):
                         mark_closed_fn()
-        return None
+        if primary_exc is not None and primary_exc is not exc_val:
+            raise primary_exc
+        return suppressed
 
 
 class _AdapterAsyncConnectionContext:
     """Default asynchronous connection context manager for `AsyncAdapterConfig`."""
 
-    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_kwargs", "_tenant_lease")
-
-    def __init__(self, config: AsyncAdapterConfig[Any, Any, Any, Any], *args: Any, **kwargs: Any) -> None:
-        self._config = config
-        self._args = args
-        self._kwargs = kwargs
-        self._conn_ctx: Any = None
-        self._connection: Any = None
-        self._tenant_lease: Any = None
-
-    async def __aenter__(self) -> Any:
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = await self._tenant_lease.acquire()
-            return self._connection
-        pool = await self._config.provide_pool()
-        get_conn = getattr(pool, "get_connection", None)
-        if callable(get_conn):
-            self._conn_ctx = get_conn()
-            self._connection = await self._conn_ctx.__aenter__()
-        else:
-            self._connection = pool
-        return self._connection
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> bool | None:
-        conn = self._connection
-        reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
-        try:
-            if conn is not None and (exc_type is not None or reset_on_release):
-                if getattr(conn, "in_transaction", False):
-                    rollback_fn = getattr(conn, "rollback", None)
-                    if callable(rollback_fn):
-                        with CancelScope(shield=True), contextlib.suppress(Exception):
-                            res = rollback_fn()
-                            if isinstance(res, Awaitable):
-                                await res
-                if reset_on_release:
-                    reset_fn = getattr(conn, "reset_session", None) or getattr(conn, "reset", None)
-                    if callable(reset_fn):
-                        with CancelScope(shield=True), contextlib.suppress(Exception):
-                            res = reset_fn()
-                            if isinstance(res, Awaitable):
-                                await res
-            if self._tenant_lease is not None:
-                await self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-            elif self._conn_ctx is not None:
-                return cast("bool | None", await self._conn_ctx.__aexit__(exc_type, exc_val, exc_tb))
-        finally:
-            self._connection = None
-            self._conn_ctx = None
-            self._tenant_lease = None
-        return None
-
-
-class _AdapterAsyncSessionContext:
-    """Default asynchronous session context manager creating a fresh driver per session entry."""
-
     __slots__ = (
+        "_acquired_pool",
         "_args",
         "_config",
         "_conn_ctx",
         "_connection",
-        "_driver",
+        "_created_unshared",
         "_kwargs",
-        "_statement_config",
         "_tenant_lease",
     )
 
-    def __init__(
-        self,
-        config: AsyncAdapterConfig[Any, Any, Any, Any],
-        *args: Any,
-        statement_config: StatementConfig | None = None,
-        **kwargs: Any,
-    ) -> None:
+    _engine_label: ClassVar[str] = "Adapter"
+    _strict_cleanup: ClassVar[bool] = False
+    _run_on_connection_create: ClassVar[bool] = True
+
+    def __init__(self, config: Any, *args: Any, **kwargs: Any) -> None:
+        """Store configuration and forwarded connection arguments."""
         self._config = config
         self._args = args
-        self._statement_config = statement_config
         self._kwargs = kwargs
+        self._acquired_pool: Any = None
         self._conn_ctx: Any = None
         self._connection: Any = None
-        self._driver: Any = None
+        self._created_unshared: bool = False
         self._tenant_lease: Any = None
 
+    def _unwrap_connection(self, raw_conn: Any) -> Any:
+        """Adapt or unwrap the acquired connection before running hooks."""
+        return raw_conn
+
+    async def _on_first_acquire(self, conn: Any) -> None:
+        """Run one-time per-connection setup before `on_connection_create`."""
+        _ = conn
+
+    async def _on_acquire(self, conn: Any) -> Any:
+        """Run per-acquisition and one-time connection initialization hooks."""
+        if not self._run_on_connection_create:
+            return conn
+        initialized_ids: set[int] | None = getattr(self._config, "_initialized_conn_ids", None)
+        conn_id = id(conn)
+        if initialized_ids is None or conn_id not in initialized_ids:
+            await self._on_first_acquire(conn)
+            hook = self._config.driver_features.get("on_connection_create")
+            if callable(hook):
+                hook_res: Any = hook(conn)
+                if inspect.isawaitable(hook_res):
+                    hook_res = await hook_res
+                if hook_res is not None:
+                    conn = hook_res
+                    conn_id = id(conn)
+            if initialized_ids is not None:
+                initialized_ids.add(conn_id)
+        return conn
+
+    def _needs_cleanup(self, exc_type: type[BaseException] | None, reset_on_release: bool) -> bool:
+        """Return whether release rollback/reset cleanup should execute."""
+        return exc_type is not None or reset_on_release
+
+    def _should_reset(self, reset_on_release: bool) -> bool:
+        """Return whether session reset should execute during release cleanup."""
+        return reset_on_release
+
+    async def _rollback_conn(self, conn: Any) -> None:
+        """Roll back any open transaction on `conn` under cancellation shielding."""
+        in_tx = getattr(conn, "in_transaction", False)
+        if callable(in_tx):
+            in_tx = in_tx()
+        if not in_tx:
+            return
+        rollback_fn = getattr(conn, "rollback", None)
+        if callable(rollback_fn):
+            with CancelScope(shield=True):
+                res = rollback_fn()
+                if inspect.isawaitable(res):
+                    await res
+
+    async def _reset_conn(self, conn: Any) -> None:
+        """Reset session state on `conn` under cancellation shielding."""
+        reset_fn = getattr(conn, "reset_session", None) or getattr(conn, "reset", None)
+        if callable(reset_fn):
+            with CancelScope(shield=True):
+                res = reset_fn()
+                if inspect.isawaitable(res):
+                    await res
+
+    async def _cleanup_aenter_failure(self, exc: BaseException) -> None:
+        """Release any partially acquired connection when `__aenter__` fails."""
+        conn = self._connection
+        created_unshared = self._created_unshared
+        try:
+            await self.__aexit__(type(exc), exc, exc.__traceback__)
+        except BaseException as cleanup_exc:
+            if cleanup_exc is not exc:
+                exc.add_note(f"{self._engine_label} async connection enter cleanup failed: {cleanup_exc!r}")
+        if created_unshared and conn is not None:
+            close_fn = getattr(conn, "close", None)
+            if callable(close_fn):
+                with CancelScope(shield=True), contextlib.suppress(Exception):
+                    res = close_fn()
+                    if inspect.isawaitable(res):
+                        await res
+            if self._config.connection_instance is conn:
+                self._config.connection_instance = None
+
     async def __aenter__(self) -> Any:
-        self._tenant_lease = self._config._create_tenant_lease()
-        if self._tenant_lease is not None:
-            self._connection = await self._tenant_lease.acquire()
+        """Asynchronously acquire a native connection or tenant lease and run initialization hooks."""
+        lease = self._config._create_tenant_lease()
+        if lease is not None:
+            self._tenant_lease = lease
+            try:
+                raw_conn = await lease.acquire()
+            except BaseException:
+                self._tenant_lease = None
+                raise
         else:
+            had_instance = self._config.connection_instance is not None
             pool = await self._config.provide_pool()
             get_conn = getattr(pool, "get_connection", None)
+            lease_fn = getattr(pool, "lease", None)
+            acquire_fn = getattr(pool, "acquire", None)
+            release_fn = getattr(pool, "release", None)
             if callable(get_conn):
-                self._conn_ctx = get_conn()
-                self._connection = await self._conn_ctx.__aenter__()
+                conn_ctx: Any = get_conn()
+                raw_conn = await conn_ctx.__aenter__()
+                self._conn_ctx = conn_ctx
+            elif callable(lease_fn):
+                conn_ctx = lease_fn()
+                raw_conn = await conn_ctx.__aenter__()
+                self._conn_ctx = conn_ctx
+            elif callable(acquire_fn) and callable(release_fn):
+                self._acquired_pool = pool
+                conn_res = acquire_fn()
+                raw_conn = await conn_res if inspect.isawaitable(conn_res) else conn_res
             else:
-                self._connection = pool
+                raw_conn = pool
+                self._created_unshared = not had_instance and not self._config.share_pool
+        self._connection = self._unwrap_connection(raw_conn)
         try:
-            stmt_cfg = self._statement_config if self._statement_config is not None else self._config.statement_config
-            driver = self._config.driver_type(
-                self._connection,
-                statement_config=stmt_cfg,
-                driver_features=dict(self._config.driver_features),
-                shared_pool=self._config._pool_is_shared,
-            )
-            self._driver = self._config._prepare_driver(driver)
-            return self._driver
+            self._connection = await self._on_acquire(self._connection)
+            return self._connection
         except BaseException as exc:
-            await self.__aexit__(type(exc), exc, exc.__traceback__)
+            if self._strict_cleanup:
+                await self._cleanup_aenter_failure(exc)
+            else:
+                await self.__aexit__(type(exc), exc, exc.__traceback__)
             raise
 
     async def __aexit__(
@@ -1775,54 +2010,231 @@ class _AdapterAsyncSessionContext:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> bool | None:
-        driver = self._driver
+        """Roll back open transactions, optionally reset session state, and release the lease."""
         conn = self._connection
+        reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
+        primary_exc: BaseException | None = exc_val
+        suppressed: bool | None = None
+        try:
+            if conn is not None and self._needs_cleanup(exc_type, reset_on_release):
+                if self._strict_cleanup:
+                    try:
+                        await self._rollback_conn(conn)
+                    except BaseException as rb_exc:
+                        primary_exc = _record_exit_exception(
+                            primary_exc, rb_exc, f"{self._engine_label} async connection rollback failed"
+                        )
+                    if self._should_reset(reset_on_release):
+                        try:
+                            await self._reset_conn(conn)
+                        except BaseException as reset_exc:
+                            primary_exc = _record_exit_exception(
+                                primary_exc, reset_exc, f"{self._engine_label} async session reset failed"
+                            )
+                else:
+                    with contextlib.suppress(Exception):
+                        await self._rollback_conn(conn)
+                    if self._should_reset(reset_on_release):
+                        with contextlib.suppress(Exception):
+                            await self._reset_conn(conn)
+            rel_type = type(primary_exc) if primary_exc is not None else exc_type
+            rel_val = primary_exc if primary_exc is not None else exc_val
+            rel_tb = primary_exc.__traceback__ if primary_exc is not None else exc_tb
+            if self._tenant_lease is not None:
+                if self._strict_cleanup:
+                    try:
+                        with CancelScope(shield=True):
+                            await self._tenant_lease.release(exc_type=rel_type, exc_val=rel_val, exc_tb=rel_tb)
+                    except BaseException as rel_exc:
+                        primary_exc = _record_exit_exception(
+                            primary_exc, rel_exc, f"{self._engine_label} async tenant lease release failed"
+                        )
+                else:
+                    await self._tenant_lease.release(exc_type=rel_type, exc_val=rel_val, exc_tb=rel_tb)
+            elif self._conn_ctx is not None:
+                if self._strict_cleanup:
+                    try:
+                        with CancelScope(shield=True):
+                            suppressed = cast("bool | None", await self._conn_ctx.__aexit__(rel_type, rel_val, rel_tb))
+                    except BaseException as ctx_exc:
+                        primary_exc = _record_exit_exception(
+                            primary_exc, ctx_exc, f"{self._engine_label} async connection release failed"
+                        )
+                else:
+                    suppressed = cast("bool | None", await self._conn_ctx.__aexit__(rel_type, rel_val, rel_tb))
+            elif self._acquired_pool is not None and conn is not None:
+                rel_res = self._acquired_pool.release(conn)
+                if inspect.isawaitable(rel_res):
+                    await rel_res
+        finally:
+            self._acquired_pool = None
+            self._connection = None
+            self._conn_ctx = None
+            self._created_unshared = False
+            self._tenant_lease = None
+        if primary_exc is not None and primary_exc is not exc_val:
+            raise primary_exc
+        return suppressed
+
+
+class _AdapterAsyncSessionContext:
+    """Default asynchronous session context manager creating a fresh driver per session entry."""
+
+    __slots__ = ("_args", "_config", "_conn_ctx", "_connection", "_driver", "_kwargs", "_statement_config")
+
+    _connection_context_type: ClassVar[type[_AdapterAsyncConnectionContext]] = _AdapterAsyncConnectionContext
+    _engine_label: ClassVar[str] = "Adapter"
+    _strict_cleanup: ClassVar[bool] = False
+
+    def __init__(
+        self,
+        config: Any,
+        *args: Any,
+        statement_config: StatementConfig | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Store configuration, optional statement override, and forwarded session arguments."""
+        self._config = config
+        self._args = args
+        self._statement_config = statement_config
+        self._kwargs = kwargs
+        self._conn_ctx: _AdapterAsyncConnectionContext | None = None
+        self._connection: Any = None
+        self._driver: Any = None
+
+    def _driver_in_transaction(self, driver: Any) -> bool:
+        """Return whether `driver` currently holds an uncommitted transaction."""
+        in_tx_fn = getattr(driver, "_connection_in_transaction", None)
+        return bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
+
+    def _needs_tx_rollback(
+        self,
+        exc_type: type[BaseException] | None,
+        primary_exc: BaseException | None,
+        pooled_state: bool,
+        reset_on_release: bool,
+    ) -> bool:
+        """Return whether uncommitted driver transactions should roll back on session exit."""
+        return exc_type is not None or primary_exc is not None or pooled_state or reset_on_release
+
+    async def __aenter__(self) -> Any:
+        """Asynchronously acquire a leased connection and instantiate a fresh prepared driver."""
+        conn_ctx = self._connection_context_type(self._config, *self._args, **self._kwargs)
+        self._connection = await conn_ctx.__aenter__()
+        self._conn_ctx = conn_ctx
+        try:
+            stmt_cfg = self._statement_config if self._statement_config is not None else self._config.statement_config
+            driver = self._config.driver_type(
+                self._connection,
+                statement_config=stmt_cfg,
+                driver_features=dict(self._config.driver_features),
+                shared_pool=self._config._pool_is_shared,
+            )
+            self._driver = driver
+            self._driver = self._config._prepare_driver(driver)
+            return self._driver
+        except BaseException as exc:
+            if self._strict_cleanup:
+                try:
+                    await self.__aexit__(type(exc), exc, exc.__traceback__)
+                except BaseException as cleanup_exc:
+                    if cleanup_exc is not exc:
+                        exc.add_note(f"{self._engine_label} async session enter cleanup failed: {cleanup_exc!r}")
+            else:
+                await self.__aexit__(type(exc), exc, exc.__traceback__)
+            raise
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None:
+        """Close open streams, roll back uncommitted work, release lease, and mark driver closed."""
+        driver = self._driver
+        conn_ctx = self._conn_ctx
+        primary_exc: BaseException | None = exc_val
+        suppressed: bool | None = None
         try:
             if driver is not None:
                 close_streams_fn = getattr(driver, "_close_open_streams", None)
                 if callable(close_streams_fn):
-                    res = close_streams_fn(error=exc_type is not None)
-                    if isinstance(res, Awaitable):
-                        await res
+                    if self._strict_cleanup:
+                        try:
+                            res = close_streams_fn(error=exc_type is not None)
+                            if inspect.isawaitable(res):
+                                await res
+                        except BaseException as close_exc:
+                            primary_exc = _record_exit_exception(
+                                primary_exc, close_exc, f"{self._engine_label} async stream close failed"
+                            )
+                    else:
+                        res = close_streams_fn(error=exc_type is not None)
+                        if inspect.isawaitable(res):
+                            await res
         except BaseException as close_exc:
             if exc_type is None:
                 exc_type, exc_val, exc_tb = type(close_exc), close_exc, close_exc.__traceback__
-                raise
+                primary_exc = close_exc
+            raise
         finally:
             try:
                 reset_on_release = bool(self._config.driver_features.get("reset_session_on_release"))
                 pooled_state = bool(
-                    self._config.share_pool or self._tenant_lease is not None or self._conn_ctx is not None
+                    self._config.share_pool
+                    or (
+                        conn_ctx is not None
+                        and (
+                            conn_ctx._tenant_lease is not None
+                            or conn_ctx._conn_ctx is not None
+                            or conn_ctx._acquired_pool is not None
+                        )
+                    )
                 )
-                if driver is not None and (exc_type is not None or pooled_state or reset_on_release):
-                    in_tx_fn = getattr(driver, "_connection_in_transaction", None)
-                    in_tx = bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
-                    if in_tx:
+                if (
+                    driver is not None
+                    and self._needs_tx_rollback(exc_type, primary_exc, pooled_state, reset_on_release)
+                    and self._driver_in_transaction(driver)
+                ):
+                    if self._strict_cleanup:
+                        try:
+                            with CancelScope(shield=True):
+                                res = driver.rollback()
+                                if inspect.isawaitable(res):
+                                    await res
+                        except BaseException as rb_exc:
+                            primary_exc = _record_exit_exception(
+                                primary_exc, rb_exc, f"{self._engine_label} async session rollback failed"
+                            )
+                    else:
                         with CancelScope(shield=True), contextlib.suppress(Exception):
                             res = driver.rollback()
-                            if isinstance(res, Awaitable):
+                            if inspect.isawaitable(res):
                                 await res
-                if conn is not None and reset_on_release:
-                    reset_fn = getattr(conn, "reset_session", None) or getattr(conn, "reset", None)
-                    if callable(reset_fn):
-                        with CancelScope(shield=True), contextlib.suppress(Exception):
-                            res = reset_fn()
-                            if isinstance(res, Awaitable):
-                                await res
-                if self._tenant_lease is not None:
-                    await self._tenant_lease.release(exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb)
-                elif self._conn_ctx is not None:
-                    await self._conn_ctx.__aexit__(exc_type, exc_val, exc_tb)
+                if conn_ctx is not None:
+                    rel_type = type(primary_exc) if primary_exc is not None else exc_type
+                    rel_val = primary_exc if primary_exc is not None else exc_val
+                    rel_tb = primary_exc.__traceback__ if primary_exc is not None else exc_tb
+                    if self._strict_cleanup:
+                        try:
+                            suppressed = await conn_ctx.__aexit__(rel_type, rel_val, rel_tb)
+                        except BaseException as rel_exc:
+                            primary_exc = _record_exit_exception(
+                                primary_exc, rel_exc, f"{self._engine_label} async connection context exit failed"
+                            )
+                    else:
+                        suppressed = await conn_ctx.__aexit__(rel_type, rel_val, rel_tb)
             finally:
                 self._connection = None
                 self._conn_ctx = None
-                self._tenant_lease = None
                 self._driver = None
                 if driver is not None:
                     mark_closed_fn = getattr(driver, "_mark_closed", None)
                     if callable(mark_closed_fn):
                         mark_closed_fn()
-        return None
+        if primary_exc is not None and primary_exc is not exc_val:
+            raise primary_exc
+        return suppressed
 
 
 class _AdapterLifecycleMixin:

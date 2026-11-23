@@ -29,8 +29,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }
-vertebra-core = { path = "../vertebra-core" }
-vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }
+vertebra-core = { path = "../vertebra-core", default-features = false, features = ["gcp-auth"] }
+vertebra-db = { path = "../vertebra-db", default-features = false, features = ["arrow-shm", "broker", "codecs-oracle", "pyo3"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [build-dependencies]

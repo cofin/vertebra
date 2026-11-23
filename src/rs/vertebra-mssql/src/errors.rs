@@ -7,11 +7,11 @@
 //! `ProgrammingError`, `NotSupportedError`) with `.sqlstate`, `.vendor_code`, and `.is_transient`.
 
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyTuple, PyType};
+use pyo3::types::PyType;
 use tiberius::error::{Error as TiberiusError, IoErrorKind, TokenError};
 use vertebra_core::broker::BrokerError;
 use vertebra_db::TransportError;
+use vertebra_db::py_errors::{DbPyExceptionTypes, instantiate_db_exc, resolve_db_exceptions};
 
 /// Canonical Vertebra database exception category for an MSSQL failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,111 +299,7 @@ impl From<TiberiusError> for MssqlError {
     }
 }
 
-/// Cached Python exception classes resolved from `vertebra._vertebra`.
-pub struct MssqlExceptionTypes {
-    pub database: Py<PyType>,
-    pub interface: Py<PyType>,
-    pub data: Py<PyType>,
-    pub not_found: Py<PyType>,
-    pub operational: Py<PyType>,
-    pub connection_failure: Py<PyType>,
-    pub pool_exhausted: Py<PyType>,
-    pub query_cancelled: Py<PyType>,
-    pub serialization_failure: Py<PyType>,
-    pub integrity: Py<PyType>,
-    pub internal: Py<PyType>,
-    pub programming: Py<PyType>,
-    pub not_supported: Py<PyType>,
-}
-
-static MSSQL_EXCEPTION_TYPES: PyOnceLock<MssqlExceptionTypes> = PyOnceLock::new();
-
-fn new_stand_in_class<'py>(
-    py: Python<'py>,
-    name: &str,
-    bases: &Bound<'py, PyTuple>,
-) -> PyResult<Py<PyType>> {
-    let dict = PyDict::new(py);
-    dict.set_item("__module__", "vertebra._vertebra")?;
-    let ty = py
-        .get_type::<PyType>()
-        .call1((name, bases, dict))?
-        .cast_into::<PyType>()?;
-    Ok(ty.unbind())
-}
-
-fn stand_in_exception_types(py: Python<'_>) -> PyResult<MssqlExceptionTypes> {
-    let root = match py
-        .import("vertebra._typing")
-        .and_then(|m| m.getattr("VertebraError"))
-        .and_then(|v| v.cast_into::<PyType>().map_err(Into::into))
-    {
-        Ok(ty) => ty,
-        Err(_) => py.get_type::<pyo3::exceptions::PyException>(),
-    };
-    let database = new_stand_in_class(py, "DatabaseError", &PyTuple::new(py, [&root])?)?;
-    let db_base = PyTuple::new(py, [database.bind(py)])?;
-    let interface = new_stand_in_class(py, "InterfaceError", &db_base)?;
-    let data = new_stand_in_class(py, "DataError", &db_base)?;
-    let not_found = new_stand_in_class(py, "NotFoundError", &db_base)?;
-    let operational = new_stand_in_class(py, "OperationalError", &db_base)?;
-    let op_base = PyTuple::new(py, [operational.bind(py)])?;
-    let connection_failure = new_stand_in_class(py, "ConnectionFailure", &op_base)?;
-    let pool_exhausted = new_stand_in_class(py, "PoolExhaustedError", &op_base)?;
-    let query_cancelled = new_stand_in_class(py, "QueryCancelledError", &op_base)?;
-    let serialization_failure = new_stand_in_class(py, "SerializationFailure", &op_base)?;
-    let integrity = new_stand_in_class(py, "IntegrityError", &db_base)?;
-    let internal = new_stand_in_class(py, "InternalError", &db_base)?;
-    let programming = new_stand_in_class(py, "ProgrammingError", &db_base)?;
-    let not_supported = new_stand_in_class(py, "NotSupportedError", &db_base)?;
-
-    Ok(MssqlExceptionTypes {
-        database,
-        interface,
-        data,
-        not_found,
-        operational,
-        connection_failure,
-        pool_exhausted,
-        query_cancelled,
-        serialization_failure,
-        integrity,
-        internal,
-        programming,
-        not_supported,
-    })
-}
-
-pub(crate) fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static MssqlExceptionTypes> {
-    MSSQL_EXCEPTION_TYPES.get_or_try_init(py, || match py.import("vertebra._vertebra") {
-        Ok(core_mod) => {
-            let get = |name: &str| -> PyResult<Py<PyType>> {
-                Ok(core_mod.getattr(name)?.cast_into::<PyType>()?.unbind())
-            };
-            Ok(MssqlExceptionTypes {
-                database: get("DatabaseError")?,
-                interface: get("InterfaceError")?,
-                data: get("DataError")?,
-                not_found: get("NotFoundError")?,
-                operational: get("OperationalError")?,
-                connection_failure: get("ConnectionFailure")?,
-                pool_exhausted: get("PoolExhaustedError")?,
-                query_cancelled: get("QueryCancelledError")?,
-                serialization_failure: get("SerializationFailure")?,
-                integrity: get("IntegrityError")?,
-                internal: get("InternalError")?,
-                programming: get("ProgrammingError")?,
-                not_supported: get("NotSupportedError")?,
-            })
-        }
-        Err(err) if err.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py) => {
-            stand_in_exception_types(py)
-        }
-        Err(err) => Err(err),
-    })
-}
-
-fn select_exception_type(types: &MssqlExceptionTypes, kind: MssqlErrorKind) -> &Py<PyType> {
+fn select_exception_type(types: &DbPyExceptionTypes, kind: MssqlErrorKind) -> &Py<PyType> {
     match kind {
         MssqlErrorKind::Database => &types.database,
         MssqlErrorKind::Interface => &types.interface,
@@ -424,16 +320,20 @@ fn select_exception_type(types: &MssqlExceptionTypes, kind: MssqlErrorKind) -> &
 /// Convert a native [`MssqlError`] into a Python exception from the `vertebra._vertebra` hierarchy
 /// with `.sqlstate`, `.vendor_code`, and `.is_transient` populated.
 pub fn mssql_error_to_py(py: Python<'_>, err: MssqlError) -> PyErr {
-    let types = match resolve_exception_types(py) {
+    let types = match resolve_db_exceptions(py) {
         Ok(t) => t,
         Err(py_err) => return py_err,
     };
     let ty = select_exception_type(types, err.kind);
-    let py_err = PyErr::from_type(ty.bind(py).clone(), (err.message.clone(),));
+    let py_err = instantiate_db_exc(
+        py,
+        ty,
+        &err.message,
+        err.sqlstate.as_deref(),
+        err.vendor_code,
+        err.is_transient,
+    );
     let val = py_err.value(py);
-    let _ = val.setattr("sqlstate", err.sqlstate.as_deref());
-    let _ = val.setattr("vendor_code", err.vendor_code);
-    let _ = val.setattr("is_transient", err.is_transient);
     let _ = val.setattr("severity_class", err.severity_class);
     let _ = val.setattr("error_state", err.error_state);
     py_err
@@ -447,7 +347,7 @@ mod tests {
     fn tds_error_number_classification_maps_to_canonical_hierarchy() {
         Python::initialize();
         Python::attach(|py| {
-            let types = stand_in_exception_types(py).expect("stand-in types");
+            let types = resolve_db_exceptions(py).expect("exception types");
 
             for (code, class, expected_kind, expected_sqlstate, expected_transient) in [
                 (2601_u32, 14_u8, MssqlErrorKind::Integrity, "23505", false),
