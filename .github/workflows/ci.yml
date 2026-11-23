@@ -639,7 +639,7 @@ jobs:
       - name: Install test dependencies and prebuilt postgres wheel
         run: |
           uv sync --frozen --no-install-local --group test
-          PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/build_ci_wheels.py install --wheel-dir dist/wheels --packages core,postgres
+          PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/build_ci_wheels.py install --wheel-dir dist/wheels --packages core,postgres,duckdb
       - name: Run zero-skip PostgreSQL ${{ matrix.pg_version }} conformance
         env:
           VERTEBRA_CONFORMANCE_DOCKER: "1"

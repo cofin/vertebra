@@ -1045,6 +1045,36 @@ mod tests {
             let short_params = PyTuple::new(py, [1_i64]).unwrap();
             let err = bind_positional(py, "SELECT ? + ?", short_params.as_any()).unwrap_err();
             assert_eq!(err.kind, MssqlErrorKind::Programming);
+
+            let at_p_params = PyTuple::new(py, [1_i64, 2_i64]).unwrap();
+            let (at_p_plan, at_p_bound) = bind_positional(
+                py,
+                "INSERT INTO t (a, b, c) VALUES (@P1, @p2, @P1)",
+                at_p_params.as_any(),
+            )
+            .unwrap();
+            assert_eq!(
+                at_p_plan.sql.as_ref(),
+                "INSERT INTO t (a, b, c) VALUES (@P1, @P2, @P1)"
+            );
+            assert_eq!(at_p_plan.param_count, 2);
+            assert_eq!(at_p_bound.len(), 2);
+
+            let at_p_short = PyTuple::new(py, [1_i64]).unwrap();
+            let at_p_err = bind_positional(
+                py,
+                "INSERT INTO t (a, b) VALUES (@P1, @P2)",
+                at_p_short.as_any(),
+            )
+            .unwrap_err();
+            assert_eq!(at_p_err.kind, MssqlErrorKind::Programming);
+            assert!(
+                at_p_err
+                    .message
+                    .contains("expected 2 positional parameter(s), got 1"),
+                "unexpected message: {}",
+                at_p_err.message
+            );
         });
     }
 

@@ -173,7 +173,7 @@ class MSSQLCore:
 
     @staticmethod
     def rewrite_placeholders(sql: str) -> tuple[str, int]:
-        """Rewrite `?` and `$1`/`$2` placeholders to T-SQL `@P1, @P2, ...` outside quotes, brackets, and comments."""
+        """Rewrite `?`, `$1`/`$2`, and `@P1`/`@p1` placeholders to T-SQL `@P1, @P2, ...` outside quotes, brackets, and comments."""
         mssql_mod = import_optional("vertebra._mssql")
         if mssql_mod is not None and hasattr(mssql_mod, "rewrite_mssql_placeholders"):
             rewritten, count = mssql_mod.rewrite_mssql_placeholders(sql)
@@ -228,6 +228,28 @@ class MSSQLCore:
                     max_param = max(max_param, num)
                     out.append(f"@P{num}")
                     i = j
+                elif (
+                    ch == "@"
+                    and (i == 0 or not (sql[i - 1].isascii() and (sql[i - 1].isalnum() or sql[i - 1] in "_@")))
+                    and i + 2 < n
+                    and sql[i + 1] in ("P", "p")
+                    and sql[i + 2].isascii()
+                    and sql[i + 2].isdigit()
+                    and sql[i + 2] != "0"
+                ):
+                    j = i + 2
+                    while j < n and sql[j].isascii() and sql[j].isdigit():
+                        j += 1
+                    at_boundary = j == n or not (sql[j].isascii() and (sql[j].isalnum() or sql[j] in "_$#@"))
+                    if at_boundary:
+                        num = int(sql[i + 2 : j])
+                        seq_index = max(seq_index, num)
+                        max_param = max(max_param, num)
+                        out.append(f"@P{num}")
+                        i = j
+                    else:
+                        out.append(ch)
+                        i += 1
                 else:
                     out.append(ch)
                     i += 1
