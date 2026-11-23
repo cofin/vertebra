@@ -11,16 +11,22 @@ import copy
 import inspect
 import types
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Union, cast, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, cast, get_args, get_origin, get_type_hints
 
 import anyio
 import msgspec
 
-from vertebra._vertebra import SchemaDigestCache
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.core.guards import authorize as authorize_guards
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.serializers import schema_components
+
+try:
+    from vertebra import _vertebra
+
+    _NativeSchemaDigestCache = getattr(_vertebra, "SchemaDigestCache", None)
+except ImportError:
+    _NativeSchemaDigestCache = None
 
 __all__ = [
     "DEFAULT_TOOL_EXPOSURE",
@@ -45,6 +51,57 @@ type ToolExposure = Literal["mcp", "webmcp", "a2a"]
 
 DEFAULT_TOOL_EXPOSURE: frozenset[ToolExposure] = frozenset({"mcp", "a2a"})
 
+
+class _PySchemaDigestCache:
+    """Pure-Python fallback for SchemaDigestCache."""
+
+    FNV_OFFSET_BASIS: int = 0xCBF29CE484222325
+    FNV_PRIME: int = 0x100000001B3
+    MASK64: int = 0xFFFFFFFFFFFFFFFF
+
+    def __init__(self) -> None:
+        self._entries: dict[str, tuple[int, str, bytes]] = {}
+
+    @classmethod
+    def compute_schema_digest(cls, data: bytes) -> int:
+        h = cls.FNV_OFFSET_BASIS
+        for b in data:
+            h ^= b
+            h = (h * cls.FNV_PRIME) & cls.MASK64
+        return h
+
+    def put(self, key: str, json_bytes: bytes) -> tuple[int, str]:
+        digest = self.compute_schema_digest(json_bytes)
+        etag = f'"{digest:016x}"'
+        self._entries[key] = (digest, etag, json_bytes)
+        return digest, etag
+
+    def get_etag(self, key: str) -> str | None:
+        entry = self._entries.get(key)
+        return entry[1] if entry is not None else None
+
+    def get_bytes(self, key: str) -> bytes | None:
+        entry = self._entries.get(key)
+        return entry[2] if entry is not None else None
+
+    def combined_etag(self) -> str:
+        h = self.FNV_OFFSET_BASIS
+        for key in sorted(self._entries.keys()):
+            for b in key.encode("utf-8"):
+                h ^= b
+                h = (h * self.FNV_PRIME) & self.MASK64
+            digest, _, _ = self._entries[key]
+            h ^= digest
+            h = (h * self.FNV_PRIME) & self.MASK64
+        return f'"W/{h:016x}"'
+
+
+if TYPE_CHECKING:
+
+    class SchemaDigestCache(_PySchemaDigestCache):
+        """Type-checking stub for SchemaDigestCache."""
+else:
+    SchemaDigestCache = _NativeSchemaDigestCache if _NativeSchemaDigestCache is not None else _PySchemaDigestCache
 
 STRIP_TYPE_NAMES: frozenset[str] = frozenset(
     {
