@@ -74,6 +74,7 @@ runs:
       run: |
         {
           echo "CARGO_PROFILE_DEV_DEBUG=${INPUT_CARGO_DEBUG}"
+          echo "CARGO_PROFILE_TEST_DEBUG=${INPUT_CARGO_DEBUG}"
           echo "CARGO_INCREMENTAL=0"
           echo "CARGO_NET_RETRY=10"
           echo "CARGO_TERM_COLOR=always"

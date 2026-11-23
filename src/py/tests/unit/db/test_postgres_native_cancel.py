@@ -7,6 +7,7 @@ import gc
 import socket
 import struct
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -482,9 +483,18 @@ def test_ambient_begin_cancel_on_query_and_pipeline_blocks_until_rollback() -> N
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(client.query("SELECT pg_sleep(10)"), timeout=0.05)
         assert await srv.wait_for_error_count_async(1, timeout=2.0)
-        await asyncio.sleep(0)
-        with pytest.raises(InterfaceError):
-            await client.query("SELECT pg_backend_pid() AS pid")
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                await client.query("SELECT pg_backend_pid() AS pid")
+            except InterfaceError as exc:
+                if "already in flight" in str(exc) and time.monotonic() < deadline:
+                    await asyncio.sleep(0.01)
+                    continue
+                assert "ambient transaction failed" in str(exc), str(exc)
+                break
+            msg = "expected InterfaceError after ambient transaction cancellation"
+            raise AssertionError(msg)
         await client.rollback()
         assert client.closed
 
