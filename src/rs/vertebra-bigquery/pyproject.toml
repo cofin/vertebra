@@ -6,9 +6,33 @@ build-backend = "maturin"
 name = "vertebra-bigquery"
 version = "0.3.0"
 description = "Native Rust Google BigQuery client extension for Vertebra."
+readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = ["vertebra-core==0.3.0"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://cofin.github.io/vertebra/"
+Documentation = "https://cofin.github.io/vertebra/"
+Source = "https://github.com/cofin/vertebra/tree/main/src/rs/vertebra-bigquery"
+Issues = "https://github.com/cofin/vertebra/issues"
+Changelog = "https://cofin.github.io/vertebra/changelog/"
 
 [tool.maturin]
 python-source = "../../py"

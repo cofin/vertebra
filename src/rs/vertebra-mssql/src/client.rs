@@ -20,7 +20,7 @@ use crate::errors::{MssqlError, MssqlErrorKind};
 use crate::params::MssqlParam;
 use crate::transport::{MssqlCancelHandle, MssqlSession};
 
-/// Thread-safe native SQL Server client managing TDS 7.3+ wire sessions and SHM broker leases.
+/// Thread-safe native SQL Server client managing TDS 7.4 wire sessions and SHM broker leases.
 pub struct MssqlClient {
     config: MssqlClientConfig,
     broker: MssqlBrokerBackend,

@@ -15,6 +15,30 @@ dependencies = [
     "rich>=13.0",
     "rich-click>=1.7",
 ]
+classifiers = [
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://cofin.github.io/vertebra/"
+Documentation = "https://cofin.github.io/vertebra/"
+Source = "https://github.com/cofin/vertebra"
+Issues = "https://github.com/cofin/vertebra/issues"
+Changelog = "https://cofin.github.io/vertebra/changelog/"
 
 [project.scripts]
 vtb = "vertebra.cli:cli"

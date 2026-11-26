@@ -1,4 +1,4 @@
-//! TDS 7.3+ column value decoding and Python object materialization for `vertebra-mssql`.
+//! TDS 7.4 column value decoding and Python object materialization for `vertebra-mssql`.
 //!
 //! Decodes `tiberius::Row` cells across all SQL Server wire types:
 //! - Exact numerics (`Numeric` / `DECIMAL` / `NUMERIC` / `MONEY` / `SMALLMONEY` via `tiberius::numeric::Numeric` up to 38 digits)

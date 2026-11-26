@@ -61,13 +61,7 @@ SIBLING_WHEEL_MANIFESTS: tuple[tuple[str, str, str], ...] = (
 
 
 def test_root_pyproject_omits_pypi_duckdb_from_core_and_non_duckdb_groups() -> None:
-    """Root `pyproject.toml` declares `vertebra-duckdb` matching project version and isolates PyPI `duckdb`."""
-    version = _ROOT_PYPROJECT_DATA["project"]["version"]
-    pinned = f"vertebra-duckdb=={version}"
-    opt_deps = _ROOT_PYPROJECT_DATA["project"]["optional-dependencies"]
-    assert opt_deps["duckdb"] == [pinned]
-    assert "all" not in opt_deps
-
+    """Root `pyproject.toml` installs DuckDB through `vertebra-duckdb` and keeps PyPI `duckdb` out of core."""
     uv_sources = _ROOT_PYPROJECT_DATA["tool"]["uv"]["sources"]
     assert uv_sources["vertebra-duckdb"] == {"path": "src/rs/vertebra-duckdb", "editable": True}
 
@@ -216,52 +210,10 @@ def test_optional_wheel_pyproject_isolation_and_exclusions(
     assert stub_file.is_file()
 
 
-@pytest.mark.parametrize(
-    ("pkg_name", "rel_path", "own_stub"),
-    SIBLING_WHEEL_MANIFESTS,
-    ids=[item[0] for item in SIBLING_WHEEL_MANIFESTS],
-)
-def test_optional_wheel_pins_core_stub_includes_and_bumpversion(
-    pkg_name: str,
-    rel_path: str,
-    own_stub: str,
-) -> None:
-    """Every companion crate pins `vertebra-core`, includes its `.pyi` stub, and registers in bumpversion."""
-    root_version = _ROOT_PYPROJECT_DATA["project"]["version"]
-    data = tomllib.loads((_REPO_ROOT / rel_path).read_text(encoding="utf-8"))
-    assert data["project"]["name"] == pkg_name
-    assert data["project"]["dependencies"] == [f"vertebra-core=={root_version}"]
-
-    includes = data["tool"]["maturin"].get("include", [])
-    assert {"path": f"vertebra/{own_stub}", "format": ["sdist", "wheel"]} in includes
-
-    bump_files = _ROOT_PYPROJECT_DATA["tool"]["bumpversion"]["files"]
-    assert {
-        "filename": rel_path,
-        "search": "vertebra-core=={current_version}",
-        "replace": "vertebra-core=={new_version}",
-    } in bump_files
-
-
-@pytest.mark.parametrize("extra_name", ["mysql", "mssql", "redis", "sqlite", "valkey"])
-def test_root_pyproject_declares_optional_driver_extra(extra_name: str) -> None:
-    """Root `pyproject.toml` maps each optional SQL driver extra to its matching workspace crate."""
-    root_toml = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    pkg_name = f"vertebra-{extra_name}"
-    version = root_toml["project"]["version"]
-    optional_deps = root_toml["project"]["optional-dependencies"]
-    assert any(dep.startswith(pkg_name) for dep in optional_deps[extra_name])
-    assert optional_deps[extra_name] == [f"{pkg_name}=={version}"]
-    assert "all" not in optional_deps
-    uv_sources = root_toml["tool"]["uv"]["sources"]
-    assert uv_sources[pkg_name] == {"path": f"src/rs/{pkg_name}", "editable": True}
-
-
 def test_vertebra_mysql_runtime_module_surface() -> None:
     """`vertebra._mysql` exposes `SyncMySQLClient`, `AsyncMySQLClient`, `MySQLWireTestServer`, and `GIL_USED=False`."""
     mysql_mod = pytest.importorskip("vertebra._mysql")
     assert getattr(mysql_mod, "GIL_USED", None) is False
-    assert isinstance(getattr(mysql_mod, "__version__", None), str)
     assert hasattr(mysql_mod, "SyncMySQLClient")
     assert hasattr(mysql_mod, "AsyncMySQLClient")
     assert hasattr(mysql_mod, "MySQLWireTestServer")

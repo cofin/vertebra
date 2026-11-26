@@ -1,4 +1,4 @@
-//! Configuration types for `vertebra-mssql` TDS 7.3+ connections, TLS encryption modes,
+//! Configuration types for `vertebra-mssql` TDS 7.4 connections, TLS encryption modes,
 //! transaction isolation levels, and Cloud SQL for SQL Server (`:3307`) mTLS dialing.
 
 use std::net::SocketAddr;

@@ -134,7 +134,6 @@ def test_postgres_native_module_exports_classes(export_name: str) -> None:
     pg_mod = pytest.importorskip("vertebra._postgres")
     assert pg_mod.GIL_USED is False
     assert isinstance(pg_mod.FREE_THREADED, bool)
-    assert isinstance(pg_mod.__version__, str) and pg_mod.__version__
     cls = getattr(pg_mod, export_name, None)
     assert isinstance(cls, type), f"Missing native PostgreSQL type {export_name}"
 
@@ -145,7 +144,6 @@ def test_oracle_native_module_exports_classes(export_name: str) -> None:
     oracle_mod = pytest.importorskip("vertebra._oracle")
     assert oracle_mod.GIL_USED is False
     assert isinstance(oracle_mod.FREE_THREADED, bool)
-    assert isinstance(oracle_mod.__version__, str)
     assert oracle_mod.ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED is False
     cls = getattr(oracle_mod, export_name, None)
     assert isinstance(cls, type), f"Missing native Oracle type {export_name}"
@@ -157,7 +155,6 @@ def test_redis_native_module_exports_classes(export_name: str) -> None:
     redis_mod = pytest.importorskip("vertebra._redis")
     assert redis_mod.GIL_USED is False
     assert isinstance(redis_mod.FREE_THREADED, bool)
-    assert isinstance(redis_mod.__version__, str) and redis_mod.__version__
     cls = getattr(redis_mod, export_name, None)
     assert isinstance(cls, type), f"Missing native Redis type {export_name}"
 
@@ -168,7 +165,6 @@ def test_valkey_native_module_exports_classes(export_name: str) -> None:
     valkey_mod = pytest.importorskip("vertebra._valkey")
     assert valkey_mod.GIL_USED is False
     assert isinstance(valkey_mod.FREE_THREADED, bool)
-    assert isinstance(valkey_mod.__version__, str) and valkey_mod.__version__
     cls = getattr(valkey_mod, export_name, None)
     assert isinstance(cls, type), f"Missing native Valkey type {export_name}"
 

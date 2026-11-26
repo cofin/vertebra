@@ -41,6 +41,29 @@ jobs:
               print(f"Release blocked: [tool.uv.sources] contains upstream git pins: {pinned}", file=sys.stderr)
               sys.exit(1)
           PY
+      - name: Verify release tag matches package versions
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY'
+          import os
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          expected = tag.removeprefix("v")
+          manifests = [Path("pyproject.toml"), *sorted(Path("src/rs").glob("vertebra-*/pyproject.toml"))]
+          mismatched = {
+              str(path): version
+              for path in manifests
+              if (version := tomllib.loads(path.read_text(encoding="utf-8"))["project"]["version"]) != expected
+          }
+          if mismatched:
+              print(f"Release blocked: tag {tag!r} does not match package versions {mismatched}", file=sys.stderr)
+              sys.exit(1)
+          PY
 
   build_ts:
     name: Build TypeScript client bundle
@@ -454,6 +477,9 @@ jobs:
           pattern: cibw-*
           path: dist
           merge-multiple: true
+
+      - name: Check distribution metadata
+        run: pipx run twine check --strict dist/*
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

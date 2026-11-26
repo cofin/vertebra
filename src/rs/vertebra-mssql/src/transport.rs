@@ -1,4 +1,4 @@
-//! TDS 7.3+ transport session, `PRELOGIN` / TLS negotiation, `ENVCHANGE` routing redirects,
+//! TDS 7.4 transport session, `PRELOGIN` / TLS negotiation, `ENVCHANGE` routing redirects,
 //! and out-of-band `ATTENTION` (`0x06`) cancellation for `vertebra-mssql`.
 
 use std::fmt::Write as _;
@@ -80,7 +80,7 @@ impl CancelHandle for MssqlCancelHandle {
     }
 }
 
-/// Active TDS 7.3+ wire session wrapping `tiberius::Client<Compat<TransportStream>>`.
+/// Active TDS 7.4 wire session wrapping `tiberius::Client<Compat<TransportStream>>`.
 pub struct MssqlSession {
     client: TiberiusClient<Compat<TransportStream>>,
     cancel_state: Arc<MssqlCancelState>,
@@ -93,7 +93,7 @@ pub struct MssqlSession {
 }
 
 impl MssqlSession {
-    /// Connect a new TDS 7.3+ session, negotiating `PRELOGIN` encryption (or Cloud SQL `:3307` mTLS),
+    /// Connect a new TDS 7.4 session, negotiating `PRELOGIN` encryption (or Cloud SQL `:3307` mTLS),
     /// authenticating via `LOGIN7`, and following up to [`MAX_ROUTING_REDIRECTS`] `ENVCHANGE` routing tokens.
     pub async fn connect(config: &MssqlClientConfig) -> Result<Self, MssqlError> {
         install_rustls_ring_provider();

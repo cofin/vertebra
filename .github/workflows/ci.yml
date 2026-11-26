@@ -266,6 +266,7 @@ jobs:
           uv run --no-sync mypy src/py/vertebra src/py/tests/unit src/py/tests/integration tools/scripts tools/pgo tools/benchmarks tools/docs docs/examples
           uv run --no-sync pyright src/py/vertebra
           uv run --no-sync python tools/scripts/check_extras.py
+          uv run --no-sync python tools/scripts/check_package_metadata.py
 
   lint-rust:
     runs-on: ubuntu-latest
