@@ -9,7 +9,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 | **`vertebra._storage`** | `StorageBuffer`, `ObjectMeta`, `SyncObjectStore`, `AsyncObjectStore` | `vertebra-storage` (Rust `object_store` + Tokio) |
 | **`vertebra._bigquery`** | `SyncBigQueryClient`, `AsyncBigQueryClient` | `vertebra-bigquery` (REST v2 + Storage Read/Write gRPC) |
 | **`vertebra._duckdb`** | `SyncDuckDBClient`, `AsyncDuckDBClient` | `vertebra-duckdb` (Bundled DuckDB 2.0 + `VTBARROW` SHM) |
-| **`vertebra._mssql`** | `SyncMSSQLClient`, `AsyncMSSQLClient` | `vertebra-mssql` (TDS 7.4/8.0 + `BulkLoad` + `VTBARROW` SHM) |
+| **`vertebra._mssql`** | `SyncMSSQLClient`, `AsyncMSSQLClient` | `vertebra-mssql` (TDS 7.4 + `BulkLoad` + `VTBARROW` SHM) |
 | **`vertebra._mysql`** | `SyncMySQLClient`, `AsyncMySQLClient`, `MySQLWireTestServer` | `vertebra-mysql` (MySQL Binary Protocol + `VTBARROW` SHM) |
 | **`vertebra._oracle`** | `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `SyncOracleListener`, `AsyncOracleListener` | `vertebra-oracle` (Oracle 26ai Thin TNS/TTC + Arrow SHM) |
 | **`vertebra._postgres`** | `SyncPostgresClient`, `AsyncPostgresClient`, `SyncPostgresPool`, `AsyncPostgresPool`, `SyncPostgresListener`, `AsyncPostgresListener`, `AsyncPostgresReplication` | `vertebra-postgres` (PostgreSQL Protocol 3.0 + `PGCOPY` + `pgoutput` + `VTBARROW` SHM) |

@@ -23,7 +23,7 @@ export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
 endif
 
-export CARGO_TARGET_DIR ?= $(if $(CI),$(CURDIR)/src/rs/target,/tmp/vtb-cargo-target)
+export CARGO_TARGET_DIR ?= $(CURDIR)/src/rs/target
 export PATH := $(CURDIR)/.venv/bin:$(CURDIR)/.venv/Scripts:$(HOME)/.bun/bin:$(HOME)/.local/bin:$(PATH)
 ifneq ($(wildcard $(CURDIR)/.venv/bin/python),)
 export PYO3_PYTHON ?= $(CURDIR)/.venv/bin/python
@@ -158,7 +158,7 @@ ts-lint:                                            ## Lint TS package with auto
 .PHONY: dev
 dev:                                                ## Install native extensions in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@rm -f "$(CARGO_TARGET_DIR)/release/vertebra-server" src/rs/target/release/vertebra-server
+	@rm -f "$(CARGO_TARGET_DIR)/release/vertebra-server"
 	@(cd src/rs && $(if $(PYO3_PYTHON),PYO3_PYTHON="$$(realpath "$(PYO3_PYTHON)")",) cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-mssql --exclude vertebra-spanner --exclude vertebra-duckdb --exclude vertebra-oracle --exclude vertebra-postgres --exclude vertebra-sqlite --exclude vertebra-redis --exclude vertebra-valkey)
 	@uv run maturin develop --uv
 	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml
@@ -455,8 +455,9 @@ lint: ts-lint                                       ## Format and lint everythin
 	@echo "${INFO} Running type checks (Mypy & Pyright)..."
 	@uv run --no-sync mypy src/py/vertebra src/py/tests/unit src/py/tests/integration tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync pyright src/py/vertebra
-	@echo "${INFO} Checking optional extras parity..."
+	@echo "${INFO} Checking optional extras parity and package metadata..."
 	@uv run --no-sync python tools/scripts/check_extras.py
+	@uv run --no-sync python tools/scripts/check_package_metadata.py
 	@echo "${INFO} Checking native extension stubs (stubtest)..."
 	@uv run --no-sync python -c 'import importlib.util, sys; missing = [m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite", "vertebra._redis", "vertebra._valkey") if importlib.util.find_spec(m) is None]; sys.exit(f"Missing native extensions: {missing}") if missing else None'
 	@uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres vertebra._sqlite vertebra._redis vertebra._valkey
@@ -469,13 +470,14 @@ lint-ts:                                            ## Check TypeScript formatti
 	@(cd src/ts/vertebra-client && bunx tsc --noEmit)
 
 .PHONY: lint-py
-lint-py:                                            ## Check Python lint, format, types, and optional extras without mutating files
-	@echo "${INFO} Checking Python (Ruff, Mypy, Pyright & extras)..."
+lint-py:                                            ## Check Python lint, format, types, extras, and package metadata without mutating files
+	@echo "${INFO} Checking Python (Ruff, Mypy, Pyright, extras & metadata)..."
 	@uv run --no-sync ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync mypy src/py/vertebra src/py/tests/unit src/py/tests/integration tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync pyright src/py/vertebra
 	@uv run --no-sync python tools/scripts/check_extras.py
+	@uv run --no-sync python tools/scripts/check_package_metadata.py
 
 .PHONY: lint-rs
 lint-rs:                                            ## Check Rust formatting and Clippy warnings without mutating files
@@ -489,12 +491,13 @@ lint-all:                                           ## Check formatting, linting
 	@echo "${INFO} Checking TS package (Biome & tsc)..."
 	@(cd src/ts/vertebra-client && bunx biome check .)
 	@(cd src/ts/vertebra-client && bunx tsc --noEmit)
-	@echo "${INFO} Checking Python (Ruff, Mypy, Pyright & extras)..."
+	@echo "${INFO} Checking Python (Ruff, Mypy, Pyright, extras & metadata)..."
 	@uv run --no-sync ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync mypy src/py/vertebra src/py/tests/unit src/py/tests/integration tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync pyright src/py/vertebra
 	@uv run --no-sync python tools/scripts/check_extras.py
+	@uv run --no-sync python tools/scripts/check_package_metadata.py
 	@uv run --no-sync python -c 'import importlib.util, sys; missing = [m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite", "vertebra._redis", "vertebra._valkey") if importlib.util.find_spec(m) is None]; sys.exit(f"Missing native extensions: {missing}") if missing else None'
 	@uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres vertebra._sqlite vertebra._redis vertebra._valkey
 	@echo "${INFO} Checking Rust (Fmt & Clippy)..."
@@ -727,25 +730,68 @@ postgres-bench-check:                               ## Verify Criterion postgres
 # Release
 # =============================================================================
 .PHONY: release
-release:                                             ## Bump version: make release bump=patch|minor|major
-	@if [ -z "$(bump)" ]; then \
-		echo "${ERROR} Usage: make release bump=patch|minor|major"; \
-		exit 1; \
-	fi
-	@echo "${INFO} Preparing release ($(bump))..."
-	@uv run bump-my-version bump $(bump)
-	@uv lock --offline
-	@cargo update -w --manifest-path src/rs/Cargo.toml --offline
-	@echo "${OK} Release bump complete"
+release:                                             ## Bump a stable release (bump=patch|minor|major) or finalize the current pre-release (no bump)
+	@$(MAKE) --no-print-directory _release-preflight
+	@current="$$(uv run --no-sync bump-my-version show current_version)"
+	@case "$(bump)" in
+		patch|minor|major)
+			echo "${INFO} Bumping $$current ($(bump))..."
+			uv run --no-sync bump-my-version bump "$(bump)" ;;
+		"")
+			case "$$current" in
+				*-*)
+					echo "${INFO} Finalizing pre-release $$current as $${current%%-*}..."
+					uv run --no-sync bump-my-version bump --new-version "$${current%%-*}" pre ;;
+				*)
+					echo "${ERROR} $$current is already stable. Usage: make release bump=patch|minor|major"
+					exit 1 ;;
+			esac ;;
+		*)
+			echo "${ERROR} Unknown bump '$(bump)'. Usage: make release bump=patch|minor|major"
+			exit 1 ;;
+	esac
+	@$(MAKE) --no-print-directory _release-finish
 
 .PHONY: pre-release
-pre-release:                                         ## Start a pre-release: make pre-release version=0.2.0-alpha.1
-	@if [ -z "$(version)" ]; then \
-		echo "${ERROR} Usage: make pre-release version=X.Y.Z-alpha.N"; \
-		exit 1; \
+pre-release:                                         ## Start or advance a pre-release: make pre-release version=X.Y.Z-alpha.N
+	@if ! [[ "$(version)" =~ ^[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+$$ ]]; then
+		echo "${ERROR} Usage: make pre-release version=X.Y.Z-(alpha|beta|rc).N"
+		echo ""
+		echo "Pre-release workflow:"
+		echo "  1. Start alpha:     make pre-release version=0.4.0-alpha.1"
+		echo "  2. Next alpha:      make pre-release version=0.4.0-alpha.2"
+		echo "  3. Move to beta:    make pre-release version=0.4.0-beta.1"
+		echo "  4. Move to rc:      make pre-release version=0.4.0-rc.1"
+		echo "  5. Final release:   make release"
+		exit 1
 	fi
+	@$(MAKE) --no-print-directory _release-preflight
 	@echo "${INFO} Preparing pre-release $(version)..."
-	@uv run bump-my-version bump --new-version $(version) pre
+	@uv run --no-sync bump-my-version bump --new-version "$(version)" pre
+	@$(MAKE) --no-print-directory _release-finish
+
+.PHONY: _release-preflight
+_release-preflight:
+	@if [ "$$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
+		echo "${ERROR} Releases are prepared on a branch and merged by pull request. Run: git switch -c release/next"
+		exit 1
+	fi
+	@uv run --no-sync python tools/scripts/check_package_metadata.py
+
+.PHONY: _release-finish
+_release-finish:
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@uv lock --offline
 	@cargo update -w --manifest-path src/rs/Cargo.toml --offline
-	@echo "${OK} Pre-release $(version) complete"
+	@$(MAKE) --no-print-directory docs
+	@version="$$(uv run --no-sync bump-my-version show current_version)"
+	@prerelease=""
+	@case "$$version" in *-*) prerelease=" --prerelease" ;; esac
+	@echo "${OK} Version bumped to $$version"
+	@echo ""
+	@echo "${INFO} Next steps:"
+	@echo "  1. Add a '## $$version' section to CHANGELOG.md"
+	@echo "  2. Commit: git commit -S -am 'chore(release): bump to v$$version'"
+	@echo "  3. Push the branch and open a pull request"
+	@echo "  4. After it merges, publish: gh release create v$$version --target main --generate-notes$$prerelease --title v$$version"
+	@echo "     The Release workflow builds every wheel and publishes all 13 packages to PyPI"

@@ -29,7 +29,7 @@ Verify the installation and `vtb` CLI entrypoint:
 vtb --help
 ```
 
-Prebuilt `vertebra-core` wheels ship a relocatable `vertebra/bin/vertebra-server` binary across Linux (`linux-x86_64`, `linux-aarch64`) and macOS (`arm64`, `x86_64`). On POSIX hosts, the packaged binary requires a shared `libpython` runtime (`ENABLE_SHARED=1`, provided by `uv python install` and standard shared CPython builds) or an explicit `VERTEBRA_SERVER_BINARY` override.
+Prebuilt `vertebra-core` wheels ship a relocatable `vertebra/bin/vertebra-server` binary across Linux (`linux-x86_64`, `linux-aarch64`) and macOS (`arm64`, `x86_64`), and Windows wheels ship `vertebra/bin/vertebra-server.exe` (`win_amd64`). On POSIX hosts, the packaged binary requires a shared `libpython` runtime (`ENABLE_SHARED=1`, provided by `uv python install` and standard shared CPython builds) or an explicit `VERTEBRA_SERVER_BINARY` override.
 
 ## Optional Extras
 
@@ -62,12 +62,15 @@ Vertebra keeps its base dependency footprint minimal (`anyio`, `msgspec`, `rich`
 | `bigquery` | `"vertebra-core[bigquery]"` | Standalone native Rust `vertebra-bigquery` (`vertebra._bigquery`) driver wheel |
 | `bundler` | `"vertebra-core[bundler]"` | Standalone native Rust `vertebra-bundler` (`vertebra._bundler`) Rolldown/Oxc & QuickJS SSR wheel |
 | `duckdb` | `"vertebra-core[duckdb]"` | Standalone native Rust `vertebra-duckdb` (`vertebra._duckdb`) DuckDB 2.0 & Arrow wheel |
-| `mssql` | `"vertebra-core[mssql]"` | Standalone native Rust `vertebra-mssql` (`vertebra._mssql`) SQL Server TDS 7.4/8.0 wheel |
+| `mssql` | `"vertebra-core[mssql]"` | Standalone native Rust `vertebra-mssql` (`vertebra._mssql`) SQL Server TDS 7.4 wheel |
 | `mysql` | `"vertebra-core[mysql]"` | Standalone native Rust `vertebra-mysql` (`vertebra._mysql`) MySQL/MariaDB binary protocol wheel |
 | `oracle` | `"vertebra-core[oracle]"` | Standalone native Rust `vertebra-oracle` (`vertebra._oracle`) Oracle 26ai Thin TNS/TTC wheel |
 | `postgres` | `"vertebra-core[postgres]"` | Standalone native Rust `vertebra-postgres` (`vertebra._postgres`) pure-Rust PostgreSQL wheel |
+| `redis` | `"vertebra-core[redis]"` | Standalone native Rust `vertebra-redis` (`vertebra._redis`) Redis 7.2+/8.0 RESP3 client wheel |
 | `spanner` | `"vertebra-core[spanner]"` | Standalone native Rust `vertebra-spanner` (`vertebra._spanner`) driver wheel |
+| `sqlite` | `"vertebra-core[sqlite]"` | Standalone native Rust `vertebra-sqlite` (`vertebra._sqlite`) wheel with bundled SQLite 3.45+ |
 | `storage` | `"vertebra-core[storage]"` | Standalone native Rust `vertebra-storage` (`vertebra._storage`) multicloud object storage wheel |
+| `valkey` | `"vertebra-core[valkey]"` | Standalone native Rust `vertebra-valkey` (`vertebra._valkey`) Valkey 8.0+/9.0 RESP3 client wheel |
 | `uvloop` | `"vertebra-core[uvloop]"` | Optional `uvloop` asyncio event loop integration on POSIX hosts |
 | `winloop` | `"vertebra-core[winloop]"` | Optional `winloop` asyncio event loop integration on Windows |
 | `rloop` | `"vertebra-core[rloop]"` | Optional `rloop` asyncio event loop integration on POSIX hosts |
@@ -105,7 +108,7 @@ Development, lint, type-checking, test, and benchmark dependencies are managed v
 
 ## Free-Threaded Python (`3.14t` / `3.15t`)
 
-All 10 native Rust extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, `vertebra._duckdb`, `vertebra._mssql`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._postgres`, `vertebra._spanner`) run without the GIL and support multi-core execution inside a single OS process under `--topology embedded`:
+All 13 native Rust extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, `vertebra._duckdb`, `vertebra._mssql`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._postgres`, `vertebra._redis`, `vertebra._spanner`, `vertebra._sqlite`, `vertebra._valkey`) run without the GIL and support multi-core execution inside a single OS process under `--topology embedded`:
 
 ```bash
 uv python install 3.14t

@@ -53,6 +53,7 @@ jobs:
               - 'src/py/**'
               - 'tools/**'
               - 'pyproject.toml'
+              - 'README.md'
               - 'uv.lock'
             db_code:
               - 'src/py/vertebra/db/**'
@@ -97,6 +98,7 @@ jobs:
               - 'tools/scripts/build_ci_wheels.py'
               - 'tools/scripts/smoke_vtb_run.py'
               - 'pyproject.toml'
+              - 'README.md'
               - 'Makefile'
             docs:
               - 'docs/**'
@@ -266,6 +268,7 @@ jobs:
           uv run --no-sync mypy src/py/vertebra src/py/tests/unit src/py/tests/integration tools/scripts tools/pgo tools/benchmarks tools/docs docs/examples
           uv run --no-sync pyright src/py/vertebra
           uv run --no-sync python tools/scripts/check_extras.py
+          uv run --no-sync python tools/scripts/check_package_metadata.py
 
   lint-rust:
     runs-on: ubuntu-latest

@@ -41,6 +41,56 @@ jobs:
               print(f"Release blocked: [tool.uv.sources] contains upstream git pins: {pinned}", file=sys.stderr)
               sys.exit(1)
           PY
+      - name: Check package metadata
+        run: uv run --no-project --python 3.12 python tools/scripts/check_package_metadata.py
+      - name: Verify package versions and release tag parity
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          root_pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          expected = os.environ["RELEASE_TAG"].removeprefix("v") or root_pyproject["project"]["version"]
+          mismatched: dict[str, str] = {}
+
+          for path in [Path("pyproject.toml"), *sorted(Path("src/rs").glob("vertebra-*/pyproject.toml"))]:
+              data = tomllib.loads(path.read_text(encoding="utf-8"))
+              version = data["project"]["version"]
+              if version != expected:
+                  mismatched[str(path)] = version
+              if path != Path("pyproject.toml"):
+                  pin = f"vertebra-core=={expected}"
+                  deps = data["project"].get("dependencies", [])
+                  if pin not in deps:
+                      mismatched[f"{path}:dependencies"] = str(deps)
+
+          init_match = re.search(
+              r'^__version__\s*=\s*"([^"]+)"',
+              Path("src/py/vertebra/__init__.py").read_text(encoding="utf-8"),
+              re.MULTILINE,
+          )
+          init_version = init_match.group(1) if init_match else "<missing>"
+          if init_version != expected:
+              mismatched["src/py/vertebra/__init__.py"] = init_version
+
+          cargo_version = tomllib.loads(Path("src/rs/Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
+          if cargo_version != expected:
+              mismatched["src/rs/Cargo.toml"] = cargo_version
+
+          ts_version = json.loads(Path("src/ts/vertebra-client/package.json").read_text(encoding="utf-8"))["version"]
+          if ts_version != expected:
+              mismatched["src/ts/vertebra-client/package.json"] = ts_version
+
+          if mismatched:
+              print(f"Release blocked: expected version {expected!r}, found mismatches {mismatched}", file=sys.stderr)
+              sys.exit(1)
+          PY
 
   build_ts:
     name: Build TypeScript client bundle
@@ -416,9 +466,31 @@ jobs:
           assert pathlib.Path(vertebra.__file__).is_relative_to(sys.prefix)
           PY
 
+  verify_dists:
+    name: Check distribution metadata
+    needs: [build_wheels, build_sdist, test_wheels]
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/setup-python-env
+        with:
+          python-version: "3.12"
+          enable-cache: false
+          save-cache: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cibw-*
+          path: dist
+          merge-multiple: true
+      - name: Check distribution metadata
+        run: uvx --from twine twine check --strict dist/*
+
   upload_release:
     name: Upload wheels and sdist to GitHub Release
-    needs: [build_wheels, build_sdist, test_wheels]
+    needs: [verify_dists]
     if: github.event_name == 'release'
     runs-on: ubuntu-slim
     permissions:
@@ -440,7 +512,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   upload_pypi:
-    needs: [build_wheels, build_sdist, test_wheels]
+    needs: [verify_dists]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment:

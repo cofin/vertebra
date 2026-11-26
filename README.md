@@ -1,8 +1,8 @@
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-inline-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-inline-light.svg">
-    <img alt="Vertebra" src="docs/assets/banner-inline-light.svg" width="520">
+    <source media="(prefers-color-scheme: dark)" srcset="https://cofin.github.io/vertebra/assets/banner-inline-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://cofin.github.io/vertebra/assets/banner-inline-light.svg">
+    <img alt="Vertebra" src="https://cofin.github.io/vertebra/assets/banner-inline-light.svg" width="520">
   </picture>
   <p><strong>One runtime for Python and TypeScript — backend, frontend, web, gRPC, workers, and standalone apps.</strong></p>
 </div>
@@ -21,7 +21,7 @@ Vertebra is one unified runtime for Python and TypeScript across backend, fronte
 ```bash
 uv add vertebra-core
 # Optional native wheels:
-# bigquery, bundler, duckdb, mssql, mysql, oracle, postgres, spanner, storage
+# bigquery, bundler, duckdb, mssql, mysql, oracle, postgres, redis, spanner, sqlite, storage, valkey
 uv add "vertebra-core[postgres]"
 ```
 
@@ -73,7 +73,7 @@ src/
     vertebra-db/       # DB wire codecs, cloud dialers, and Arrow SHM framing
     vertebra-bigquery/ # BigQuery REST v2 and Storage Read/Write (_bigquery)
     vertebra-duckdb/   # Embedded DuckDB 2.0 and VTBARROW SHM (_duckdb)
-    vertebra-mssql/    # SQL Server TDS 7.4/8.0 and BulkLoad (_mssql)
+    vertebra-mssql/    # SQL Server TDS 7.4 and BulkLoad (_mssql)
     vertebra-mysql/    # MySQL/MariaDB binary protocol (_mysql)
     vertebra-oracle/   # Oracle 26ai Thin client, DRCP pool, and Arrow SHM (_oracle)
     vertebra-postgres/ # PostgreSQL 3.0, PGCOPY, pgoutput, Arrow SHM (_postgres)

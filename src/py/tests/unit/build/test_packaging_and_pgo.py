@@ -669,7 +669,7 @@ def test_optional_extension_pyproject_isolation_and_bundler_extra(
     pkg_slug: str,
     expected_module: str,
 ) -> None:
-    """Verify optional extension manifests isolate src/py/vertebra and sync with root pyproject.toml."""
+    """Verify optional extension manifests isolate src/py/vertebra and exclude sibling stubs."""
     repo_root = Path(__file__).resolve().parents[5]
     ext_toml = tomllib.loads(
         (repo_root / "src" / "rs" / f"vertebra-{pkg_slug}" / "pyproject.toml").read_text(encoding="utf-8")
@@ -707,14 +707,6 @@ def test_optional_extension_pyproject_isolation_and_bundler_extra(
     ]
     assert maturin_cfg["exclude"] == [*expected_prefix, *other_stubs]
     assert all(not pattern.startswith("!") for pattern in maturin_cfg["exclude"])
-
-    root_toml = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
-    version = root_toml["project"]["version"]
-    opt_deps = root_toml["project"]["optional-dependencies"]
-    pinned = f"vertebra-{pkg_slug}=={version}"
-    assert opt_deps[pkg_slug] == [pinned]
-    assert "all" not in opt_deps
-    assert f"vertebra-{pkg_slug}" in root_toml["tool"]["uv"]["sources"]
 
 
 def test_run_default_pgo_workload_executes_extensions_routes_and_fast_fail(tmp_path: Path) -> None:

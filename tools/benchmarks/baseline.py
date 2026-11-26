@@ -58,7 +58,6 @@ def find_criterion_estimates(repo_root: Path) -> dict[str, float]:
         [
             repo_root / "src/rs/target/criterion",
             repo_root / "target/criterion",
-            Path("/tmp/vtb-cargo-target/criterion"),
         ]
     )
 

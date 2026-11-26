@@ -1,6 +1,6 @@
 //! `vertebra-mssql` crate and `vertebra._mssql` PyO3 extension module.
 //!
-//! Provides pure-Rust Microsoft SQL Server (TDS 7.3+) wire protocol execution, `PRELOGIN` and
+//! Provides pure-Rust Microsoft SQL Server (TDS 7.4) wire protocol execution, `PRELOGIN` and
 //! TLS-in-TDS / strict TLS negotiation, Cloud SQL for SQL Server (`:3307`) mTLS dialing,
 //! `sp_executesql` `@P1` RPC execution, `BEGIN`/`COMMIT`/`ROLLBACK`/`SAVE TRANSACTION` control,
 //! out-of-band `ATTENTION` (`0x06`) cancellation, `VTBARROW` zero-copy shared-memory Arrow IPC
@@ -241,7 +241,7 @@ fn stmt_cache_stats_to_py(py: Python<'_>, client: &MssqlClient) -> PyResult<Py<P
     Ok(dict.into_any().unbind())
 }
 
-/// Synchronous pure-Rust Microsoft SQL Server (TDS 7.3+) client exposed to Python (`vertebra._mssql.SyncMSSQLClient`).
+/// Synchronous pure-Rust Microsoft SQL Server (TDS 7.4) client exposed to Python (`vertebra._mssql.SyncMSSQLClient`).
 #[pyclass(
     name = "SyncMSSQLClient",
     module = "vertebra._mssql",
@@ -661,7 +661,7 @@ impl PySyncMSSQLClient {
     }
 }
 
-/// Asynchronous pure-Rust Microsoft SQL Server (TDS 7.3+) client exposed to Python (`vertebra._mssql.AsyncMSSQLClient`).
+/// Asynchronous pure-Rust Microsoft SQL Server (TDS 7.4) client exposed to Python (`vertebra._mssql.AsyncMSSQLClient`).
 #[pyclass(
     name = "AsyncMSSQLClient",
     module = "vertebra._mssql",

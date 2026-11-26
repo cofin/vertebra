@@ -10,7 +10,6 @@ import signal
 import subprocess
 import sys
 import sysconfig
-import tempfile
 import threading
 from collections.abc import MutableMapping
 from pathlib import Path
@@ -248,10 +247,6 @@ def find_server_binary() -> str:
                 repo_root / "src" / "rs" / "target",
             ]
         )
-
-    default_make_target = Path(tempfile.gettempdir()) / "vtb-cargo-target"
-    if default_make_target not in target_dirs:
-        target_dirs.append(default_make_target)
 
     for profile in ("release", "debug"):
         existing = [

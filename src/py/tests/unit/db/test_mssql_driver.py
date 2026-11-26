@@ -568,7 +568,6 @@ def test_mssql_native_module_metadata_and_placeholder_rewriter() -> None:
     """Verify `vertebra._mssql` metadata attributes and `@P1` placeholder rewriting."""
     assert mssql_native.GIL_USED is False
     assert isinstance(mssql_native.FREE_THREADED, bool)
-    assert isinstance(mssql_native.__version__, str)
 
     sql = "SELECT '?', [a?b], \"c$1\" FROM items WHERE id = ? AND status = $2"
     rewritten, count = rewrite_mssql_placeholders(sql)
