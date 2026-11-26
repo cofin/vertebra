@@ -12,6 +12,7 @@ _URLS = "".join(f'{key} = "https://example.com/{key.lower()}"\n' for key in REQU
 def _write_package(
     package_dir: Path,
     *,
+    description: str = 'description = "Demo package."\n',
     readme_field: str = 'readme = "README.md"\n',
     readme_text: str | None = "# demo\n",
     urls: str = _URLS,
@@ -23,8 +24,8 @@ def _write_package(
         (package_dir / "README.md").write_text(readme_text, encoding="utf-8")
     pyproject = package_dir / "pyproject.toml"
     pyproject.write_text(
-        '[project]\nname = "demo"\nversion = "0.1.0"\ndescription = "Demo package."\n'
-        f"{readme_field}{classifiers}\n[project.urls]\n{urls}",
+        '[project]\nname = "demo"\nversion = "0.1.0"\n'
+        f"{description}{readme_field}{classifiers}\n[project.urls]\n{urls}",
         encoding="utf-8",
     )
     return pyproject
@@ -46,6 +47,8 @@ def test_readme_table_form_is_accepted(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
+        ({"description": ""}, "missing [project] description"),
+        ({"description": 'description = "   "\n'}, "missing [project] description"),
         ({"readme_field": ""}, "missing [project] readme file"),
         ({"readme_text": None}, "readme 'README.md' does not exist"),
         ({"readme_text": "  \n"}, "readme 'README.md' is empty"),
@@ -58,6 +61,14 @@ def test_incomplete_metadata_is_reported(tmp_path: Path, overrides: dict[str, An
     """Verify each missing or invalid field produces a matching problem."""
     problems = find_metadata_problems(_write_package(tmp_path, **overrides))
     assert any(expected in problem for problem in problems), problems
+
+
+def test_main_returns_zero_when_all_packages_pass(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify the CLI exits zero with no stderr output when every manifest is valid."""
+    _write_package(tmp_path)
+    _write_package(tmp_path / "src" / "rs" / "vertebra-demo")
+    assert main(["--repo-root", str(tmp_path)]) == 0
+    assert capsys.readouterr().err == ""
 
 
 def test_main_reports_failures_with_relative_paths(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

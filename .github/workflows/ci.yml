@@ -53,6 +53,7 @@ jobs:
               - 'src/py/**'
               - 'tools/**'
               - 'pyproject.toml'
+              - 'README.md'
               - 'uv.lock'
             db_code:
               - 'src/py/vertebra/db/**'
@@ -97,6 +98,7 @@ jobs:
               - 'tools/scripts/build_ci_wheels.py'
               - 'tools/scripts/smoke_vtb_run.py'
               - 'pyproject.toml'
+              - 'README.md'
               - 'Makefile'
             docs:
               - 'docs/**'

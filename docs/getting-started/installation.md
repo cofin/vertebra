@@ -108,7 +108,7 @@ Development, lint, type-checking, test, and benchmark dependencies are managed v
 
 ## Free-Threaded Python (`3.14t` / `3.15t`)
 
-All 10 native Rust extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, `vertebra._duckdb`, `vertebra._mssql`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._postgres`, `vertebra._spanner`) run without the GIL and support multi-core execution inside a single OS process under `--topology embedded`:
+All 13 native Rust extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, `vertebra._duckdb`, `vertebra._mssql`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._postgres`, `vertebra._redis`, `vertebra._spanner`, `vertebra._sqlite`, `vertebra._valkey`) run without the GIL and support multi-core execution inside a single OS process under `--topology embedded`:
 
 ```bash
 uv python install 3.14t

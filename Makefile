@@ -470,8 +470,8 @@ lint-ts:                                            ## Check TypeScript formatti
 	@(cd src/ts/vertebra-client && bunx tsc --noEmit)
 
 .PHONY: lint-py
-lint-py:                                            ## Check Python lint, format, types, and optional extras without mutating files
-	@echo "${INFO} Checking Python (Ruff, Mypy, Pyright & extras)..."
+lint-py:                                            ## Check Python lint, format, types, extras, and package metadata without mutating files
+	@echo "${INFO} Checking Python (Ruff, Mypy, Pyright, extras & metadata)..."
 	@uv run --no-sync ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync mypy src/py/vertebra src/py/tests/unit src/py/tests/integration tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
@@ -491,7 +491,7 @@ lint-all:                                           ## Check formatting, linting
 	@echo "${INFO} Checking TS package (Biome & tsc)..."
 	@(cd src/ts/vertebra-client && bunx biome check .)
 	@(cd src/ts/vertebra-client && bunx tsc --noEmit)
-	@echo "${INFO} Checking Python (Ruff, Mypy, Pyright & extras)..."
+	@echo "${INFO} Checking Python (Ruff, Mypy, Pyright, extras & metadata)..."
 	@uv run --no-sync ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run --no-sync mypy src/py/vertebra src/py/tests/unit src/py/tests/integration tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
