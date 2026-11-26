@@ -5,91 +5,118 @@
     <img alt="Vertebra" src="https://cofin.github.io/vertebra/assets/banner-inline-light.svg" width="520">
   </picture>
   <p><strong>One runtime for Python and TypeScript — backend, frontend, web, gRPC, workers, and standalone apps.</strong></p>
+  <p>
+    <a href="https://cofin.github.io/vertebra/">Documentation</a> ·
+    <a href="https://cofin.github.io/vertebra/getting-started/quickstart/">Quickstart</a> ·
+    <a href="https://cofin.github.io/vertebra/usage/">Usage Guides</a> ·
+    <a href="https://cofin.github.io/vertebra/changelog/">Changelog</a>
+  </p>
 </div>
 
----
+Vertebra combines a Rust HTTP server, a typed Python web framework, native database and object storage drivers, a frontend bundler, and a bundled TypeScript client into one package.
 
-Vertebra is one unified runtime for Python and TypeScript across backend, frontend, web, gRPC, workers, and standalone apps:
-
-- **Python Framework & Server**: Type-safe APIs (`App`, `Controller`, `Router`, `Route`, `Procedure`, `ProcedureRouter`, `Provide`, `Inject`, `QueueService`, Inertia v3, SSR, and MCP/A2A agent protocols) plus native, ASGI, WSGI, and RSGI support.
-- **Worker Runtime (`vertebra-core`, `vertebra-py`)**: Runs Python in-process or across multiple worker processes over shared memory.
-- **HTTP Server & Bundler (`vertebra-http`, `vertebra-bundler`)**: HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSockets, SSE, TLS, compression, static files, JavaScript bundling, and QuickJS SSR.
-- **Storage, Databases & TypeScript Client (`vertebra-storage`, `vertebra-db`, `vertebra-postgres`, `vertebra-mysql`, `vertebra-mssql`, `vertebra-sqlite`, `vertebra-duckdb`, `vertebra-oracle`, `vertebra-bigquery`, `vertebra-spanner`, `vertebra-redis`, `vertebra-valkey`, `@vertebra/client`)**: Multicloud object storage covers S3, GCS, Azure, R2, OCI, HTTP, and local files. Native database drivers support PostgreSQL, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, BigQuery, Spanner, Redis, Valkey, and DataFusion. Native `driver.pipeline()` batching (`SyncPipelineCapable`, `AsyncPipelineCapable`) pairs with Cloud SQL/AlloyDB dialers and `@vertebra/client` for React, Vue, Svelte, Angular, HTMX, and Vite.
-
-## Quickstart
+## Install
 
 ```bash
 uv add vertebra-core
-# Optional native wheels:
-# bigquery, bundler, duckdb, mssql, mysql, oracle, postgres, redis, spanner, sqlite, storage, valkey
+```
+
+Or with `pip`:
+
+```bash
+pip install vertebra-core
+```
+
+Add optional extras for databases, object storage, frontend bundling, or framework integrations as needed:
+
+```bash
 uv add "vertebra-core[postgres]"
+uv add "vertebra-core[storage,bundler]"
 ```
 
-## CLI Usage (`vtb`)
+Available native extras: `bigquery`, `bundler`, `duckdb`, `mssql`, `mysql`, `oracle`, `postgres`, `redis`, `spanner`, `sqlite`, `storage`, `valkey`.
+
+## Quickstart
+
+Create `app.py`:
+
+```python
+import msgspec
+from vertebra import App
+
+
+class Item(msgspec.Struct):
+    name: str
+    quantity: int = 1
+
+
+app = App()
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/items")
+def create_item(body: Item) -> Item:
+    return body
+```
+
+Run the development server with live reload:
 
 ```bash
-vtb run myapp:app --host 127.0.0.1 --port 8000 --workers 4
-vtb dev myapp:app --port 8000
-vtb js build
-vtb js generate-types
-vtb init my-project
-vtb build --standalone
+vtb dev app:app --port 8000
 ```
 
-## Common Make Targets
+Run in production across multiple workers:
 
 ```bash
-make dev         # Build Rust crates and install debug Python extensions
-make build       # Build TS client, release Rust binaries, and wheel
-make test        # Run all tests (Rust + Python + TypeScript)
-make rs-test     # Run Rust tests (tls, http3, compression, gcp)
-make py-test     # Run Python test suite
-make oracle-test # Run Oracle 26ai Rust tests, stubtest, and Python unit tests
-make oracle-wheel-check # Verify vertebra-oracle wheel isolation
-make postgres-test # Run vertebra-postgres Rust tests and _postgres stubtest
-make postgres-wheel-check # Verify vertebra-postgres wheel and isolation
-make postgres-bench-check # Run Criterion tests and comparator unit suite
-make ts-test     # Run TypeScript client tests (Vitest)
-make lint        # Format and lint Python, Rust, and TypeScript
-make check       # Run full lint, type checks, all tests, and coverage
-make docs        # Build Zensical site, postbuild, and verify artifacts
-make docs-serve  # Serve Zensical documentation locally with live reload
-make bench       # Run benchmark suite
+vtb run app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-## Repository Layout
+## Features
 
-```text
-src/
-  py/
-    vertebra/          # Python framework, server, CLI, agent, storage, db
-    tests/             # Python unit and FFI test suite
-  rs/
-    vertebra-core/     # Shared-memory rings and worker IPC
-    vertebra-py/       # PyO3 native extension (_vertebra)
-    vertebra-http/     # HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSocket, and TLS server
-    vertebra-bundler/  # JavaScript bundler and QuickJS SSR (_bundler)
-    vertebra-storage/  # Cloud and local object storage (_storage)
-    vertebra-db/       # DB wire codecs, cloud dialers, and Arrow SHM framing
-    vertebra-bigquery/ # BigQuery REST v2 and Storage Read/Write (_bigquery)
-    vertebra-duckdb/   # Embedded DuckDB 2.0 and VTBARROW SHM (_duckdb)
-    vertebra-mssql/    # SQL Server TDS 7.4 and BulkLoad (_mssql)
-    vertebra-mysql/    # MySQL/MariaDB binary protocol (_mysql)
-    vertebra-oracle/   # Oracle 26ai Thin client, DRCP pool, and Arrow SHM (_oracle)
-    vertebra-postgres/ # PostgreSQL 3.0, PGCOPY, pgoutput, Arrow SHM (_postgres)
-    vertebra-spanner/  # Spanner v1 gRPC and DatabaseAdmin (_spanner)
-  ts/
-    vertebra-client/   # @vertebra/client TypeScript SDK
+### Web Framework & HTTP Server
+- **Typed Python APIs**: Build endpoints with `App`, `Controller`, `Router`, `Procedure`, dependency injection (`Provide`/`Inject`), and `msgspec.Struct` validation.
+- **Modern Protocols**: Native HTTP/1.1, HTTP/2, HTTP/3 (QUIC), TLS, compression, static files, WebSockets, Server-Sent Events, and gRPC.
+- **Bring Your Own Framework**: Run native Vertebra apps or existing ASGI, WSGI, and RSGI apps (Litestar, Starlette, FastAPI, Flask, Django) with `vtb run`.
+- **Automatic Worker Modes**: Runs in-process for a single worker or free-threaded Python (`3.14t`/`3.15t`), and scales across shared-memory worker processes when `--workers > 1` on standard Python (`--topology embedded|shm`).
+
+### Databases & Caching
+- **Native Sync & Async Drivers**: PostgreSQL, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, BigQuery, Spanner, Redis, and Valkey.
+- **High-Throughput Data Access**: Statement pipelining, zero-copy Arrow results, DataFusion queries, change feeds, and Cloud SQL/AlloyDB dialers.
+- **Ecosystem Integrations**: Drop-in support for SQLSpec, SQLAlchemy, Advanced Alchemy, and Django database backends.
+
+### Object Storage
+- **One API Across Clouds**: Sync and async access to S3, GCS, Azure Blob, Cloudflare R2, OCI, HTTP, and local files via `vertebra-core[storage]`.
+- **Large File Support**: Streaming reads/writes, multipart uploads, bulk transfers, HTTP Range responses, and presigned URLs.
+
+### Frontend, Bundling & TypeScript Client
+- **Built-In Bundling & SSR**: Bundle TypeScript/JSX, run server-side rendering, and integrate with Inertia.js or HTMX.
+- **Zero-NPM Client SDK**: `@vertebra/client` ships inside the wheel with adapters for React, Vue, Svelte, Angular, HTMX, and Vite.
+- **End-to-End Types**: Generate TypeScript, Zod, Valibot, OpenAPI, and Protobuf schemas directly from Python routes.
+
+### Queues, Live State & AI Agents
+- **Background Workers**: Distributed task queues, cron schedules, and dedicated worker processes via `vtb workers run`.
+- **Real-Time Sync**: Delta-based live state rooms over WebSockets.
+- **Agent Protocols**: Built-in Model Context Protocol (MCP) tools, resources, and prompts alongside Agent-to-Agent (A2A) services.
+
+### Standalone Packaging
+- Package applications into standalone directories (`vtb build --standalone`) or single-file executables (`vtb build --onefile`).
+
+## CLI Commands
+
+```bash
+vtb init my-project          # Scaffold a new project
+vtb dev app:app              # Run with live reload
+vtb run app:app --workers 4  # Run the production server
+vtb workers run              # Run background queue workers
+vtb js build                 # Bundle frontend assets
+vtb js generate-types        # Generate TypeScript/Zod types from routes
+vtb build --standalone       # Build a standalone distribution
 ```
 
-## Execution Modes
+## Documentation
 
-Vertebra automatically picks the right worker mode from `--workers` and your Python build (or you can set `--topology embedded` or `--topology shm` yourself):
-
-### 1. Embedded Mode
-- **When it runs**: Automatically for a single worker (`--workers 0` or `1`) or on free-threaded Python (`3.14t`/`3.15t`), or when you pass `--topology embedded`.
-- **How it works**: The Rust HTTP server and Python app run inside the same OS process with no cross-process overhead.
-
-### 2. Shared-Memory Mode (`shm`)
-- **When it runs**: Automatically when `--workers > 1` on standard GIL-enabled Python on Linux/macOS, or when you pass `--topology shm`.
-- **How it works**: The Rust HTTP server spawns separate Python worker processes and passes requests and responses through shared memory.
+Full guides, configuration options, and API references are at [cofin.github.io/vertebra](https://cofin.github.io/vertebra/).
