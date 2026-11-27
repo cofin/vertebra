@@ -360,6 +360,8 @@ def _granian_data(
     if factory:
         args.append("--factory")
     args.extend(["--interface", interface, "--host", "127.0.0.1", "--port", str(port), "--workers", "4"])
+    if interface != "wsgi":
+        args.extend(["--loop", "uvloop"])
     return name, Target(
         name=name,
         topology=Topology.BASELINE,

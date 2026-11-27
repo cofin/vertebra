@@ -867,3 +867,26 @@ async def test_async_broker_cross_thread_release_no_stale_local_wake_debt() -> N
     for lease in (l1, l2):
         assert await transport.release(lease.lease_id) is True
     assert transport.metrics().active_leases == 0
+
+
+def test_async_broker_eager_task_factory_no_deadlock() -> None:
+    """Verify contended acquire never deadlocks _waiter_lock when loop uses asyncio.eager_task_factory."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=4, max_overflow=0, acquire_timeout_ms=2000))
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_task_factory(asyncio.eager_task_factory)
+
+        async def _worker(idx: int) -> None:
+            lease = await transport.acquire(worker_id=idx + 1, timeout_ms=2000)
+            try:
+                await asyncio.sleep(0.001)
+            finally:
+                lease.release_sync()
+
+        await asyncio.wait_for(asyncio.gather(*(_worker(i) for i in range(64))), timeout=5.0)
+
+    asyncio.run(_run())
+    assert transport.metrics().active_leases == 0
+    assert transport.metrics().total_acquired == 64
+    assert transport.metrics().total_released == 64

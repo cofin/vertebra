@@ -1644,9 +1644,12 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
     async def _watch_broker_wakes(self, queue: _PartitionWaitQueue, initial_seq: int) -> None:
         """Watch cross-process SHM wake sequence updates for a non-empty partition waiter queue."""
         seq = initial_seq
+        current = asyncio.current_task()
         try:
             while True:
                 with self._waiter_lock:
+                    if queue.watcher_task is None:
+                        queue.watcher_task = current
                     while queue.waiters and queue.waiters[0].done():
                         queue.waiters.popleft()
                     if not queue.waiters:
@@ -1680,9 +1683,8 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                 for fut in to_wake:
                     self._resolve_future(fut, True)
         finally:
-            current = asyncio.current_task()
             with self._waiter_lock:
-                if queue.watcher_task is current:
+                if queue.watcher_task is current or (queue.watcher_task is None and queue.watcher_active):
                     queue.watcher_active = False
                     queue.watcher_task = None
                     if not queue.waiters:
@@ -1825,13 +1827,28 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                 raise TimeoutError("Connection broker pool exhausted")
 
             waiter: asyncio.Future[bool] = loop.create_future()
+            start_watcher = False
             with self._waiter_lock:
                 queue.waiters.append(waiter)
                 if not queue.watcher_active:
                     queue.watcher_active = True
                     queue.local_wakes = 0
                     queue.watcher_seq = seq
-                    queue.watcher_task = loop.create_task(self._watch_broker_wakes(queue, seq))
+                    start_watcher = True
+
+            if start_watcher:
+                try:
+                    task = loop.create_task(self._watch_broker_wakes(queue, seq))
+                except BaseException:
+                    with self._waiter_lock:
+                        queue.watcher_active = False
+                        queue.watcher_task = None
+                    self._discard_waiter(queue, waiter)
+                    raise
+                if not task.done():
+                    with self._waiter_lock:
+                        if queue.watcher_active and queue.watcher_task is None:
+                            queue.watcher_task = task
 
             timer = loop.call_later(remaining_s, self._resolve_future, waiter, False)
             woken_by_broker = False
