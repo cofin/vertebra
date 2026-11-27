@@ -11,9 +11,10 @@ use pyo3::prelude::*;
 
 use vertebra_core::transport::BatchSnapshot;
 
-use crate::asgi::FlushedProtocolResponse;
+use crate::asgi::{FlushedProtocolResponse, log_app_exception};
 use crate::transport::ResponseSubmitter;
 use crate::wsgi::environ::WsgiServerConfig;
+use crate::wsgi::runner::execute_single_wsgi_item;
 
 const DEFAULT_STALL_THRESHOLD_US: u64 = 250;
 const DEFAULT_HYSTERESIS_US: u64 = 2_000_000;
@@ -31,7 +32,7 @@ fn now_ns() -> u64 {
 
 /// Execution mode for `drive_wsgi_batch` controlled by `VERTEBRA_WSGI_MODE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WsgiExecutionMode {
+pub(crate) enum WsgiExecutionMode {
     Auto,
     Concurrent,
     Inline,
@@ -39,7 +40,7 @@ pub enum WsgiExecutionMode {
 
 /// Runtime configuration for `WsgiExecutor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WsgiPoolConfig {
+pub(crate) struct WsgiPoolConfig {
     pub mode: WsgiExecutionMode,
     pub threads: usize,
     pub stall_threshold_us: u64,
@@ -91,7 +92,7 @@ impl WsgiPoolConfig {
 }
 
 /// Owned representation of a batch of WSGI request targets.
-pub enum WsgiBatchItems {
+pub(crate) enum WsgiBatchItems {
     Contiguous {
         snapshot: Arc<BatchSnapshot>,
         len: usize,
@@ -106,11 +107,6 @@ impl WsgiBatchItems {
             Self::Contiguous { len, .. } => *len,
             Self::Indexed(items) => items.len(),
         }
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     #[inline]
@@ -129,16 +125,6 @@ impl WsgiBatchItems {
         }
     }
 }
-
-/// Callback executing a single WSGI request item and producing a flushed raw response.
-pub(crate) type WsgiItemExecutor = fn(
-    Python<'_>,
-    &Bound<'_, PyAny>,
-    Arc<BatchSnapshot>,
-    usize,
-    Arc<WsgiServerConfig>,
-    u64,
-) -> FlushedProtocolResponse;
 
 /// Wrapper guaranteeing `Py<PyAny>` is never decref'd without an attached Python thread state.
 struct GilSafePyObject(Option<Py<PyAny>>);
@@ -171,7 +157,6 @@ struct InlineHandoffState {
     next_index: AtomicUsize,
     handed_off: AtomicBool,
     item_start_ns: AtomicU64,
-    progress: AtomicU64,
 }
 
 impl InlineHandoffState {
@@ -181,7 +166,6 @@ impl InlineHandoffState {
             next_index: AtomicUsize::new(0),
             handed_off: AtomicBool::new(false),
             item_start_ns: AtomicU64::new(0),
-            progress: AtomicU64::new(0),
         }
     }
 
@@ -197,7 +181,6 @@ impl InlineHandoffState {
     #[inline]
     fn mark_item_start(&self, start_ns: u64) {
         self.item_start_ns.store(start_ns.max(1), Ordering::Release);
-        self.progress.fetch_add(1, Ordering::Release);
     }
 
     #[inline]
@@ -235,7 +218,6 @@ enum HandoffPayload {
         app: Arc<GilSafePyObject>,
         items: WsgiBatchItems,
         server_config: Arc<WsgiServerConfig>,
-        execute_item: WsgiItemExecutor,
     },
     #[cfg(test)]
     Test(Arc<dyn Fn(usize) + Send + Sync>),
@@ -248,7 +230,6 @@ enum PoolTask {
         index: usize,
         server_config: Arc<WsgiServerConfig>,
         request_id: u64,
-        execute_item: WsgiItemExecutor,
     },
     #[cfg(test)]
     Test(Box<dyn FnOnce() + Send>),
@@ -260,12 +241,13 @@ struct QueueState {
 }
 
 struct WatchdogState {
-    active: Option<Arc<InlineBatchHandoff>>,
+    active: Vec<Arc<InlineBatchHandoff>>,
+    awake: bool,
     shutdown: bool,
 }
 
 /// Adaptive native Rust WSGI executor with inline fastpath, stall watchdog, and lazy OS thread pool.
-pub struct WsgiExecutor {
+pub(crate) struct WsgiExecutor {
     config: WsgiPoolConfig,
     stall_threshold_ns: u64,
     hysteresis_ns: u64,
@@ -274,7 +256,6 @@ pub struct WsgiExecutor {
     queue_cv: Condvar,
     workers_spawned: AtomicBool,
     workers: Mutex<Vec<JoinHandle<()>>>,
-    watchdog_awake: AtomicBool,
     watchdog_started: AtomicBool,
     watchdog_mu: Mutex<WatchdogState>,
     watchdog_cv: Condvar,
@@ -295,20 +276,15 @@ impl WsgiExecutor {
             queue_cv: Condvar::new(),
             workers_spawned: AtomicBool::new(false),
             workers: Mutex::new(Vec::new()),
-            watchdog_awake: AtomicBool::new(false),
             watchdog_started: AtomicBool::new(false),
             watchdog_mu: Mutex::new(WatchdogState {
-                active: None,
+                active: Vec::new(),
+                awake: false,
                 shutdown: false,
             }),
             watchdog_cv: Condvar::new(),
             watchdog_handle: Mutex::new(None),
         }
-    }
-
-    #[inline]
-    pub fn config(&self) -> WsgiPoolConfig {
-        self.config
     }
 
     #[inline]
@@ -411,10 +387,9 @@ impl WsgiExecutor {
                     index,
                     server_config,
                     request_id,
-                    execute_item,
                 } => {
                     Python::attach(|py| {
-                        let flushed = execute_item(
+                        let flushed = execute_single_wsgi_item(
                             py,
                             app.bind(py),
                             snapshot,
@@ -422,13 +397,15 @@ impl WsgiExecutor {
                             server_config,
                             request_id,
                         );
-                        let _ = ResponseSubmitter::submit_raw_inner(
+                        if let Err(err) = ResponseSubmitter::submit_raw_inner(
                             py,
                             flushed.request_id,
                             flushed.status,
                             flushed.headers_raw.as_slice(),
                             flushed.body.as_slice(py),
-                        );
+                        ) {
+                            log_app_exception(py, "WSGI", &err);
+                        }
                         drop(flushed);
                         drop(app);
                     });
@@ -454,7 +431,6 @@ impl WsgiExecutor {
                 app,
                 items,
                 server_config,
-                execute_item,
             } => {
                 for idx in range {
                     if let Some((snapshot, snap_idx)) = items.get(idx) {
@@ -465,7 +441,6 @@ impl WsgiExecutor {
                             index: snap_idx,
                             server_config: Arc::clone(server_config),
                             request_id,
-                            execute_item: *execute_item,
                         });
                     }
                 }
@@ -478,12 +453,12 @@ impl WsgiExecutor {
                 }
             }
         }
-        self.enqueue_tasks(batch_tasks);
+        let _ = self.enqueue_tasks(batch_tasks);
     }
 
-    fn enqueue_tasks(self: &Arc<Self>, tasks: Vec<PoolTask>) {
+    fn enqueue_tasks(self: &Arc<Self>, tasks: Vec<PoolTask>) -> bool {
         if tasks.is_empty() {
-            return;
+            return true;
         }
         self.ensure_workers_spawned();
         let count = tasks.len();
@@ -492,6 +467,11 @@ impl WsgiExecutor {
                 .queue_mu
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.shutdown {
+                drop(guard);
+                drop(tasks);
+                return false;
+            }
             guard.tasks.extend(tasks);
         }
         if count == 1 {
@@ -499,55 +479,74 @@ impl WsgiExecutor {
         } else {
             self.queue_cv.notify_all();
         }
+        true
     }
 
     fn watchdog_loop(self: Arc<Self>) {
         let poll_interval =
             Duration::from_nanos((self.stall_threshold_ns / 2).clamp(25_000, 100_000));
         let mut idle_since: Option<u64> = None;
-        self.watchdog_awake.store(true, Ordering::Release);
+        {
+            let mut guard = self
+                .watchdog_mu
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.awake = true;
+        }
 
         loop {
-            let (active_opt, shutdown) = {
+            let (snapshot, shutdown) = {
                 let guard = self
                     .watchdog_mu
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                (guard.active.as_ref().map(Arc::clone), guard.shutdown)
+                (guard.active.clone(), guard.shutdown)
             };
 
             if shutdown {
-                drop(active_opt);
-                self.watchdog_awake.store(false, Ordering::Release);
+                drop(snapshot);
+                let mut guard = self
+                    .watchdog_mu
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.awake = false;
                 return;
             }
 
-            if let Some(handoff) = active_opt {
+            if !snapshot.is_empty() {
                 idle_since = None;
                 let now = now_ns();
-                if handoff.state.is_stalled(now, self.stall_threshold_ns) {
-                    self.mark_concurrent_window(now);
-                    if let Some(range) = handoff.state.try_handoff() {
-                        let cleared = {
-                            let mut guard = self
-                                .watchdog_mu
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            if guard
-                                .active
-                                .as_ref()
-                                .is_some_and(|cur| Arc::ptr_eq(cur, &handoff))
-                            {
-                                guard.active.take()
-                            } else {
-                                None
-                            }
-                        };
-                        self.enqueue_handoff_range(&handoff, range);
-                        drop(cleared);
+                let mut handed_off_refs: Vec<Arc<InlineBatchHandoff>> = Vec::new();
+                for handoff in &snapshot {
+                    if handoff.state.is_stalled(now, self.stall_threshold_ns) {
+                        self.mark_concurrent_window(now);
+                        if let Some(range) = handoff.state.try_handoff() {
+                            handed_off_refs.push(Arc::clone(handoff));
+                            self.enqueue_handoff_range(handoff, range);
+                        }
                     }
                 }
-                drop(handoff);
+                if !handed_off_refs.is_empty() {
+                    let removed = {
+                        let mut guard = self
+                            .watchdog_mu
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let mut extracted = Vec::with_capacity(handed_off_refs.len());
+                        guard.active.retain(|cur| {
+                            if handed_off_refs.iter().any(|h| Arc::ptr_eq(cur, h)) {
+                                extracted.push(Arc::clone(cur));
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        extracted
+                    };
+                    drop(removed);
+                }
+                drop(handed_off_refs);
+                drop(snapshot);
 
                 let guard = self
                     .watchdog_mu
@@ -557,6 +556,7 @@ impl WsgiExecutor {
                     let _ = self.watchdog_cv.wait_timeout(guard, poll_interval);
                 }
             } else {
+                drop(snapshot);
                 let now = now_ns();
                 let start_idle = *idle_since.get_or_insert(now);
                 if now.saturating_sub(start_idle) < WATCHDOG_IDLE_GRACE_NS {
@@ -564,7 +564,7 @@ impl WsgiExecutor {
                         .watchdog_mu
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if guard.active.is_none() && !guard.shutdown {
+                    if guard.active.is_empty() && !guard.shutdown {
                         let _ = self
                             .watchdog_cv
                             .wait_timeout(guard, Duration::from_micros(100));
@@ -577,15 +577,15 @@ impl WsgiExecutor {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if guard.shutdown {
-                    self.watchdog_awake.store(false, Ordering::Release);
+                    guard.awake = false;
                     return;
                 }
-                if guard.active.is_some() {
+                if !guard.active.is_empty() {
                     idle_since = None;
                     continue;
                 }
-                self.watchdog_awake.store(false, Ordering::SeqCst);
-                while guard.active.is_none() && !guard.shutdown {
+                guard.awake = false;
+                while guard.active.is_empty() && !guard.shutdown {
                     guard = self
                         .watchdog_cv
                         .wait(guard)
@@ -594,7 +594,7 @@ impl WsgiExecutor {
                 if guard.shutdown {
                     return;
                 }
-                self.watchdog_awake.store(true, Ordering::Release);
+                guard.awake = true;
                 idle_since = None;
             }
         }
@@ -602,19 +602,12 @@ impl WsgiExecutor {
 
     fn publish_active_handoff(self: &Arc<Self>, handoff: Arc<InlineBatchHandoff>) {
         self.ensure_watchdog_spawned();
-        let previous = {
-            let mut guard = self
-                .watchdog_mu
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.active.replace(handoff)
-        };
-        drop(previous);
-        if !self.watchdog_awake.load(Ordering::SeqCst) {
-            let _guard = self
-                .watchdog_mu
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .watchdog_mu
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.active.push(handoff);
+        if !guard.awake {
             self.watchdog_cv.notify_one();
         }
     }
@@ -625,15 +618,11 @@ impl WsgiExecutor {
                 .watchdog_mu
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if guard
+            guard
                 .active
-                .as_ref()
-                .is_some_and(|cur| Arc::ptr_eq(cur, handoff))
-            {
-                guard.active.take()
-            } else {
-                None
-            }
+                .iter()
+                .position(|cur| Arc::ptr_eq(cur, handoff))
+                .map(|pos| guard.active.swap_remove(pos))
         };
         drop(removed);
     }
@@ -659,11 +648,9 @@ impl WsgiExecutor {
 
     fn dispatch_concurrent(
         self: &Arc<Self>,
-        py: Python<'_>,
         app: &Bound<'_, PyAny>,
         items: WsgiBatchItems,
         server_config: Arc<WsgiServerConfig>,
-        execute_item: WsgiItemExecutor,
     ) -> usize {
         let total = items.len();
         let shared_app = Arc::new(GilSafePyObject::new(app.clone().unbind()));
@@ -677,12 +664,10 @@ impl WsgiExecutor {
                     index: snap_idx,
                     server_config: Arc::clone(&server_config),
                     request_id,
-                    execute_item,
                 });
             }
         }
-        let _ = py;
-        self.enqueue_tasks(tasks);
+        let _ = self.enqueue_tasks(tasks);
         total
     }
 
@@ -691,14 +676,13 @@ impl WsgiExecutor {
         app: &Bound<'_, PyAny>,
         items: &WsgiBatchItems,
         server_config: &Arc<WsgiServerConfig>,
-        execute_item: WsgiItemExecutor,
     ) -> PyResult<usize> {
         let total = items.len();
         let mut completed = Vec::with_capacity(total);
         for idx in 0..total {
             if let Some((snapshot, snap_idx)) = items.get(idx) {
                 let request_id = snapshot.node(snap_idx).correlation_id;
-                completed.push(execute_item(
+                completed.push(execute_single_wsgi_item(
                     py,
                     app,
                     snapshot,
@@ -718,7 +702,6 @@ impl WsgiExecutor {
         app: &Bound<'_, PyAny>,
         items: WsgiBatchItems,
         server_config: Arc<WsgiServerConfig>,
-        execute_item: WsgiItemExecutor,
     ) -> PyResult<usize> {
         let total = items.len();
         if total == 0 {
@@ -727,17 +710,17 @@ impl WsgiExecutor {
 
         match self.config.mode {
             WsgiExecutionMode::Inline => {
-                return Self::dispatch_inline_all(py, app, &items, &server_config, execute_item);
+                return Self::dispatch_inline_all(py, app, &items, &server_config);
             }
             WsgiExecutionMode::Concurrent => {
-                return Ok(self.dispatch_concurrent(py, app, items, server_config, execute_item));
+                return Ok(self.dispatch_concurrent(app, items, server_config));
             }
             WsgiExecutionMode::Auto => {}
         }
 
         let now = now_ns();
         if self.is_in_concurrent_window(now) {
-            return Ok(self.dispatch_concurrent(py, app, items, server_config, execute_item));
+            return Ok(self.dispatch_concurrent(app, items, server_config));
         }
 
         if total == 1 {
@@ -746,7 +729,8 @@ impl WsgiExecutor {
             };
             let request_id = snapshot.node(snap_idx).correlation_id;
             let start = now_ns();
-            let flushed = execute_item(py, app, snapshot, snap_idx, server_config, request_id);
+            let flushed =
+                execute_single_wsgi_item(py, app, snapshot, snap_idx, server_config, request_id);
             let end = now_ns();
             if end.saturating_sub(start) >= self.stall_threshold_ns {
                 self.mark_concurrent_window(end);
@@ -762,7 +746,6 @@ impl WsgiExecutor {
                 app: shared_app,
                 items,
                 server_config,
-                execute_item,
             },
         });
         self.publish_active_handoff(Arc::clone(&handoff));
@@ -786,7 +769,7 @@ impl WsgiExecutor {
             let request_id = snapshot.node(snap_idx).correlation_id;
             let item_start = now_ns();
             handoff.state.mark_item_start(item_start);
-            let flushed = execute_item(py, app, snapshot, snap_idx, cfg, request_id);
+            let flushed = execute_single_wsgi_item(py, app, snapshot, snap_idx, cfg, request_id);
             let item_end = now_ns();
             handoff.state.clear_item_start();
             completed.push(flushed);
@@ -819,10 +802,10 @@ impl WsgiExecutor {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             guard.shutdown = true;
-            let prev = guard.active.take();
+            let drained = std::mem::take(&mut guard.active);
             self.watchdog_cv.notify_all();
             drop(guard);
-            drop(prev);
+            drop(drained);
         }
         if let Some(handle) = self
             .watchdog_handle
@@ -854,7 +837,7 @@ impl WsgiExecutor {
 }
 
 /// Return the process-global `WsgiExecutor`, initializing it lazily from environment variables.
-pub fn global_wsgi_executor() -> Arc<WsgiExecutor> {
+pub(crate) fn global_wsgi_executor() -> Arc<WsgiExecutor> {
     {
         let guard = GLOBAL_WSGI_EXECUTOR
             .read()
@@ -1042,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_drains_queued_tasks_and_noop_on_unused_executor() {
+    fn shutdown_drains_queued_tasks_and_rejects_post_shutdown_enqueue() {
         let unused = WsgiExecutor::new(WsgiPoolConfig {
             mode: WsgiExecutionMode::Auto,
             threads: 4,
@@ -1068,8 +1051,9 @@ mod tests {
                 }))
             })
             .collect();
-        exec.enqueue_tasks(tasks);
+        assert!(exec.enqueue_tasks(tasks));
         exec.shutdown();
         assert_eq!(completed.load(Ordering::Acquire), 24);
+        assert!(!exec.enqueue_tasks(vec![PoolTask::Test(Box::new(|| {}))]));
     }
 }

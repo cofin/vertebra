@@ -72,6 +72,7 @@ pub struct WsgiServerConfig {
     pub root_path: String,
     pub server_name: String,
     pub server_port: u16,
+    pub server_port_str: String,
     pub url_scheme: String,
 }
 
@@ -82,16 +83,15 @@ impl WsgiServerConfig {
         server_port: u16,
         url_scheme: impl Into<String>,
     ) -> Self {
-        let raw_root = root_path.into();
-        let normalized_root = if raw_root == "/" {
-            String::new()
-        } else {
-            raw_root.trim_end_matches('/').to_string()
-        };
+        let mut normalized_root = root_path.into();
+        while normalized_root.ends_with('/') {
+            normalized_root.pop();
+        }
         Self {
             root_path: normalized_root,
             server_name: server_name.into(),
             server_port,
+            server_port_str: server_port.to_string(),
             url_scheme: url_scheme.into(),
         }
     }
@@ -236,7 +236,7 @@ impl WsgiEnviron {
             "SERVER_NAME" => PyString::new(py, &self.config.server_name)
                 .into_any()
                 .unbind(),
-            "SERVER_PORT" => PyString::new(py, &self.config.server_port.to_string())
+            "SERVER_PORT" => PyString::new(py, &self.config.server_port_str)
                 .into_any()
                 .unbind(),
             "SERVER_PROTOCOL" => {

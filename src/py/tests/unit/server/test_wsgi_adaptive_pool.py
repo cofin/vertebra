@@ -16,6 +16,7 @@ from vertebra._vertebra import (
     init_transport,
     shutdown_wsgi_executor,
 )
+from vertebra.server import worker as worker_mod
 from vertebra.server._wsgi._adapter import WsgiAdapter
 from vertebra.server.worker import Worker
 
@@ -297,8 +298,6 @@ def test_worker_run_calls_shutdown_wsgi_executor_in_finally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify Worker.run invokes shutdown_wsgi_executor on both clean stop and startup error."""
-    import vertebra.server.worker as worker_mod
-
     calls: list[str] = []
 
     def record_shutdown() -> None:

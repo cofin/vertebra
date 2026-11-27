@@ -6,7 +6,7 @@
 //!
 //! The transport mode is selected by the `mode` parameter of `init_transport()`.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -30,7 +30,57 @@ use crate::response::Response;
 
 /// Global SHM transport, set once by `init_transport(mode="shm")`.
 static SHM_TRANSPORT: OnceLock<Transport> = OnceLock::new();
+/// Serializes multi-thread producer writes to the single-producer SHM response rings.
+struct ShmResponseLock {
+    locked: Mutex<bool>,
+    cv: Condvar,
+}
+
+static SHM_RESPONSE_LOCK: ShmResponseLock = ShmResponseLock {
+    locked: Mutex::new(false),
+    cv: Condvar::new(),
+};
 const STREAM_FRAME_WIRE_OVERHEAD: usize = 22;
+
+struct ShmResponseGuard;
+
+impl Drop for ShmResponseGuard {
+    fn drop(&mut self) {
+        let mut locked = SHM_RESPONSE_LOCK
+            .locked
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *locked = false;
+        SHM_RESPONSE_LOCK.cv.notify_one();
+    }
+}
+
+#[inline]
+fn lock_shm_response(py: Python<'_>) -> ShmResponseGuard {
+    if let Ok(mut locked) = SHM_RESPONSE_LOCK.locked.try_lock()
+        && !*locked
+    {
+        *locked = true;
+        return ShmResponseGuard;
+    }
+    py.detach(lock_shm_response_detached)
+}
+
+#[inline]
+fn lock_shm_response_detached() -> ShmResponseGuard {
+    let mut locked = SHM_RESPONSE_LOCK
+        .locked
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while *locked {
+        locked = SHM_RESPONSE_LOCK
+            .cv
+            .wait(locked)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    *locked = true;
+    ShmResponseGuard
+}
 
 /// Initialize the transport channel. Called once during worker startup.
 ///
@@ -294,6 +344,7 @@ impl ResponseSubmitter {
         body: &[u8],
     ) -> PyResult<()> {
         if let Some(transport) = SHM_TRANSPORT.get() {
+            let _shm_guard = lock_shm_response(py);
             let mut pending = false;
             send_shm_response_inline_or_detached(
                 py,
@@ -347,6 +398,7 @@ impl ResponseSubmitter {
         }
 
         if let Some(transport) = SHM_TRANSPORT.get() {
+            let _shm_guard = lock_shm_response(py);
             let mut pending = false;
             for (req_id, status, headers_raw, body) in items {
                 send_shm_response_inline_or_detached(
@@ -718,6 +770,7 @@ pub fn submit_batch_raw(py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<()
             let (req_id, status, body_obj, headers_obj) = extract_batch_tuple_parts(&item)?;
             with_buffer_slice(py, &body_obj, |body_slice| match headers_obj {
                 Some(ref hdr) => with_buffer_slice(py, hdr, |hdr_slice| {
+                    let _shm_guard = lock_shm_response(py);
                     send_shm_response_inline_or_detached(
                         py,
                         transport,
@@ -729,16 +782,19 @@ pub fn submit_batch_raw(py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<()
                     )
                     .map_err(map_shm_submit_err)
                 }),
-                None => send_shm_response_inline_or_detached(
-                    py,
-                    transport,
-                    &mut pending,
-                    req_id,
-                    status,
-                    b"",
-                    body_slice,
-                )
-                .map_err(map_shm_submit_err),
+                None => {
+                    let _shm_guard = lock_shm_response(py);
+                    send_shm_response_inline_or_detached(
+                        py,
+                        transport,
+                        &mut pending,
+                        req_id,
+                        status,
+                        b"",
+                        body_slice,
+                    )
+                    .map_err(map_shm_submit_err)
+                }
             })
         };
 
@@ -748,6 +804,7 @@ pub fn submit_batch_raw(py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<()
             }
             for item in list.iter() {
                 if let Err(err) = process_one(item) {
+                    let _shm_guard = lock_shm_response(py);
                     let _ = flush_shm_response_notification(transport, &mut pending);
                     return Err(err);
                 }
@@ -755,12 +812,14 @@ pub fn submit_batch_raw(py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<()
         } else {
             for item in items.try_iter()? {
                 if let Err(err) = process_one(item?) {
+                    let _shm_guard = lock_shm_response(py);
                     let _ = flush_shm_response_notification(transport, &mut pending);
                     return Err(err);
                 }
             }
         }
 
+        let _shm_guard = lock_shm_response(py);
         flush_shm_response_notification(transport, &mut pending)
             .map_err(|e| map_shm_submit_err((true, e)))?;
         return Ok(());
@@ -895,6 +954,7 @@ pub fn submit_raw_response(
                     .collect::<Vec<_>>(),
             );
             py.detach(|| -> Result<(), (bool, TransportError)> {
+                let _shm_guard = lock_shm_response_detached();
                 let mut pending_notify = false;
                 send_shm_response_detached(
                     transport,
@@ -1073,6 +1133,7 @@ fn submit_shm_stream_frames(
         ));
     }
     py.detach(|| -> Result<(), (bool, TransportError)> {
+        let _shm_guard = lock_shm_response_detached();
         let mut pending = false;
         for_each_stream_chunk(
             flags,
@@ -1383,5 +1444,83 @@ mod tests {
             .expect("rust sink works after _set_stream_sink(None)");
             bridge.clear_stream_sink();
         });
+    }
+
+    #[test]
+    fn shm_response_lock_serializes_concurrent_multithreaded_producers() {
+        let mut config = RingPairConfig::default();
+        config.response_tiers.small.slot_count = 4;
+
+        let pair = Arc::new(RingPair::create(config).expect("create ring pair"));
+        let transport = Arc::new(Transport::new_shared_memory(Arc::clone(&pair)));
+
+        const THREADS: u64 = 8;
+        const PER_THREAD: u64 = 16;
+        const TOTAL: usize = (THREADS * PER_THREAD) as usize;
+
+        let pair_reader = Arc::clone(&pair);
+        let reader = std::thread::spawn(move || {
+            let mut seen = Vec::with_capacity(TOTAL);
+            while seen.len() < TOTAL {
+                while let Some(resp) = pair_reader
+                    .response_rings
+                    .try_recv_response()
+                    .expect("drain response ring")
+                {
+                    let expected_body = format!("resp-{}", resp.correlation_id);
+                    assert_eq!(resp.status, 200);
+                    assert_eq!(resp.body.as_ref(), expected_body.as_bytes());
+                    seen.push(resp.correlation_id);
+                }
+                if seen.len() >= TOTAL {
+                    break;
+                }
+                if pair_reader.prepare_response_sleep() {
+                    assert!(
+                        pair_reader
+                            .response_notifier
+                            .wait(5_000)
+                            .expect("wait for response notification"),
+                        "timed out waiting for concurrent SHM responses"
+                    );
+                    pair_reader.cancel_response_sleep();
+                    pair_reader
+                        .response_notifier
+                        .clear()
+                        .expect("clear response notifier");
+                } else {
+                    pair_reader.cancel_response_sleep();
+                }
+            }
+            seen
+        });
+
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS as usize));
+        let mut handles = Vec::with_capacity(THREADS as usize);
+        for tid in 0..THREADS {
+            let t = Arc::clone(&transport);
+            let b = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                for j in 0..PER_THREAD {
+                    let req_id = tid * PER_THREAD + j + 1;
+                    let body = format!("resp-{req_id}");
+                    let _shm_guard = lock_shm_response_detached();
+                    let mut pending = false;
+                    send_shm_response_detached(&t, &mut pending, req_id, 200, b"", body.as_bytes())
+                        .expect("send concurrent response");
+                    flush_shm_response_notification(&t, &mut pending)
+                        .expect("flush concurrent notification");
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("producer thread panicked");
+        }
+        let mut seen = reader.join().expect("reader thread panicked");
+        seen.sort_unstable();
+        let expected: Vec<u64> = (1..=(TOTAL as u64)).collect();
+        assert_eq!(seen, expected);
     }
 }

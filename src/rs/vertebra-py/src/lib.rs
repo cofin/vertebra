@@ -58,8 +58,8 @@ pub use telemetry::{
 };
 pub use webtransport::{WebTransportSession, WebTransportStream, register_webtransport_handler};
 pub use wsgi::{
-    WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput, WsgiServerConfig,
-    WsgiStartResponse, drive_wsgi_batch, run_wsgi_callable, shutdown_wsgi_executor,
+    WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput, WsgiStartResponse,
+    drive_wsgi_batch, run_wsgi_callable, shutdown_wsgi_executor,
 };
 
 /// Whether this build targets free-threaded Python (3.14t+).

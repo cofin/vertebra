@@ -491,7 +491,7 @@ pub fn run_wsgi_callable(
     })
 }
 
-pub(crate) fn execute_single_wsgi_item(
+pub(super) fn execute_single_wsgi_item(
     py: Python<'_>,
     app: &Bound<'_, PyAny>,
     snapshot: Arc<BatchSnapshot>,
@@ -588,13 +588,17 @@ pub fn drive_wsgi_batch(
         server_port,
         url_scheme,
     ));
-    global_wsgi_executor().dispatch_batch(py, app, items, server_config, execute_single_wsgi_item)
+    global_wsgi_executor().dispatch_batch(py, app, items, server_config)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::synthetic::SyntheticRequest;
+    use crate::transport::init_transport;
+    use crate::wsgi::pool::{WsgiExecutionMode, WsgiExecutor, WsgiPoolConfig};
+    use std::ffi::CString;
+    use vertebra_core::bridge::{BatchBridge, BridgeResponse};
 
     #[test]
     fn targets_to_wsgi_items_detects_contiguous_and_indexed() {
@@ -619,5 +623,79 @@ mod tests {
             }
             WsgiBatchItems::Contiguous { .. } => panic!("expected Indexed for mixed snapshots"),
         }
+    }
+
+    #[test]
+    fn wsgi_batch_submits_200_and_500_responses_to_bridge_sink() {
+        Python::attach(|py| {
+            init_transport("inprocess", 4096, 64, 64).expect("init inprocess bridge");
+            let bridge = BatchBridge::get().expect("bridge initialized");
+            let captured: Arc<Mutex<Vec<BridgeResponse>>> = Arc::new(Mutex::new(Vec::new()));
+            let cap_sink = Arc::clone(&captured);
+            bridge.set_response_sink(Arc::new(move |resp| {
+                cap_sink.lock().unwrap().push(resp);
+            }));
+
+            let code = CString::new(
+                "def app(environ, start_response):\n\
+                 \x20   path = environ['PATH_INFO']\n\
+                 \x20   if path == '/boom':\n\
+                 \x20       raise RuntimeError('boom')\n\
+                 \x20   if path == '/missing':\n\
+                 \x20       return [b'no start']\n\
+                 \x20   start_response('200 OK', [('Content-Type', 'text/plain')])\n\
+                 \x20   return [b'ok:' + path.encode('ascii')]\n",
+            )
+            .unwrap();
+            let locals = pyo3::types::PyDict::new(py);
+            py.run(code.as_c_str(), None, Some(&locals))
+                .expect("define wsgi test app");
+            let app = locals.get_item("app").unwrap().unwrap();
+
+            for mode in [WsgiExecutionMode::Inline, WsgiExecutionMode::Concurrent] {
+                captured.lock().unwrap().clear();
+                let exec = Arc::new(WsgiExecutor::new(WsgiPoolConfig {
+                    mode,
+                    threads: 4,
+                    stall_threshold_us: 250,
+                    hysteresis_us: 2_000_000,
+                }));
+                let items = WsgiBatchItems::Indexed(vec![
+                    (
+                        SyntheticRequest::build("GET", "/ok", None, b"", b"", 101, 0, "1.1"),
+                        0,
+                    ),
+                    (
+                        SyntheticRequest::build("GET", "/boom", None, b"", b"", 102, 0, "1.1"),
+                        0,
+                    ),
+                    (
+                        SyntheticRequest::build("GET", "/missing", None, b"", b"", 103, 0, "1.1"),
+                        0,
+                    ),
+                ]);
+                let cfg = Arc::new(WsgiServerConfig::new("", "localhost", 8000, "http"));
+                let count = exec
+                    .dispatch_batch(py, &app, items, cfg)
+                    .expect("dispatch wsgi batch");
+                assert_eq!(count, 3);
+                py.detach(|| exec.shutdown());
+
+                let mut resps = captured.lock().unwrap().clone();
+                resps.sort_by_key(|r| r.request_id);
+                assert_eq!(resps.len(), 3, "mode={mode:?} should submit 3 responses");
+                assert_eq!(resps[0].request_id, 101);
+                assert_eq!(resps[0].status, 200);
+                assert_eq!(resps[0].body.as_ref(), b"ok:/ok");
+                assert_eq!(resps[1].request_id, 102);
+                assert_eq!(resps[1].status, 500);
+                assert_eq!(resps[1].body.as_ref(), ERROR_500_BODY);
+                assert_eq!(resps[2].request_id, 103);
+                assert_eq!(resps[2].status, 500);
+                assert_eq!(resps[2].body.as_ref(), ERROR_500_BODY);
+            }
+
+            bridge.clear_response_sink();
+        });
     }
 }
