@@ -69,12 +69,13 @@ _DEFAULT_BIND_KEY_HASH: int = stable_hash64("default")
 class _PartitionWaitQueue:
     """Per-event-loop FIFO waiter deque and single-watcher state for a broker partition."""
 
-    __slots__ = ("local_wakes", "waiters", "watcher_active", "watcher_task")
+    __slots__ = ("local_wakes", "waiters", "watcher_active", "watcher_seq", "watcher_task")
 
     def __init__(self) -> None:
         self.waiters: deque[asyncio.Future[bool]] = deque()
         self.local_wakes = 0
         self.watcher_active = False
+        self.watcher_seq = 0
         self.watcher_task: asyncio.Task[None] | None = None
 
 
@@ -1675,6 +1676,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                                 break
                             to_wake.append(fut)
                     seq = next_seq
+                    queue.watcher_seq = next_seq
                 for fut in to_wake:
                     self._resolve_future(fut, True)
         finally:
@@ -1686,6 +1688,14 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                     if not queue.waiters:
                         queue.local_wakes = 0
 
+    @staticmethod
+    def _credit_local_wake_locked(queue: _PartitionWaitQueue, post_release_seq: int | None) -> None:
+        if post_release_seq is None or not queue.watcher_active:
+            return
+        pending_delta = (post_release_seq - queue.watcher_seq) & 0xFFFFFFFF
+        if 0 < pending_delta < 0x80000000 and queue.local_wakes < pending_delta:
+            queue.local_wakes += 1
+
     def _on_slot_freed(self, partition: int | None) -> None:
         """Wake a local async waiter directly on its event loop without touching SyncPool."""
         try:
@@ -1693,6 +1703,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         except RuntimeError:
             running_loop = None
 
+        post_release_seq = self._native.wake_seq() if self._has_native_wake else None
         to_wake: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[bool]]] = []
         with self._waiter_lock:
             if not self._waiter_queues:
@@ -1709,7 +1720,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                 if queue is not None:
                     fut = self._pop_live_waiter_locked(queue)
                     if fut is not None:
-                        queue.local_wakes += 1
+                        self._credit_local_wake_locked(queue, post_release_seq)
                         to_wake.append((loop, fut))
                         break
 
@@ -1719,7 +1730,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                     if unpart_queue is not None:
                         fut = self._pop_live_waiter_locked(unpart_queue)
                         if fut is not None:
-                            unpart_queue.local_wakes += 1
+                            self._credit_local_wake_locked(unpart_queue, post_release_seq)
                             to_wake.append((loop, fut))
                             break
 
@@ -1730,7 +1741,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                             continue
                         fut = self._pop_live_waiter_locked(queue)
                         if fut is not None:
-                            queue.local_wakes += 1
+                            self._credit_local_wake_locked(queue, post_release_seq)
                             to_wake.append((loop, fut))
                             break
                     if to_wake:
@@ -1819,6 +1830,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                 if not queue.watcher_active:
                     queue.watcher_active = True
                     queue.local_wakes = 0
+                    queue.watcher_seq = seq
                     queue.watcher_task = loop.create_task(self._watch_broker_wakes(queue, seq))
 
             timer = loop.call_later(remaining_s, self._resolve_future, waiter, False)

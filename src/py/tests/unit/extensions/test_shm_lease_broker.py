@@ -835,3 +835,35 @@ async def test_async_broker_zero_and_short_timeout_cleanup() -> None:
 
     assert await transport.release(held.lease_id) is True
     assert transport.metrics().active_leases == 0
+
+
+@pytest.mark.anyio
+async def test_async_broker_cross_thread_release_no_stale_local_wake_debt() -> None:
+    """Verify late _on_slot_freed after watcher advances seq never swallows a subsequent remote release."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=2000))
+    held1 = await transport.acquire(worker_id=1)
+    held2 = await transport.acquire(worker_id=2)
+
+    w1 = asyncio.create_task(transport.acquire(worker_id=11, timeout_ms=2000))
+    w2 = asyncio.create_task(transport.acquire(worker_id=12, timeout_ms=2000))
+    await asyncio.sleep(0.005)
+
+    assert transport._native.release(held1.slot_index, held1.generation) is True
+    l1 = await asyncio.wait_for(w1, timeout=1.0)
+    assert not w2.done()
+
+    transport._on_slot_freed(None)
+    await asyncio.sleep(0.005)
+    assert not w2.done()
+
+    loop = asyncio.get_running_loop()
+    assert transport._waiter_queues[loop][None].local_wakes == 0
+
+    started = time.monotonic()
+    assert transport._native.release(held2.slot_index, held2.generation) is True
+    l2 = await asyncio.wait_for(w2, timeout=1.0)
+    assert (time.monotonic() - started) * 1000.0 < 200.0
+
+    for lease in (l1, l2):
+        assert await transport.release(lease.lease_id) is True
+    assert transport.metrics().active_leases == 0
