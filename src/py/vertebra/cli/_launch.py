@@ -8,6 +8,7 @@ from pathlib import Path
 
 import msgspec
 
+from vertebra.server._mounts import MountSpec, serialize_mount_specs
 from vertebra.server.platform import CgroupQuota
 from vertebra.utils.config_tools import read_pyproject_section
 
@@ -107,6 +108,8 @@ class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
     worker_lane_concurrency: dict[str, int] = msgspec.field(default_factory=dict)
     zpages: bool = False
     zpages_token: str | None = None
+    mounts: tuple[MountSpec, ...] = ()
+    base_app_path: str | None = None
 
     def to_environ(self, base: Mapping[str, str] | None = None) -> dict[str, str]:
         """Assemble environment variables dictionary while preserving omitted runtime overrides."""
@@ -193,5 +196,10 @@ class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
             trimmed_zpages_token = self.zpages_token.strip()
             if trimmed_zpages_token:
                 env["VERTEBRA_ZPAGES_TOKEN"] = trimmed_zpages_token
+
+        if self.mounts:
+            env["VERTEBRA_MOUNTS"] = serialize_mount_specs(self.mounts)
+        if self.base_app_path:
+            env["VERTEBRA_BASE_APP"] = self.base_app_path
 
         return env
