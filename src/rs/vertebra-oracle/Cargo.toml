@@ -16,12 +16,12 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-arrow-array = { version = "59", default-features = false }
-arrow-buffer = { version = "59", default-features = false }
-arrow-ipc = { version = "59", default-features = false }
-arrow-schema = { version = "59", default-features = false }
+arrow-array = { workspace = true }
+arrow-buffer = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
 chrono = { workspace = true }
-oracledb = { version = "=26.0.0-beta.5", features = ["arrow"] }
+oracledb = { version = "=26.0.0-beta.6", features = ["arrow"] }
 pyo3 = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }

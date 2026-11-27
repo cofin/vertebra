@@ -10,7 +10,82 @@ from typing import TYPE_CHECKING, Any
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
-    from vertebra.agent import tools
+    from vertebra.agent import a2a, bridges, mcp, tools
+    from vertebra.agent.a2a import (
+        A2AConfig,
+        A2AHttpHandler,
+        A2AService,
+        A2ATaskStore,
+        AgentCard,
+        AgentCardSigner,
+        PushNotificationDispatcher,
+    )
+    from vertebra.agent.agents import (
+        TRANSFER_TOOL_NAME,
+        Agent,
+        AgentGroup,
+        AgentMessage,
+    )
+    from vertebra.agent.bridges import (
+        A2AAgentBridge,
+        MCPToolBridge,
+        a2a_card_to_mcp_tools,
+        mcp_service_to_a2a,
+    )
+    from vertebra.agent.controller import (
+        AgentChatController,
+        ChatRequest,
+        ConfirmationDecisionRequest,
+        QueuedTurnTicket,
+        SessionHistory,
+        SessionNotFoundError,
+        TurnResult,
+    )
+    from vertebra.agent.core import (
+        AgentContext,
+        BudgetExceededError,
+        CallerIdentity,
+        CancellationToken,
+        CursorPage,
+        GuardCallable,
+        GuardChain,
+        GuardProtocol,
+        JSONRPCError,
+        JSONRPCException,
+        JSONRPCRequest,
+        JSONRPCResponse,
+        JSONRPCRouter,
+        PermissionDeniedError,
+        ProgressCallback,
+        ProgressReporter,
+        RateLimitExceededError,
+        RequireAuthenticated,
+        RequireRoles,
+        RequireScopes,
+        SchemaBuilder,
+        SchemaDigestCache,
+        SseFrame,
+        SseReplayBuffer,
+        SseStreamBroker,
+        TenantIsolationGuard,
+        TokenBucketGuard,
+        Tool,
+        ToolAnnotations,
+        ToolArgumentError,
+        ToolCall,
+        ToolExposure,
+        ToolResult,
+        ToolSpec,
+        TurnBudget,
+        authorize,
+        bind_agent_context,
+        current_agent_context,
+        decode_cursor,
+        encode_cursor,
+        execute_tool_calls,
+        paginate_sequence,
+        tool,
+    )
     from vertebra.agent.knowledge_catalog import (
         AsyncKnowledgeCatalogClient,
         CatalogEntryRecord,
@@ -19,13 +94,63 @@ if TYPE_CHECKING:
         KnowledgeCatalogConfig,
         SyncKnowledgeCatalogClient,
     )
+    from vertebra.agent.mcp import (
+        MCPCore,
+        MCPHttpRequest,
+        MCPHttpResponse,
+        ToolRegistry,
+    )
     from vertebra.agent.okf import (
         OkfBundle,
         OkfDocument,
         OkfSource,
         OkfValidationError,
     )
+    from vertebra.agent.planning import (
+        PlanNode,
+        PlanNodeStatus,
+        PlanTree,
+    )
+    from vertebra.agent.plugin import (
+        AgentPlugin,
+        AgentPluginConfig,
+    )
+    from vertebra.agent.runtime import (
+        AgentRuntime,
+        AgentStreamFrame,
+        ConfirmationCapacityError,
+        ConfirmationGate,
+        ConfirmationTicket,
+        GoogleGenAIProvider,
+        ModelDelta,
+        ModelProvider,
+        RetryPolicy,
+        TurnRequest,
+        TurnResponse,
+    )
+    from vertebra.agent.sessions import (
+        ANONYMOUS_OWNER,
+        AgentSessionStore,
+        AlchemySessionStore,
+        CacheSessionStore,
+        MemorySessionStore,
+        ObjectStoreSessionStore,
+        SQLSpecSessionStore,
+    )
+    from vertebra.agent.telemetry import (
+        AgentAuditEvent,
+        AgentTelemetryRecorder,
+    )
     from vertebra.agent.tools import build_tools
+    from vertebra.agent.workflow import (
+        Workflow,
+        WorkflowCheckpoint,
+        WorkflowContext,
+        WorkflowEngine,
+        WorkflowLiveState,
+        WorkflowStep,
+        WorkflowStepResult,
+    )
 
 __all__ = (
     "A2AAgentBridge",

@@ -1,9 +1,8 @@
-//! Crate-local Arrow 59 (`arrow-array`, `arrow-schema`, `arrow-ipc`) serialization to `VTBARROW` IPC bytes.
+//! Crate-local Arrow 60 (`arrow-array`, `arrow-schema`, `arrow-ipc`) serialization to `VTBARROW` IPC bytes.
 //!
-//! `oracledb = "=26.0.0-beta.5"` pins Arrow 59 (`arrow-array = "59"`, `arrow-schema = "59"`), whereas
-//! `vertebra-core` uses Arrow 58. This module keeps Arrow 59 strictly private to `vertebra-oracle`
-//! by serializing `RecordBatch` streams into Arrow IPC stream bytes (`(Vec<u8>, usize)`), which are
-//! then framed into 16-byte `VTBARROW` shared-memory segments via `vertebra-db`.
+//! `oracledb = "=26.0.0-beta.6"` aligns with workspace Arrow 60 (`=60.1.0`). This module serializes
+//! `RecordBatch` streams into Arrow IPC stream bytes (`(Vec<u8>, usize)`), which are then framed
+//! into 16-byte `VTBARROW` shared-memory segments via `vertebra-db`.
 
 use std::sync::Arc;
 

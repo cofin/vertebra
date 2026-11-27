@@ -23,7 +23,7 @@ arrow-schema = { version = "=60.1.0", default-features = false }
 bytes = { workspace = true }
 fallible-iterator = "=0.2.0"
 half = "=2.7.1"
-jiff = { version = "=0.2.40", default-features = false, features = ["std", "tzdb-bundle-always"] }
+jiff = { version = "=0.2.46", default-features = false, features = ["std", "tzdb-bundle-always"] }
 postgres-protocol = "=0.6.12"
 pyo3 = { workspace = true }
 reqwest = { workspace = true }
