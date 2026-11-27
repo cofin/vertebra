@@ -763,7 +763,10 @@ def test_granian_rsgi_data_stdlib_target_registered() -> None:
     assert target.adapter == "stdlib"
     assert "--interface" in target.cmd
     assert "rsgi" in target.cmd
+    assert "--loop" in target.cmd
+    assert "uvloop" in target.cmd
     assert "tools.benchmarks.apps.data_rsgi:rsgi_app" in target.cmd
+    assert "--loop" not in ALL_TARGETS["flask-granian-data"].cmd
 
 
 def test_native_postgres_world_driver_single_checkout_and_single_lease_per_batch() -> None:

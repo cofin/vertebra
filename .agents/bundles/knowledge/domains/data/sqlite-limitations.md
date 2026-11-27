@@ -26,8 +26,8 @@ verified:
     commit: 473e1f2e
 sources:
   - id: sqlite-worker
-    resource: src/rs/vertebra-sqlite/src/worker.rs::SqliteWorkerPool
-    title: WAL multi-reader single-writer OS worker pool
+    resource: src/rs/vertebra-sqlite/src/worker.rs::SqlitePool
+    title: WAL multi-reader single-writer connection pool
   - id: sqlite-py-client
     resource: src/rs/vertebra-sqlite/src/py_client.rs::SyncSQLiteClient
     title: Native SyncSQLiteClient, AsyncSQLiteClient, and broker_engine_capsule wrappers
@@ -61,7 +61,7 @@ sources:
 
 - **WAL Write Serialization**: Tune `busy_timeout_ms` on [`SQLiteConfig`](../../../../../src/py/vertebra/db/adapters/sqlite/config.py) to absorb write-lock contention rather than running unbounded retry loops.
 - **Explicit Transaction Scope**: Because `execute_tuples` and `execute_with_description` open no implicit transaction, wrap multi-statement atomic writes in `begin()` / `commit()` / `rollback()` or `pipeline()` (which enters `BEGIN IMMEDIATE`, or `SAVEPOINT` if already inside a transaction) [^sqlite-sync] [^sqlite-worker].
-- **In-Memory Thread Affinity**: [`SqliteWorkerPool`](../../../../../src/rs/vertebra-sqlite/src/worker.rs)[^sqlite-worker] routes plain `:memory:` databases through the single writer thread so state persists across queries. Use a shared-cache URI (`file:...?mode=memory&cache=shared`) for concurrent readers.
+- **In-Memory Thread Affinity**: [`SqlitePool`](../../../../../src/rs/vertebra-sqlite/src/worker.rs)[^sqlite-worker] routes plain `:memory:` databases through the single writer connection so state persists across queries. Use a shared-cache URI (`file:...?mode=memory&cache=shared`) for concurrent readers.
 - **Dynamic Expression Schema Inference**: [`select_to_arrow`](../../../../../src/rs/vertebra-sqlite/src/arrow_bridge.rs)[^sqlite-arrow] reads declared table column types when present and infers computed expressions from the first non-null row.
 - **Extension Loading Security**: `sqlite3_enable_load_extension` stays disabled; custom SQLite extensions must be compiled into the binary rather than loaded via SQL.
 
@@ -78,7 +78,7 @@ sources:
 - **Release Benchmark Sample (2026-11-21, 2,000 iterations)**: `point_select_1` sync `0.93 us` vs `sqlite3` `1.56 us`, async `42.8 us` vs `aiosqlite` `84.7 us`; `multi_row_select_10` sync `4.81 us` vs `13.22 us`, async `47.6 us` vs `100.2 us`; `cursor_point_select_1` sync `0.74 us` vs `1.33 us`.
 - **SQLAlchemy `AUTOCOMMIT` Isolation**: [`sqlite.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects/sqlite.py) subclasses SQLAlchemy's `BaseSQLiteDialect`, which allows only `READ UNCOMMITTED` and `SERIALIZABLE`. Passing `isolation_level="AUTOCOMMIT"` raises `ArgumentError`; enable autocommit via `connect_args={"autocommit": True}`.
 
-[^sqlite-worker]: `src/rs/vertebra-sqlite/src/worker.rs::SqliteWorkerPool` — WAL multi-reader single-writer OS worker pool.
+[^sqlite-worker]: `src/rs/vertebra-sqlite/src/worker.rs::SqlitePool` — WAL multi-reader single-writer connection pool.
 [^sqlite-py-client]: `src/rs/vertebra-sqlite/src/py_client.rs::SyncSQLiteClient` — Native `SyncSQLiteClient`, `AsyncSQLiteClient`, and `broker_engine_capsule` wrappers.
 [^sqlite-py-cursor]: `src/rs/vertebra-sqlite/src/py_client.rs::SyncSQLiteCursor` — Native `SyncSQLiteCursor` and `AsyncSQLiteCursor` execution, classification, and result-set description.
 [^sqlite-arrow]: `src/rs/vertebra-sqlite/src/arrow_bridge.rs::select_to_arrow` — SQLite `ArrowCursor` streaming and dynamic schema inference.
