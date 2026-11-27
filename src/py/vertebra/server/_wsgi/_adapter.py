@@ -82,7 +82,7 @@ class WsgiAdapter:
         server_port: int = 8000,
         url_scheme: str = "http",
     ) -> int:
-        """Execute a batch of WSGI requests in Rust and submit all responses in one batch call."""
+        """Execute a batch of WSGI requests via the adaptive inline/concurrent Rust WSGI executor."""
         if isinstance(requests, RequestBatch):
             if len(requests) == 0:
                 return 0

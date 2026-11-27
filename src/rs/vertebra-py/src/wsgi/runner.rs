@@ -7,16 +7,16 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyTraceback, PyTuple};
 
-use vertebra_core::transport::decode_headers_raw;
+use vertebra_core::transport::{BatchSnapshot, decode_headers_raw};
 
 use crate::asgi::{
-    ERROR_500_BODY, ERROR_500_HEADERS_RAW, FlushedProtocolResponse, PreparedRawBody,
+    BatchTargets, ERROR_500_BODY, ERROR_500_HEADERS_RAW, FlushedProtocolResponse, PreparedRawBody,
     collect_batch_targets, encode_py_headers_into, log_app_exception, push_compact_header,
 };
 use crate::response::{Response, extract_buffer_bytes};
-use crate::transport::ResponseSubmitter;
-use crate::wsgi::environ::WsgiEnviron;
+use crate::wsgi::environ::{WsgiEnviron, WsgiServerConfig};
 use crate::wsgi::input::WsgiFileWrapper;
+use crate::wsgi::pool::{WsgiBatchItems, global_wsgi_executor};
 
 #[derive(Default)]
 struct StartResponseState {
@@ -491,7 +491,75 @@ pub fn run_wsgi_callable(
     })
 }
 
-/// Drive a batch of PEP 3333 WSGI requests in Rust and submit all responses in one batch call.
+pub(crate) fn execute_single_wsgi_item(
+    py: Python<'_>,
+    app: &Bound<'_, PyAny>,
+    snapshot: Arc<BatchSnapshot>,
+    index: usize,
+    config: Arc<WsgiServerConfig>,
+    request_id: u64,
+) -> FlushedProtocolResponse {
+    let result = (|| -> PyResult<FlushedProtocolResponse> {
+        let environ = Py::new(py, WsgiEnviron::with_config(snapshot, index, config))?;
+        let start_resp = Py::new(py, WsgiStartResponse::default())?;
+        execute_wsgi_into_raw(py, app, environ, &start_resp, request_id)
+    })();
+    match result {
+        Ok(flushed) => flushed,
+        Err(err) => {
+            log_app_exception(py, "WSGI", &err);
+            FlushedProtocolResponse {
+                request_id,
+                status: 500,
+                headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
+                body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
+            }
+        }
+    }
+}
+
+fn targets_to_wsgi_items(targets: BatchTargets) -> WsgiBatchItems {
+    match targets {
+        BatchTargets::Contiguous(snapshot) => {
+            let len = snapshot.len();
+            WsgiBatchItems::Contiguous { snapshot, len }
+        }
+        BatchTargets::Indexed(snapshot, idxs) => {
+            let is_contiguous =
+                idxs.len() <= snapshot.len() && idxs.iter().enumerate().all(|(i, &idx)| idx == i);
+            if is_contiguous {
+                WsgiBatchItems::Contiguous {
+                    len: idxs.len(),
+                    snapshot,
+                }
+            } else {
+                WsgiBatchItems::Indexed(
+                    idxs.into_iter()
+                        .map(|idx| (Arc::clone(&snapshot), idx))
+                        .collect(),
+                )
+            }
+        }
+        BatchTargets::Requests(pairs) => {
+            if let Some((first_snap, _)) = pairs.first() {
+                let is_contiguous = pairs.len() <= first_snap.len()
+                    && pairs
+                        .iter()
+                        .enumerate()
+                        .all(|(i, (s, idx))| *idx == i && Arc::ptr_eq(s, first_snap));
+                if is_contiguous {
+                    return WsgiBatchItems::Contiguous {
+                        snapshot: Arc::clone(first_snap),
+                        len: pairs.len(),
+                    };
+                }
+            }
+            WsgiBatchItems::Indexed(pairs)
+        }
+    }
+}
+
+/// Drive a batch of PEP 3333 WSGI requests via the adaptive native Rust WSGI executor.
 #[pyfunction]
 #[pyo3(
     name = "drive_wsgi_batch",
@@ -513,48 +581,43 @@ pub fn drive_wsgi_batch(
         return Ok(0);
     }
 
-    let mut completed: Vec<FlushedProtocolResponse> = Vec::with_capacity(targets.len());
-    targets.for_each(|snap, idx| {
-        let request_id = snap.node(idx).correlation_id;
-        let environ = Py::new(
-            py,
-            WsgiEnviron::with_root_path(
-                Arc::clone(snap),
-                idx,
-                root_path.to_string(),
-                server_name.to_string(),
-                server_port,
-                url_scheme.to_string(),
-            ),
-        )?;
-        let start_resp = Py::new(py, WsgiStartResponse::default())?;
-        match execute_wsgi_into_raw(py, app, environ, &start_resp, request_id) {
-            Ok(flushed) => completed.push(flushed),
-            Err(err) => {
-                log_app_exception(py, "WSGI", &err);
-                completed.push(FlushedProtocolResponse {
-                    request_id,
-                    status: 500,
-                    headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
-                    body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
-                });
+    let items = targets_to_wsgi_items(targets);
+    let server_config = Arc::new(WsgiServerConfig::new(
+        root_path,
+        server_name,
+        server_port,
+        url_scheme,
+    ));
+    global_wsgi_executor().dispatch_batch(py, app, items, server_config, execute_single_wsgi_item)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::synthetic::SyntheticRequest;
+
+    #[test]
+    fn targets_to_wsgi_items_detects_contiguous_and_indexed() {
+        let snap1 = SyntheticRequest::build("GET", "/a", None, b"", b"", 1, 0, "1.1");
+        let snap2 = SyntheticRequest::build("GET", "/b", None, b"", b"", 2, 0, "1.1");
+
+        match targets_to_wsgi_items(BatchTargets::Contiguous(Arc::clone(&snap1))) {
+            WsgiBatchItems::Contiguous { len, .. } => assert_eq!(len, 1),
+            WsgiBatchItems::Indexed(_) => panic!("expected Contiguous"),
+        }
+
+        match targets_to_wsgi_items(BatchTargets::Requests(vec![
+            (Arc::clone(&snap1), 0),
+            (Arc::clone(&snap2), 0),
+        ])) {
+            WsgiBatchItems::Indexed(pairs) => {
+                assert_eq!(pairs.len(), 2);
+                assert_eq!(pairs[0].0.path(pairs[0].1), "/a");
+                assert_eq!(pairs[1].0.path(pairs[1].1), "/b");
+                assert_eq!(pairs[0].0.node(pairs[0].1).correlation_id, 1);
+                assert_eq!(pairs[1].0.node(pairs[1].1).correlation_id, 2);
             }
+            WsgiBatchItems::Contiguous { .. } => panic!("expected Indexed for mixed snapshots"),
         }
-        Ok(())
-    })?;
-
-    if !completed.is_empty() {
-        let mut raw_refs: Vec<(u64, u16, &[u8], &[u8])> = Vec::with_capacity(completed.len());
-        for item in &completed {
-            raw_refs.push((
-                item.request_id,
-                item.status,
-                item.headers_raw.as_slice(),
-                item.body.as_slice(py),
-            ));
-        }
-        ResponseSubmitter::submit_batch_raw_inner(py, &raw_refs)?;
     }
-
-    Ok(completed.len())
 }

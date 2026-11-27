@@ -28,6 +28,7 @@ from vertebra._vertebra import (
     get_request_notify_fd,
     init_transport,
     prepare_request_sleep,
+    shutdown_wsgi_executor,
     submit_batch_raw,
     submit_response,
     submit_response_raw,
@@ -682,6 +683,10 @@ class Worker:
             if executor is not None:
                 executor.shutdown(wait=True)
             shutdown_worker_executor(wait=True)
+            try:
+                shutdown_wsgi_executor()
+            except Exception:
+                logger.exception("WSGI executor shutdown error")
             loop_pool.stop()
 
     def _attach_loop_telemetry(self, loop_pool: EventLoopPool, *, loop_runs_continuously: bool) -> None:

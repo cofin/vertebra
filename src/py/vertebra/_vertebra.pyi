@@ -188,6 +188,7 @@ __all__ = [
     "singularize",
     "slugify",
     "snake_case",
+    "shutdown_wsgi_executor",
     "splice_prefix_tokens",
     "split_qualified_identifier",
     "stable_hash64",
@@ -754,6 +755,7 @@ def run_wsgi_callable(
     environ: WsgiEnviron,
     request_id: int = 0,
 ) -> Response: ...
+def shutdown_wsgi_executor() -> None: ...
 def drive_wsgi_batch(
     app: object,
     batch: RequestBatch | Sequence[Request],

@@ -58,8 +58,8 @@ pub use telemetry::{
 };
 pub use webtransport::{WebTransportSession, WebTransportStream, register_webtransport_handler};
 pub use wsgi::{
-    WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput, WsgiStartResponse,
-    drive_wsgi_batch, run_wsgi_callable,
+    WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput, WsgiServerConfig,
+    WsgiStartResponse, drive_wsgi_batch, run_wsgi_callable, shutdown_wsgi_executor,
 };
 
 /// Whether this build targets free-threaded Python (3.14t+).
@@ -148,6 +148,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(file_io::stream_file_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(wsgi::run_wsgi_callable, m)?)?;
     m.add_function(wrap_pyfunction!(wsgi::drive_wsgi_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(wsgi::shutdown_wsgi_executor, m)?)?;
     m.add_function(wrap_pyfunction!(asgi::drive_asgi_batch, m)?)?;
     m.add_function(wrap_pyfunction!(asgi::drive_native_batch, m)?)?;
     m.add_function(wrap_pyfunction!(rsgi::drive_rsgi_batch, m)?)?;
