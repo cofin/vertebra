@@ -1043,7 +1043,7 @@ impl ShmLeaseTable {
             entry.total_quarantined.store(0, Ordering::Relaxed);
             entry.total_disposed.store(0, Ordering::Relaxed);
             entry.state.store(PARTITION_READY, Ordering::Release);
-            hdr.partition_count.0.fetch_add(1, Ordering::Relaxed);
+            hdr.partition_count.0.fetch_add(1, Ordering::Release);
             return Ok(idx as u16);
         }
     }
@@ -1354,6 +1354,11 @@ impl ShmLeaseTable {
     #[inline]
     pub fn partition_count(&self) -> u32 {
         self.header().partition_count.0.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn record_timeout(&self) {
+        self.header().total_timeouts.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Block until `wake_seq` differs from `expected_seq` or `timeout` elapses, returning the latest `wake_seq`.

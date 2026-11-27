@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import inspect
 import multiprocessing as mp
 import os
 import signal
+import threading
 import time
 import warnings
+import weakref
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -28,6 +32,7 @@ from vertebra.extensions.broker import (
     LeaseQuarantinedError,
     SyncSHMBrokerTransport,
 )
+from vertebra.extensions.broker import transport as transport_mod
 from vertebra.extensions.broker.transport import AsyncBrokerLeaseSource, SyncBrokerLeaseSource
 from vertebra.utils.module_loader import import_optional
 
@@ -504,8 +509,6 @@ async def test_async_broker_release_bypasses_sync_pool_waiters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify AsyncSHMBrokerTransport.release executes inline without queuing behind SyncPool waiters."""
-    from vertebra.extensions.broker import transport as transport_mod
-
     transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
     lease = await transport.acquire(worker_id=1)
     assert transport.metrics().active_leases == 1
@@ -525,8 +528,6 @@ async def test_async_broker_c128_contention_bypasses_sync_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify c=128 concurrent async acquires over 10 slots complete without SyncPool submissions."""
-    from vertebra.extensions.broker import transport as transport_mod
-
     transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=10, max_overflow=0, acquire_timeout_ms=5000))
 
     class _ForbidSyncPool:
@@ -556,11 +557,11 @@ async def test_async_broker_c128_contention_bypasses_sync_pool(
 
 @pytest.mark.anyio
 async def test_async_broker_leader_cancel_promotes_follower() -> None:
-    """Verify cancelling the active leader waiter immediately promotes a waiting follower."""
+    """Verify cancelling the oldest waiter still wakes remaining followers on remote/native release."""
     transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=2000))
     held = await transport.acquire(worker_id=1)
 
-    leader_task = asyncio.create_task(transport.acquire(worker_id=2, timeout_ms=2000))
+    first_waiter = asyncio.create_task(transport.acquire(worker_id=2, timeout_ms=2000))
     await asyncio.sleep(0.005)
 
     completed: list[int] = []
@@ -570,20 +571,162 @@ async def test_async_broker_leader_cancel_promotes_follower() -> None:
         try:
             completed.append(idx)
         finally:
-            assert await transport.release(lease.lease_id) is True
+            assert transport._native.release(lease.slot_index, lease.generation) is True
 
     followers = [asyncio.create_task(_follower(idx)) for idx in range(10)]
     await asyncio.sleep(0.005)
 
-    leader_task.cancel()
+    first_waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await leader_task
+        await first_waiter
 
-    assert await transport.release(held.lease_id) is True
+    assert transport._native.release(held.slot_index, held.generation) is True
 
     await asyncio.wait_for(asyncio.gather(*followers), timeout=2.0)
     assert sorted(completed) == list(range(10))
     assert transport.metrics().active_leases == 0
+
+
+@pytest.mark.anyio
+async def test_async_broker_multi_slot_remote_release_wakes_all_waiters() -> None:
+    """Verify remote multi-slot releases wake queued waiters without losing the cross-process watcher."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=3, max_overflow=0, acquire_timeout_ms=2000))
+    held = [await transport.acquire(worker_id=idx + 1) for idx in range(3)]
+
+    w1 = asyncio.create_task(transport.acquire(worker_id=11, timeout_ms=2000))
+    w2 = asyncio.create_task(transport.acquire(worker_id=12, timeout_ms=2000))
+    w3 = asyncio.create_task(transport.acquire(worker_id=13, timeout_ms=2000))
+    await asyncio.sleep(0.005)
+
+    assert transport._native.release(held[0].slot_index, held[0].generation) is True
+    assert transport._native.release(held[1].slot_index, held[1].generation) is True
+    l1, l2 = await asyncio.wait_for(asyncio.gather(w1, w2), timeout=1.0)
+    assert not w3.done()
+
+    started = time.monotonic()
+    assert transport._native.release(held[2].slot_index, held[2].generation) is True
+    l3 = await asyncio.wait_for(w3, timeout=1.0)
+    assert (time.monotonic() - started) * 1000.0 < 200.0
+
+    for lease in (l1, l2, l3):
+        assert await transport.release(lease.lease_id) is True
+    assert transport.metrics().active_leases == 0
+
+
+@pytest.mark.anyio
+async def test_async_broker_sustained_local_contention_fifo_no_starvation() -> None:
+    """Verify oldest queued waiter acquires in FIFO order without starvation under continuous local churn."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=2000))
+    held = await transport.acquire(worker_id=1)
+
+    order: list[str] = []
+
+    async def _named_waiter(label: str) -> None:
+        lease = await transport.acquire(worker_id=10, timeout_ms=2000)
+        try:
+            order.append(label)
+            await asyncio.sleep(0)
+        finally:
+            assert await transport.release(lease.lease_id) is True
+
+    oldest = asyncio.create_task(_named_waiter("oldest"))
+    await asyncio.sleep(0.005)
+    followers = [asyncio.create_task(_named_waiter(f"follower-{idx}")) for idx in range(16)]
+    await asyncio.sleep(0.005)
+
+    assert await transport.release(held.lease_id) is True
+    await asyncio.wait_for(asyncio.gather(oldest, *followers), timeout=2.0)
+    assert order[0] == "oldest"
+    assert len(order) == 17
+    assert transport.metrics().active_leases == 0
+
+
+@pytest.mark.anyio
+async def test_async_broker_cross_thread_release_sync_wakes_other_loop() -> None:
+    """Verify release_sync() from another OS thread wakes a waiting coroutine via call_soon_threadsafe."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=2000))
+    held = await transport.acquire(worker_id=1)
+
+    waiter = asyncio.create_task(transport.acquire(worker_id=2, timeout_ms=2000))
+    await asyncio.sleep(0.005)
+    assert not waiter.done()
+
+    started = time.monotonic()
+
+    def _release_from_thread() -> None:
+        held.release_sync()
+
+    releaser = threading.Thread(target=_release_from_thread)
+    releaser.start()
+    lease = await asyncio.wait_for(waiter, timeout=1.0)
+    releaser.join(timeout=2.0)
+    assert (time.monotonic() - started) * 1000.0 < 200.0
+    assert await transport.release(lease.lease_id) is True
+    assert transport.metrics().active_leases == 0
+
+
+def test_async_broker_weakref_evicts_closed_event_loop() -> None:
+    """Verify closed event loops that contended on AsyncSHMBrokerTransport are garbage-collected."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=2000))
+
+    async def _contend_once() -> None:
+        held = await transport.acquire(worker_id=1)
+        try:
+            with pytest.raises(TimeoutError):
+                await transport.acquire(worker_id=2, timeout_ms=15)
+        finally:
+            assert await transport.release(held.lease_id) is True
+
+    loop = asyncio.new_event_loop()
+    loop_ref = weakref.ref(loop)
+    try:
+        loop.run_until_complete(_contend_once())
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        loop.close()
+    del loop
+    gc.collect()
+    assert loop_ref() is None
+
+
+@pytest.mark.anyio
+async def test_async_broker_mock_native_fallback_uses_sync_pool() -> None:
+    """Verify AsyncSHMBrokerTransport falls back to SyncPool when _native lacks wait_for_wake_async."""
+    grant = SimpleNamespace(
+        slot_index=0,
+        generation=1,
+        worker_pid=1,
+        is_overflow=False,
+        acquired_ns=10,
+        expiry_ns=0,
+        bind_key_hash=0,
+    )
+    calls: list[str] = []
+
+    class _MockNative:
+        def statement_cache(self) -> None:
+            return None
+
+        def lookup_partition(self, _key_hash: int) -> None:
+            return None
+
+        def try_acquire(self, **_kwargs: Any) -> None:
+            calls.append("try_acquire")
+            return None
+
+        def acquire(self, *_args: Any, **_kwargs: Any) -> Any:
+            calls.append("acquire")
+            return grant
+
+        def release(self, _slot: int, _gen: int) -> bool:
+            calls.append("release")
+            return True
+
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0), native=cast("Any", _MockNative()))
+    lease = await transport.acquire(worker_id=1, timeout_ms=100)
+    assert lease.slot_index == 0
+    assert await transport.release(lease.lease_id) is True
+    assert calls == ["try_acquire", "acquire", "release"]
 
 
 @pytest.mark.anyio
@@ -683,9 +826,12 @@ async def test_async_broker_zero_and_short_timeout_cleanup() -> None:
     assert all(isinstance(exc, TimeoutError) for exc in results)
 
     loop = asyncio.get_running_loop()
+    await asyncio.sleep(0)
     queue = transport._waiter_queues[loop][None]
-    assert queue.leader_active is False
+    assert queue.watcher_active is False
+    assert queue.watcher_task is None
     assert len(queue.waiters) == 0
+    assert transport.metrics().total_timeouts == 7
 
     assert await transport.release(held.lease_id) is True
     assert transport.metrics().active_leases == 0

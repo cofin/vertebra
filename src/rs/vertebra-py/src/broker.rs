@@ -932,6 +932,10 @@ impl LeaseBroker {
         self.table.wake_seq()
     }
 
+    pub fn record_timeout(&self) {
+        self.table.record_timeout();
+    }
+
     #[pyo3(signature = (expected_seq, timeout_ms=25))]
     pub fn wait_for_wake_async(
         &self,

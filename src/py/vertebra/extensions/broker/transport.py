@@ -67,14 +67,15 @@ _DEFAULT_BIND_KEY_HASH: int = stable_hash64("default")
 
 
 class _PartitionWaitQueue:
-    """Per-event-loop waiter deque and leader flag for a broker partition."""
+    """Per-event-loop FIFO waiter deque and single-watcher state for a broker partition."""
 
-    __slots__ = ("leader_active", "loop", "waiters")
+    __slots__ = ("local_wakes", "waiters", "watcher_active", "watcher_task")
 
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
-        self.loop = loop
+    def __init__(self) -> None:
         self.waiters: deque[asyncio.Future[bool]] = deque()
-        self.leader_active = False
+        self.local_wakes = 0
+        self.watcher_active = False
+        self.watcher_task: asyncio.Task[None] | None = None
 
 
 @runtime_checkable
@@ -1574,11 +1575,16 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         self._has_native_wake = callable(getattr(self._native, "wait_for_wake_async", None)) and callable(
             getattr(self._native, "wake_seq", None)
         )
+        self._has_record_timeout = callable(getattr(self._native, "record_timeout", None))
 
     @staticmethod
     def _resolve_future(fut: asyncio.Future[bool], from_broker: bool) -> None:
         if not fut.done():
             fut.set_result(from_broker)
+
+    def _record_timeout(self) -> None:
+        if self._has_record_timeout:
+            self._native.record_timeout()
 
     def _try_acquire_once(
         self,
@@ -1608,7 +1614,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                 self._waiter_queues[loop] = loop_queues
             queue = loop_queues.get(partition)
             if queue is None:
-                queue = _PartitionWaitQueue(loop)
+                queue = _PartitionWaitQueue()
                 loop_queues[partition] = queue
             return queue
 
@@ -1619,20 +1625,66 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                 return candidate
         return None
 
-    def _release_leadership(self, queue: _PartitionWaitQueue) -> asyncio.Future[bool] | None:
-        with self._waiter_lock:
-            queue.leader_active = False
-            return self._pop_live_waiter_locked(queue)
-
-    def _promote_if_no_leader(self, queue: _PartitionWaitQueue) -> asyncio.Future[bool] | None:
-        with self._waiter_lock:
-            if queue.leader_active:
-                return None
-            return self._pop_live_waiter_locked(queue)
-
     def _discard_waiter(self, queue: _PartitionWaitQueue, waiter: asyncio.Future[bool]) -> None:
-        with self._waiter_lock, contextlib.suppress(ValueError):
-            queue.waiters.remove(waiter)
+        task_to_cancel: asyncio.Task[None] | None = None
+        with self._waiter_lock:
+            with contextlib.suppress(ValueError):
+                queue.waiters.remove(waiter)
+            while queue.waiters and queue.waiters[0].done():
+                queue.waiters.popleft()
+            if not queue.waiters and queue.watcher_task is not None:
+                task_to_cancel = queue.watcher_task
+                queue.watcher_active = False
+                queue.watcher_task = None
+                queue.local_wakes = 0
+        if task_to_cancel is not None and not task_to_cancel.done():
+            task_to_cancel.cancel()
+
+    async def _watch_broker_wakes(self, queue: _PartitionWaitQueue, initial_seq: int) -> None:
+        """Watch cross-process SHM wake sequence updates for a non-empty partition waiter queue."""
+        seq = initial_seq
+        try:
+            while True:
+                with self._waiter_lock:
+                    while queue.waiters and queue.waiters[0].done():
+                        queue.waiters.popleft()
+                    if not queue.waiters:
+                        queue.local_wakes = 0
+                        queue.watcher_active = False
+                        queue.watcher_task = None
+                        return
+
+                next_seq = await self._native.wait_for_wake_async(seq, 25)
+                to_wake: list[asyncio.Future[bool]] = []
+                with self._waiter_lock:
+                    while queue.waiters and queue.waiters[0].done():
+                        queue.waiters.popleft()
+                    if not queue.waiters:
+                        queue.local_wakes = 0
+                        queue.watcher_active = False
+                        queue.watcher_task = None
+                        return
+                    if next_seq != seq:
+                        delta = (next_seq - seq) & 0xFFFFFFFF
+                        consumed_local = min(delta, queue.local_wakes)
+                        queue.local_wakes -= consumed_local
+                        remote_wakes = delta - consumed_local
+                        for _ in range(min(remote_wakes, len(queue.waiters))):
+                            fut = self._pop_live_waiter_locked(queue)
+                            if fut is None:
+                                break
+                            to_wake.append(fut)
+                    seq = next_seq
+                for fut in to_wake:
+                    self._resolve_future(fut, True)
+        finally:
+            current = asyncio.current_task()
+            with self._waiter_lock:
+                if queue.watcher_task is current:
+                    queue.watcher_active = False
+                    queue.watcher_task = None
+                    if not queue.waiters:
+                        queue.local_wakes = 0
 
     def _on_slot_freed(self, partition: int | None) -> None:
         """Wake a local async waiter directly on its event loop without touching SyncPool."""
@@ -1646,10 +1698,10 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
             if not self._waiter_queues:
                 return
             ordered_loops: list[tuple[asyncio.AbstractEventLoop, dict[int | None, _PartitionWaitQueue]]] = []
-            if running_loop is not None and running_loop in self._waiter_queues:
+            if running_loop is not None and not running_loop.is_closed() and running_loop in self._waiter_queues:
                 ordered_loops.append((running_loop, self._waiter_queues[running_loop]))
             for loop, loop_queues in self._waiter_queues.items():
-                if loop is not running_loop:
+                if loop is not running_loop and not loop.is_closed():
                     ordered_loops.append((loop, loop_queues))
 
             for loop, loop_queues in ordered_loops:
@@ -1657,6 +1709,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                 if queue is not None:
                     fut = self._pop_live_waiter_locked(queue)
                     if fut is not None:
+                        queue.local_wakes += 1
                         to_wake.append((loop, fut))
                         break
 
@@ -1666,6 +1719,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                     if unpart_queue is not None:
                         fut = self._pop_live_waiter_locked(unpart_queue)
                         if fut is not None:
+                            unpart_queue.local_wakes += 1
                             to_wake.append((loop, fut))
                             break
 
@@ -1676,6 +1730,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                             continue
                         fut = self._pop_live_waiter_locked(queue)
                         if fut is not None:
+                            queue.local_wakes += 1
                             to_wake.append((loop, fut))
                             break
                     if to_wake:
@@ -1710,12 +1765,14 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
 
         if timeout is not None:
             if timeout <= 0:
+                self._record_timeout()
                 raise TimeoutError("Connection broker pool exhausted")
             timeout_s = timeout
             effective_timeout_ms = max(1, int(timeout * 1000))
         else:
             effective_timeout_ms = timeout_ms if timeout_ms is not None else self._config.acquire_timeout_ms
             if effective_timeout_ms <= 0:
+                self._record_timeout()
                 raise TimeoutError("Connection broker pool exhausted")
             timeout_s = effective_timeout_ms / 1000.0
 
@@ -1746,64 +1803,46 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         deadline = time.monotonic() + timeout_s
 
         while True:
+            seq = self._native.wake_seq()
+            grant = self._try_acquire_once(resolved_partition, worker, ttl_ns, bind_hash)
+            if grant is not None:
+                return self._build_async_lease(grant, worker, resolved_partition, resolved_bind_key)
+
             remaining_s = deadline - time.monotonic()
             if remaining_s <= 0:
+                self._record_timeout()
                 raise TimeoutError("Connection broker pool exhausted")
 
-            became_leader = False
-            waiter: asyncio.Future[bool] | None = None
+            waiter: asyncio.Future[bool] = loop.create_future()
             with self._waiter_lock:
-                if not queue.leader_active:
-                    queue.leader_active = True
-                    became_leader = True
+                queue.waiters.append(waiter)
+                if not queue.watcher_active:
+                    queue.watcher_active = True
+                    queue.local_wakes = 0
+                    queue.watcher_task = loop.create_task(self._watch_broker_wakes(queue, seq))
+
+            timer = loop.call_later(remaining_s, self._resolve_future, waiter, False)
+            woken_by_broker = False
+            try:
+                woken_by_broker = await waiter
+            except asyncio.CancelledError:
+                consumed_wake = waiter.done() and not waiter.cancelled() and bool(waiter.result())
+                if not waiter.done():
+                    waiter.cancel()
+                relay_fut: asyncio.Future[bool] | None = None
+                if consumed_wake:
+                    with self._waiter_lock:
+                        relay_fut = self._pop_live_waiter_locked(queue)
                 else:
-                    waiter = loop.create_future()
-                    queue.waiters.append(waiter)
-
-            if became_leader:
-                try:
-                    while True:
-                        seq = self._native.wake_seq()
-                        grant = self._try_acquire_once(resolved_partition, worker, ttl_ns, bind_hash)
-                        if grant is not None:
-                            return self._build_async_lease(grant, worker, resolved_partition, resolved_bind_key)
-
-                        remaining_s = deadline - time.monotonic()
-                        if remaining_s <= 0:
-                            raise TimeoutError("Connection broker pool exhausted")
-
-                        slice_ms = min(25, max(1, int(remaining_s * 1000)))
-                        await self._native.wait_for_wake_async(seq, slice_ms)
-
-                        grant = self._try_acquire_once(resolved_partition, worker, ttl_ns, bind_hash)
-                        if grant is not None:
-                            return self._build_async_lease(grant, worker, resolved_partition, resolved_bind_key)
-                finally:
-                    promoted = self._release_leadership(queue)
-                    if promoted is not None:
-                        self._resolve_future(promoted, True)
-            else:
-                assert waiter is not None
-                timer = loop.call_later(remaining_s, self._resolve_future, waiter, False)
-                woken_by_broker = False
-                try:
-                    woken_by_broker = await waiter
-                except asyncio.CancelledError:
-                    if not waiter.done():
-                        waiter.cancel()
                     self._discard_waiter(queue, waiter)
-                    promoted = self._promote_if_no_leader(queue)
-                    if promoted is not None:
-                        self._resolve_future(promoted, True)
-                    raise
-                finally:
-                    timer.cancel()
-                    if not woken_by_broker:
-                        self._discard_waiter(queue, waiter)
-
-                grant = self._try_acquire_once(resolved_partition, worker, ttl_ns, bind_hash)
-                if grant is not None:
-                    return self._build_async_lease(grant, worker, resolved_partition, resolved_bind_key)
+                woken_by_broker = True
+                if relay_fut is not None:
+                    self._resolve_future(relay_fut, True)
+                raise
+            finally:
+                timer.cancel()
+                if not woken_by_broker:
+                    self._discard_waiter(queue, waiter)
 
     def _build_async_lease(
         self,
