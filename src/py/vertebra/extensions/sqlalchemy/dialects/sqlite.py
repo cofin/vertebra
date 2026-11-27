@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy.dialects.sqlite.base import SQLiteDialect as BaseSQLiteDialect
 from sqlalchemy.engine.url import URL
@@ -10,6 +10,7 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool, Pool, QueuePool, StaticPool
 
 from vertebra.extensions.sqlalchemy.dialects._base import (
     _AsyncDialectMixin,
+    _CommonDialectMixin,
     _resolve_broker_pool_class,
     _SyncDialectMixin,
 )
@@ -54,6 +55,19 @@ class _SQLiteDialectMixin:
         if not cls._is_url_file_db(url):
             return StaticPool
         return AsyncAdaptedQueuePool if is_async else QueuePool
+
+    def create_connect_args(self, url: URL) -> tuple[list[Any], dict[str, Any]]:
+        """Extract optional ``max_readers`` from URL query or default to ``0`` for SQLAlchemy pools."""
+        max_readers_keys = [key for key in url.query if key.lower() == "max_readers"]
+        raw_max_readers = url.query[max_readers_keys[-1]] if max_readers_keys else None
+        clean_url = url.difference_update_query(max_readers_keys) if max_readers_keys else url
+        args, kwargs = _CommonDialectMixin.create_connect_args(cast("Any", self), clean_url)
+        if raw_max_readers is not None:
+            resolved = raw_max_readers[-1] if isinstance(raw_max_readers, tuple) else raw_max_readers
+            kwargs["max_readers"] = int(resolved)
+        elif "max_readers" not in kwargs:
+            kwargs["max_readers"] = 0
+        return args, kwargs
 
     def _get_server_version_info(self, connection: Any) -> tuple[int, ...]:
         """Return server version info without importing stdlib sqlite3."""

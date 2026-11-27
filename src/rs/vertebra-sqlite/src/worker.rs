@@ -3,7 +3,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc;
 use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
@@ -100,79 +99,6 @@ fn normalize_begin_sql(mode: &str) -> Result<&'static str, SqliteClientError> {
     }
 }
 
-/// Operation request executed against one pooled SQLite connection.
-enum WorkerTask {
-    Execute {
-        sql: String,
-        params: BoundParams,
-        op_id: u64,
-        resp: mpsc::Sender<Result<usize, SqliteClientError>>,
-    },
-    ExecuteMany {
-        sql: String,
-        params_seq: Vec<BoundParams>,
-        op_id: u64,
-        resp: mpsc::Sender<Result<usize, SqliteClientError>>,
-    },
-    ExecuteScript {
-        sql_script: String,
-        op_id: u64,
-        resp: mpsc::Sender<Result<(), SqliteClientError>>,
-    },
-    FetchAll {
-        sql: String,
-        params: BoundParams,
-        op_id: u64,
-        resp: mpsc::Sender<Result<QueryResult, SqliteClientError>>,
-    },
-    ExecutePipeline {
-        operations: Vec<(bool, String, BoundParams)>,
-        use_savepoint: bool,
-        op_id: u64,
-        resp: mpsc::Sender<Result<Vec<PipelineResultItem>, SqliteClientError>>,
-    },
-    SelectToArrow {
-        sql: String,
-        params: BoundParams,
-        batch_size: usize,
-        op_id: u64,
-        resp: mpsc::Sender<Result<ArrowResultPayload, SqliteClientError>>,
-    },
-    LoadFromArrow {
-        table_name: String,
-        arrow_ipc_bytes: Vec<u8>,
-        op_id: u64,
-        resp: mpsc::Sender<Result<usize, SqliteClientError>>,
-    },
-    BackupTo {
-        target_path: String,
-        pages_per_step: i32,
-        sleep_ms: u64,
-        op_id: u64,
-        resp: mpsc::Sender<Result<(), SqliteClientError>>,
-    },
-    RestoreFrom {
-        source_path: String,
-        pages_per_step: i32,
-        sleep_ms: u64,
-        op_id: u64,
-        resp: mpsc::Sender<Result<(), SqliteClientError>>,
-    },
-    Begin {
-        begin_sql: &'static str,
-        op_id: u64,
-        resp: mpsc::Sender<Result<(), SqliteClientError>>,
-    },
-    Commit {
-        op_id: u64,
-        resp: mpsc::Sender<Result<(), SqliteClientError>>,
-    },
-    Rollback {
-        op_id: u64,
-        resp: mpsc::Sender<Result<(), SqliteClientError>>,
-    },
-}
-
 /// One pooled SQLite connection.
 struct WorkerSlot {
     conn: Mutex<Option<Connection>>,
@@ -200,29 +126,12 @@ impl WorkerSlot {
         })
     }
 
-    /// Run `task` on the calling thread while holding this slot's connection lock.
-    fn send(&self, task: WorkerTask) -> Result<(), ()> {
-        let mut guard = self.conn.lock();
-        let Some(conn) = guard.as_mut() else {
-            return Err(());
-        };
-        run_worker_task(
-            conn,
-            &self.running_op,
-            &self.interrupts,
-            self.last_rowid.as_ref(),
-            task,
-        );
-        Ok(())
-    }
-
-    fn run_statement(
+    /// Execute `f` directly on the calling thread while holding this slot's connection lock.
+    fn with_conn<T>(
         &self,
         op_id: u64,
-        sql: &str,
-        params: &BoundParams,
-        is_insert: impl FnOnce() -> bool,
-    ) -> Result<StatementOutcome, SqliteClientError> {
+        f: impl FnOnce(&mut Connection, Option<&Arc<AtomicI64>>) -> Result<T, SqliteClientError>,
+    ) -> Result<T, SqliteClientError> {
         let mut guard = self.conn.lock();
         let Some(conn) = guard.as_mut() else {
             return Err(SqliteClientError::Operational {
@@ -233,9 +142,21 @@ impl WorkerSlot {
             });
         };
         run_flagged_op(&self.interrupts, op_id, &self.running_op, || {
+            f(conn, self.last_rowid.as_ref())
+        })
+    }
+
+    fn run_statement(
+        &self,
+        op_id: u64,
+        sql: &str,
+        params: &BoundParams,
+        is_insert: impl FnOnce() -> bool,
+    ) -> Result<StatementOutcome, SqliteClientError> {
+        self.with_conn(op_id, |conn, last_rowid| {
             let res = run_statement(conn, sql, params, is_insert);
             if res.is_ok()
-                && let Some(lr) = self.last_rowid.as_ref()
+                && let Some(lr) = last_rowid
             {
                 lr.store(conn.last_insert_rowid(), Ordering::Relaxed);
             }
@@ -267,8 +188,28 @@ fn open_worker_connection(
     let conn = Connection::open_with_flags(&config.path, flags)
         .map_err(SqliteClientError::from_rusqlite)?;
 
-    // Apply initialization pragmas
+    conn.busy_timeout(Duration::from_millis(u64::from(config.busy_timeout_ms)))
+        .map_err(SqliteClientError::from_rusqlite)?;
+
+    let desired_mode = if config.is_plain_in_memory() {
+        None
+    } else if config.wal_mode {
+        Some("wal")
+    } else {
+        Some("delete")
+    };
+
+    // Apply initialization pragmas, skipping redundant journal_mode writes when already set.
     for pragma in config.initialization_pragmas() {
+        if let Some(target_mode) = desired_mode
+            && pragma.starts_with("PRAGMA journal_mode = ")
+        {
+            let current: Result<String, _> =
+                conn.query_row("PRAGMA journal_mode", [], |row| row.get(0));
+            if current.is_ok_and(|mode| mode.eq_ignore_ascii_case(target_mode)) {
+                continue;
+            }
+        }
         conn.execute_batch(&pragma)
             .map_err(SqliteClientError::from_rusqlite)?;
     }
@@ -290,161 +231,6 @@ fn run_flagged_op<T>(
     let res = f();
     running_op.store(0, Ordering::Release);
     res
-}
-
-fn run_worker_task(
-    conn: &mut Connection,
-    running_op: &AtomicU64,
-    interrupts: &Mutex<InterruptState>,
-    last_rowid: Option<&Arc<AtomicI64>>,
-    task: WorkerTask,
-) {
-    {
-        match task {
-            WorkerTask::Execute {
-                sql,
-                params,
-                op_id,
-                resp,
-            } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    let res = execute_statement(conn, &sql, &params);
-                    if res.is_ok()
-                        && let Some(lr) = last_rowid
-                    {
-                        lr.store(conn.last_insert_rowid(), Ordering::Relaxed);
-                    }
-                    res
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::ExecuteMany {
-                sql,
-                params_seq,
-                op_id,
-                resp,
-            } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    execute_many_statement(conn, &sql, params_seq)
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::ExecuteScript {
-                sql_script,
-                op_id,
-                resp,
-            } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    conn.execute_batch(&sql_script)
-                        .map_err(SqliteClientError::from_rusqlite)
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::FetchAll {
-                sql,
-                params,
-                op_id,
-                resp,
-            } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    let res = fetch_all_query(conn, &sql, &params);
-                    if res.is_ok()
-                        && let Some(lr) = last_rowid
-                    {
-                        let id = conn.last_insert_rowid();
-                        if id > 0 {
-                            lr.store(id, Ordering::Relaxed);
-                        }
-                    }
-                    res
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::ExecutePipeline {
-                operations,
-                use_savepoint,
-                op_id,
-                resp,
-            } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    execute_pipeline_internal(conn, operations, use_savepoint, op_id)
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::SelectToArrow {
-                sql,
-                params,
-                batch_size,
-                op_id,
-                resp,
-            } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    execute_select_to_arrow(conn, &sql, &params, batch_size)
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::LoadFromArrow {
-                table_name,
-                arrow_ipc_bytes,
-                op_id,
-                resp,
-            } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    execute_load_from_arrow(conn, &table_name, &arrow_ipc_bytes)
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::BackupTo {
-                target_path,
-                pages_per_step,
-                sleep_ms,
-                op_id,
-                resp,
-            } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    execute_backup_to(conn, &target_path, pages_per_step, sleep_ms)
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::RestoreFrom {
-                source_path,
-                pages_per_step,
-                sleep_ms,
-                op_id,
-                resp,
-            } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    execute_restore_from(conn, &source_path, pages_per_step, sleep_ms)
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::Begin {
-                begin_sql,
-                op_id,
-                resp,
-            } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    conn.execute_batch(begin_sql)
-                        .map_err(SqliteClientError::from_rusqlite)
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::Commit { op_id, resp } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    conn.execute_batch("COMMIT")
-                        .map_err(SqliteClientError::from_rusqlite)
-                });
-                let _ = resp.send(result);
-            }
-            WorkerTask::Rollback { op_id, resp } => {
-                let result = run_flagged_op(interrupts, op_id, running_op, || {
-                    conn.execute_batch("ROLLBACK")
-                        .map_err(SqliteClientError::from_rusqlite)
-                });
-                let _ = resp.send(result);
-            }
-        }
-    }
 }
 
 fn execute_statement(
@@ -730,23 +516,179 @@ fn execute_restore_from(
         .map_err(SqliteClientError::from_rusqlite)
 }
 
-fn is_read_only_sql(sql: &str) -> bool {
-    let trimmed = sql.trim_start();
-    let upper = trimmed.to_ascii_uppercase();
-    (upper.starts_with("SELECT") || upper.starts_with("EXPLAIN") || upper.starts_with("WITH"))
-        && !upper.contains("INSERT")
-        && !upper.contains("UPDATE")
-        && !upper.contains("DELETE")
-        && !upper.contains("DROP")
-        && !upper.contains("ALTER")
-        && !upper.contains("CREATE")
+fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
 }
 
-/// Facts about one SQL text that decide routing and rowid reporting.
+fn is_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn is_write_keyword(token: &str) -> bool {
+    token.eq_ignore_ascii_case("INSERT")
+        || token.eq_ignore_ascii_case("UPDATE")
+        || token.eq_ignore_ascii_case("DELETE")
+        || token.eq_ignore_ascii_case("REPLACE")
+        || token.eq_ignore_ascii_case("DROP")
+        || token.eq_ignore_ascii_case("ALTER")
+        || token.eq_ignore_ascii_case("CREATE")
+        || token.eq_ignore_ascii_case("ATTACH")
+        || token.eq_ignore_ascii_case("DETACH")
+        || token.eq_ignore_ascii_case("VACUUM")
+        || token.eq_ignore_ascii_case("REINDEX")
+        || token.eq_ignore_ascii_case("PRAGMA")
+        || token.eq_ignore_ascii_case("BEGIN")
+        || token.eq_ignore_ascii_case("COMMIT")
+        || token.eq_ignore_ascii_case("ROLLBACK")
+        || token.eq_ignore_ascii_case("SAVEPOINT")
+        || token.eq_ignore_ascii_case("RELEASE")
+}
+
+fn is_read_only_sql(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut first_token: Option<&str> = None;
+
+    while i < len {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            continue;
+        }
+        if b == b'\'' || b == b'"' || b == b'`' {
+            let quote = b;
+            i += 1;
+            while i < len {
+                if bytes[i] == quote {
+                    if i + 1 < len && bytes[i + 1] == quote {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'[' {
+            i += 1;
+            while i < len && bytes[i] != b']' {
+                i += 1;
+            }
+            if i < len {
+                i += 1;
+            }
+            continue;
+        }
+        if is_ident_start(b) {
+            let start = i;
+            i += 1;
+            while i < len && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            let token = &sql[start..i];
+            if first_token.is_none() {
+                let starts_read = token.eq_ignore_ascii_case("SELECT")
+                    || token.eq_ignore_ascii_case("EXPLAIN")
+                    || token.eq_ignore_ascii_case("VALUES")
+                    || token.eq_ignore_ascii_case("WITH");
+                if !starts_read {
+                    return false;
+                }
+                first_token = Some(token);
+            } else if is_write_keyword(token) {
+                return false;
+            }
+            continue;
+        }
+        i += 1;
+    }
+
+    first_token.is_some()
+}
+
+fn first_sql_token(sql: &str) -> Option<&str> {
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            continue;
+        }
+        if is_ident_start(b) {
+            let start = i;
+            i += 1;
+            while i < len && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            return Some(&sql[start..i]);
+        }
+        return None;
+    }
+    None
+}
+
+fn needs_lazy_begin_sql(sql: &str, read_only: bool) -> bool {
+    if read_only {
+        return false;
+    }
+    let Some(first) = first_sql_token(sql) else {
+        return false;
+    };
+    !(first.eq_ignore_ascii_case("PRAGMA")
+        || first.eq_ignore_ascii_case("BEGIN")
+        || first.eq_ignore_ascii_case("COMMIT")
+        || first.eq_ignore_ascii_case("END")
+        || first.eq_ignore_ascii_case("ROLLBACK")
+        || first.eq_ignore_ascii_case("SAVEPOINT")
+        || first.eq_ignore_ascii_case("RELEASE")
+        || first.eq_ignore_ascii_case("ATTACH")
+        || first.eq_ignore_ascii_case("DETACH")
+        || first.eq_ignore_ascii_case("VACUUM"))
+}
+
+/// Facts about one SQL text that decide routing, lazy_begin, and rowid reporting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StatementFacts {
     /// Whether the statement can run on a read-only reader connection.
     pub read_only: bool,
+    /// Whether a `lazy_begin=True` cursor should open `BEGIN IMMEDIATE` before this statement.
+    pub needs_lazy_begin: bool,
     /// Whether the statement is an `INSERT`.
     pub is_insert: bool,
 }
@@ -815,8 +757,10 @@ impl SqlitePool {
         if let Some(facts) = self.statement_facts.read().get(sql) {
             return *facts;
         }
+        let read_only = is_read_only_sql(sql);
         let facts = StatementFacts {
-            read_only: is_read_only_sql(sql),
+            read_only,
+            needs_lazy_begin: needs_lazy_begin_sql(sql, read_only),
             is_insert: vertebra_core::text::classify_sql_statement(sql).1,
         };
         let mut cache = self.statement_facts.write();
@@ -873,11 +817,11 @@ impl SqlitePool {
     }
 
     /// Route to a reader worker or fallback to writer.
-    fn dispatch_read(
+    fn dispatch_read<T>(
         &self,
         op_id: u64,
-        task_maker: impl FnOnce(&WorkerSlot) -> Result<(), SqliteClientError>,
-    ) -> Result<(), SqliteClientError> {
+        task_maker: impl FnOnce(&WorkerSlot) -> Result<T, SqliteClientError>,
+    ) -> Result<T, SqliteClientError> {
         self.ensure_open(op_id)?;
         if !self.in_transaction.load(Ordering::Acquire) && !self.readers.is_empty() {
             let idx = self.reader_cursor.fetch_add(1, Ordering::Relaxed) % self.readers.len();
@@ -888,11 +832,11 @@ impl SqlitePool {
     }
 
     /// Route unconditionally to the single writer worker.
-    fn dispatch_write(
+    fn dispatch_write<T>(
         &self,
         op_id: u64,
-        task_maker: impl FnOnce(&WorkerSlot) -> Result<(), SqliteClientError>,
-    ) -> Result<(), SqliteClientError> {
+        task_maker: impl FnOnce(&WorkerSlot) -> Result<T, SqliteClientError>,
+    ) -> Result<T, SqliteClientError> {
         self.ensure_open(op_id)?;
         task_maker(&self.writer)
     }
@@ -909,28 +853,17 @@ impl SqlitePool {
         sql: String,
         params: BoundParams,
     ) -> Result<usize, SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
-        self.dispatch_write(op_id, |sender| {
-            sender
-                .send(WorkerTask::Execute {
-                    sql,
-                    params,
-                    op_id,
-                    resp: resp_tx,
-                })
-                .map_err(|_| SqliteClientError::Operational {
-                    message: "SQLite connection is closed".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-        })?;
-        resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?
+        self.dispatch_write(op_id, |slot| {
+            slot.with_conn(op_id, |conn, last_rowid| {
+                let res = execute_statement(conn, &sql, &params);
+                if res.is_ok()
+                    && let Some(lr) = last_rowid
+                {
+                    lr.store(conn.last_insert_rowid(), Ordering::Relaxed);
+                }
+                res
+            })
+        })
     }
 
     /// Execute multiple parameter sets.
@@ -949,28 +882,9 @@ impl SqlitePool {
         sql: String,
         params_seq: Vec<BoundParams>,
     ) -> Result<usize, SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
-        self.dispatch_write(op_id, |sender| {
-            sender
-                .send(WorkerTask::ExecuteMany {
-                    sql,
-                    params_seq,
-                    op_id,
-                    resp: resp_tx,
-                })
-                .map_err(|_| SqliteClientError::Operational {
-                    message: "SQLite connection is closed".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-        })?;
-        resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?
+        self.dispatch_write(op_id, |slot| {
+            slot.with_conn(op_id, |conn, _| execute_many_statement(conn, &sql, params_seq))
+        })
     }
 
     /// Execute a multi-statement SQL script.
@@ -984,27 +898,12 @@ impl SqlitePool {
         op_id: u64,
         sql_script: String,
     ) -> Result<(), SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
-        self.dispatch_write(op_id, |sender| {
-            sender
-                .send(WorkerTask::ExecuteScript {
-                    sql_script,
-                    op_id,
-                    resp: resp_tx,
-                })
-                .map_err(|_| SqliteClientError::Operational {
-                    message: "SQLite connection is closed".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-        })?;
-        resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?
+        self.dispatch_write(op_id, |slot| {
+            slot.with_conn(op_id, |conn, _| {
+                conn.execute_batch(&sql_script)
+                    .map_err(SqliteClientError::from_rusqlite)
+            })
+        })
     }
 
     /// Fetch all rows of a query.
@@ -1023,45 +922,26 @@ impl SqlitePool {
         sql: String,
         params: BoundParams,
     ) -> Result<QueryResult, SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
         let is_ro = self.statement_facts(&sql).read_only;
-        let task = WorkerTask::FetchAll {
-            sql,
-            params,
-            op_id,
-            resp: resp_tx,
+        let run = |slot: &WorkerSlot| {
+            slot.with_conn(op_id, |conn, last_rowid| {
+                let res = fetch_all_query(conn, &sql, &params);
+                if res.is_ok()
+                    && let Some(lr) = last_rowid
+                {
+                    let id = conn.last_insert_rowid();
+                    if id > 0 {
+                        lr.store(id, Ordering::Relaxed);
+                    }
+                }
+                res
+            })
         };
-
         if is_ro {
-            self.dispatch_read(op_id, |sender| {
-                sender
-                    .send(task)
-                    .map_err(|_| SqliteClientError::Operational {
-                        message: "SQLite connection is closed".to_string(),
-                        code: None,
-                        sqlstate: Some("08000"),
-                        is_transient: false,
-                    })
-            })?;
+            self.dispatch_read(op_id, run)
         } else {
-            self.dispatch_write(op_id, |sender| {
-                sender
-                    .send(task)
-                    .map_err(|_| SqliteClientError::Operational {
-                        message: "SQLite connection is closed".to_string(),
-                        code: None,
-                        sqlstate: Some("08000"),
-                        is_transient: false,
-                    })
-            })?;
+            self.dispatch_write(op_id, run)
         }
-
-        resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?
     }
 
     /// Run any statement and report its result set, changed-row count, and inserted rowid.
@@ -1143,28 +1023,11 @@ impl SqlitePool {
         operations: Vec<(bool, String, BoundParams)>,
         use_savepoint: bool,
     ) -> Result<Vec<PipelineResultItem>, SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
-        self.dispatch_write(op_id, |sender| {
-            sender
-                .send(WorkerTask::ExecutePipeline {
-                    operations,
-                    use_savepoint,
-                    op_id,
-                    resp: resp_tx,
-                })
-                .map_err(|_| SqliteClientError::Operational {
-                    message: "SQLite connection is closed".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-        })?;
-        resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?
+        self.dispatch_write(op_id, |slot| {
+            slot.with_conn(op_id, |conn, _| {
+                execute_pipeline_internal(conn, operations, use_savepoint, op_id)
+            })
+        })
     }
 
     /// Select to Arrow shared memory.
@@ -1185,46 +1048,17 @@ impl SqlitePool {
         params: BoundParams,
         batch_size: usize,
     ) -> Result<ArrowResultPayload, SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
-        let is_ro = is_read_only_sql(&sql);
-        let task = WorkerTask::SelectToArrow {
-            sql,
-            params,
-            batch_size,
-            op_id,
-            resp: resp_tx,
+        let is_ro = self.statement_facts(&sql).read_only;
+        let run = |slot: &WorkerSlot| {
+            slot.with_conn(op_id, |conn, _| {
+                execute_select_to_arrow(conn, &sql, &params, batch_size)
+            })
         };
-
         if is_ro {
-            self.dispatch_read(op_id, |sender| {
-                sender
-                    .send(task)
-                    .map_err(|_| SqliteClientError::Operational {
-                        message: "SQLite connection is closed".to_string(),
-                        code: None,
-                        sqlstate: Some("08000"),
-                        is_transient: false,
-                    })
-            })?;
+            self.dispatch_read(op_id, run)
         } else {
-            self.dispatch_write(op_id, |sender| {
-                sender
-                    .send(task)
-                    .map_err(|_| SqliteClientError::Operational {
-                        message: "SQLite connection is closed".to_string(),
-                        code: None,
-                        sqlstate: Some("08000"),
-                        is_transient: false,
-                    })
-            })?;
+            self.dispatch_write(op_id, run)
         }
-
-        resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?
     }
 
     /// Bulk ingest Arrow IPC stream bytes.
@@ -1243,28 +1077,11 @@ impl SqlitePool {
         table_name: String,
         arrow_ipc_bytes: Vec<u8>,
     ) -> Result<usize, SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
-        self.dispatch_write(op_id, |sender| {
-            sender
-                .send(WorkerTask::LoadFromArrow {
-                    table_name,
-                    arrow_ipc_bytes,
-                    op_id,
-                    resp: resp_tx,
-                })
-                .map_err(|_| SqliteClientError::Operational {
-                    message: "SQLite connection is closed".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-        })?;
-        resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?
+        self.dispatch_write(op_id, |slot| {
+            slot.with_conn(op_id, |conn, _| {
+                execute_load_from_arrow(conn, &table_name, &arrow_ipc_bytes)
+            })
+        })
     }
 
     /// Online backup to destination path.
@@ -1285,29 +1102,11 @@ impl SqlitePool {
         pages_per_step: i32,
         sleep_ms: u64,
     ) -> Result<(), SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
-        self.dispatch_write(op_id, |sender| {
-            sender
-                .send(WorkerTask::BackupTo {
-                    target_path,
-                    pages_per_step,
-                    sleep_ms,
-                    op_id,
-                    resp: resp_tx,
-                })
-                .map_err(|_| SqliteClientError::Operational {
-                    message: "SQLite connection is closed".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-        })?;
-        resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?
+        self.dispatch_write(op_id, |slot| {
+            slot.with_conn(op_id, |conn, _| {
+                execute_backup_to(conn, &target_path, pages_per_step, sleep_ms)
+            })
+        })
     }
 
     /// Online restore from source path.
@@ -1328,29 +1127,11 @@ impl SqlitePool {
         pages_per_step: i32,
         sleep_ms: u64,
     ) -> Result<(), SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
-        self.dispatch_write(op_id, |sender| {
-            sender
-                .send(WorkerTask::RestoreFrom {
-                    source_path,
-                    pages_per_step,
-                    sleep_ms,
-                    op_id,
-                    resp: resp_tx,
-                })
-                .map_err(|_| SqliteClientError::Operational {
-                    message: "SQLite connection is closed".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-        })?;
-        resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?
+        self.dispatch_write(op_id, |slot| {
+            slot.with_conn(op_id, |conn, _| {
+                execute_restore_from(conn, &source_path, pages_per_step, sleep_ms)
+            })
+        })
     }
 
     /// Begin an explicit transaction.
@@ -1367,27 +1148,12 @@ impl SqlitePool {
                 return Err(err);
             }
         };
-        let (resp_tx, resp_rx) = mpsc::channel();
-        self.dispatch_write(op_id, |sender| {
-            sender
-                .send(WorkerTask::Begin {
-                    begin_sql,
-                    op_id,
-                    resp: resp_tx,
-                })
-                .map_err(|_| SqliteClientError::Operational {
-                    message: "SQLite connection is closed".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-        })?;
-        let res = resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?;
+        let res = self.dispatch_write(op_id, |slot| {
+            slot.with_conn(op_id, |conn, _| {
+                conn.execute_batch(begin_sql)
+                    .map_err(SqliteClientError::from_rusqlite)
+            })
+        });
         if res.is_ok() {
             self.in_transaction.store(true, Ordering::Release);
         }
@@ -1401,26 +1167,12 @@ impl SqlitePool {
 
     /// Commit the active transaction using a caller-allocated `op_id`.
     pub fn commit_with_op_id(&self, op_id: u64) -> Result<(), SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
-        self.dispatch_write(op_id, |sender| {
-            sender
-                .send(WorkerTask::Commit {
-                    op_id,
-                    resp: resp_tx,
-                })
-                .map_err(|_| SqliteClientError::Operational {
-                    message: "SQLite connection is closed".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-        })?;
-        let res = resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?;
+        let res = self.dispatch_write(op_id, |slot| {
+            slot.with_conn(op_id, |conn, _| {
+                conn.execute_batch("COMMIT")
+                    .map_err(SqliteClientError::from_rusqlite)
+            })
+        });
         self.in_transaction.store(false, Ordering::Release);
         res
     }
@@ -1432,26 +1184,12 @@ impl SqlitePool {
 
     /// Roll back the active transaction using a caller-allocated `op_id`.
     pub fn rollback_with_op_id(&self, op_id: u64) -> Result<(), SqliteClientError> {
-        let (resp_tx, resp_rx) = mpsc::channel();
-        self.dispatch_write(op_id, |sender| {
-            sender
-                .send(WorkerTask::Rollback {
-                    op_id,
-                    resp: resp_tx,
-                })
-                .map_err(|_| SqliteClientError::Operational {
-                    message: "SQLite connection is closed".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-        })?;
-        let res = resp_rx.recv().map_err(|_| SqliteClientError::Operational {
-            message: "worker response dropped".to_string(),
-            code: None,
-            sqlstate: Some("08000"),
-            is_transient: false,
-        })?;
+        let res = self.dispatch_write(op_id, |slot| {
+            slot.with_conn(op_id, |conn, _| {
+                conn.execute_batch("ROLLBACK")
+                    .map_err(SqliteClientError::from_rusqlite)
+            })
+        });
         self.in_transaction.store(false, Ordering::Release);
         res
     }
@@ -1482,5 +1220,74 @@ impl SqlitePool {
 impl Drop for SqlitePool {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_read_only_sql_lexical_classification() {
+        assert!(is_read_only_sql("SELECT 1"));
+        assert!(is_read_only_sql(
+            "SELECT id, created_at, updated_at, deleted_at FROM items WHERE id = ?"
+        ));
+        assert!(is_read_only_sql("/* trace */ SELECT 1"));
+        assert!(is_read_only_sql("-- leading note\nSELECT 'UPDATE', \"delete\", [insert] FROM items"));
+        assert!(is_read_only_sql("WITH cte AS (SELECT 1) SELECT * FROM cte"));
+        assert!(is_read_only_sql("EXPLAIN QUERY PLAN SELECT 1"));
+        assert!(is_read_only_sql("VALUES (1, 2)"));
+
+        assert!(!is_read_only_sql("INSERT INTO items VALUES (1)"));
+        assert!(!is_read_only_sql("UPDATE items SET x = 1"));
+        assert!(!is_read_only_sql("DELETE FROM items"));
+        assert!(!is_read_only_sql("REPLACE INTO items VALUES (1)"));
+        assert!(!is_read_only_sql(
+            "WITH cte AS (SELECT 1) REPLACE INTO items VALUES (1)"
+        ));
+        assert!(!is_read_only_sql(
+            "WITH cte AS (SELECT 1) INSERT INTO items SELECT * FROM cte"
+        ));
+        assert!(!is_read_only_sql("PRAGMA journal_mode = WAL"));
+        assert!(!is_read_only_sql("   -- only a comment"));
+
+        assert!(!needs_lazy_begin_sql("SELECT 1", true));
+        assert!(!needs_lazy_begin_sql("PRAGMA read_uncommitted", false));
+        assert!(!needs_lazy_begin_sql("BEGIN IMMEDIATE", false));
+        assert!(needs_lazy_begin_sql("INSERT INTO items VALUES (1)", false));
+        assert!(needs_lazy_begin_sql("CREATE TABLE items (id INT)", false));
+        assert!(needs_lazy_begin_sql(
+            "WITH cte AS (SELECT 1) REPLACE INTO items VALUES (1)",
+            false
+        ));
+    }
+
+    #[test]
+    fn direct_with_conn_handles_cancellation_and_last_rowid() {
+        let pool = SqlitePool::open(SqliteClientConfig::default()).expect("open memory pool");
+        pool.execute(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT)".to_string(),
+            BoundParams::default(),
+        )
+        .expect("create table");
+        pool.execute(
+            "INSERT INTO items (label) VALUES ('alpha')".to_string(),
+            BoundParams::default(),
+        )
+        .expect("insert row");
+        assert_eq!(pool.last_insert_rowid(), 1);
+
+        let cancelled_op = pool.next_op_id();
+        assert!(pool.cancel_operation(cancelled_op));
+        let err = pool
+            .fetch_all_with_op_id(
+                cancelled_op,
+                "SELECT id FROM items".to_string(),
+                BoundParams::default(),
+            )
+            .expect_err("pre-cancelled op must return Cancelled");
+        assert!(matches!(err, SqliteClientError::Cancelled(_)));
+        pool.close();
     }
 }

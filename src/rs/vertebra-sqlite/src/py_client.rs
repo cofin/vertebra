@@ -887,7 +887,8 @@ impl SyncSQLiteCursor {
         let this = slf.get();
         this.require_open(py)?;
         let bound = BoundParams::from_py(params).map_err(|e| this.fail(py, e))?;
-        this.run_and_install(py, this.lazy_begin, move |pool| pool.run(sql, bound))?;
+        let begin = this.lazy_begin && this.pool.statement_facts(sql).needs_lazy_begin;
+        this.run_and_install(py, begin, move |pool| pool.run(sql, bound))?;
         Ok(slf.clone())
     }
 
@@ -1144,8 +1145,9 @@ impl AsyncSQLiteCursor {
         let this = slf.get();
         let guard = this.begin_statement(py)?;
         let bound = BoundParams::from_py(params).map_err(|e| e.into_py_err(py))?;
+        let begin = this.lazy_begin && this.pool.statement_facts(sql).needs_lazy_begin;
         let sql_owned = sql.to_string();
-        Self::spawn_statement(slf, guard, this.lazy_begin, move |pool, op_id| {
+        Self::spawn_statement(slf, guard, begin, move |pool, op_id| {
             pool.run_with_op_id(op_id, &sql_owned, bound)
         })
     }
