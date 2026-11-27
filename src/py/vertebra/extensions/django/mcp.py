@@ -32,7 +32,6 @@ from vertebra.utils.module_loader import import_optional
 __all__ = (
     "MCPConfig",
     "MCPCore",
-    "ToolRegistry",
     "PromptController",
     "SkillController",
     "ToolRegistry",

@@ -375,7 +375,7 @@ async def test_confirmation_gate_pause_and_approval() -> None:
 
 
 @pytest.mark.anyio
-async def test_spectree_decomposition_and_checkpoint() -> None:
+async def test_plantree_decomposition_and_checkpoint() -> None:
     """Verify hierarchical task decomposition, readiness, and checkpoint round-trip."""
     tree = PlanTree(root_id="goal_project")
     root = PlanNode(id="goal_project", title="Build Web Application", description="Root goal")
@@ -414,6 +414,18 @@ async def test_spectree_decomposition_and_checkpoint() -> None:
     ship = ergonomic.add_step("create-shipment", description="Book carrier label", depends_on=(validate.id,))
     assert validate.parent_id == "root"
     assert ship.depends_on == ("validate-inventory",)
+    assert [node.id for node in ergonomic.ready_nodes()] == ["validate-inventory"]
+
+    ergonomic.mark_completed("validate-inventory", output={"ok": True})
+    assert [node.id for node in ergonomic.ready_nodes()] == ["create-shipment"]
+
+    ergonomic.mark_completed("create-shipment", output={"shipped": True})
+    root_after = ergonomic.get_node("root")
+    assert root_after is not None and root_after.status == "completed"
+    assert ergonomic.ready_nodes() == []
+
+    ergonomic_wf = ergonomic.to_workflow()
+    assert set(ergonomic_wf.steps) == {"validate-inventory", "create-shipment"}
 
     declarative = Workflow(
         name="order-fulfillment",

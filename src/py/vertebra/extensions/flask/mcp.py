@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 __all__ = (
     "MCPConfig",
     "MCPCore",
-    "ToolRegistry",
     "PromptController",
     "SkillController",
     "ToolRegistry",

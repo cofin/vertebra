@@ -36,9 +36,6 @@ sources:
 - id: mcp-ts-client
   resource: src/ts/vertebra-client/src/agent/index.ts::McpClient
   title: Stateless MCP 2026-07-28 TypeScript client SDK
-- id: mcp-registry
-  resource: src/py/vertebra/agent/mcp/registry.py::ToolRegistry
-  title: ToolRegistry and host-extension ToolRegistry alias subclass
 - id: mcp-identity
   resource: src/py/vertebra/agent/core/identity.py::MtlsIdentitySource
   title: Immediate peer checks for trusted proxy mTLS identity
@@ -55,7 +52,6 @@ sources:
 - Distributed cache-backed stores accept `vertebra.cache` URL schemes (`memory://`, `shm://`, `valkey(s)://`, `redis(s)://`, and object-store schemes `s3://`, `gs://`, `az://`, `r2://`, `oci://`, `file://`); SQL schemes are outside `vertebra.cache` [^mcp-sessions] [^a2a-service].
 - `@vertebra/client` `McpClient` operates as a stateless MCP `2026-07-28` HTTP client and does not negotiate legacy `initialize` / `GET /mcp` SSE sessions [^mcp-ts-client].
 - Native `App` routes constructed via `AgentPlugin.mount_native` supply headers without socket peer addresses, so `MtlsIdentitySource` refuses header identity on header-only native paths [^mcp-identity] [^agent-plugin].
-- `ToolRegistry(ToolRegistry)` acts as a host-extension compatibility alias over `ToolRegistry` [^mcp-registry].
 <!-- truth: end -->
 
 ## Scope & Operational Notes
@@ -71,6 +67,5 @@ Current protocol capabilities and extensions are documented in [Agentic Harness,
 [^mcp-sse]: `src/py/vertebra/agent/core/sse.py::CacheSseStreamBroker` — `SyncCacheStore`-backed SSE replay broker.
 [^a2a-service]: `src/py/vertebra/agent/a2a/service.py::CacheA2ATaskStore` — `SyncCacheStore`-backed A2A task store and `PushNotificationDispatcher`.
 [^mcp-ts-client]: `src/ts/vertebra-client/src/agent/index.ts::McpClient` — Stateless MCP `2026-07-28` TypeScript client SDK.
-[^mcp-registry]: `src/py/vertebra/agent/mcp/registry.py::ToolRegistry` — `ToolRegistry` and host-extension `ToolRegistry` alias subclass.
 [^mcp-identity]: `src/py/vertebra/agent/core/identity.py::MtlsIdentitySource` — Immediate-peer proxy policy.
 [^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPlugin.mount_native` — Header-only native context forwarding.

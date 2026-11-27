@@ -97,7 +97,7 @@ sources:
     title: MCP notifications, resource subscriptions, skills, UI extensions, and WebMCP suite
   - id: src-agent-mcp-registry-py
     resource: src/py/vertebra/agent/mcp/registry.py
-    title: Unified ToolRegistry and ToolRegistry implementation
+    title: Unified ToolRegistry implementation
   - id: src-sqlalchemy-dialect-tests
     resource: src/py/tests/unit/extensions/test_sqlalchemy_vtb_dialects_and_dbapi.py
     title: SQLAlchemy 2.1 +vtb dialects, types, Alembic, and PEP 249 DBAPI tests
@@ -257,7 +257,7 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 [^src-tests-unit-agent-mcp-core-py]: `src/py/tests/unit/agent/test_mcp_core_and_plugin.py` — MCP core dispatch, ToolRegistry provider, confirmations, and plugin routing conformance suite.
 [^src-tests-unit-agent-mcp-sessions-py]: `src/py/tests/unit/agent/test_mcp_protocol_sessions_and_sse.py` — MCP protocol negotiation, session store, batching, and SSE conformance suite.
 [^src-tests-unit-agent-mcp-skills-py]: `src/py/tests/unit/agent/test_mcp_skills_and_ui_extensions.py` — MCP notifications, resource subscriptions, skills, UI extensions, and WebMCP suite.
-[^src-agent-mcp-registry-py]: `src/py/vertebra/agent/mcp/registry.py` — Unified ToolRegistry and ToolRegistry implementation.
+[^src-agent-mcp-registry-py]: `src/py/vertebra/agent/mcp/registry.py` — Unified ToolRegistry implementation.
 [^src-sqlalchemy-dialect-tests]: `src/py/tests/unit/extensions/test_sqlalchemy_vtb_dialects_and_dbapi.py` — SQLAlchemy 2.1 +vtb dialects, types, Alembic, and PEP 249 DBAPI tests.
 [^src-sqlspec-stack-tests]: `src/py/tests/unit/extensions/test_sqlspec_vtb_stacks.py` — SQLSpec StatementStack execution and PostgreSQL/Oracle adapter stack tests.
 [^src-broker-proxy-tests]: `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_broker_proxy.py` — SyncBrokerPool, SQLSpec provider, and Proxy*Driver isolation and cancellation tests.

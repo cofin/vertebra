@@ -328,6 +328,15 @@ def test_public_bundler_facade_config_first_api(tmp_path: Path) -> None:
         result = bundler.build()
         assert isinstance(result, BundleResult)
         assert any(isinstance(out, BundleOutput) and out.path == "main.js" for out in result.outputs)
+        bundler.start_dev()
+        assert bundler.is_dev_mode() is True
+    assert bundler.is_dev_mode() is False
+
+    override_outdir = tmp_path / "dist-override"
+    override_cfg = BundleConfig(entry=str(entry), outdir=str(override_outdir), minify=False, sourcemap=False)
+    override_res = Bundler(bundle_cfg).build(override_cfg)
+    assert override_res.outputs
+    assert (override_outdir / "main.js").is_file()
 
     via_factory = Bundler.from_config(bundle_cfg)
     assert via_factory.build().outputs

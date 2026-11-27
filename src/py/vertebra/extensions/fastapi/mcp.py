@@ -30,7 +30,6 @@ __all__ = (
     "AsgiMCPApp",
     "MCPConfig",
     "MCPCore",
-    "ToolRegistry",
     "PromptController",
     "SkillController",
     "ToolRegistry",

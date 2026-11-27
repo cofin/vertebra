@@ -82,11 +82,11 @@ sources:
 - `SSRPool` pools QuickJS contexts with generation-tagged reloads and bounded render caching, returning `PoolExhausted` immediately when all slots are busy.
 <!-- truth: end -->
 
-[`vertebra-bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs)[^src-vertebra-bundler-src-lib-rs] builds the `_bundler` PyO3 module (`crate-type = ["cdylib", "rlib"]`, `#[pymodule(gil_used = false)]`, module constant `GIL_USED = False`). [`vertebra/_bundler.pyi`](../../../../../src/py/vertebra/_bundler.pyi)[^src-bundler-pyi] declares the stub types for `Bundler`, `BundleConfig`, `BundleDevConfig`, `BundleResult`, `BundleOutput`, `SourceWatcher`, `SSRPool`, `SSRResult`, `IsolatedDeclarationsGenerator`, `minify_css`, and `GIL_USED` as `vertebra._bundler`. When `vertebra._bundler` is unavailable, `BuildOrchestrator._run_bundler` catches `ImportError` (`MissingDependencyError` from `ensure_module`) and delegates to Vite.
+[`vertebra-bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs)[^src-vertebra-bundler-src-lib-rs] builds the `_bundler` PyO3 module (`crate-type = ["cdylib", "rlib"]`, `#[pymodule(gil_used = false)]`, module constant `GIL_USED = False`), re-exported publicly through the lazy [`vertebra.build`](../../../../../src/py/vertebra/build/_bundler.py) facade (`Bundler`, `BundleConfig`, `BundleDevConfig`, `BundleResult`, `BundleOutput`, `SourceWatcher`, `IsolatedDeclarationsGenerator`, `minify_css`). [`vertebra/_bundler.pyi`](../../../../../src/py/vertebra/_bundler.pyi)[^src-bundler-pyi] declares the matching stub types alongside `SSRPool`, `SSRResult`, and `GIL_USED`. When `vertebra._bundler` is unavailable, `BuildOrchestrator._run_bundler` catches `ImportError` (`MissingDependencyError` from `ensure_module`) and delegates to Vite.
 
 ## Single-entry transform (`bundler.rs`, `config.rs`)
 
-`Bundler.build(config)` releases the GIL (`py.detach`) and runs `build_internal`:
+`Bundler(config=None, *, dev_config=None)` (or `Bundler.from_config(config, *, dev_config=None)`) binds production and dev configurations at construction time, exposes `.config`/`.dev_config` getters and context-manager teardown (`__enter__`/`__exit__` calling `stop_dev()`), and runs `build(config=None)` with the GIL released (`py.detach`):
 
 1. Read the entry file only. Imports are not resolved or inlined.
 2. Parse with `oxc_parser`, build scoping with `oxc_semantic::SemanticBuilder`, strip TypeScript/JSX with `oxc_transformer` (`TransformOptions::default()`), and emit with `oxc_codegen` (`CodegenOptions { minify, .. }`).
@@ -94,7 +94,7 @@ sources:
 
 There is no source map output, content hashing, asset manifest, or `oxc_minifier`. `BundleConfig` defaults: `outdir="dist"`, `minify=True`, `sourcemap=False`, `target="es2022"`; `build_internal` reads `entry`, `outdir`, and `minify`.
 
-Other `Bundler` methods: `transform_file(path, source)` (GIL released), `check_file(path, source)` (parse errors), `start_dev(BundleDevConfig)` / `stop_dev()`, `poll_events(timeout_ms=None)`, `notify_type_change(version=None)`, `notify_reload()`, `hmr_url()` (`ws://localhost:{port}/hmr`), and `is_dev_mode()`. `BundleDevConfig` defaults: `watch_dirs=["src"]`, `hmr_port=5173`, `extensions=["ts","tsx","js","jsx"]`, `debounce_ms=100`. Errors map to `BundlerError` (`Io`, `Parse`, `Transform`, `Watcher`, `Ssr`, `PoolExhausted`) and surface in Python as `RuntimeError`.
+Other `Bundler` methods: `transform_file(path, source)` (GIL released), `check_file(path, source)` (parse errors), `start_dev(config=None)` / `stop_dev()`, `poll_events(timeout_ms=None)`, `notify_type_change(version=None)`, `notify_reload()`, `hmr_url()` (`ws://localhost:{port}/hmr`), and `is_dev_mode()`. `BundleDevConfig` defaults: `watch_dirs=["src"]`, `hmr_port=5173`, `extensions=["ts","tsx","js","jsx"]`, `debounce_ms=100`. Errors map to `BundlerError` (`Io`, `Parse`, `Transform`, `Watcher`, `Ssr`, `PoolExhausted`) and surface in Python as `RuntimeError`.
 
 ## File watcher (`hmr.rs`)
 

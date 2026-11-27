@@ -78,7 +78,7 @@ class PlanTree:
                     parent_id=parent.parent_id,
                     depends_on=parent.depends_on,
                     assigned_agent=parent.assigned_agent,
-                    status=parent.status,
+                    status="running" if parent.status == "pending" else parent.status,
                     output=parent.output,
                     children=updated_children,
                     metadata=parent.metadata,
@@ -159,10 +159,10 @@ class PlanTree:
         self._nodes[parent_id] = updated_parent
 
     def ready_nodes(self) -> list[PlanNode]:
-        """Return all pending or ready nodes whose dependencies are all completed."""
+        """Return all pending or ready leaf nodes whose dependencies are all completed."""
         ready: list[PlanNode] = []
         for node in self._nodes.values():
-            if node.status not in ("pending", "ready"):
+            if node.children or node.status not in ("pending", "ready"):
                 continue
             deps_met = True
             for dep_id in node.depends_on:

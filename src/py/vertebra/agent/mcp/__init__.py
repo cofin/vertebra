@@ -124,7 +124,6 @@ __all__ = [
     "MCPConfig",
     "MCPCore",
     "MCPHttpHandler",
-    "ToolRegistry",
     "MCPSession",
     "MCPSessionStore",
     "MCPSkillsConfig",
