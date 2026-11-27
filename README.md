@@ -16,7 +16,7 @@
 > [!WARNING]
 > Vertebra is experimental software. APIs and behavior may change without notice, and this project may be archived at any time.
 
-Vertebra combines a Rust HTTP server, a typed Python web framework, database and object storage drivers, a frontend bundler, and a TypeScript client in one package.
+Vertebra combines a Rust HTTP server, a typed Python web framework, database and object storage drivers, a frontend bundler, and a TypeScript client in one package. Serve existing ASGI, WSGI, or RSGI apps (Litestar, FastAPI, Starlette, Flask, Django) directly and adopt compiled routing, Rust middleware offload, native drivers, and shared-memory worker pools gradually.
 
 ## Install
 
@@ -24,24 +24,25 @@ Vertebra combines a Rust HTTP server, a typed Python web framework, database and
 uv add vertebra-core
 ```
 
-Or with `pip`:
+Add optional extras (such as `[postgres]`, `[storage]`, or `[litestar]`) as needed — see the [installation guide](https://cofin.github.io/vertebra/getting-started/installation/) for the full list.
+
+## Run an Existing App
+
+Serve an existing Litestar, FastAPI, Starlette, Flask, or Django app directly:
 
 ```bash
-pip install vertebra-core
+vtb run myapp:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-Add optional extras for databases, object storage, frontend bundling, or framework integrations:
+Upgrade gradually by enabling framework plugins for compiled routing and Rust middleware offload (CORS, compression, static files), or mount existing and native apps side by side to migrate route by route:
 
 ```bash
-uv add "vertebra-core[postgres]"
-uv add "vertebra-core[storage,bundler]"
+vtb run api:app --mount /legacy=legacy_app:app --workers 4
 ```
-
-Available native extras: `bigquery`, `bundler`, `duckdb`, `mssql`, `mysql`, `oracle`, `postgres`, `redis`, `spanner`, `sqlite`, `storage`, `valkey`.
 
 ## Quickstart
 
-Create `app.py`:
+Create a native `app.py`:
 
 ```python
 import msgspec
@@ -66,28 +67,24 @@ def create_item(body: Item) -> Item:
     return body
 ```
 
-Run the development server with live reload:
+Run the development server with live reload, or run across multiple workers in production:
 
 ```bash
 vtb dev app:app --port 8000
-```
-
-Run in production across multiple workers:
-
-```bash
 vtb run app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
 ## Features
 
 ### Web Framework & HTTP Server
+- **Run existing apps & upgrade gradually**: Serve existing Litestar, Starlette, FastAPI, Flask, or Django apps via ASGI, WSGI, or RSGI with `vtb run`, attach framework plugins for compiled routing and Rust middleware offload, or mount native and existing apps together with `--mount` and `App.mount`.
+- **Cooperative multiprocessing & scaling**: Runs in-process by default, scales across cooperative worker processes over shared memory on standard Python — sharing bounded database connection pools through the shared-memory broker, compiled statement caches, pub/sub rings, and local embedding batches across workers — and scales across threads on free-threaded Python (`3.14t`/`3.15t`).
 - **Typed Python APIs**: Define routes, controllers, RPC procedures, dependency injection, and `msgspec.Struct` request/response models.
 - **Protocols**: HTTP/1.1, HTTP/2, HTTP/3, TLS, compression, static files, WebSockets, Server-Sent Events, and gRPC.
-- **Existing frameworks**: Run native Vertebra apps or existing ASGI, WSGI, and RSGI apps (Litestar, Starlette, FastAPI, Flask, Django) with `vtb run`.
-- **Worker scaling**: Runs in-process by default, scales across shared-memory worker processes on standard Python, and scales across threads on free-threaded Python.
 
 ### Databases & Caching
 - **Sync & async drivers**: PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB, BigQuery, Spanner, Redis, and Valkey.
+- **Shared-memory connection broker**: Share bounded connection pools, compiled statement caches, and crash-safe lease reclamation across worker processes (`vtb broker serve`, `?broker=true`, and SQLSpec `Proxy*Config`).
 - **Pipelines & analytics**: Statement pipelining, Arrow results, DataFusion queries, change feeds, and Cloud SQL, AlloyDB, AWS RDS, and Azure Entra dialers.
 - **ORM & SQL integrations**: Drop-in support for SQLSpec, SQLAlchemy, Advanced Alchemy, and Django database backends.
 
@@ -113,7 +110,8 @@ vtb run app:app --host 0.0.0.0 --port 8000 --workers 4
 ```bash
 vtb init my-project          # Scaffold a new project
 vtb dev app:app              # Run with live reload
-vtb run app:app --workers 4  # Run the production server
+vtb run app:app --workers 4  # Run a native or ASGI/WSGI/RSGI app
+vtb broker serve             # Run the shared-memory DB connection broker
 vtb workers run              # Run background queue workers
 vtb js build                 # Bundle frontend assets
 vtb js generate-types        # Generate TypeScript/Zod types from routes

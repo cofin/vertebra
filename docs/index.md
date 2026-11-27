@@ -80,7 +80,8 @@ vtb run app:app --host 127.0.0.1 --port 8000
 | Area | What's included |
 | --- | --- |
 | **HTTP server** | HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSockets, SSE, TLS, compression, and static files in Rust. |
-| **Workers & scaling** | Runs in-process by default and scales across worker processes over shared memory on standard Python, or across threads on free-threaded Python. |
+| **Existing apps & gradual adoption** | Serve existing Litestar, FastAPI, Starlette, Flask, and Django apps via ASGI, WSGI, or RSGI with `vtb run`, offload routing and middleware to Rust, and mount apps side by side with `--mount`. |
+| **Cooperative multiprocessing** | Runs in-process by default, scales across worker processes over shared memory with shared connection broker pools, statement caches, and pub/sub rings on standard Python, and scales across threads on free-threaded Python. |
 | **Databases & analytics** | Sync and async drivers for PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB, BigQuery, Spanner, Redis, and Valkey, with pipelining, cloud IAM dialers, change feeds, and Arrow/DataFusion support. |
 | **Object storage** | One sync and async API for S3, GCS, Azure Blob, Cloudflare R2, OCI, HTTP, local files, and in-memory stores, with streaming, presigned URLs, and Parquet range reads. |
 | **Frontend & SSR** | Built-in TypeScript/JSX bundler, QuickJS server-side rendering, Inertia, HTMX, and a bundled TypeScript client with schema codegen. |
