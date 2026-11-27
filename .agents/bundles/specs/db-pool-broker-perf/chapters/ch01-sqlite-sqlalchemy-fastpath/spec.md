@@ -5,7 +5,7 @@ chapter_id: ch01-sqlite-sqlalchemy-fastpath
 title: SQLite SQLAlchemy Fastpath and Direct WorkerSlot Execution
 description: Skip implicit BEGIN IMMEDIATE on read-only SQLite lazy_begin queries, default max_readers=0 for SQLAlchemy SQLite dialects, and eliminate dead mpsc::channel allocations in SqlitePool.
 status: stable
-state: planned
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 planning_status: complete
@@ -14,8 +14,8 @@ replan_trigger: null
 plan_revision: 2
 plan_commit: "16ccb56e"
 current_task: null
-last_verified_checkpoint: null
-last_reviewed_commit: null
+last_verified_checkpoint: "b14aa2c3"
+last_reviewed_commit: "b14aa2c3"
 generated:
   by: flow/0.26.0
   at: "2026-11-27T18:30:00Z"
@@ -153,9 +153,9 @@ class _SQLiteDialectMixin:
 
 ## 5. Implementation Plan
 
-- [ ] t01 — Skip `BEGIN IMMEDIATE` on read-only `lazy_begin` SQL and replace `mpsc::channel()` in `SqlitePool` (`tasks/t01-sqlite-lazy-begin-and-direct-slot.md`)
-- [ ] t02 — Default `max_readers=0` in SQLAlchemy SQLite `+vtb` / `+vtb_async` dialects (`tasks/t02-sqlalchemy-sqlite-max-readers.md`)
-- [ ] t03 — Add Rust and Python concurrency and transaction regression tests (`tasks/t03-sqlite-fastpath-tests.md`)
+- [x] [b14aa2c3] t01 — Skip `BEGIN IMMEDIATE` on read-only `lazy_begin` SQL and replace `mpsc::channel()` in `SqlitePool` (`tasks/t01-sqlite-lazy-begin-and-direct-slot.md`)
+- [x] [66a8acf6] t02 — Default `max_readers=0` in SQLAlchemy SQLite `+vtb` / `+vtb_async` dialects (`tasks/t02-sqlalchemy-sqlite-max-readers.md`)
+- [x] [0fa384d3] t03 — Add Rust and Python concurrency and transaction regression tests (`tasks/t03-sqlite-fastpath-tests.md`)
 
 ### Chapter / Phase Recovery Checkpoint
 
@@ -165,8 +165,8 @@ make dev-ext EXT=sqlite && cargo test -p vertebra-sqlite && uv run --no-sync pyt
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Chapter State**: `planned` (`0/3` tasks complete).
-- **Next Task**: `t01`.
+- **Chapter State**: `completed` (`3/3` tasks complete, reviewed `APPROVE` at `b14aa2c3`).
+- **Next Task**: None.
 
 [^src-sqlite-py-client]: `src/rs/vertebra-sqlite/src/py_client.rs::AsyncSQLiteCursor` — SyncSQLiteCursor and AsyncSQLiteCursor lazy_begin logic.
 [^src-sqlite-worker]: `src/rs/vertebra-sqlite/src/worker.rs::SqlitePool` — SqlitePool WorkerSlot execution and statement_facts cache.

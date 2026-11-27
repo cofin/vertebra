@@ -5,7 +5,7 @@ chapter_id: ch01-sqlite-sqlalchemy-fastpath
 title: Add SQLite lazy_begin read-concurrency and SQLAlchemy pool regression tests
 description: Add Python regression tests verifying read-only lazy_begin concurrency without write locks, read-then-write SQLAlchemy sessions without SQLITE_BUSY, and max_readers=0 pool slot isolation.
 status: stable
-state: pending
+state: completed
 priority: high
 verification_strategy: regression_tdd
 worksheet_format: compact
@@ -24,7 +24,7 @@ tests:
 estimated_loc: 120
 plan_revision: 2
 plan_commit: "16ccb56e"
-commit: null
+commit: "0fa384d3"
 sources:
   - id: src-sqlite-tests
     resource: src/py/tests/unit/db/test_sqlite_driver.py

@@ -5,7 +5,7 @@ chapter_id: ch02-async-shm-broker-contention
 title: Lock-Free Async SHM Broker Waiter Queue and Single-Waiter Futex Wake
 description: Replace wake_all thundering herds with single-waiter futex wakeups, expose LeaseBroker.wait_for_wake_async over Tokio, and replace SyncPool contention in AsyncSHMBrokerTransport with per-loop local handoff and a single leader watcher.
 status: stable
-state: planned
+state: active
 planning_quality: standard
 planning_degraded_reason: null
 planning_status: complete
@@ -13,7 +13,7 @@ depends_on_chapters: []
 replan_trigger: null
 plan_revision: 2
 plan_commit: "16ccb56e"
-current_task: null
+current_task: t04
 last_verified_checkpoint: null
 last_reviewed_commit: null
 generated:
@@ -157,7 +157,7 @@ make dev-ext EXT=core && cargo test -p vertebra-core broker && cargo test -p ver
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Chapter State**: `planned` (`0/3` tasks complete).
+- **Chapter State**: `active` (`0/3` tasks complete).
 - **Next Task**: `t04`.
 
 [^src-core-broker]: `src/rs/vertebra-core/src/broker.rs::ShmLeaseTable` — ShmLeaseTable CAS acquire, release, and futex wake logic.

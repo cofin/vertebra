@@ -5,7 +5,7 @@ chapter_id: ch01-sqlite-sqlalchemy-fastpath
 title: Default max_readers=0 in SQLAlchemy SQLite dialects
 description: Override create_connect_args on _SQLiteDialectMixin so SQLAlchemy-pooled SQLite +vtb and +vtb_async connections open one physical connection per pool slot unless max_readers is explicitly configured.
 status: stable
-state: pending
+state: completed
 priority: high
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -21,7 +21,7 @@ tests:
 estimated_loc: 35
 plan_revision: 2
 plan_commit: "16ccb56e"
-commit: null
+commit: "66a8acf6"
 sources:
   - id: src-sa-sqlite-dialect
     resource: src/py/vertebra/extensions/sqlalchemy/dialects/sqlite.py::_SQLiteDialectMixin

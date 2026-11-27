@@ -5,7 +5,7 @@ chapter_id: ch01-sqlite-sqlalchemy-fastpath
 title: Skip BEGIN IMMEDIATE on read-only lazy_begin and remove dead SqlitePool channels
 description: Update SyncSQLiteCursor and AsyncSQLiteCursor to skip implicit BEGIN IMMEDIATE for read-only statements and replace WorkerSlot mpsc channels with direct locked execution.
 status: stable
-state: pending
+state: completed
 priority: high
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -21,7 +21,7 @@ tests:
 estimated_loc: 180
 plan_revision: 2
 plan_commit: "16ccb56e"
-commit: null
+commit: "b14aa2c3"
 sources:
   - id: src-sqlite-py-client
     resource: src/rs/vertebra-sqlite/src/py_client.rs::AsyncSQLiteCursor
