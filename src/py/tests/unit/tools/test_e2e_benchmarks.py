@@ -8,7 +8,7 @@ import socket
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from click.testing import CliRunner
@@ -705,6 +705,7 @@ def test_data_backend_validation_postgres_dsn_and_broker_pool_checkout(tmp_path:
         ("vtb-data-sqlspec-shm-4w-broker", "data", "sqlspec", "sqlspec", "vertebra", "shm_broker"),
         ("vtb-data-aa-native-4w", "data", "advanced_alchemy", "advanced_alchemy", "vertebra", "per_worker"),
         ("vtb-data-aa-shm-4w-broker", "data", "advanced_alchemy", "advanced_alchemy", "vertebra", "shm_broker"),
+        ("granian-rsgi-data-stdlib", "baseline", "stdlib", "stdlib", "upstream", "per_worker"),
         ("granian-asgi-data-stdlib", "baseline", "stdlib", "stdlib", "upstream", "per_worker"),
         ("granian-asgi-data-sqlspec", "baseline", "sqlspec-upstream", "sqlspec", "upstream", "per_worker"),
         ("granian-asgi-data-aa", "baseline", "advanced_alchemy-vanilla", "advanced_alchemy", "upstream", "per_worker"),
@@ -750,3 +751,176 @@ def test_http_data_ports_unique_and_shm_broker_dsn_guard() -> None:
     )
     assert apply_shm_broker_dsn("/tmp/world.db", broker_mode="shm_broker") == "/tmp/world.db"
     assert apply_shm_broker_dsn(":memory:", broker_mode="shm_broker") == ":memory:"
+
+
+def test_granian_rsgi_data_stdlib_target_registered() -> None:
+    """Verify granian-rsgi-data-stdlib is registered on port 8170 with RSGI upstream stdlib metadata."""
+    assert "granian-rsgi-data-stdlib" in ALL_TARGETS
+    assert "granian-rsgi-data-stdlib" in DATA_BASELINE_TARGETS
+    target = ALL_TARGETS["granian-rsgi-data-stdlib"]
+    assert target.port == 8170
+    assert target.transport == "rsgi"
+    assert target.adapter == "stdlib"
+    assert "--interface" in target.cmd
+    assert "rsgi" in target.cmd
+    assert "tools.benchmarks.apps.data_rsgi:rsgi_app" in target.cmd
+
+
+def test_native_postgres_world_driver_single_checkout_and_single_lease_per_batch() -> None:
+    """Verify fetch_worlds_async and update_worlds_async acquire one pool client and one broker lease per call."""
+    events: list[str] = []
+    updated_order: list[tuple[int, int]] = []
+
+    class _FakeLease:
+        def release_sync(self) -> None:
+            events.append("lease.release")
+
+    class _FakeBroker:
+        async def acquire(self, *, bind_key: str = "default") -> _FakeLease:
+            events.append(f"lease.acquire:{bind_key}")
+            return _FakeLease()
+
+    class _FakeClient:
+        async def fetch_dicts(self, _sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+            row_id = int(params[0])
+            events.append(f"select:{row_id}")
+            return [{"id": row_id, "randomnumber": row_id * 10}]
+
+        async def execute_dml(self, _sql: str, params: tuple[Any, ...]) -> tuple[int, None]:
+            new_val, row_id = int(params[0]), int(params[1])
+            updated_order.append((row_id, new_val))
+            events.append(f"update:{row_id}={new_val}")
+            return (1, None)
+
+        async def begin(self) -> None:
+            events.append("tx.begin")
+
+        async def commit(self) -> None:
+            events.append("tx.commit")
+
+        async def rollback(self) -> None:
+            events.append("tx.rollback")
+
+        async def close(self) -> None:
+            events.append("client.close")
+
+    class _FakePool:
+        async def acquire(self) -> _FakeClient:
+            events.append("pool.acquire")
+            return _FakeClient()
+
+    class _FakeDriver:
+        def __init__(self) -> None:
+            self.pool = _FakePool()
+
+    world_driver = NativePostgresWorldDriver(
+        DataBackendConfig(
+            db_backend="postgres",
+            db_dsn="postgresql://postgres:bench@127.0.0.1:5432/bench",
+            broker_mode="per_worker",
+        ),
+        pool_size=4,
+    )
+    world_driver.async_broker = cast("Any", _FakeBroker())
+    world_driver._seeded = True
+    fake_driver = _FakeDriver()
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        world_driver._async_drivers[loop] = cast("Any", fake_driver)
+
+        rows = await world_driver.fetch_worlds_async([1, 2, 3])
+        assert [row.id for row in rows] == [1, 2, 3]
+        assert events.count("lease.acquire:default") == 1
+        assert events.count("pool.acquire") == 1
+        assert events.count("client.close") == 1
+        assert events.count("lease.release") == 1
+
+        events.clear()
+        updated = await world_driver.update_worlds_async([(5, 10), (2, 20)])
+        assert updated == [WorldRow(id=5, randomNumber=10), WorldRow(id=2, randomNumber=20)]
+        assert updated_order == [(2, 20), (5, 10)]
+        assert events == [
+            "lease.acquire:default",
+            "pool.acquire",
+            "tx.begin",
+            "select:2",
+            "update:2=20",
+            "select:5",
+            "update:5=10",
+            "tx.commit",
+            "client.close",
+            "lease.release",
+        ]
+
+    asyncio.run(_run())
+
+
+def test_native_postgres_world_driver_update_rollback_releases_lease_on_error() -> None:
+    """Verify update_worlds_async rolls back, closes the client, and releases the broker lease on failure."""
+    events: list[str] = []
+
+    class _FakeLease:
+        def release_sync(self) -> None:
+            events.append("lease.release")
+
+    class _FakeBroker:
+        async def acquire(self, *, bind_key: str = "default") -> _FakeLease:
+            events.append(f"lease.acquire:{bind_key}")
+            return _FakeLease()
+
+    class _FailingClient:
+        async def fetch_dicts(self, _sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+            return [{"id": int(params[0]), "randomnumber": 1}]
+
+        async def execute_dml(self, _sql: str, _params: tuple[Any, ...]) -> tuple[int, None]:
+            raise RuntimeError("simulated update failure")
+
+        async def begin(self) -> None:
+            events.append("tx.begin")
+
+        async def commit(self) -> None:
+            events.append("tx.commit")
+
+        async def rollback(self) -> None:
+            events.append("tx.rollback")
+
+        async def close(self) -> None:
+            events.append("client.close")
+
+    class _FakePool:
+        async def acquire(self) -> _FailingClient:
+            events.append("pool.acquire")
+            return _FailingClient()
+
+    class _FakeDriver:
+        def __init__(self) -> None:
+            self.pool = _FakePool()
+
+    world_driver = NativePostgresWorldDriver(
+        DataBackendConfig(
+            db_backend="postgres",
+            db_dsn="postgresql://postgres:bench@127.0.0.1:5432/bench",
+            broker_mode="per_worker",
+        ),
+        pool_size=4,
+    )
+    world_driver.async_broker = cast("Any", _FakeBroker())
+    world_driver._seeded = True
+    fake_driver = _FakeDriver()
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        world_driver._async_drivers[loop] = cast("Any", fake_driver)
+        with pytest.raises(RuntimeError, match="simulated update failure"):
+            await world_driver.update_worlds_async([(5, 10), (2, 20)])
+
+    asyncio.run(_run())
+    assert events == [
+        "lease.acquire:default",
+        "pool.acquire",
+        "tx.begin",
+        "tx.rollback",
+        "client.close",
+        "lease.release",
+    ]

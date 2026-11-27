@@ -1003,6 +1003,17 @@ ALL_TARGETS: dict[str, Target] = dict(
             extra_env={"VTB_BENCH_DB_ADAPTER": "advanced_alchemy", "VTB_BENCH_DB_ADAPTER_FLAVOR": "vertebra"},
         ),
         _granian_data(
+            "granian-rsgi-data-stdlib",
+            "tools.benchmarks.apps.data_rsgi:rsgi_app",
+            8170,
+            "rsgi",
+            "Granian RSGI data baseline (stdlib drivers)",
+            factory=False,
+            category="data-baseline",
+            adapter="stdlib",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "stdlib", "VTB_BENCH_DB_ADAPTER_FLAVOR": "upstream"},
+        ),
+        _granian_data(
             "granian-asgi-data-stdlib",
             "tools.benchmarks.apps.data_asgi:asgi_app",
             8164,

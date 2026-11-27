@@ -13,9 +13,11 @@ import os
 import sqlite3
 import threading
 import weakref
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, Final, Protocol
 from urllib.parse import urlsplit
+
+from anyio import CancelScope
 
 from tools.benchmarks.apps._data_backend import (
     WORLD_ROW_COUNT,
@@ -689,11 +691,34 @@ class NativePostgresWorldDriver:
             if existing is not None:
                 return existing
             driver = AsyncPostgreSQLDriver(self.async_pg_config)
+            await driver.connect()
             if not self._seeded:
                 await _seed_pg_native_async(driver)
                 self._seeded = True
             self._async_drivers[loop] = driver
             return driver
+
+    @contextlib.asynccontextmanager
+    async def _checkout_async_client(self, driver: AsyncPostgreSQLDriver) -> AsyncIterator[Any]:
+        """Acquire one physical pooled client and at most one SHM broker lease for a multi-query request."""
+        lease: Any = None
+        if self.async_broker is not None:
+            lease = await self.async_broker.acquire(bind_key="default")
+        client: Any = None
+        try:
+            client = await driver.pool.acquire()
+            yield client
+        finally:
+            if client is not None:
+                with CancelScope(shield=True), contextlib.suppress(Exception):
+                    await client.close()
+            if lease is not None:
+                with CancelScope(shield=True), contextlib.suppress(Exception):
+                    release_sync = getattr(lease, "release_sync", None)
+                    if callable(release_sync):
+                        release_sync()
+                    else:
+                        await lease.release()
 
     def fetch_world_sync(self, row_id: int) -> WorldRow:
         driver = self._ensure_sync_driver()
@@ -723,19 +748,27 @@ class NativePostgresWorldDriver:
     async def fetch_worlds_async(self, row_ids: list[int]) -> list[WorldRow]:
         driver = await self._ensure_async_driver()
         rows: list[WorldRow] = []
-        for row_id in row_ids:
-            rec = await driver.select_one(_PG_SELECT_WORLD_DOLLAR_SQL, (row_id,))
-            rows.append(record_to_world_row(rec, row_id))
+        async with self._checkout_async_client(driver) as client:
+            for row_id in row_ids:
+                recs = await client.fetch_dicts(_PG_SELECT_WORLD_DOLLAR_SQL, (row_id,))
+                rows.append(record_to_world_row(recs[0] if recs else None, row_id))
         return rows
 
     async def update_worlds_async(self, updates: list[tuple[int, int]]) -> list[WorldRow]:
         driver = await self._ensure_async_driver()
-        updated: list[WorldRow] = []
-        for row_id, new_value in updates:
-            _ = await driver.select_one(_PG_SELECT_WORLD_DOLLAR_SQL, (row_id,))
-            await driver.execute(_PG_UPDATE_WORLD_DOLLAR_SQL, (new_value, row_id))
-            updated.append(WorldRow(id=row_id, randomNumber=new_value))
-        return updated
+        sorted_updates = sorted(updates, key=lambda pair: pair[0])
+        async with self._checkout_async_client(driver) as client:
+            await client.begin()
+            try:
+                for row_id, new_value in sorted_updates:
+                    _ = await client.fetch_dicts(_PG_SELECT_WORLD_DOLLAR_SQL, (row_id,))
+                    await client.execute_dml(_PG_UPDATE_WORLD_DOLLAR_SQL, (new_value, row_id))
+                await client.commit()
+            except BaseException:
+                with CancelScope(shield=True), contextlib.suppress(Exception):
+                    await client.rollback()
+                raise
+        return [WorldRow(id=row_id, randomNumber=new_value) for row_id, new_value in updates]
 
     def close(self) -> None:
         with self._sync_lock:
@@ -900,13 +933,12 @@ class StdlibPostgresWorldDriver:
     async def update_worlds_async(self, updates: list[tuple[int, int]]) -> list[WorldRow]:
         await ensure_task_context()
         pool = await self._ensure_async_pool()
-        updated: list[WorldRow] = []
+        sorted_updates = sorted(updates, key=lambda pair: pair[0])
         async with pool.acquire() as conn, conn.transaction():
-            for row_id, new_value in updates:
+            for row_id, new_value in sorted_updates:
                 _ = await conn.fetchrow(_PG_SELECT_WORLD_DOLLAR_SQL, row_id)
                 await conn.execute(_PG_UPDATE_WORLD_DOLLAR_SQL, new_value, row_id)
-                updated.append(WorldRow(id=row_id, randomNumber=new_value))
-        return updated
+        return [WorldRow(id=row_id, randomNumber=new_value) for row_id, new_value in updates]
 
     def close(self) -> None:
         with self._sync_lock:
