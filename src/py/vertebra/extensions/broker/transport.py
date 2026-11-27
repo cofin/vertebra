@@ -1604,20 +1604,20 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         return lease
 
     async def release(self, lease_id: str) -> bool:
-        """Release an acquired connection lease asynchronously."""
-        return await SyncPool.default().submit_async(self._release_impl, lease_id)
+        """Release an acquired connection lease asynchronously without blocking on SyncPool waiters."""
+        return self._release_impl(lease_id)
 
     async def quarantine(self, target: _BaseConnectionLease | str | tuple[int, int]) -> None:
-        """Move an active lease into quarantine asynchronously."""
-        await SyncPool.default().submit_async(self._quarantine_impl, target)
+        """Move an active lease into quarantine asynchronously without blocking on SyncPool waiters."""
+        self._quarantine_impl(target)
 
     async def dispose_quarantined(
         self,
         target: _BaseConnectionLease | int | tuple[int, int],
         generation: int | None = None,
     ) -> None:
-        """Return a quarantined slot back to the free pool asynchronously."""
-        await SyncPool.default().submit_async(self._dispose_quarantined_impl, target, generation)
+        """Return a quarantined slot back to the free pool asynchronously without blocking on SyncPool waiters."""
+        self._dispose_quarantined_impl(target, generation)
 
     def quarantined_count(self) -> int:
         """Return count of currently quarantined connection slots."""

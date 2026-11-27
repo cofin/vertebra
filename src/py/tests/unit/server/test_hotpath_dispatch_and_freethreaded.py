@@ -586,6 +586,7 @@ def test_worker_native_only_async_error_passes_request_to_custom_error_handler(
 ) -> None:
     """Verify native_only passes the real Request to custom error_handler when an async route raises."""
     import vertebra.server.worker as worker_mod
+    from vertebra._vertebra import Response
 
     seen_paths: list[str] = []
     submitted: list[Any] = []
@@ -597,7 +598,7 @@ def test_worker_native_only_async_error_passes_request_to_custom_error_handler(
     def custom_error_handler(request: Any, exc: Exception) -> Any:
         del exc
         seen_paths.append(request.path)
-        return worker_mod.Response(status=418, body=b"handled", request_id=request.request_id)
+        return Response(status=418, body=b"handled", request_id=request.request_id)
 
     monkeypatch.setattr(worker_mod, "submit_response", submitted.append)
     compiled = compile_handler_table({1: boom})

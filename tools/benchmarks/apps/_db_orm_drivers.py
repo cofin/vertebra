@@ -17,6 +17,7 @@ from tools.benchmarks.apps._data_backend import DataBackendConfig, WorldRow
 from tools.benchmarks.apps._db_drivers import (
     POSTGRES_BENCH_INSTALL_HINT,
     WorldDriver,
+    ensure_task_context,
     normalize_sqlite_target,
     record_to_world_row,
     require_postgres_dsn,
@@ -52,7 +53,7 @@ _PG_CREATE_WORLD_SQL: Final[str] = (
 )
 _PG_SEED_WORLD_SQL: Final[str] = (
     "INSERT INTO world (id, randomnumber) "
-    "SELECT g, ((g * 1103515245 + 12345) % 10000) + 1 "
+    "SELECT g, ((g::BIGINT * 1103515245 + 12345) % 10000)::INT + 1 "
     "FROM generate_series(1, 10000) AS g "
     "ON CONFLICT (id) DO NOTHING"
 )
@@ -225,7 +226,7 @@ class SQLSpecWorldDriver:
             if pg_mod is None:
                 msg = "vertebra.extensions.sqlspec.adapters.postgres is required for Vertebra SQLSpec PostgreSQL"
                 raise RuntimeError(msg)
-            broker = resolve_benchmark_broker(self.config.broker_mode, pool_size=self.pool_size)
+            _, async_broker = resolve_broker_transports(self.config.broker_mode, pool_size=self.pool_size)
             return pg_mod.PostgresAsyncConfig(
                 connection_config={
                     "dsn": self.db_target,
@@ -233,7 +234,7 @@ class SQLSpecWorldDriver:
                     "max_size": self.pool_size,
                 },
                 share_pool=self.share_pool,
-                broker=broker,
+                broker=async_broker,
             )
 
         if import_optional("asyncpg") is None:
@@ -515,6 +516,8 @@ class AdvancedAlchemyWorldDriver:
             assert sa_orm is not None
             url = rewrite_sqlalchemy_url(self.backend, self.db_target, flavor=self.flavor, is_async=False)
             engine_kwargs: dict[str, Any] = {}
+            if self.flavor == "vertebra":
+                engine_kwargs["connect_args"] = {"share_pool": False}
             if self.use_broker_pool:
                 vtb_pool = import_optional("vertebra.extensions.sqlalchemy.pool")
                 assert vtb_pool is not None
@@ -525,7 +528,7 @@ class AdvancedAlchemyWorldDriver:
                     url=url,
                 )
                 engine_kwargs["pool_size"] = self.pool_size
-            elif not self.is_memory and self.backend == "postgres":
+            elif not self.is_memory:
                 engine_kwargs["pool_size"] = self.pool_size
             self._sync_engine = self._sa.create_engine(url, **engine_kwargs)
             if self.is_memory:
@@ -563,6 +566,8 @@ class AdvancedAlchemyWorldDriver:
             assert sa_async is not None
             url = rewrite_sqlalchemy_url(self.backend, self.db_target, flavor=self.flavor, is_async=True)
             engine_kwargs: dict[str, Any] = {}
+            if self.flavor == "vertebra":
+                engine_kwargs["connect_args"] = {"share_pool": False}
             if self.use_broker_pool:
                 vtb_pool = import_optional("vertebra.extensions.sqlalchemy.pool")
                 assert vtb_pool is not None
@@ -573,7 +578,7 @@ class AdvancedAlchemyWorldDriver:
                     url=url,
                 )
                 engine_kwargs["pool_size"] = self.pool_size
-            elif not self.is_memory and self.backend == "postgres":
+            elif not self.is_memory:
                 engine_kwargs["pool_size"] = self.pool_size
             engine = sa_async.create_async_engine(url, **engine_kwargs)
             if self.is_memory:
@@ -611,6 +616,7 @@ class AdvancedAlchemyWorldDriver:
         return updated
 
     async def fetch_world_async(self, row_id: int) -> WorldRow:
+        await ensure_task_context()
         session_factory = await self._ensure_async_sessionmaker()
         async with session_factory() as session:
             service = self._async_service_cls(session=session)
@@ -618,6 +624,7 @@ class AdvancedAlchemyWorldDriver:
             return record_to_world_row(model, row_id)
 
     async def fetch_worlds_async(self, row_ids: list[int]) -> list[WorldRow]:
+        await ensure_task_context()
         session_factory = await self._ensure_async_sessionmaker()
         rows: list[WorldRow] = []
         async with session_factory() as session:
@@ -628,6 +635,7 @@ class AdvancedAlchemyWorldDriver:
         return rows
 
     async def update_worlds_async(self, updates: list[tuple[int, int]]) -> list[WorldRow]:
+        await ensure_task_context()
         session_factory = await self._ensure_async_sessionmaker()
         updated: list[WorldRow] = []
         async with session_factory() as session:

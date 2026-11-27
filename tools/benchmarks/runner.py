@@ -99,8 +99,11 @@ class BrokerHostHook:
             if broker_mod is None:
                 msg = "vertebra.extensions.broker is required when host_factory is not provided"
                 raise ImportError(msg)
+            broker_shm_name = (
+                self.config.shm_name if self.config.shm_name.startswith("/") else f"/{self.config.shm_name}"
+            )
             broker_config = broker_mod.BrokerConfig(
-                shm_name=self.config.shm_name,
+                shm_name=broker_shm_name,
                 pool_size=self.config.pool_size,
                 max_overflow=self.config.max_overflow,
                 lease_ttl_ms=self.config.lease_ttl_ms,

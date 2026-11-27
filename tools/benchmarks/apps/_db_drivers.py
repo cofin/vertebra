@@ -44,6 +44,7 @@ __all__ = (
     "POSTGRES_BENCH_INSTALL_HINT",
     "WorldDriver",
     "build_world_driver",
+    "ensure_task_context",
     "is_postgres_dsn",
     "normalize_sqlite_target",
     "record_to_world_row",
@@ -72,7 +73,7 @@ _PG_CREATE_WORLD_SQL: Final[str] = (
 )
 _PG_SEED_WORLD_SQL: Final[str] = (
     "INSERT INTO world (id, randomnumber) "
-    "SELECT g, ((g * 1103515245 + 12345) % 10000) + 1 "
+    "SELECT g, ((g::BIGINT * 1103515245 + 12345) % 10000)::INT + 1 "
     "FROM generate_series(1, 10000) AS g "
     "ON CONFLICT (id) DO NOTHING"
 )
@@ -116,6 +117,16 @@ class WorldDriver(Protocol):
     async def aclose(self) -> None:
         """Asynchronously release pooled connections and synchronous handles."""
         ...
+
+
+async def ensure_task_context() -> None:
+    """Yield once when stepped synchronously outside an ``asyncio.Task`` (e.g. ``PyIter_Send``).
+
+    Required before awaiting libraries such as SQLAlchemy ``AsyncAdaptedQueuePool`` or
+    ``asyncpg`` that invoke ``asyncio.timeout()`` internally.
+    """
+    if asyncio.current_task() is None:
+        await asyncio.sleep(0)
 
 
 def is_postgres_dsn(dsn: str) -> bool:
@@ -184,6 +195,24 @@ def record_to_world_row(record: Any, fallback_id: int) -> WorldRow:
     )
 
 
+def _worker_broker_config(shm_name: str, *, pool_size: int) -> BrokerConfig:
+    """Build a worker-role ``BrokerConfig`` aligned with ``BrokerHostHook`` env vars."""
+    normalized_name = shm_name if shm_name.startswith("/") else f"/{shm_name}"
+    raw_overflow = os.environ.get("VERTEBRA_BROKER_MAX_OVERFLOW", "0").strip()
+    try:
+        max_overflow = max(0, int(raw_overflow))
+    except ValueError:
+        max_overflow = 0
+    return BrokerConfig(
+        shm_name=normalized_name,
+        role="worker",
+        pool_size=max(1, pool_size),
+        max_overflow=max_overflow,
+        socket_path=os.environ.get("VERTEBRA_BROKER_SOCKET") or None,
+        attach_secret=os.environ.get("VERTEBRA_BROKER_SECRET") or None,
+    )
+
+
 def resolve_benchmark_broker(broker_mode: str, *, pool_size: int = 40) -> Any:
     """Resolve a sync-capable SHM broker handle when ``broker_mode == 'shm_broker'``."""
     if broker_mode.strip().lower() != "shm_broker":
@@ -191,14 +220,7 @@ def resolve_benchmark_broker(broker_mode: str, *, pool_size: int = 40) -> Any:
     shm_name = os.environ.get("VERTEBRA_BROKER_SHM", "").strip()
     shm_fd = os.environ.get("VERTEBRA_BROKER_SHM_FD", "").strip()
     if shm_name and not shm_fd:
-        broker_cfg = BrokerConfig(
-            shm_name=shm_name,
-            role="worker",
-            pool_size=max(1, pool_size),
-            socket_path=os.environ.get("VERTEBRA_BROKER_SOCKET") or None,
-            attach_secret=os.environ.get("VERTEBRA_BROKER_SECRET") or None,
-        )
-        return SyncSHMBrokerTransport(broker_cfg)
+        return SyncSHMBrokerTransport(_worker_broker_config(shm_name, pool_size=pool_size))
     return DatabaseRegistry.default_broker(pool_size=max(1, pool_size))
 
 
@@ -213,13 +235,7 @@ def resolve_broker_transports(
     shm_name = os.environ.get("VERTEBRA_BROKER_SHM", "").strip()
     shm_fd = os.environ.get("VERTEBRA_BROKER_SHM_FD", "").strip()
     if shm_name and not shm_fd:
-        broker_cfg = BrokerConfig(
-            shm_name=shm_name,
-            role="worker",
-            pool_size=max(1, pool_size),
-            socket_path=os.environ.get("VERTEBRA_BROKER_SOCKET") or None,
-            attach_secret=os.environ.get("VERTEBRA_BROKER_SECRET") or None,
-        )
+        broker_cfg = _worker_broker_config(shm_name, pool_size=pool_size)
         return SyncSHMBrokerTransport(broker_cfg), AsyncSHMBrokerTransport(broker_cfg)
     native_broker = DatabaseRegistry.default_broker(pool_size=max(1, pool_size))
     return (
@@ -555,12 +571,20 @@ class NativePostgresWorldDriver:
     def __init__(self, config: DataBackendConfig, *, pool_size: int) -> None:
         self.dsn = require_postgres_dsn(config.db_dsn)
         self.pool_size = max(1, pool_size)
-        self.broker = resolve_benchmark_broker(config.broker_mode, pool_size=self.pool_size)
+        sync_broker, async_broker = resolve_broker_transports(config.broker_mode, pool_size=self.pool_size)
+        self.broker = sync_broker
+        self.async_broker = async_broker
         self.pg_config = PostgreSQLConfig.from_url(
             self.dsn,
             min_size=1,
             max_size=self.pool_size,
             broker=self.broker,
+        )
+        self.async_pg_config = PostgreSQLConfig.from_url(
+            self.dsn,
+            min_size=1,
+            max_size=self.pool_size,
+            broker=self.async_broker,
         )
         self._sync_lock = threading.Lock()
         self._sync_driver: SyncPostgreSQLDriver | None = None
@@ -603,7 +627,7 @@ class NativePostgresWorldDriver:
             existing = self._async_drivers.get(loop)
             if existing is not None:
                 return existing
-            driver = AsyncPostgreSQLDriver(self.pg_config)
+            driver = AsyncPostgreSQLDriver(self.async_pg_config)
             if not self._seeded:
                 await driver.execute(_PG_CREATE_WORLD_SQL)
                 await driver.execute(_PG_SEED_WORLD_SQL)
@@ -793,12 +817,14 @@ class StdlibPostgresWorldDriver:
         return updated
 
     async def fetch_world_async(self, row_id: int) -> WorldRow:
+        await ensure_task_context()
         pool = await self._ensure_async_pool()
         async with pool.acquire() as conn:
             rec = await conn.fetchrow(_PG_SELECT_WORLD_DOLLAR_SQL, row_id)
         return record_to_world_row(rec, row_id)
 
     async def fetch_worlds_async(self, row_ids: list[int]) -> list[WorldRow]:
+        await ensure_task_context()
         pool = await self._ensure_async_pool()
         rows: list[WorldRow] = []
         async with pool.acquire() as conn:
@@ -808,6 +834,7 @@ class StdlibPostgresWorldDriver:
         return rows
 
     async def update_worlds_async(self, updates: list[tuple[int, int]]) -> list[WorldRow]:
+        await ensure_task_context()
         pool = await self._ensure_async_pool()
         updated: list[WorldRow] = []
         async with pool.acquire() as conn, conn.transaction():
