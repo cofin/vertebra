@@ -5,7 +5,7 @@ chapter_id: ch03-ingress-and-worker-hotpaths
 title: HTTP Ingress, Backpressure, SHM Batching, and Worker Hot Paths
 description: Eliminate per-request timer resets, atomic shard contention, BackpressureController allocations and fences, per-batch SHM scratch allocations, and Python/PyO3 request/scope/eventfd overhead.
 status: stable
-state: active
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 planning_status: complete
@@ -15,8 +15,8 @@ replan_trigger: null
 plan_revision: 2
 plan_commit: "86527cf1"
 current_task: null
-last_verified_checkpoint: null
-last_reviewed_commit: null
+last_verified_checkpoint: "cf919307"
+last_reviewed_commit: "cf919307"
 generated:
   by: flow/0.26.0
   at: "2026-11-27T01:40:00Z"
@@ -267,13 +267,13 @@ impl RsgiScope {
 
 ## 5. Implementation Plan
 
-- [ ] runtime-perf-remediation:ch03:t01 — Lazy `IdleTimeoutStream`, connection-pinned collector shards, empty-body header gate, and single-pass header encoding (`tasks/t01-http1-idle-timeout-and-ingress-fastpath.md`)
-- [ ] runtime-perf-remediation:ch03:t02 — Borrowed `AdmissionPermit<'a>`, fence-free Dekker drop, and strided coarse circuit clock in `BackpressureController` (`tasks/t02-backpressure-zero-arc-and-coarse-clock.md`)
-- [ ] runtime-perf-remediation:ch03:t03 — `InFlightRequests::insert_with_now` and batch-level timestamp call in `BridgeCorrelation` (`tasks/t03-correlation-insert-with-now.md`)
-- [ ] runtime-perf-remediation:ch03:t04 — `RequestBatcher`-owned `ShmDispatchScratch`, batch-level `insert_with_now`, and single-shard `ShmDispatcher::complete_many` fast path (`tasks/t04-batcher-shm-scratch-and-complete-many.md`)
-- [ ] runtime-perf-remediation:ch03:t05 — Direct `Request::body` `PyBytes` construction and shared-root bitmask-drop `AsgiScope` (`tasks/t05-pyo3-request-body-and-asgi-scope.md`)
-- [ ] runtime-perf-remediation:ch03:t06 — Lazy `RsgiHttpProtocol` streaming state and batch-shared `Arc<RsgiServerMeta>` in `RsgiScope` (`tasks/t06-pyo3-rsgi-lazy-stream-and-shared-meta.md`)
-- [ ] runtime-perf-remediation:ch03:t07 — Eventfd-split inline drain with grace yield, single-pass `native_only` mixed dispatch, and specialized 1-arg simple extractors (`tasks/t07-worker-eventfd-drain-mixed-native-and-extractors.md`)
+- [x] [6e72abac] runtime-perf-remediation:ch03:t01 — Lazy `IdleTimeoutStream`, connection-pinned collector shards, empty-body header gate, and single-pass header encoding (`tasks/t01-http1-idle-timeout-and-ingress-fastpath.md`)
+- [x] [6e72abac] runtime-perf-remediation:ch03:t02 — Borrowed `AdmissionPermit<'a>`, fence-free Dekker drop, and strided coarse circuit clock in `BackpressureController` (`tasks/t02-backpressure-zero-arc-and-coarse-clock.md`)
+- [x] [6e72abac] runtime-perf-remediation:ch03:t03 — `InFlightRequests::insert_with_now` and batch-level timestamp call in `BridgeCorrelation` (`tasks/t03-correlation-insert-with-now.md`)
+- [x] [6e72abac] runtime-perf-remediation:ch03:t04 — `RequestBatcher`-owned `ShmDispatchScratch`, batch-level `insert_with_now`, and single-shard `ShmDispatcher::complete_many` fast path (`tasks/t04-batcher-shm-scratch-and-complete-many.md`)
+- [x] [6e72abac] runtime-perf-remediation:ch03:t05 — Direct `Request::body` `PyBytes` construction and shared-root bitmask-drop `AsgiScope` (`tasks/t05-pyo3-request-body-and-asgi-scope.md`)
+- [x] [6e72abac] runtime-perf-remediation:ch03:t06 — Lazy `RsgiHttpProtocol` streaming state and batch-shared `Arc<RsgiServerMeta>` in `RsgiScope` (`tasks/t06-pyo3-rsgi-lazy-stream-and-shared-meta.md`)
+- [x] [6e72abac] runtime-perf-remediation:ch03:t07 — Eventfd-split inline drain with grace yield, single-pass `native_only` mixed dispatch, and specialized 1-arg simple extractors (`tasks/t07-worker-eventfd-drain-mixed-native-and-extractors.md`)
 
 ### Fast Chapter Gate (`< 60s`)
 
@@ -287,9 +287,8 @@ make lint-rs && uv run --no-sync ruff check src/py/vertebra/server/worker.py src
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Chapter State**: `planned` (0/7 tasks completed).
-- **Parallelizable Independent Tasks**: `t01`, `t02`, `t03`, `t05`, `t06`, `t07`; `t04` runs after `t03`.
-- **Next Action**: Approved (`status: stable`); execute after `ch02-embedded-bridge-and-batching`.
+- **Chapter State**: `completed` (`7/7` tasks completed across `6e72abac..cf919307`, reviewed by `code-reviewer` + `quality-reviewer`).
+- **Remaining Tasks**: None.
 
 [^src-http-server]: `src/rs/vertebra-http/src/server.rs::IdleTimeoutStream` — Hyper HTTP/1.1 connection loop, idle timeout wrapper, and collector shard routing.
 [^src-http-response]: `src/rs/vertebra-http/src/response.rs::dispatch_request_inner` — Request header encoding, body collection gate, and shard dispatch entry point.

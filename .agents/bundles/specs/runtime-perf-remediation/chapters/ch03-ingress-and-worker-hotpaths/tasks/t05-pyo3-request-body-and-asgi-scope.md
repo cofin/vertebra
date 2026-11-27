@@ -5,7 +5,7 @@ chapter_id: ch03-ingress-and-worker-hotpaths
 title: Direct Request::body and shared-root bitmask-drop AsgiScope
 description: Construct PyBytes directly from BatchSnapshot in Request::body and optimize AsgiScope with Arc<str> root_path and populated_mask-guided MaybeUninit drop.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 worksheet_format: compact
@@ -23,7 +23,7 @@ tests:
 estimated_loc: 160
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "6e72abac"
 sources:
   - id: src-py-request
     resource: src/rs/vertebra-py/src/request.rs::Request

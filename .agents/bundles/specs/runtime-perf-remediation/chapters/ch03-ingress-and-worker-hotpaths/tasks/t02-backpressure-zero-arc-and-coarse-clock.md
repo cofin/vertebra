@@ -5,7 +5,7 @@ chapter_id: ch03-ingress-and-worker-hotpaths
 title: Zero-Arc AdmissionPermit, fence-free Dekker drop, and coarse circuit clock
 description: Borrow BackpressureController inside AdmissionPermit, replace AcqRel+mfence with SeqCst RMW+load, and amortize clock_gettime on closed-circuit record_success.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 worksheet_format: compact
@@ -20,7 +20,7 @@ tests:
 estimated_loc: 120
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "6e72abac"
 sources:
   - id: src-http-backpressure
     resource: src/rs/vertebra-http/src/backpressure.rs::BackpressureController

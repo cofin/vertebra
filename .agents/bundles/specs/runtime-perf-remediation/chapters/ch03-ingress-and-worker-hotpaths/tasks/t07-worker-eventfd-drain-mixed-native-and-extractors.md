@@ -5,7 +5,7 @@ chapter_id: ch03-ingress-and-worker-hotpaths
 title: Eventfd-split drain, native_only mixed dispatch, and 1-arg extractors
 description: Split _on_notify_readable from _drain_batches with a 1-turn grace yield, add single-pass native_only mixed dispatch, and specialize 1-arg simple extractors.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -23,7 +23,7 @@ tests:
 estimated_loc: 170
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "6e72abac"
 sources:
   - id: src-server-worker
     resource: src/py/vertebra/server/worker.py::Worker

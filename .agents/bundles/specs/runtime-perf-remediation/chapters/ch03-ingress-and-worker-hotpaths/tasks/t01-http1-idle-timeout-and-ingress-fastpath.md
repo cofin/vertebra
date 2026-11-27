@@ -5,7 +5,7 @@ chapter_id: ch03-ingress-and-worker-hotpaths
 title: Lazy IdleTimeoutStream, connection-pinned shards, and single-pass headers
 description: Replace per-I/O Sleep resets with an activity flag, pin collector shards per accepted connection, gate empty-body header scans, and encode HeaderMap in one pass.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -23,7 +23,7 @@ tests:
 estimated_loc: 140
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "6e72abac"
 sources:
   - id: src-http-server
     resource: src/rs/vertebra-http/src/server.rs::IdleTimeoutStream

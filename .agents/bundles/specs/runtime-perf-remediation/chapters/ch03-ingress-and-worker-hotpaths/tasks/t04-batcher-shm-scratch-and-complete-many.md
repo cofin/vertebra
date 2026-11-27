@@ -5,7 +5,7 @@ chapter_id: ch03-ingress-and-worker-hotpaths
 title: Reusable ShmDispatchScratch and single-shard complete_many fast path
 description: Own reusable scratch buffers inside RequestBatcher, use batch-level insert_with_now in ShmDispatcher, and add a single-shard fast path in complete_many.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -26,7 +26,7 @@ tests:
 estimated_loc: 180
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "6e72abac"
 sources:
   - id: src-http-batcher
     resource: src/rs/vertebra-http/src/batcher.rs::RequestBatcher

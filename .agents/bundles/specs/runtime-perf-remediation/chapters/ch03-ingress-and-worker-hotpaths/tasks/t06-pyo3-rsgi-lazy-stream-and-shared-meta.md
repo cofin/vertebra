@@ -5,7 +5,7 @@ chapter_id: ch03-ingress-and-worker-hotpaths
 title: Lazy RsgiHttpProtocol streaming state and batch-shared RsgiServerMeta
 description: Remove eager Arc allocations on unary RSGI responses by making streaming state lazy and share batch-invariant RsgiScope metadata via Arc<RsgiServerMeta>.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 worksheet_format: compact
@@ -23,7 +23,7 @@ tests:
 estimated_loc: 220
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "6e72abac"
 sources:
   - id: src-py-rsgi-http
     resource: src/rs/vertebra-py/src/rsgi/http.rs::RsgiHttpProtocol

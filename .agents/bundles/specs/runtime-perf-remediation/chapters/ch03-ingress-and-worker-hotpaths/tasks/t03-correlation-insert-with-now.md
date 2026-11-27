@@ -5,7 +5,7 @@ chapter_id: ch03-ingress-and-worker-hotpaths
 title: Batch-amortized Instant in InFlightRequests and BridgeCorrelation
 description: Add InFlightRequests::insert_with_now accepting a caller-supplied Instant and capture Instant::now() once per batch in BridgeCorrelation.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -23,7 +23,7 @@ tests:
 estimated_loc: 45
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "6e72abac"
 sources:
   - id: src-http-correlation
     resource: src/rs/vertebra-http/src/dispatcher/correlation.rs::InFlightRequests
