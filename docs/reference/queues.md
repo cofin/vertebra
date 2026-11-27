@@ -1,13 +1,13 @@
-# `vertebra.framework.queues` — Background Task Queues & Cron Scheduler
+# Background Task Queues & Cron Scheduler
 
-Synchronous and asynchronous background task queues (`QueueService`, `QueueConfig`, `QueueBackendSettings`), capability store protocols (`SyncQueueStore`, `AsyncQueueStore`, `QueueEntry`), retry policies (`TaskRetryPolicy`), dead-letter tracking (`DeadLetterEntry`), task results (`TaskResultRecord`), distributed cron leases (`CronScheduler`), multi-lane worker execution (`WorkerRunner`), and pluggable storage backends (`MemoryQueueBackend`, `PostgreSQLQueueBackend`, `OracleQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `SpannerQueueBackend`).
+`vertebra.framework.queues` provides sync and async task queues, retry and dead-letter policies, distributed cron leases, multi-lane worker execution, and pluggable backends for Memory, PostgreSQL, Oracle, Redis, Valkey, and Spanner.
 
-| Component | Classes | Purpose |
-| --- | --- | --- |
-| **Queue Core & Runner** | `QueueConfig`, `QueueBackendSettings`, `TaskRetryPolicy`, `TaskEnvelope`, `TaskResultRecord`, `DeadLetterEntry`, `QueueService`, `WorkerRunner` | Enqueue typed tasks (`enqueue` / `enqueue_sync`) onto `io`, `cpu`, or `agent` lanes with scoped DI, heartbeats, exponential backoff, and dead-letter retention |
-| **Queue Store Protocols** | `SyncQueueStore`, `AsyncQueueStore`, `QueueEntry` | `@runtime_checkable` engine-local queue persistence contracts (`vertebra.db.driver.capabilities`) implemented by `SyncPostgresQueueStore`/`AsyncPostgresQueueStore`, `SyncOracleQueueStore`/`AsyncOracleQueueStore`, and `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` |
-| **Cron Scheduler** | `CronSchedule`, `CronScheduler` | Execute recurring cron schedules with slot-keyed distributed leader lease coordination |
-| **Storage Backends** | `MemoryQueueBackend`, `PostgreSQLQueueBackend`, `OracleQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `SpannerQueueBackend` | Persist and claim task envelopes with auto-constructed native `SKIP LOCKED` stores (`vertebra-core[postgres]`, `vertebra-core[oracle]`), interactive `ReadWrite` hash-sharded `FOR UPDATE` stores (`vertebra-core[spanner]`), or native Streams consumer groups (`vertebra-core[redis]`, `vertebra-core[valkey]`). |
+| Component | Purpose |
+| --- | --- |
+| **Queue Core & Runner** | Enqueue typed tasks onto `io`, `cpu`, or `agent` lanes with scoped DI, heartbeats, exponential backoff, and dead-letter retention. |
+| **Queue Store Protocols** | Runtime-checkable persistence contracts implemented by the PostgreSQL, Oracle, and Spanner queue stores. |
+| **Cron Scheduler** | Run recurring cron schedules with slot-keyed distributed leader leases. |
+| **Storage Backends** | Store and claim task envelopes using `SKIP LOCKED` SQL tables, hash-sharded Spanner transactions, or Redis and Valkey Streams consumer groups. |
 
 ## Queue Configuration, Store Protocols & Service
 
@@ -67,7 +67,7 @@ Synchronous and asynchronous background task queues (`QueueService`, `QueueConfi
     options:
       heading_level: 3
 
-## Cron Scheduling (`vertebra.framework.queues.scheduler`)
+## Cron Scheduling
 
 ::: vertebra.framework.queues.base.CronSchedule
     options:

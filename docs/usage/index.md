@@ -1,51 +1,51 @@
 # Usage Guides
 
-Practical guides for building, scaling, testing, and deploying applications with Vertebra, organized by architectural subsystem.
+Practical guides for building, scaling, testing, and deploying applications with Vertebra.
 
 ## Framework & Routing
 
 | Guide | Topics Covered |
 | --- | --- |
-| **[Routing, Controllers & Procedures](routing-and-handlers.md)** | `App`, `Controller`, `Router`, `Route`, query/header/cookie markers, `msgspec.Struct` models, RPC `Procedure` / `ProcedureRouter`, lifecycle hooks, and auto-wiring. |
-| **[DI, Security & OpenAPI](framework-features.md)** | Scoped dependency injection (`Provide`, `Inject`, `Container`), security guards (`Principal`, `CsrfConfig`, `RateLimitConfig`), OpenAPI 3.1 / Scalar UI, and AsyncAPI 3.0. |
-| **[Queues, LiveState, Email & Telemetry](queues-and-realtime.md)** | Background task queues (`QueueService`, `CronScheduler`), real-time `LiveState` & `ChannelBus`, `KeyValueStore`, `EmailService`, and OpenTelemetry / GenAI metrics. |
+| **[Routing, Controllers & Procedures](routing-and-handlers.md)** | Apps, controllers, routers, parameter extractors, msgspec models, RPC procedures, lifecycle hooks, and auto-wiring. |
+| **[DI, Security & OpenAPI](framework-features.md)** | Scoped dependency injection, security guards, CSRF and rate limiting, OpenAPI 3.1 with Scalar UI, and AsyncAPI 3.0. |
+| **[Queues, LiveState, Email & Telemetry](queues-and-realtime.md)** | Background job queues, cron schedules, real-time state sync and pub/sub channels, key-value stores, email delivery, and OpenTelemetry metrics. |
 
 ## Server & Runtime
 
 | Guide | Topics Covered |
 | --- | --- |
-| **[Server & Workers](server-and-workers.md)** | Embedded vs. shared-memory topologies, worker lanes (`fast`, `async`, `cpu`, `blocking`), `vtb run --with-workers`, `vtb workers run`, ASGI/WSGI/RSGI adapters, and `3.14t`/`3.15t` execution. |
-| **[Packaging & Deployment](packaging-and-deployment.md)** | Standalone and single-file binaries (`vtb build`, `StandaloneBuilder`, `OnefileBuilder`), TypeScript/Zod/OpenAPI/Protobuf codegen, container cgroups, and WebAssembly sandboxes. |
-| **[Testing](testing.md)** | In-process testing patterns for `App`, `Controller`, and `Router` handlers, dependency overrides, in-memory `SyncObjectStore` / `AsyncObjectStore`, `SyncSQLiteDriver`, and `MemoryQueueBackend`. |
+| **[Server & Workers](server-and-workers.md)** | Embedded and shared-memory topologies, worker lanes, CLI runner commands, ASGI/WSGI/RSGI adapters, and free-threaded Python execution. |
+| **[Packaging & Deployment](packaging-and-deployment.md)** | Standalone and single-file builds, TypeScript/Zod/OpenAPI/Protobuf codegen, container cgroups, and WebAssembly sandboxes. |
+| **[Testing](testing.md)** | In-process handler testing, dependency overrides, and in-memory object store, SQLite, and queue test backends. |
 
 ## Databases & Analytics
 
 | Guide | Topics Covered |
 | --- | --- |
-| **[Overview & Drivers](databases.md)** | First-class SQLSpec & Litestar integration (`create_sqlspec_plugin`) and the 11 database, analytical, cloud, and cache adapters. |
-| **[Cloud Dialers (Cloud SQL & AlloyDB)](cloud-dialers.md)** | Zero-sidecar Cloud SQL (`:3307`) and AlloyDB (`:5433`) ephemeral mTLS certificate dialers and IAM database authentication. |
-| **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Multi-tenant Row-Level Security (`TenantPredicate`), logical replication CDC (`ChangeFeed`), zero-copy `ArrowCursor`, DuckDB `httpfs` ADC rotation, and `DataFusionEngine`. |
-| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | `VertebraPlugin`, `create_sqlspec_plugin`, `create_alchemy_plugin`, SQLAlchemy 2.0+ `+vtb` dialects, `Vector` & `BinaryJSON` column types, `GrpcServiceRegistry`, `ApexGateway`, and `BrokerPlugin`. |
+| **[Overview & Drivers](databases.md)** | Native database drivers, SQLSpec and Litestar integration, pipelining, and error handling across relational, analytical, cloud, and cache engines. |
+| **[Cloud Dialers (Cloud SQL & AlloyDB)](cloud-dialers.md)** | Direct mTLS and IAM authentication for Cloud SQL, AlloyDB, AWS RDS, Aurora DSQL, and Azure Entra ID without proxy sidecars. |
+| **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Multi-tenant row-level security, logical replication and change streams, shared-memory Arrow cursors, DuckDB secret rotation, and DataFusion queries. |
+| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | Integrations for Litestar, SQLSpec, SQLAlchemy, Advanced Alchemy, Django, gRPC, Oracle APEX, and shared-memory session brokers. |
 
 ## Object Storage
 
 | Guide | Topics Covered |
 | --- | --- |
-| **[Overview & Backends](storage.md)** | Multicloud and local object storage (`SyncObjectStore`, `AsyncObjectStore`) across S3, GCS, Azure, R2, OCI, HTTP, Local, and Memory backends with GIL-free sync and `RustTaskAwaitable` async I/O. |
-| **[GCS, Active ADC & Presigning](storage-auth-and-signing.md)** | Active `300s`-skew GCP ADC token caching (`RefreshingGcpCredentialProvider`, `SyncGcpTokenCache`, `AsyncGcpTokenCache`), keyless IAM `signBlob` V4 signing, and `SigningConfig` presigned URLs. |
-| **[Range Reads, Parquet & Attachments](storage-parquet-and-orm.md)** | Seekable HTTP `Range` reads (`SyncReadableFile` / `AsyncReadableFile`) for PyArrow/Polars Parquet inspection and transactional `ObjectStoreBackend` model attachments. |
+| **[Overview & Backends](storage.md)** | Sync and async object storage across local files, S3, GCS, Azure, R2, OCI, HTTP, and memory backends, plus streaming, checksums, and Arrow/Parquet I/O. |
+| **[GCS, Active ADC & Presigning](storage-auth-and-signing.md)** | Shared GCP token caches, audience-bound ID tokens, keyless IAM signing, and presigned URLs across GCS, S3, R2, Azure, and OCI. |
+| **[Range Reads, Parquet & Attachments](storage-parquet-and-orm.md)** | Seekable HTTP Range readers for PyArrow and Polars, Advanced Alchemy model attachments, and SQLSpec dataset exports. |
 
 ## AI, Agents & Embeddings
 
 | Guide | Topics Covered |
 | --- | --- |
-| **[MCP, Skills & Stdio Bridge](agent-protocols.md)** | Model Context Protocol (`@tool`, `@prompt`, `@resource`, `MCPRegistry`), `SKILL.md` bundles (`MCPSkillsConfig`), async tasks, and `vtb ai mcp serve|bridge`. |
-| **[A2A, WebMCP & Workflows](a2a-and-workflows.md)** | Agent-to-Agent (`A2AService`, `AgentCard` with automatic `AgentInterface` and dynamic URL resolution), browser WebMCP (`@vertebra/client/webmcp`), `SpecTree`, `DynamicWorkflow`, and `AgentRuntime`. |
-| **[Vector Embeddings & Slabs](embeddings-and-vectors.md)** | Shared-memory `VectorSlab` and `VectorCache`, PEP 3118 `VectorView` / `VectorBatchView`, `Embedder`, `VertexEmbedder`, `GeminiEmbedder`, `PushdownEmbedder` with BigQuery, Spanner, PostgreSQL/AlloyDB (`vertebra-core[postgres]`), and Oracle (`vertebra-core[oracle]`), `GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`, `RemoteEmbedder`, and `vtb ai models`. |
+| **[MCP, Skills & Stdio Bridge](agent-protocols.md)** | Model Context Protocol tools, prompts, and resources, skill bundles, async tasks, and the stdio MCP bridge. |
+| **[A2A, WebMCP & Workflows](a2a-and-workflows.md)** | Agent-to-Agent discovery and services, browser WebMCP integration, workflow trees, and the agent runtime. |
+| **[Vector Embeddings & Slabs](embeddings-and-vectors.md)** | Shared-memory vector slabs and caches, buffer views, local and remote embedders, and in-database embedding pushdown. |
 
 ## Frontend & Client SDK
 
 | Guide | Topics Covered |
 | --- | --- |
-| **[Bundler, Inertia v3 & QuickJS SSR](frontend-and-ssr.md)** | Built-in Rust JavaScript bundler (`Bundler`, `BundleConfig`), Inertia v3 (`@inertia`, `DeferredProp`, `MergeProp`), QuickJS SSR (`SyncEmbeddedSSRClient` / `AsyncEmbeddedSSRClient`), and HTMX helpers. |
-| **[TypeScript SDK & Framework Adapters](typescript-sdk.md)** | Wheel-native `@vertebra/client` distribution (`/__vertebra/client/*`), `vtb js install`, and React, Vue, Svelte, Angular, HTMX, and Vite adapters. |
+| **[Bundler, Inertia v3 & QuickJS SSR](frontend-and-ssr.md)** | Built-in Rust JavaScript bundler, Inertia v3 deferred and merge props, embedded QuickJS server rendering, and HTMX helpers. |
+| **[TypeScript SDK & Framework Adapters](typescript-sdk.md)** | Bundled TypeScript client distribution, CLI installation, and adapters for React, Vue, Svelte, Angular, HTMX, and Vite. |

@@ -1,6 +1,6 @@
 # vertebra-bundler
 
-Native Rust Oxc/Rolldown frontend bundler and QuickJS SSR extension for [Vertebra](https://cofin.github.io/vertebra/).
+Oxc/Rolldown frontend bundler and QuickJS SSR extension for [Vertebra](https://cofin.github.io/vertebra/).
 
 This package contains the compiled `vertebra._bundler` module. It powers `vtb js build` and Vertebra's server-side rendering. Install it through the `vertebra-core` extra so both packages stay on the same version:
 
@@ -12,7 +12,7 @@ uv add "vertebra-core[bundler]"
 ## Features
 
 - Bundles TypeScript, JSX/TSX, and CSS with Oxc and Rolldown. No Node.js build server required.
-- Runs server-side rendering in an in-process QuickJS pool (`SyncEmbeddedSSRClient`, `AsyncEmbeddedSSRClient`).
+- Runs server-side rendering in an in-process QuickJS pool.
 - Drives Vertebra's Inertia v3 and Vite integrations.
 
 ## Usage
@@ -20,7 +20,12 @@ uv add "vertebra-core[bundler]"
 ```python
 from vertebra._bundler import BundleConfig, Bundler
 
-config = BundleConfig(entry="frontend/src/main.tsx", outdir="static/dist", minify=True, sourcemap=True)
+config = BundleConfig(
+    entry="frontend/src/main.tsx",
+    outdir="static/dist",
+    minify=True,
+    sourcemap=True,
+)
 result = Bundler().build(config)
 ```
 
@@ -32,7 +37,7 @@ vtb js build
 
 ## Compatibility
 
-- Python 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
+- Python 3.12 to 3.15, including free-threaded builds.
 - Prebuilt wheels for Linux (x86_64, aarch64; glibc 2.28+), macOS (x86_64, arm64), and Windows (x64).
 
 ## Links

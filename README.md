@@ -13,7 +13,10 @@
   </p>
 </div>
 
-Vertebra combines a Rust HTTP server, a typed Python web framework, native database and object storage drivers, a frontend bundler, and a bundled TypeScript client into one package.
+> [!WARNING]
+> Vertebra is experimental software. APIs and behavior may change without notice, and this project may be archived at any time.
+
+Vertebra combines a Rust HTTP server, a typed Python web framework, database and object storage drivers, a frontend bundler, and a TypeScript client in one package.
 
 ## Install
 
@@ -27,7 +30,7 @@ Or with `pip`:
 pip install vertebra-core
 ```
 
-Add optional extras for databases, object storage, frontend bundling, or framework integrations as needed:
+Add optional extras for databases, object storage, frontend bundling, or framework integrations:
 
 ```bash
 uv add "vertebra-core[postgres]"
@@ -78,32 +81,32 @@ vtb run app:app --host 0.0.0.0 --port 8000 --workers 4
 ## Features
 
 ### Web Framework & HTTP Server
-- **Typed Python APIs**: Build endpoints with `App`, `Controller`, `Router`, `Procedure`, dependency injection (`Provide`/`Inject`), and `msgspec.Struct` validation.
-- **Modern Protocols**: Native HTTP/1.1, HTTP/2, HTTP/3 (QUIC), TLS, compression, static files, WebSockets, Server-Sent Events, and gRPC.
-- **Bring Your Own Framework**: Run native Vertebra apps or existing ASGI, WSGI, and RSGI apps (Litestar, Starlette, FastAPI, Flask, Django) with `vtb run`.
-- **Automatic Worker Modes**: Runs in-process for a single worker or free-threaded Python (`3.14t`/`3.15t`), and scales across shared-memory worker processes when `--workers > 1` on standard Python (`--topology embedded|shm`).
+- **Typed Python APIs**: Define routes, controllers, RPC procedures, dependency injection, and `msgspec.Struct` request/response models.
+- **Protocols**: HTTP/1.1, HTTP/2, HTTP/3, TLS, compression, static files, WebSockets, Server-Sent Events, and gRPC.
+- **Existing frameworks**: Run native Vertebra apps or existing ASGI, WSGI, and RSGI apps (Litestar, Starlette, FastAPI, Flask, Django) with `vtb run`.
+- **Worker scaling**: Runs in-process by default, scales across shared-memory worker processes on standard Python, and scales across threads on free-threaded Python.
 
 ### Databases & Caching
-- **Native Sync & Async Drivers**: PostgreSQL, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, BigQuery, Spanner, Redis, and Valkey.
-- **High-Throughput Data Access**: Statement pipelining, zero-copy Arrow results, DataFusion queries, change feeds, and Cloud SQL/AlloyDB dialers.
-- **Ecosystem Integrations**: Drop-in support for SQLSpec, SQLAlchemy, Advanced Alchemy, and Django database backends.
+- **Sync & async drivers**: PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB, BigQuery, Spanner, Redis, and Valkey.
+- **Pipelines & analytics**: Statement pipelining, Arrow results, DataFusion queries, change feeds, and Cloud SQL, AlloyDB, AWS RDS, and Azure Entra dialers.
+- **ORM & SQL integrations**: Drop-in support for SQLSpec, SQLAlchemy, Advanced Alchemy, and Django database backends.
 
 ### Object Storage
-- **One API Across Clouds**: Sync and async access to S3, GCS, Azure Blob, Cloudflare R2, OCI, HTTP, and local files via `vertebra-core[storage]`.
-- **Large File Support**: Streaming reads/writes, multipart uploads, bulk transfers, HTTP Range responses, and presigned URLs.
+- **One API across clouds**: Sync and async access to S3, GCS, Azure Blob, Cloudflare R2, OCI, HTTP, and local files via `vertebra-core[storage]`.
+- **Large files & signing**: Streaming uploads and downloads, multipart transfers, HTTP Range responses, Parquet range reads, and presigned URLs.
 
 ### Frontend, Bundling & TypeScript Client
-- **Built-In Bundling & SSR**: Bundle TypeScript/JSX, run server-side rendering, and integrate with Inertia.js or HTMX.
-- **Zero-NPM Client SDK**: `@vertebra/client` ships inside the wheel with adapters for React, Vue, Svelte, Angular, HTMX, and Vite.
-- **End-to-End Types**: Generate TypeScript, Zod, Valibot, OpenAPI, and Protobuf schemas directly from Python routes.
+- **Bundling & SSR**: Built-in TypeScript/JSX bundler, QuickJS server-side rendering, Inertia, and HTMX helpers.
+- **Bundled TypeScript client**: `@vertebra/client` ships inside the Python wheel with adapters for React, Vue, Svelte, Angular, HTMX, and Vite — no npm required.
+- **Schema generation**: Generate TypeScript, Zod, Valibot, OpenAPI, and Protobuf schemas from Python routes.
 
 ### Queues, Live State & AI Agents
-- **Background Workers**: Distributed task queues, cron schedules, and dedicated worker processes via `vtb workers run`.
-- **Real-Time Sync**: Delta-based live state rooms over WebSockets.
-- **Agent Protocols**: Built-in Model Context Protocol (MCP) tools, resources, and prompts alongside Agent-to-Agent (A2A) services.
+- **Background workers**: Distributed task queues, cron schedules, and dedicated worker processes.
+- **Live state**: Delta-based real-time state rooms over WebSockets and cross-node pub/sub channels.
+- **Agent protocols**: Built-in Model Context Protocol (MCP) tools, resources, and prompts alongside Agent-to-Agent (A2A) services and vector embeddings.
 
 ### Standalone Packaging
-- Package applications into standalone directories (`vtb build --standalone`) or single-file executables (`vtb build --onefile`).
+- Package applications into standalone directories or single-file executables with `vtb build`.
 
 ## CLI Commands
 

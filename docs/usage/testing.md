@@ -1,10 +1,10 @@
 # Testing
 
-Test Vertebra applications in `pytest` without opening network sockets using in-process route and controller dispatch, `Container` / `Provide` dependency overrides, in-memory `SyncObjectStore` / `AsyncObjectStore` namespaces, `:memory:` SQLite drivers, and `MemoryQueueBackend`.
+Test Vertebra applications in `pytest` without opening network sockets. Use in-process route lookup, dependency overrides, in-memory object stores, `:memory:` SQLite databases, and the in-memory queue backend.
 
-## Route, Controller & Dependency Override Testing
+## Testing Routes, Controllers & Dependencies
 
-Test route registration, `Controller` endpoints, path parameter extraction (`extract_path_params`), and `Provide` dependency overrides directly in memory:
+Verify route registration, path parameter extraction, and dependency overrides directly in memory:
 
 ```python
 from vertebra import App, Controller, Provide, extract_path_params, get, handler_id
@@ -35,9 +35,9 @@ def test_controller_and_params() -> None:
     assert info is not None
 ```
 
-## Asynchronous Queue & Storage Testing
+## Testing Async Queues & Storage
 
-Use `pytest` and `anyio` when testing async handlers, `QueueService` with `memory://`, and `SyncObjectStore.from_memory()`:
+Use `pytest` and `anyio` to test async handlers, `memory://` queues, and in-memory object storage:
 
 ```python
 import pytest
@@ -56,8 +56,8 @@ async def test_memory_queue_and_storage() -> None:
     assert env.task_name == "jobs.process"
 ```
 
-## In-Memory Subsystems for Fast Tests
+## In-Memory Backends for Fast Tests
 
-- **Dependency Overrides**: Pass overridden `Provide(...)` entries on `App(dependencies=...)` or `container.create_child({...})` so handlers receive test doubles.
-- **In-Memory Object Storage**: Call `SyncObjectStore.from_memory()` (or `AsyncObjectStore.from_memory()`) or pass `MemoryConfig()` to `SyncObjectStore.from_config()` for zero-disk storage tests.
-- **In-Memory SQLite Drivers**: Use `SyncSQLiteDriver(SQLiteConfig(path=":memory:"))` for fast SQL schema and query tests.
+- **Dependency overrides**: Pass test doubles via `App(dependencies=...)` or `container.create_child({...})`.
+- **Object storage**: Call `SyncObjectStore.from_memory()` or `AsyncObjectStore.from_memory()` for zero-disk storage tests.
+- **SQLite**: Use `SyncSQLiteDriver(SQLiteConfig(path=":memory:"))` for isolated SQL schema and query tests.

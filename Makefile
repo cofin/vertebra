@@ -530,6 +530,7 @@ docs-clean:                                         ## Remove built documentatio
 docs: docs-clean                                    ## Build and verify Zensical documentation
 	@echo "${INFO} Building documentation (Zensical)..."
 	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts --stage-inventory-cache /tmp/vertebra-mkdocs-cache src/py/vertebra
+	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.render_diagrams --check
 	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.generate_cli_docs --check
 	@XDG_CACHE_HOME="/tmp/vertebra-mkdocs-cache" PYTHONPATH="src/py:." uv run --no-sync zensical build --clean
 	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.postbuild --site-dir site --docs-dir docs --zensical-config zensical.toml --rust-doc-dir "$(CARGO_TARGET_DIR)/doc"

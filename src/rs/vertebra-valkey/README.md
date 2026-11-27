@@ -1,6 +1,6 @@
 # vertebra-valkey
 
-Native pure-Rust Valkey 8.0+/9.0 client, Cluster, Sentinel, Pub/Sub, Streams, and Memorystore IAM extension for [Vertebra](https://cofin.github.io/vertebra/).
+Valkey 8.0+/9.0 client, Cluster, Sentinel, Pub/Sub, Streams, and Memorystore IAM extension for [Vertebra](https://cofin.github.io/vertebra/).
 
 This package contains the compiled `vertebra._valkey` module that Vertebra's Valkey drivers run on. You don't import it directly. Install it through the `vertebra-core` extra so both packages stay on the same version:
 
@@ -27,7 +27,7 @@ Without it, the Valkey drivers raise `MissingDependencyError`.
 
 ## Compatibility
 
-- Python 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
+- Python 3.12 to 3.15, including free-threaded builds.
 - Prebuilt wheels for Linux (x86_64, aarch64; glibc 2.28+), macOS (x86_64, arm64), and Windows (x64).
 
 ## Links

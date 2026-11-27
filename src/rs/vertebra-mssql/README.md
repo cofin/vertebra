@@ -1,6 +1,6 @@
 # vertebra-mssql
 
-Native pure-Rust Microsoft SQL Server (TDS 7.4) client extension for [Vertebra](https://cofin.github.io/vertebra/).
+Microsoft SQL Server (TDS 7.4) client extension for [Vertebra](https://cofin.github.io/vertebra/).
 
 This package contains the compiled `vertebra._mssql` module that Vertebra's Microsoft SQL Server drivers run on. You don't import it directly. Install it through the `vertebra-core` extra so both packages stay on the same version:
 
@@ -13,7 +13,7 @@ Without it, the Microsoft SQL Server drivers raise `MissingDependencyError`.
 
 ## Features
 
-- Pure Rust TDS 7.4 protocol for SQL Server 2012 and later, with TLS-in-TDS encryption or a TLS-first `strict` mode. No ODBC driver or FreeTDS required.
+- Rust TDS 7.4 protocol for SQL Server 2012 and later, with TLS-in-TDS encryption or TLS-first `strict` mode. No ODBC driver or FreeTDS required.
 - `?` and `$1` placeholders are rewritten to `sp_executesql` `@P1` parameters.
 - `BulkLoad` inserts, `ATTENTION` query cancellation, pipelines, and Arrow result streaming.
 - Cloud SQL for SQL Server over the `:3307` mTLS dialer.
@@ -28,7 +28,7 @@ Without it, the Microsoft SQL Server drivers raise `MissingDependencyError`.
 
 ## Compatibility
 
-- Python 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
+- Python 3.12 to 3.15, including free-threaded builds.
 - Prebuilt wheels for Linux (x86_64, aarch64; glibc 2.28+), macOS (x86_64, arm64), and Windows (x64).
 
 ## Links

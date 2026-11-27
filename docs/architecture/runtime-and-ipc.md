@@ -1,24 +1,24 @@
-# Runtime & Shared-Memory IPC (`vertebra-core`)
+# Runtime & Shared-Memory IPC
 
-`vertebra-core` implements the transport layer that connects the Rust HTTP server to Python workers in both single-process (`embedded`) and multi-process (`shm`) modes.
+`vertebra-core` implements the transport layer between the Rust HTTP server and Python workers. It supports both single-process `embedded` mode and multi-process `shm` mode.
 
-## Shared-Memory Layout (`ShmHeader` & Rings)
+## Shared-Memory Layout
 
-When running in `--topology shm`, the parent Rust process creates a shared-memory region (backed by `memfd_create`, `/dev/shm`, or POSIX `shm_open`) validated by a header, version, and generation counter (`ShmHeader`).
+In `--topology shm`, the parent Rust process allocates a shared-memory region backed by `memfd_create`, `/dev/shm`, or POSIX `shm_open`. A shared header records the layout version and generation counter so workers can validate the mapping on startup.
 
-To prevent CPU cache contention between threads, producer and consumer pointers sit on separate **128-byte cache lines**:
+Producer and consumer indices live on separate 128-byte cache lines to avoid false sharing across CPU cores:
 
-- **`SpscRing`**: Single-producer/single-consumer ring buffer pairing each Python worker process with the Rust HTTP server.
-- **`MpmcRing`**: Multi-producer/multi-consumer ring buffer used for work-stealing request queues.
-- **`TieredRingSet`**: Size-tiered response slot pools (`tiny`, `small`, `medium`, `large`, plus `/tmp/vtb-*` overflow files for multi-megabyte payloads) so small JSON responses never wait behind large file downloads.
+- **`SpscRing`**: Single-producer, single-consumer ring buffer pairing each Python worker process with the Rust server.
+- **`MpmcRing`**: Multi-producer, multi-consumer ring buffer for work-stealing request queues.
+- **`TieredRingSet`**: Size-tiered response pools (`tiny`, `small`, `medium`, `large`, plus `/tmp/vtb-*` overflow files for multi-megabyte bodies) so small JSON responses do not queue behind large downloads.
 
-## Adaptive Worker Wakeups (`futex`, `ulock` & `eventfd`)
+## Adaptive Worker Wakeups
 
-Polling shared memory non-stop wastes CPU when idle, while making a kernel syscall on every request adds latency under load. `vertebra-core` uses a two-step wakeup strategy:
+Continuous polling burns CPU when traffic is idle, while a syscall on every request adds latency under load. `vertebra-core` switches between spinning and sleeping:
 
-1. **Brief Spin While Busy**: Workers spin briefly while request batches are arriving back-to-back.
-2. **Sleep When Idle**: Before sleeping, a worker marks itself parked (`prepare_request_sleep`) and waits on Linux `futex`, macOS `ulock`, or an `eventfd` registered with Python's `asyncio` event loop (`get_request_notify_fd`). The Rust server only makes a wake syscall when a worker is actually asleep.
+1. **Brief Spin While Busy**: Workers spin briefly while request batches arrive back-to-back.
+2. **Sleep When Idle**: Before sleeping, a worker marks itself parked and blocks on Linux `futex`, macOS `ulock`, or an `eventfd` registered with Python's `asyncio` event loop. The Rust server issues a wake syscall only when a worker is parked.
 
-## In-Process `BatchBridge`
+## In-Process Batch Bridge
 
-In `--topology embedded`, `vertebra-core` skips shared memory and passes `RequestBatch` pointers directly between Rust HTTP threads and Python worker threads in process memory via `BatchBridge`.
+In `--topology embedded`, `vertebra-core` skips shared memory and hands request batches directly between Rust HTTP threads and Python worker threads in process memory through `BatchBridge`.

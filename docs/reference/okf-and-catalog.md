@@ -1,8 +1,8 @@
 # OKF v0.2 & Google Cloud Knowledge Catalog
 
-`OkfBundle`, `OkfDocument`, `OkfSource`, and `OkfValidationError` (`vertebra.agent.okf`) provide pure-Python Open Knowledge Format (OKF v0.2) parsing, fence-aware truth-block and footnote validation, canonical SHA-256 digests, and reproducible ZIP serialization with zero `PyYAML` dependency.
+`vertebra.agent.okf` parses Open Knowledge Format (OKF v0.2) bundles in Python with no `PyYAML` dependency. It validates truth blocks and footnotes, computes SHA-256 digests, and writes reproducible ZIP archives.
 
-`SyncKnowledgeCatalogClient` and `AsyncKnowledgeCatalogClient` (`vertebra.agent.knowledge_catalog`) connect to Google Cloud Dataplex Universal Catalog (`dataplex.googleapis.com/v1`) over Vertebra's native `GcpTokenCache` and HTTP/2 transport. They resolve `type=context-set` entry groups, sync `OkfBundle` entries in `<= 250`-entry batches by digest, and query entries through `locations/global:searchEntries`. See [Agent Runtime (`vertebra.agent`)](agent.md) for MCP, A2A, and workflow APIs.
+`vertebra.agent.knowledge_catalog` connects to Google Cloud Dataplex Universal Catalog (`dataplex.googleapis.com/v1`) over `GcpTokenCache` and HTTP/2. Sync and async clients resolve `context-set` entry groups, upload changed `OkfBundle` entries in batches of up to 250 by digest, and search entries via `locations/global:searchEntries`. See [Agent Runtime](agent.md) for MCP, A2A, and workflow APIs.
 
 ## Quick Example
 
@@ -33,7 +33,7 @@ matches = await client.search_entries(
 )
 ```
 
-## OKF v0.2 Bundle Serializer (`vertebra.agent.okf`)
+## OKF v0.2 Bundle Serializer
 
 ::: vertebra.agent.okf.OkfSource
     options:
@@ -65,7 +65,7 @@ matches = await client.search_entries(
       heading_level: 4
       members: false
 
-## Knowledge Catalog Clients (`vertebra.agent.knowledge_catalog`)
+## Knowledge Catalog Clients
 
 ::: vertebra.agent.knowledge_catalog.KnowledgeCatalogConfig
     options:

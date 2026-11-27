@@ -2,27 +2,27 @@
 
 ## Runtime (`runtime/`)
 
-- [Runtime Topologies & Python Embedding](runtime/topologies-and-embedding.md) — `Topology::{Auto, Embedded, Shm}`, explicit `tokio::runtime::Builder`, `EmbeddedSupervisor` `SO_REUSEPORT` multi-process supervision, `BatchBridge`, `RingFactory`, and Free-Threaded Python `3.14t`/`3.15t` execution modes (`#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, and `_spanner`).
-- [SHM Worker Spawn, Shutdown & Recovery Hooks](runtime/shm-supervision-and-recovery.md) — `RingFactory` FD inheritance (`VERTEBRA_*_FD`), `shutdown_workers` (`SIGTERM` then `SIGKILL`), and library-level recovery primitives (`WorkerLifecycle` with `pidfd_open` + `Child::try_wait` and 1 s–32 s exponential backoff, `RingPair::reclaim`, `cleanup_stale_shm`).
-- [Server Platform & Process Lifecycle](runtime/platform-and-lifecycle.md) — `run_supervisor` binary launcher, `find_server_binary`, `EventLoopPool` (`uvloop` + inline `add_reader`), `GilAuditReport`, `SyncLoopShardedResource` / `AsyncLoopShardedResource`, `SyncPool`, `SHMAllocationPolicy`, and container platform primitives (`CgroupQuota`, `LameDuckController`, `ZPagesRegistry`).
+- [Runtime Topologies & Python Embedding](runtime/topologies-and-embedding.md) — Automatic, embedded, and shared-memory topologies, Tokio runtime sizing, multi-process supervision, and free-threaded worker pools.
+- [SHM Worker Spawn, Shutdown & Recovery Hooks](runtime/shm-supervision-and-recovery.md) — Shared-memory FD inheritance, graceful worker termination, crash recovery backoff, and stale segment cleanup.
+- [Server Platform & Process Lifecycle](runtime/platform-and-lifecycle.md) — Binary discovery, supervisor launcher, event-loop pools, GIL auditing, sync thread pools, cgroup sizing, lame-duck drain, and ZPages diagnostics.
 
 ## IPC & Shared Memory (`ipc/`)
 
-- [Lock-Free Ring Buffers & Shared Memory](ipc/ring-buffers-and-shm.md) — `ShmHeader` (`ABI_VERSION = 3`) layout with Dekker `consumer_sleeping` and `active_flags` cache lines, cached-head `SpscRing` + `SlotView` zero-copy borrow/release, cache-line-padded Vyukov `MpmcRing` + `MpmcSlotView`, LZ4/Zstd payload compression, and Linux (`futex`/`eventfd`) / macOS (`pipe`/`__ulock_wait`) wake primitives.
-- [Tiered Rings & In-Process Batch Bridge](ipc/tiered-rings-and-batch-bridge.md) — `RingPair`, right-sized `TieredRingSet` (`small` 4 KiB×512, `medium` 32 KiB×128, `large` 256 KiB×32, `xlarge` 2 MiB×8 with 20-byte `VRES` wire headers and `active_flags` bitmask), `VRSF` (`ResponseStreamFrame`) streaming frames, and lock-free `BatchBridge` (`InProcessRequest`, `ResponseSink`, Dekker request `Notifier`).
+- [Lock-Free Ring Buffers & Shared Memory](ipc/ring-buffers-and-shm.md) — Cache-line-aligned ring headers, Dekker wakeups, SPSC and MPMC ring transports, payload compression, and OS notification primitives.
+- [Tiered Rings & In-Process Batch Bridge](ipc/tiered-rings-and-batch-bridge.md) — Size-tiered response rings, file-backed overflow fallbacks, streaming response frames, and the lock-free in-process batch bridge.
 
 ## HTTP Ingress & Dispatch (`http/`)
 
-- [HTTP Ingress, Request Pipeline & Native Routing](http/ingress-and-routing.md) — `run_with_listener` `SO_REUSEPORT` accept loop (`ServerState`), tuned `http1::Builder`, ALPN `TlsAcceptor` (`h2` + mTLS), `Router` (`normalize_typed_path` + FNV-1a `HandlerId`), and `RouteTable` (`MOUNT_HANDLER_BASE`).
-- [Request Batching, Dispatch & Backpressure](http/batching-dispatch-and-backpressure.md) — Double-buffered `RequestBatcher` shard pool (`BatchLimit`, compact binary headers), `Dispatcher` (`DispatchBackend::{Direct, Bridge, Shm}`), lock-free batch-affinitized `ShmDispatcher` 8-shard `Mutex<InFlightRequests>` slabs, `ResponseStreamRegistry` bounded response streams, and lock-free atomic `BackpressureController`.
-- [Protocol and Offload Modules in vertebra-http](http/protocol-and-offload-modules.md) — Inventory of wired `vertebra-http` offloads (`cors`, `compression`, `assets`, `openapi_cache`, `health` via `VERTEBRA_OFFLOAD_CONFIG`), wire protocols (`h2c`, `http3`, `grpc`), realtime and protocol bridges (`sse`, `ws_mount`, `pubsub`, `mcp_bridge`), and library helpers (`payload`, `multipart`, `access_log`, `profile`, `discovery`, `dispatcher/direct`).
+- [HTTP Ingress, Request Pipeline & Native Routing](http/ingress-and-routing.md) — TCP/TLS/HTTP/3 accept loop, fixed-order ingress offloads, environment configuration, and Rust radix routing.
+- [Request Batching, Dispatch & Backpressure](http/batching-dispatch-and-backpressure.md) — Sharded request batchers, bridge and SHM dispatchers, sharded correlation slabs, isolated stream pumps, and lock-free admission control.
+- [Protocol and Offload Modules in vertebra-http](http/protocol-and-offload-modules.md) — Inventory of wired HTTP offloads, wire protocols, realtime bridges, and auxiliary crate helpers.
 
 ## Python Worker & Protocols (`worker/`)
 
-- [PyO3 FFI & Vectorized Batch Dispatch](worker/pyo3-ffi-and-batch-dispatch.md) — `vertebra._vertebra` zero-copy `BatchSnapshot`-backed `Request` (`body_view` buffer protocol)/`Headers`/`Response`/`RequestBatch`, Python 3.15/3.15t `immutable_type` and conditional `freelist`, inline vectorized sync dispatch (`sync_to_thread`), `O(1)` mount routing, and `EventLoopPool` wakeups.
-- [ASGI, RSGI & WSGI Runners](worker/asgi-and-wsgi-runners.md) — `AsgiRunner` + Rust `AsgiProtocol` / `PyEmptyAwaitable` / `drive_asgi_batch` (`PyIter_Send` + `_SteppedCoroutine`), `FastPath`, 20-slot `AsgiScope`, RSGI 1.6 (`RsgiAdapter`, lazy `RsgiScope`, direct-submitting `RsgiHttpProtocol`, `drive_rsgi_batch`), and `WsgiAdapter` (`WsgiEnviron`).
+- [PyO3 FFI & Vectorized Batch Dispatch](worker/pyo3-ffi-and-batch-dispatch.md) — Zero-copy request and response wrappers, free-threaded class flags, inline sync batching, mount dispatch, and loop wakeups.
+- [ASGI, RSGI & WSGI Runners](worker/asgi-and-wsgi-runners.md) — Rust-driven ASGI 3.0, RSGI 1.6, and PEP 3333 WSGI batch runners, lazy scopes, lifespan handling, and framework fastpaths.
 
 ## Frontend, SSR & Codegen (`frontend/`)
 
-- [Oxc Bundler, HMR Watcher & QuickJS SSR Pool](frontend/bundler-hmr-and-ssr.md) — Oxc `Bundler` (`vertebra._bundler`), `rolldown-notify-debouncer-mini` `SourceWatcher` (`HmrEvent`), `rquickjs` `SSRPool` with `ArrayQueue` slot leasing and `DashMap` 60 s TTL cache, and `BuildOrchestrator`.
-- [Route Codegen Targets & Inertia v3 Middleware](frontend/codegen-and-inertia.md) — `RouteCollector` and `TypeExtractor` (`TypeNode` IR), `TypeScriptGenerator`, `ZodGenerator`, `ValibotGenerator`, `OpenAPIGenerator`, `ProtobufGenerator`, `ProcedureClientGenerator`, `ManifestGenerator`, import maps, and `SyncInertiaMiddleware` / `AsyncInertiaMiddleware`.
+- [Oxc Bundler, HMR Watcher & QuickJS SSR Pool](frontend/bundler-hmr-and-ssr.md) — Native TypeScript/JSX transforms, debounced file watching, QuickJS SSR pooling with TTL caching, and build orchestration.
+- [Route Codegen Targets & Inertia v3 Middleware](frontend/codegen-and-inertia.md) — Route and type extraction, TypeScript/schema/OpenAPI/Protobuf codegen, import maps, and sync/async Inertia middleware.

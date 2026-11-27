@@ -1,10 +1,10 @@
 # Quickstart
 
-Build a typed Vertebra application with `App`, `msgspec.Struct` models, and in-process testing.
+Build a typed Vertebra app, run it locally, and test its routes in `pytest`.
 
 ## 1. Create an Application
 
-Create `app.py` with a health endpoint and a typed `POST` route:
+Create `app.py` with a health check and a `POST` route:
 
 ```python
 import msgspec
@@ -35,23 +35,23 @@ def create_item(body: CreateItemRequest) -> ItemResponse:
     return ItemResponse(id=1, name=body.name, quantity=body.quantity)
 ```
 
-## 2. Run the Development Server
+## 2. Run the Server
 
-Start the application with live reload using `vtb dev`:
+Start the dev server with live reload:
 
 ```bash
 vtb dev app:app --port 8000
 ```
 
-Or run in production mode with `vtb run`:
+Run in production across multiple workers:
 
 ```bash
 vtb run app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-## 3. Verify Routes in `pytest`
+## 3. Test Routes in `pytest`
 
-Test route registration, handler lookup (`handler_id`), and path parameter extraction (`extract_path_params`) directly in `pytest` without opening a network socket:
+Test route lookup and path parameter extraction directly in memory without opening a socket:
 
 ```python
 from vertebra import App, extract_path_params, handler_id
@@ -75,6 +75,6 @@ def test_routes_and_handlers() -> None:
 
 ## Next Steps
 
-- Configure runtime topologies and environment variables in [Configuration](configuration.md).
-- Explore modular routers, dependency injection, guards, and `msgspec.Struct` models in [Routing & Handlers](../usage/routing-and-handlers.md).
+- Tune worker modes and environment variables in [Configuration](configuration.md).
+- Learn about routers, controllers, dependency injection, and guards in [Routing & Handlers](../usage/routing-and-handlers.md).
 - Browse runnable scripts in [Examples](../examples/index.md).

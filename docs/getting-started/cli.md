@@ -1,27 +1,25 @@
 # CLI Guide
 
-The `vtb` command-line interface manages the full lifecycle of a Vertebra project: scaffolding, hot-reload development, production execution, frontend asset bundling, TypeScript client generation, MCP stdio bridges, background queue workers, and standalone binary packaging.
+The `vtb` CLI handles project setup, development servers, production runs, frontend builds, type generation, background workers, MCP bridges, and standalone packaging.
 
-## Running CLI Commands
+## Running `vtb`
 
-=== "Direct CLI (Activated Environment)"
+=== "Activated environment"
     ```bash
     vtb --help
     ```
-=== "uvx (Ad-hoc Execution)"
+=== "uvx"
     ```bash
     uvx vertebra-core --help
     ```
-=== "uv (Project Runner)"
+=== "uv run"
     ```bash
     uv run vtb --help
     ```
 
 ## Common Workflows
 
-### Scaffold a New Project
-
-Create a new project directory with `vtb init`:
+### Scaffold a Project
 
 ```bash
 vtb init my-service
@@ -29,13 +27,13 @@ vtb init my-service
 
 ### Development & Production Servers
 
-Run in development mode with automatic Python reload and frontend HMR:
+Run with Python reload and frontend hot reload:
 
 ```bash
 vtb dev app:app --port 8000
 ```
 
-Run in production mode with multi-worker scale-out (`--workers 4` automatically selects `shm` on standard GIL Python and `embedded` on free-threaded `3.14t`/`3.15t`; pass `--topology embedded` or `--topology shm` to override explicitly) and TLS certificates:
+Run in production with multiple workers and TLS (use `--topology embedded` or `--topology shm` to override automatic mode selection):
 
 ```bash
 vtb run app:app \
@@ -46,9 +44,9 @@ vtb run app:app \
   --tls-key certs/server.key
 ```
 
-### Frontend & TypeScript Codegen (`vtb js`)
+### Frontend & Type Generation
 
-Manage frontend dependencies, bundle assets through `vertebra-bundler` (Rolldown/Oxc), and generate end-to-end TypeScript route and DTO types:
+Install JS dependencies, bundle assets, and generate TypeScript types from your Python routes:
 
 ```bash
 vtb js install
@@ -57,25 +55,25 @@ vtb js build
 vtb js generate-types
 ```
 
-The `@vertebra/client` TypeScript SDK is supplied directly with the Python package distribution and linked automatically without requiring an external NPM install.
+`@vertebra/client` ships inside the Python wheel and links automatically without npm.
 
-### Background Queue Workers (`vtb workers` & `--worker-only`)
+### Background Workers
 
-Run dedicated background task queue and cron workers:
+Run standalone queue and cron workers:
 
 ```bash
 vtb workers run app:app --concurrency 16 --queues cpu,io,agent
 ```
 
-Run worker lanes alongside HTTP readiness probes (`/healthz`, `/readyz`, `/startupz`) without starting the HTTP ingress server:
+Or run workers with HTTP health probes (`/healthz`, `/readyz`, `/startupz`) and no HTTP app ingress:
 
 ```bash
 vtb run app:app --worker-only --host 0.0.0.0 --port 8080
 ```
 
-### MCP Stdio Server & HTTP/OIDC Bridge (`vtb ai mcp`)
+### MCP Server & Bridge
 
-Serve your discovered application MCP endpoints incrementally over stdio, or bridge stdio desktop AI hosts to remote Vertebra or Cloud Run / IAP HTTP/SSE endpoints with audience-bound OIDC identity tokens (`AsyncGcpIdTokenCache`):
+Serve your app's MCP tools over stdio, or bridge a local stdio client to a remote HTTPS/IAP MCP server:
 
 ```bash
 vtb ai mcp serve --app app:app
@@ -85,12 +83,12 @@ vtb ai mcp bridge \
   --timeout 30
 ```
 
-### Standalone Binary Packaging (`vtb build`)
+### Standalone Binaries
 
-Package your Python application, native extensions, and static assets into a relocatable standalone directory or self-contained single-file executable (pass `--include-agent-skills` to opt into staging `.agents/skills`):
+Package your app, extensions, and static assets into a standalone directory or single-file executable (add `--include-agent-skills` to bundle `.agents/skills`):
 
 ```bash
 vtb build --standalone --onefile
 ```
 
-See the complete generated flag reference in the [CLI Reference](../reference/cli.md).
+See the full flag list in the [CLI Reference](../reference/cli.md).

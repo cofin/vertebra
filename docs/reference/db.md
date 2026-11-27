@@ -1,20 +1,20 @@
-# `vertebra.db` — Database Drivers, Analytics Engines & Cloud Dialers
+# Database Drivers, Analytics & Cloud Dialers
 
-Native database configurations, synchronous and asynchronous drivers (`SyncDatabaseDriver`, `AsyncDatabaseDriver`), capability protocols (`SyncPipelineCapable`, `AsyncPipelineCapable`, `SyncNotificationSource`, `AsyncNotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `SyncQueueStore`, `AsyncQueueStore`, `EmbeddingPushdown`), typed `DatabaseError` / `NotFoundError` exceptions, Apache Arrow shared-memory cursors (`ArrowCursor`), DataFusion federated analytics (`DataFusionConfig`, `DataFusionEngine`), Change Data Capture (`ChangeFeed`), dialect-agnostic tenant predicates (`TenantPredicate`), and zero-sidecar Cloud SQL / AlloyDB dialers. See the [Databases & Native Drivers Usage Guide](../usage/databases.md) for architectural patterns and examples.
+`vertebra.db` provides database configs, sync and async drivers, capability protocols, DB-API 2.0 adapters, Apache Arrow cursors, DataFusion SQL federation, change data capture, tenant scoping, and direct Cloud SQL and AlloyDB dialers. See the [Databases & Native Drivers Usage Guide](../usage/databases.md) for patterns and examples.
 
-| Category | Classes | Highlights |
-| --- | --- | --- |
-| **SQLSpec Adapters (Litestar)** | `PostgresAsyncConfig`, `MySQLAsyncConfig`, `SQLiteAsyncConfig`, `OracleAsyncConfig`, `MSSQLAsyncConfig`, `DuckDBAsyncConfig`, `BigQueryAsyncConfig`, `SpannerAsyncConfig` | Canonical Litestar adapter configurations (`vertebra.extensions.sqlspec`) backed by engine drivers and connection leasing |
-| **Standalone PEP 249 DB-API** | `SyncDBAPIModule`, `AsyncDBAPIModule`, `SyncDBAPIConnection`, `AsyncDBAPIConnection` | Standalone synchronous and asynchronous DB-API 2.0 interfaces (`vertebra.db.dbapi`) with zero SQLAlchemy dependency |
-| **Registry, Contracts & Native Pipelines** | `DatabaseRegistry`, `provide_driver`, `BaseDatabaseConfig`, `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `DatabaseError`, `NotFoundError`, `ArrowCursor` | Polymorphic URL scheme resolution, shared endpoint pool keys, uniform sync/async execution contracts, capability-based `driver.pipeline()` batching, and zero-copy Arrow IPC cursors |
-| **Capability Protocols** | `SyncPipelineCapable`, `AsyncPipelineCapable`, `SyncNotificationSource`, `AsyncNotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `SyncQueueStore`, `AsyncQueueStore`, `EmbeddingPushdown` | `@runtime_checkable` structural protocols for query pipelining, pub/sub notifications, CDC streams, `SKIP LOCKED` job queues, and in-database embedding pushdown |
-| **Relational & OLAP Configs** | `PostgreSQLConfig`, `MySQLConfig`, `SQLiteConfig`, `OracleConfig`, `MSSQLConfig`, `DuckDBConfig`, `BigQueryConfig`, `SpannerConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, SQL Server `@P1` placeholder rewriting, DuckDB Arrow streaming (`vertebra-core[duckdb]`), BigQuery Storage Read/Write v1 + Object Tables, and Spanner Multiplexed Sessions + `BatchWrite` |
-| **RESP3 & Federated SQL** | `RedisConfig`, `ValkeyConfig`, `DataFusionConfig`, `DataFusionEngine` | RESP3 `HELLO 3` client-side cache invalidation, Cluster/Sentinel routing, and cross-engine SQL federation |
-| **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `SyncAlloyDBDialer`, `AsyncAlloyDBDialer`, `CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`, `CDCConfig`, `ChangeFeed`, `PostgresNotifyConfig`, `SyncPostgresNotificationSource`, `AsyncPostgresNotificationSource`, `OracleNotifyConfig`, `SyncOracleNotificationSource`, `AsyncOracleNotificationSource`, `SyncSpannerChangeStreamSource`, `AsyncSpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate`, `TenantConnectionScope`, `AsyncTenantConnectionScope` | Direct TCP/TLS IAM OAuth2 token password resolution (`:5432`, `:3306`), zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication / Oracle TxEventQ / Spanner change-stream streaming, and reset-or-evict tenant isolation |
+| Category | Coverage |
+| --- | --- |
+| **SQLSpec Adapters** | Litestar adapter configs under `vertebra.extensions.sqlspec` backed by Vertebra drivers and connection leasing. |
+| **PEP 249 DB-API** | Sync and async DB-API 2.0 interfaces under `vertebra.db.dbapi` with no SQLAlchemy dependency. |
+| **Registry & Driver Contracts** | URL-based driver resolution, shared pool keys, uniform sync and async contracts, query pipelining, and zero-copy Arrow cursors. |
+| **Capability Protocols** | Runtime-checkable protocols for pipelining, pub/sub notifications, CDC streams, `SKIP LOCKED` queues, and in-database embedding pushdown. |
+| **Relational & Analytical Drivers** | Configs for PostgreSQL, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, BigQuery, and Spanner. |
+| **Key-Value & Federated SQL** | RESP3 Redis and Valkey clients with client-side caching, Sentinel, and Cluster routing, plus cross-engine DataFusion analytics. |
+| **Cloud Dialers, CDC & RLS** | Direct IAM token auth, `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication and change streams, and tenant isolation. |
 
-## Database Registry, Driver Contracts & Native Pipelines
+## Registry, Driver Contracts & Pipelines
 
-`DatabaseRegistry` and `provide_driver` resolve polymorphic configurations and shared drivers from URL schemes, while `SyncDatabaseDriver` / `AsyncDatabaseDriver` define the uniform execution contract and `SyncPipelineCapable` / `AsyncPipelineCapable` expose native `driver.pipeline()` batching with ordered results.
+`DatabaseRegistry` and `provide_driver` resolve configs and shared drivers from URL schemes. `SyncDatabaseDriver` and `AsyncDatabaseDriver` define the execution contract, while `SyncPipelineCapable` and `AsyncPipelineCapable` add batched `driver.pipeline()` execution.
 
 ::: vertebra.db.registry.DatabaseRegistry
     options:
@@ -72,7 +72,7 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
       members: false
       summary: false
 
-## Standalone PEP 249 DB-API (`vertebra.db.dbapi`)
+## PEP 249 DB-API
 
 ::: vertebra.db.dbapi.SyncDBAPIConnection
     options:
@@ -98,7 +98,7 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
       members: false
       summary: false
 
-## Relational, Cloud & Analytical Drivers (`vertebra.db.adapters`)
+## Relational, Cloud & Analytical Drivers
 
 ::: vertebra.db.adapters.postgres.PostgreSQLConfig
     options:
@@ -143,7 +143,7 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
       heading_level: 4
       members: false
 
-## RESP3 Key-Value Stores & DataFusion (`redis`, `valkey`, `datafusion`)
+## Key-Value Stores & DataFusion
 
 ::: vertebra.db.adapters.redis.RedisConfig
     options:
@@ -201,14 +201,6 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
       members: false
       summary: false
 
+`TenantScopeConfig.setting_name` is adapter-neutral. `TenantPredicate` renders ANSI placeholders with an optional `CAST`, while the PostgreSQL and Oracle adapters own session SQL. SQLSpec accepts the declared PostgreSQL and Oracle setters and rejects other engines. BigQuery and Spanner constructors reject a non-`None` `tenant_predicate` before initialization. Oracle VPD scopes support trusted context package procedures alongside `DBMS_SESSION.SET_IDENTIFIER` and reset or evict connections on pool release.
 
-`TenantScopeConfig.setting_name` is adapter-neutral. `TenantPredicate` renders ANSI
-placeholders and optional `CAST`, while PostgreSQL and Oracle cores own session
-SQL. SQLSpec supports the declared PostgreSQL/Oracle setters and refuses other
-engines. BigQuery/Spanner constructors reject non-None `tenant_predicate` before
-initialization. Oracle VPD scopes (`TenantConnectionScope` / `AsyncTenantConnectionScope`)
-support trusted context package procedures alongside `DBMS_SESSION.SET_IDENTIFIER` with
-mandatory reset-or-evict pool release.
-
-See [Database Capabilities](database-capabilities.md) for notification, change-stream,
-tenant-scope, and tool-provider APIs.
+See [Database Capabilities](database-capabilities.md) for notification, change-stream, tenant-scope, and tool-provider APIs.

@@ -1,24 +1,24 @@
-# PyO3 Native Extension Stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`, `_sqlite`, `_redis`, `_valkey`)
+# PyO3 Native Extension Stubs
 
-Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files across all 13 native extensions (`_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`, `_bigquery.pyi`, `_duckdb.pyi`, `_mssql.pyi`, `_mysql.pyi`, `_oracle.pyi`, `_postgres.pyi`, `_spanner.pyi`, `_sqlite.pyi`, `_redis.pyi`, `_valkey.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`. Most applications interact with these primitives through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) facades.
+Low-level Rust classes and functions declared in PEP 561 `.pyi` stub files across Vertebra's compiled extension modules. Each extension is built with `gil_used = false` for free-threaded Python. Most applications use these through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) APIs.
 
-| Native Module | Key Stub Classes | Backing Rust Crate |
+| Native Module | Backing Crate | Scope |
 | --- | --- | --- |
-| **`vertebra._vertebra`** | `Request`, `Headers`, `Response`, `RequestBatch`, `AsgiScope`, `RsgiScope`, `WsgiEnviron`, `ShmCache`, `ShmCacheStats` | `vertebra-py`, `vertebra-core`, `vertebra-http`, `vertebra-db` |
-| **`vertebra._bundler`** | `BundleConfig`, `BuildResult`, `Bundler`, `SSRPool`, `IsolatedDeclarationsGenerator` | `vertebra-bundler` (Oxc, Rolldown, QuickJS) |
-| **`vertebra._storage`** | `StorageBuffer`, `ObjectMeta`, `SyncObjectStore`, `AsyncObjectStore` | `vertebra-storage` (Rust `object_store` + Tokio) |
-| **`vertebra._bigquery`** | `SyncBigQueryClient`, `AsyncBigQueryClient` | `vertebra-bigquery` (REST v2 + Storage Read/Write gRPC) |
-| **`vertebra._duckdb`** | `SyncDuckDBClient`, `AsyncDuckDBClient` | `vertebra-duckdb` (Bundled DuckDB 2.0 + `VTBARROW` SHM) |
-| **`vertebra._mssql`** | `SyncMSSQLClient`, `AsyncMSSQLClient` | `vertebra-mssql` (TDS 7.4 + `BulkLoad` + `VTBARROW` SHM) |
-| **`vertebra._mysql`** | `SyncMySQLClient`, `AsyncMySQLClient`, `MySQLWireTestServer` | `vertebra-mysql` (MySQL Binary Protocol + `VTBARROW` SHM) |
-| **`vertebra._oracle`** | `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `SyncOracleListener`, `AsyncOracleListener` | `vertebra-oracle` (Oracle 26ai Thin TNS/TTC + Arrow SHM) |
-| **`vertebra._postgres`** | `SyncPostgresClient`, `AsyncPostgresClient`, `SyncPostgresPool`, `AsyncPostgresPool`, `SyncPostgresListener`, `AsyncPostgresListener`, `AsyncPostgresReplication` | `vertebra-postgres` (PostgreSQL Protocol 3.0 + `PGCOPY` + `pgoutput` + `VTBARROW` SHM) |
-| **`vertebra._spanner`** | `SyncSpannerClient`, `AsyncSpannerClient` | `vertebra-spanner` (Spanner Data + DatabaseAdmin) |
-| **`vertebra._sqlite`** | `SyncSQLiteClient`, `AsyncSQLiteClient` | `vertebra-sqlite` (Bundled SQLite 3.45+ + `VTBARROW` SHM) |
-| **`vertebra._redis`** | `SyncRedisClient`, `AsyncRedisClient`, `SyncRedisListener`, `AsyncRedisListener` | `vertebra-redis` (RESP3 + Client Tracking + Sentinel + Cluster) |
-| **`vertebra._valkey`** | `SyncValkeyClient`, `AsyncValkeyClient`, `SyncValkeyListener`, `AsyncValkeyListener` | `vertebra-valkey` (RESP3 + Hash Expiration + Client Tracking + Sentinel + Cluster) |
+| **`vertebra._vertebra`** | `vertebra-py`, `vertebra-core`, `vertebra-http`, `vertebra-db` | Request and response views, protocol scopes, shared-memory cache, and core IPC bridge. |
+| **`vertebra._bundler`** | `vertebra-bundler` | Oxc and Rolldown asset bundling, QuickJS SSR pool, and `.d.ts` declaration generation. |
+| **`vertebra._storage`** | `vertebra-storage` | Sync and async object storage backed by Rust `object_store` and Tokio. |
+| **`vertebra._bigquery`** | `vertebra-bigquery` | BigQuery REST v2 queries and Storage Read/Write gRPC streams. |
+| **`vertebra._duckdb`** | `vertebra-duckdb` | Bundled DuckDB 2.0 client with shared-memory Arrow output. |
+| **`vertebra._mssql`** | `vertebra-mssql` | SQL Server TDS 7.4 client with bulk load and Arrow output. |
+| **`vertebra._mysql`** | `vertebra-mysql` | MySQL binary protocol client with Arrow output. |
+| **`vertebra._oracle`** | `vertebra-oracle` | Oracle 26ai Thin client, connection pools, and notification listeners. |
+| **`vertebra._postgres`** | `vertebra-postgres` | PostgreSQL Protocol 3.0 client, pools, `COPY`, `pgoutput` replication, and Arrow output. |
+| **`vertebra._spanner`** | `vertebra-spanner` | Cloud Spanner data and admin client. |
+| **`vertebra._sqlite`** | `vertebra-sqlite` | Bundled SQLite 3.45+ client with WAL pooling and Arrow output. |
+| **`vertebra._redis`** | `vertebra-redis` | RESP3 Redis client with client-side caching, Sentinel, and Cluster support. |
+| **`vertebra._valkey`** | `vertebra-valkey` | RESP3 Valkey client with hash-field expiration, client-side caching, Sentinel, and Cluster support. |
 
-## `vertebra._vertebra` — HTTP/IPC Transport, Request Batches & Protocol Drivers
+## Core Runtime & Protocol Views
 
 ::: vertebra._vertebra.Request
     options:
@@ -68,7 +68,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
       members: false
       show_signature: false
 
-## `vertebra._bundler` — Embedded Rolldown/Oxc Bundler & QuickJS SSR Pool
+## Bundler & QuickJS SSR
 
 ::: vertebra._bundler.BundleConfig
     options:
@@ -98,7 +98,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
       members: false
       show_signature: false
 
-## `vertebra._storage` — Rust `object_store` & Cloud Presigning Primitives
+## Object Storage
 
 ::: vertebra._storage.StorageBuffer
     options:
@@ -130,7 +130,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
         - list
         - copy
 
-## `vertebra._bigquery` & `vertebra._spanner` — Google Cloud Data-Plane Extensions
+## BigQuery & Spanner
 
 ::: vertebra._bigquery.SyncBigQueryClient
     options:
@@ -160,7 +160,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
       summary: false
       show_signature: false
 
-## `vertebra._duckdb` — Embedded DuckDB 2.0 Analytical Client
+## DuckDB
 
 ::: vertebra._duckdb.SyncDuckDBClient
     options:
@@ -176,9 +176,9 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
       summary: false
       show_signature: false
 
-## Native SQL Drivers (`_postgres`, `_oracle`, `_mysql`, `_mssql`, `_sqlite`)
+## SQL Database Drivers
 
-Each companion database extension exposes `GIL_USED = False` and `FREE_THREADED` module constants alongside its synchronous/asynchronous native clients (`Sync*`, `Async*`) and extension-specific pooling or replication types listed in the summary table above (`SyncPostgresClient`, `AsyncPostgresClient`, `SyncPostgresPool`, `AsyncPostgresPool`, `AsyncPostgresReplication`, `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `SyncMySQLClient`, `AsyncMySQLClient`, `SyncMSSQLClient`, `AsyncMSSQLClient`, `SyncSQLiteClient`, `AsyncSQLiteClient`).
+Each SQL database extension exports `GIL_USED = False` and `FREE_THREADED` alongside its sync and async clients, connection pools, listeners, and replication types.
 
 ::: vertebra._postgres.AsyncPostgresClient
     options:
@@ -229,9 +229,9 @@ Each companion database extension exposes `GIL_USED = False` and `FREE_THREADED`
       summary: false
       show_signature: false
 
-## Native RESP3 Cache Drivers (`_redis`, `_valkey`)
+## Redis & Valkey Drivers
 
-Standalone `vertebra._redis` and `vertebra._valkey` extensions expose `SyncRedisClient`, `AsyncRedisClient`, `SyncRedisListener`, `AsyncRedisListener`, `SyncRedisPipeline`, and `AsyncRedisPipeline` plus Valkey-native `SyncValkeyClient`, `AsyncValkeyClient`, `SyncValkeyListener`, `AsyncValkeyListener`, `SyncValkeyPipeline`, and `AsyncValkeyPipeline` with RESP3 wire framing, Valkey 9.0 hash-field expiration (`hexpire`, `hpexpire`, `httl`, `hpersist`), `CLIENT CAPA redirect`, client-side caching invalidations, Sentinel, and Cluster topology routing.
+`vertebra._redis` and `vertebra._valkey` expose sync and async clients, pub/sub listeners, and pipelines with RESP3 framing, client-side caching invalidations, Sentinel, and Cluster routing. `vertebra._valkey` adds Valkey 9.0 hash-field expiration and `CLIENT CAPA redirect`.
 
 ::: vertebra._redis.AsyncRedisClient
     options:

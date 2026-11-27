@@ -1,10 +1,10 @@
 # Routing & Handlers
 
-Vertebra routes incoming HTTP requests through its Rust router (`vertebra-http`) directly to typed Python functions, `Controller` classes, modular `Router` groups, or RPC `Procedure` definitions.
+Vertebra routes incoming HTTP requests through its Rust router directly to typed Python functions, controllers, modular routers, or RPC procedures.
 
-## Route Decorators, `Controller`, and `Router`
+## Route Decorators, Controllers & Routers
 
-Register routes directly on `App` with `@app.get`, `@app.post`, `@app.put`, `@app.patch`, and `@app.delete`, or group related endpoints on a `Controller` and `Router`:
+Register routes on an `App` using HTTP method decorators (GET, POST, PUT, PATCH, DELETE), or group related endpoints into controllers and routers:
 
 ```python
 from vertebra import App, Controller, Provide, Router, get, post
@@ -33,7 +33,7 @@ api_router = Router(prefix="/api/v1", route_handlers=[UserController])
 app = App(route_handlers=[api_router])
 ```
 
-You can also instantiate explicit `Route` descriptors when building route tables programmatically:
+You can also construct `Route` descriptors directly when building route tables programmatically:
 
 ```python
 from vertebra import Route
@@ -48,7 +48,7 @@ ping_route = Route(path="/ping", fn=ping, methods=("GET",))
 
 ## Path, Query, Header & Cookie Parameters
 
-Path parameters are extracted from `{name}` or typed `{name:int}` / `{name:float}` / `{name:uuid}` / `{name:path}` placeholders. Use `FromQuery`, `FromHeader`, `FromCookie`, or `Parameter` (`vertebra.build.codegen`) to bind query strings, HTTP headers, and cookies with optional default values and wire-name aliases:
+Extract path parameters from placeholders like `{name}` or typed variants (int, float, uuid, path). Use `FromQuery`, `FromHeader`, `FromCookie`, or `Parameter` to bind query strings, headers, and cookies with defaults and wire-name aliases:
 
 ```python
 from typing import Annotated
@@ -76,9 +76,9 @@ def search_items(
     }
 ```
 
-## Typed `msgspec.Struct` Request & Response Models
+## Request & Response Models
 
-Vertebra uses `msgspec.Struct` (or `FrozenBaseStruct` from `vertebra.typing`) for fast JSON and MessagePack (`MsgPackBody`) validation and response serialization:
+Use `msgspec.Struct` models for fast JSON and MessagePack request validation and response serialization:
 
 ```python
 import msgspec
@@ -104,9 +104,9 @@ def create_order(body: CreateOrderInput) -> OrderSummary:
     return OrderSummary(order_id=101, sku=body.sku, quantity=body.quantity)
 ```
 
-## Typed RPC Procedures (`Procedure` & `ProcedureRouter`)
+## RPC Procedures
 
-For RPC-style `@query`, `@mutation`, and `@subscription` endpoints with automatic TypeScript client generation, declare procedures on a `Controller` or `ProcedureRouter` (`vertebra.framework.procedures`):
+Declare query, mutation, and subscription endpoints on a `Controller` or `ProcedureRouter` to expose typed RPC APIs with automatic TypeScript client generation:
 
 ```python
 from vertebra import App, ProcedureRouter
@@ -127,11 +127,11 @@ def archive_order(order_id: int) -> dict[str, int | bool]:
 app = App(route_handlers=[procedures])
 ```
 
-Invoke registered procedures directly in Python tests or internal services with `await app.call_procedure("archive_order", {"order_id": 42})`.
+In tests or internal services, call registered procedures directly with `await app.call_procedure("archive_order", {"order_id": 42})`.
 
 ## Lifecycle Hooks, Sub-Apps & Auto-Wiring
 
-Register startup/shutdown hooks, mount sub-applications under a path prefix, enable interactive OpenAPI + Scalar docs, or auto-discover controllers and routers across domain packages using `AutowireLoader`:
+Register startup and shutdown hooks, mount sub-applications under a prefix, enable OpenAPI and Scalar docs, or auto-discover controllers and routers across domain packages with `AutowireLoader`:
 
 ```python
 from vertebra import App

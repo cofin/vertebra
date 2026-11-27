@@ -1,10 +1,10 @@
 # Range reads, Parquet, and ORM attachments
 
-`SyncObjectStore` and `AsyncObjectStore` plug into PyArrow through seekable range readers, and into Advanced Alchemy and SQLSpec through `ObjectStoreBackend` adapters. The examples use in-memory stores with explicit namespaces; swap in any backend configuration from the [object storage guide](storage.md).
+Vertebra object stores connect to PyArrow through seekable range readers, and to Advanced Alchemy and SQLSpec through `ObjectStoreBackend` adapters. The examples below use in-memory stores; swap in any backend from the [object storage guide](storage.md).
 
 ## Range reads with PyArrow
 
-`store.open_reader(key)` returns a seekable `SyncReadableFile` (or `AsyncReadableFile`). PyArrow and Polars accept it as a file, so a Parquet reader fetches the footer and the row groups it needs instead of downloading the whole object:
+`store.open_reader(key)` returns a seekable file object accepted directly by PyArrow and Polars. Parquet readers fetch only the footer and needed row groups instead of downloading the whole file:
 
 ```python
 import pyarrow as pa
@@ -22,13 +22,13 @@ with store.open_reader("events/2026-10.parquet", read_ahead=1_048_576) as reader
 
 Output: `2 ['day', 'events']`.
 
-`read_ahead` sets the cached range window (default `4_194_304` bytes). Reads shorter than the window are served from it, which keeps the many small footer and page reads a Parquet reader issues down to a few requests. Set `read_ahead=0` when every read should map to exactly one range request. `read_at(offset, length)` reads a slice without moving the cursor.
+`read_ahead` sets the cached range window (default 4 MiB) so small sequential footer and page reads coalesce into fewer requests. Set it to 0 for one range request per read, or call `read_at` to read a slice without moving the cursor.
 
-`write_parquet` takes `use_dictionary` and `use_byte_stream_split` as a boolean or a list of column names, plus `options` forwarded to `pyarrow.parquet.ParquetWriter`. `iter_parquet_batches` reads row groups on demand; see [Arrow IPC and Parquet batches](storage.md#arrow-ipc-and-parquet-batches).
+For encoding options and streaming batch reads, see [Arrow IPC and Parquet batches](storage.md#arrow-ipc-and-parquet-batches).
 
 ## Advanced Alchemy file attachments
 
-`register_storage_backend` registers an `ObjectStoreBackend` (`vertebra.extensions.alchemy.storage`) in Advanced Alchemy's storage registry. `FileObject` and `StoredObject` columns then save and load through the native store:
+`register_storage_backend` registers an object-store backend in Advanced Alchemy's storage registry so file attachment model fields read and write through Vertebra:
 
 ```python
 from advanced_alchemy.types.file_object import FileObject
@@ -43,7 +43,9 @@ backend.save_object(contract, b"%PDF-1.4...")
 print(contract.size)
 ```
 
-Output: `11`. Saves use native `put`, `put_file`, or streaming `put_stream`, and set the file's size and ETag from the result. Both `save_object` and `save_object_async` also forward `checksum`, `expected_sha256`, `expected_crc32c`, and `expected_md5`. Use `save_arrow` and `save_arrow_async` to stream Arrow Tables, RecordBatches, or batch iterators directly through `write_batches_sync` / `write_batches_async` and receive the resulting `PutResult`:
+Output: 11. Saves populate file size and ETag automatically and forward checksum and expected-digest options.
+
+Use `save_arrow` or `save_arrow_async` to stream Arrow tables, record batches, or iterators directly and get back the write result:
 
 ```python
 import pyarrow as pa
@@ -56,7 +58,7 @@ res = backend.save_arrow(
 print(res.sha256)
 ```
 
-To sign attachment URLs or share a GCS token cache, pass a configuration instead of a built store and forward `signing` and `token_cache`:
+To sign URLs or share a GCS token cache, pass a config instead of a pre-built store so you can forward `signing` and `token_cache`:
 
 ```python
 import os
@@ -73,11 +75,11 @@ backend = register_storage_backend(
 url = backend.sign("contract.pdf", expires_in=900)
 ```
 
-A GCS configuration with a service-account identity derives `SigningConfig` automatically; pass `signing=SigningConfig(...)` to override it. Passing `signing` or `token_cache` together with an already-built store raises `ImproperConfigurationError`, because that store's authentication is fixed.
+A GCS config with a service-account identity derives signing automatically; pass an explicit `SigningConfig` to override it. Passing signing or token-cache options alongside an already-built store raises `ImproperConfigurationError`.
 
 ## SQLSpec storage backend
 
-`vertebra.extensions.sqlspec.storage.ObjectStoreBackend` implements SQLSpec's `ObjectStoreProtocol` for data pipelines, dataset staging, and Arrow or Parquet export:
+`vertebra.extensions.sqlspec.storage.ObjectStoreBackend` implements SQLSpec's storage protocol for dataset staging and Arrow or Parquet exports:
 
 ```python
 import pyarrow as pa
@@ -89,13 +91,13 @@ lake.write_arrow_sync("daily.parquet", pa.table({"events": [120, 98]}))
 print(lake.read_arrow_sync("daily.parquet").num_rows)
 ```
 
-Output: `2`. `base_path` prefixes every key. `ObjectStoreBackend` declares `supports_direct_arrow_write = True` and exposes `write_arrow_sync`, `write_arrow_async`, `write_arrow_cursor_sync`, and `write_arrow_cursor_async`, normalizing `format_hint`, `compression`, `write_options`, and `checksum` / `expected_*` integrity parameters while aborting multipart uploads on mid-stream `RecordBatchReader` errors. `read_arrow_*` returns a complete Table and defaults to `pre_buffer=True`; `stream_arrow_sync` and `stream_arrow_async` yield batches on demand across every object matching a pattern, and `read_bytes_*` / `write_bytes_*` / `put_stream_*` forward integrity options.
+Output: 2.
 
-Arrow writes stream as Parquet, Arrow IPC, or CSV (`file_format="csv"`), and `overwrite=False` fails instead of replacing an existing object. SQLSpec `SyncStoragePipeline.write_arrow` and `AsyncStoragePipeline.write_arrow` (`sqlspec>=0.74.1`) call these streaming writers directly, so peak memory stays bounded by the upload part size rather than the file size. A writer failure or cancellation aborts the upload and leaves any existing object unchanged.
+- **Direct Arrow streaming**: Supports Parquet, Arrow IPC, and CSV (`file_format="csv"`), forwarding compression, writer options, and checksum checks. SQLSpec storage pipelines stream through these writers so peak memory stays bounded by upload part size. Errors or cancellations abort the upload without overwriting existing objects, and `overwrite=False` refuses to replace an existing key.
+- **Reads**: Sync and async table reads default to pre-buffering enabled, while pattern streams yield batches lazily across every matching key.
+- **Django integrity hooks**: In Django apps, `DjangoStorage` forwards optional SHA-256, CRC32C, and MD5 attributes on uploaded files and raises `vertebra.typing.IntegrityError` on mismatch.
 
-In Django applications, `DjangoStorage` automatically forwards optional `.sha256`, `.crc32c`, and `.md5` attributes attached to uploaded `ContentFile` / `File` instances through `save`, `asave`, and `_save`, surfacing `vertebra.typing.IntegrityError` on mismatch.
-
-The constructor also accepts a URI or `StorageConfig` with `signing=` and `token_cache=`, so SQLSpec exports to GCS can share the token cache used by your other stores:
+Pass a URI or storage config with signing or token-cache options to share a GCS token cache across SQLSpec exports and your other stores:
 
 ```python
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
@@ -109,4 +111,4 @@ lake = ObjectStoreBackend(
 )
 ```
 
-See the [storage API reference](../reference/storage.md) for every store method.
+See the [storage API reference](../reference/storage.md) for the full method list.

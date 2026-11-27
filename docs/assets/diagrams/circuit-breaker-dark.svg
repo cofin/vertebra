@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 272" width="860" height="272" role="img" aria-label="Circuit Breaker Lifecycle">
+  <title>Circuit Breaker Lifecycle</title>
+  <defs>
+    <marker id="arrow-muted" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#94a3b8"/></marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#3b82f6"/></marker>
+    <marker id="arrow-gold" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#d97706"/></marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#22c55e"/></marker>
+    <marker id="arrow-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#f43f5e"/></marker>
+  </defs>
+  <style>
+    .sans { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 13.5px; font-weight: 600; }
+    .title-lg { font-size: 14.5px; font-weight: 600; }
+    .sub { font-size: 11px; font-weight: 400; }
+    .kicker { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; }
+    .label { font-size: 11px; font-weight: 500; }
+    .caption { font-size: 11.5px; font-weight: 400; }
+  </style>
+  <circle cx="24" cy="136" r="5" fill="#94a3b8"/>
+  <path d="M 29 136 L 54 136" fill="none" stroke="#94a3b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-muted)"/>
+  <rect x="58" y="96" width="212" height="80" rx="9" fill="#052e16" stroke="#22c55e" stroke-width="1.25"/>
+  <text x="164.0" y="131.2" text-anchor="middle" class="sans title-lg" fill="#86efac">Closed</text>
+  <text x="164.0" y="155.2" text-anchor="middle" class="sans sub" fill="#94a3b8">Normal traffic · counts errors</text>
+  <rect x="344" y="96" width="204" height="80" rx="9" fill="#2f1119" stroke="#f43f5e" stroke-width="1.25"/>
+  <text x="446.0" y="131.2" text-anchor="middle" class="sans title-lg" fill="#fda4af">Open</text>
+  <text x="446.0" y="155.2" text-anchor="middle" class="sans sub" fill="#94a3b8">Fast-fail 429 · skips workers</text>
+  <rect x="622" y="96" width="216" height="80" rx="9" fill="#27200d" stroke="#d97706" stroke-width="1.25"/>
+  <text x="730.0" y="131.2" text-anchor="middle" class="sans title-lg" fill="#edb641">Half-Open</text>
+  <text x="730.0" y="155.2" text-anchor="middle" class="sans sub" fill="#94a3b8">Allows limited probe traffic</text>
+  <path d="M 270 136 L 340 136" fill="none" stroke="#f43f5e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-rose)"/>
+  <text x="305" y="114" text-anchor="middle" class="sans label" fill="#fda4af">error rate</text>
+  <text x="305" y="128" text-anchor="middle" class="sans sub" fill="#94a3b8">≥ threshold</text>
+  <path d="M 548 136 L 618 136" fill="none" stroke="#d97706" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-gold)"/>
+  <text x="583" y="114" text-anchor="middle" class="sans label" fill="#edb641">window</text>
+  <text x="583" y="128" text-anchor="middle" class="sans sub" fill="#94a3b8">elapsed</text>
+  <path d="M 730 96 L 730 44 Q 730 32 718 32 L 176 32 Q 164 32 164 44 L 164 92" fill="none" stroke="#22c55e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-green)"/>
+  <rect x="347.0" y="22.0" width="200.0" height="20" rx="10" fill="#052e16" stroke="#334155" stroke-width="1"/>
+  <text x="447.0" y="35.8" text-anchor="middle" class="sans label" fill="#86efac">N consecutive probes succeed</text>
+  <path d="M 730 176 L 730 224 Q 730 236 718 236 L 458 236 Q 446 236 446 224 L 446 180" fill="none" stroke="#f43f5e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-rose)"/>
+  <rect x="517.2" y="226.0" width="141.5" height="20" rx="10" fill="#2f1119" stroke="#334155" stroke-width="1"/>
+  <text x="588.0" y="239.8" text-anchor="middle" class="sans label" fill="#fda4af">any 5xx probe fails</text>
+</svg>

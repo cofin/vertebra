@@ -1,21 +1,21 @@
-# PyO3 Bridge, Worker Lanes & Native Storage/DB (`vertebra-py`, `vertebra-db`, `vertebra-storage`)
+# PyO3 Bridge, Worker Lanes & Data Plane
 
-`vertebra-py` compiles to the `vertebra._vertebra` native module, connecting Rust `RequestBatch` buffers, database pools (`vertebra-db`), and object storage (`vertebra-storage`) to Python's native, ASGI, RSGI, and WSGI workers.
+`vertebra-py` compiles to the `vertebra._vertebra` extension module. It bridges Rust request batches, `vertebra-db` connection pools, and `vertebra-storage` object stores into Python workers running native, ASGI, RSGI, and WSGI apps.
 
 ## Worker Modes & Free-Threaded Python
 
-Vertebra supports two worker modes (`embedded` and `shm`) across both standard GIL-enabled Python (`3.12`–`3.15`) and free-threaded Python (`3.14t`/`3.15t`). When `--topology` is omitted (or set to `auto`), `--workers > 1` automatically uses `shm` on standard GIL builds and stays `embedded` on free-threaded builds:
+Vertebra supports `embedded` and `shm` topologies on both standard GIL Python and free-threaded Python. When `--topology` is omitted or set to `auto`, running with `--workers > 1` selects `shm` on standard GIL builds and stays `embedded` on free-threaded builds:
 
 | Build Flavor | Workers | Default Mode (`auto`) | How It Runs |
 | --- | --- | --- | --- |
-| Standard GIL Python | `1` (`0`) | `embedded` | Single process running both the Rust HTTP server and Python |
-| Standard GIL Python | `N > 1` | `shm` (override with `--topology embedded`) | Rust parent process + `N` Python worker processes over shared memory |
-| Free-Threaded Python (`3.14t`/`3.15t`) | `N` (`0`) | `embedded` | Single process with multiple Python worker threads running in parallel without a GIL (`FREE_THREADED = True`) |
-| Free-Threaded Python (`3.14t`/`3.15t`) | `N` | `--topology shm` (explicit) | Multi-process shared memory combined with free-threaded worker pools per process |
+| Standard GIL Python | `1` or `0` | `embedded` | Single process running both the Rust HTTP server and Python |
+| Standard GIL Python | `N > 1` | `shm` (override with `--topology embedded`) | Rust parent process plus `N` Python worker processes over shared memory |
+| Free-Threaded Python | `N` or `0` | `embedded` | Single process with parallel Python worker threads and no GIL |
+| Free-Threaded Python | `N` | `--topology shm` (explicit) | Multi-process shared memory with free-threaded worker pools per process |
 
-### Compile-Time `FREE_THREADED` Flag
+### Compile-Time Free-Threaded Flag
 
-`vertebra-py` exposes a boolean constant indicating whether the extension was compiled for free-threaded Python (`Py_GIL_DISABLED`):
+`vertebra-py` exports a `FREE_THREADED` boolean indicating whether the extension was built with `Py_GIL_DISABLED`:
 
 ```rust
 #[cfg(Py_GIL_DISABLED)]
@@ -24,17 +24,17 @@ pub const FREE_THREADED: bool = true;
 pub const FREE_THREADED: bool = false;
 ```
 
-All blocking Rust work in `vertebra-py`, `vertebra-bundler`, `vertebra-db`, and `vertebra-storage` releases the Python GIL (`py.detach(|| ...)`) so Rust I/O and bundling never block Python threads.
+Blocking Rust work in `vertebra-py`, `vertebra-bundler`, `vertebra-db`, and `vertebra-storage` detaches from the Python GIL (`py.detach`) so network I/O and bundling never stall Python threads.
 
 ## Batch Dispatch & Worker Lanes
 
-When a `RequestBatch` arrives in `vertebra.server.worker.Worker`:
+When a request batch arrives in a Python worker:
 
-1. **`partition_batch`**: Uses pre-compiled `HandlerSpec` metadata (`compile_handler_table`) to group requests by target lane (`fast`, `async`, `cpu`, `blocking`).
-2. **Direct Buffer Views**: Request headers and bodies are exposed via `Request` and `RequestBatch` views backed by Rust memory, avoiding extra byte copies when decoding `msgspec.Struct` models.
-3. **Sharded `EventLoopPool`**: Async handlers run on a pool of `asyncio` event loops (`vertebra.server._loops.EventLoopPool`) with optional CPU core pinning (`configure_worker_affinity`), returning completed batches via `submit_batch_raw`.
+1. **Lane Partitioning**: Pre-compiled handler metadata splits the batch into `fast`, `async`, `cpu`, and `blocking` lanes before execution.
+2. **Direct Buffer Views**: Request headers and bodies are exposed as views over Rust-owned memory, avoiding extra copies when decoding `msgspec.Struct` payloads.
+3. **Sharded Event Loops**: Async handlers run across a sharded `asyncio` loop pool with optional CPU core pinning, then submit completed response batches back to Rust.
 
-## Native Database Pools & Object Storage (`vertebra-db`, `vertebra-storage`)
+## Database Pools & Object Storage
 
-- **`vertebra-db`**: Implements Rust connection pools, prepared statement caches (`StatementCache`), cross-worker connection leases (`LeaseBroker`), Arrow shared-memory cursors (`ArrowCursor`), and Cloud SQL (`:3307`) / AlloyDB (`:5433`) dialers exposed through `vertebra._vertebra`.
-- **`vertebra-storage`**: Compiles to `vertebra._storage`, wrapping the Rust `object_store` crate with zero-copy `StorageBuffer` views, `SyncReadableFile` and `AsyncReadableFile` random-access readers for PyArrow/Parquet, and cloud URL presigning (`S3`, `GCS`, `Azure`, `R2`, `OCI`, `HMAC`).
+- **`vertebra-db`**: Implements Rust connection pools, prepared statement caches, cross-worker connection leases, Apache Arrow shared-memory cursors, and Cloud SQL (`:3307`) and AlloyDB (`:5433`) dialers exposed via `vertebra._vertebra`.
+- **`vertebra-storage`**: Compiles to `vertebra._storage`, wrapping the Rust `object_store` crate with zero-copy buffer views, random-access readers for PyArrow and Parquet, and presigned URL support for S3, GCS, Azure, R2, OCI, and HMAC schemes.

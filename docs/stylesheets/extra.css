@@ -776,6 +776,13 @@ body:has(.vertebra-hero) .md-header__topic + .md-header__topic {
   white-space: nowrap;
 }
 
+.md-typeset img[src*="assets/diagrams/"] {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1.25rem auto;
+}
+
 .md-footer-meta:not(:has(.md-copyright__highlight, .md-social)) {
   display: none;
 }

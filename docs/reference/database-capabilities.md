@@ -1,12 +1,10 @@
 # Database Capabilities
 
-Engine adapters own notification, change-stream, and database tool implementations.
-Shared tenant values remain engine-neutral; session SQL belongs to the owning adapter.
+Database adapters own their notification, change-stream, queue-store, and agent tool implementations. Tenant scope settings remain engine-neutral, while each adapter owns its session SQL.
 
 ## Agent Tool Providers
 
-Pass a provider to [`build_tools`](agent.md) to expose typed operations through the generic
-agent bridge. Creating providers and registering their tools opens no database connection.
+Pass a provider to [`build_tools`](agent.md) to expose typed database operations to an agent. Constructing providers and registering tools opens no database connection.
 
 ::: vertebra.db.adapters.bigquery.tools.BigQueryToolProvider
     options:
