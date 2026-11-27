@@ -1,16 +1,16 @@
 ---
 type: Task
-id: "runtime-perf-remediation:ch04:t06"
+id: "runtime-perf-remediation:ch04:t07"
 chapter_id: ch04-data-benchmarks-and-verification
 title: Sync runtime, IPC, and HTTP OKF knowledge chapters
-description: Update topologies-and-embedding.md, tiered-rings-and-batch-bridge.md, and batching-dispatch-and-backpressure.md in present-tense OKF v0.2 format matching verified ch02 and ch03 implementations.
+description: Update topologies-and-embedding.md, tiered-rings-and-batch-bridge.md, and batching-dispatch-and-backpressure.md in present-tense OKF v0.2 format matching verified ch02, ch03, and ch04:t01 implementations.
 status: stable
 state: pending
 priority: P2
 verification_strategy: documentation_validation
 worksheet_format: compact
 depends_on:
-  - "runtime-perf-remediation:ch04:t05"
+  - "runtime-perf-remediation:ch04:t06"
 read_set:
   - .agents/bundles/specs/runtime-perf-remediation/spec.md
   - .agents/bundles/knowledge/architecture/runtime/topologies-and-embedding.md
@@ -22,8 +22,8 @@ files:
   - .agents/bundles/knowledge/architecture/http/batching-dispatch-and-backpressure.md
 tests: []
 estimated_loc: 150
-plan_revision: 2
-plan_commit: "86527cf1"
+plan_revision: 3
+plan_commit: "9dfbd408"
 commit: null
 sources:
   - id: src-root-spec
@@ -44,7 +44,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-Rewrite the runtime topology, IPC bridge, and HTTP batching/backpressure OKF knowledge chapters in present tense to reflect the final verified implementations from `ch02`, `ch03`, and `t05` [^src-root-spec] [^src-ch04-spec].
+Rewrite the runtime topology, IPC bridge, and HTTP batching/backpressure OKF knowledge chapters in present tense to reflect the final verified implementations from `ch02`, `ch03`, `ch04:t01`, and `ch04:t06` [^src-root-spec] [^src-ch04-spec].
 
 Preserve strict OKF v0.2 compliance across all three chapters without leaving historical notes, migration prose, or standalone `---` body rules.
 
@@ -57,17 +57,17 @@ Preserve strict OKF v0.2 compliance across all three chapters without leaving hi
 
 ## Contracts & Edge Cases
 
-- `topologies-and-embedding.md`: document the empirically verified 1-worker GIL Embedded Tokio thread default (`VERTEBRA_TOKIO_THREADS`), consumer-aligned `RequestBatcher` shard sizing, and cgroup `cpu.max`-aware `EmbeddedSupervisor` budgeting.
+- `topologies-and-embedding.md`: document the empirically verified 1-worker GIL Embedded Tokio thread default (`available_cpus.clamp(1, 2)`, honoring `VERTEBRA_TOKIO_THREADS`), consumer-aligned `RequestBatcher` shard sizing, and cgroup `cpu.max`-aware `EmbeddedSupervisor` budgeting (`1` Tokio thread per child).
 - `tiered-rings-and-batch-bridge.md`: document `BatchResponseSink`, zero-copy `InProcessRequest` carrying `http::uri::PathAndQuery`, and owned `Vec<u8>` handoff in `ResponseSubmitter::submit_batch_flushed`.
 - `batching-dispatch-and-backpressure.md`: document lazy `IdleTimeoutStream`, per-connection collector shard affinity, single-lock `BridgeCorrelation` batch allocation and `complete_many`, zero-Arc `AdmissionPermit` + coarse circuit clock, `InFlightRequests::insert_with_now`, and reusable `ShmDispatcher` scratch buffers.
 - Keep every `<!-- truth: start --> ... <!-- truth: end -->` block at `<= 40` lines and match every frontmatter `sources:` entry 1:1 with `[^id]:` footnotes.
-- Verify all relative links and file symbol references resolve against the live tree after `ch02` and `ch03` commits.
+- Verify all relative links and file symbol references resolve against the live tree.
 
 ## Test Matrix
 
 | Chapter | Required Coverage | OKF Invariant |
 | :--- | :--- | :--- |
-| `topologies-and-embedding.md` | 1w Tokio default, shard sizing, cgroup `cpu.max` | `<= 40` line truth block, 1:1 `sources`/`[^id]:`, zero body `---` |
+| `topologies-and-embedding.md` | 1w Tokio `clamp(1, 2)` default, shard sizing, cgroup `cpu.max` | `<= 40` line truth block, 1:1 `sources`/`[^id]:`, zero body `---` |
 | `tiered-rings-and-batch-bridge.md` | `BatchResponseSink`, `PathAndQuery`, `submit_batch_flushed` | `<= 40` line truth block, 1:1 `sources`/`[^id]:`, zero body `---` |
 | `batching-dispatch-and-backpressure.md` | `IdleTimeoutStream`, shard affinity, `BridgeCorrelation`, `BackpressureController`, `ShmDispatcher` | `<= 40` line truth block, 1:1 `sources`/`[^id]:`, zero body `---` |
 

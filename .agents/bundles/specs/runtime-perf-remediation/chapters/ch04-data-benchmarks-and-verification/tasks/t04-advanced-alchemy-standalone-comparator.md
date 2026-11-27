@@ -1,6 +1,6 @@
 ---
 type: Task
-id: "runtime-perf-remediation:ch04:t03"
+id: "runtime-perf-remediation:ch04:t04"
 chapter_id: ch04-data-benchmarks-and-verification
 title: Add standalone Advanced Alchemy benchmark comparator
 description: Add capture_advanced_alchemy_report, register four SQLite/PostgreSQL COMPARATOR_PAIRS entries, and wire --engine advanced_alchemy --aa-engine sqlite|postgres CLI flags in tools/benchmarks/adapters/sql.py.
@@ -21,8 +21,8 @@ tests:
   - src/py/tests/unit/tools/test_e2e_benchmarks.py
   - src/py/tests/unit/test_bench_infrastructure.py
 estimated_loc: 190
-plan_revision: 2
-plan_commit: "86527cf1"
+plan_revision: 3
+plan_commit: "9dfbd408"
 commit: null
 sources:
   - id: src-ch04-spec
@@ -64,7 +64,7 @@ Register all four comparator pairs in `COMPARATOR_PAIRS` and wire `--engine adva
 - Benchmark cases per driver:
   - `aa_point_select_1`: fetch single row by primary key (`id=1`) through `SQLAlchemySyncRepositoryService` / `SQLAlchemyAsyncRepositoryService`.
   - `aa_multi_row_select_10`: fetch 10 rows via repository `list()` with limit 10.
-- Seed a lightweight 10-row `aa_bench_world` table idempotently before sampling so `:memory:` SQLite and fresh Postgres databases run without external setup.
+- Seed a lightweight 10-row `aa_bench_world` table idempotently before sampling so `:memory:` SQLite and fresh Postgres databases run without external setup. Keep default SQLAlchemy dialect pools (`StaticPool` / `SingletonThreadPool`) on SQLite `:memory:` rather than forcing `NullPool` so the seeded table persists across sessions.
 - Rewrite input `dsn` cleanly:
   - SQLite: `sqlite+vtb:///` & `sqlite+vtb_async:///` for Vertebra; `sqlite:///` & `sqlite+aiosqlite:///` for vanilla (skipping vanilla async gracefully when `aiosqlite` is absent).
   - Postgres: `postgresql+vtb://` & `postgresql+vtb_async://` for Vertebra; `postgresql+psycopg://` & `postgresql+asyncpg://` for vanilla (skipping absent external drivers gracefully when `include_external=True`).

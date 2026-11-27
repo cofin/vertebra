@@ -1,16 +1,17 @@
 ---
 type: Task
-id: "runtime-perf-remediation:ch04:t05"
+id: "runtime-perf-remediation:ch04:t06"
 chapter_id: ch04-data-benchmarks-and-verification
 title: Run release build and live empirical benchmark gate
-description: Build release artifacts and execute the live Granian HTTP/1.1 comparison, Embedded 1w Tokio A/B check, SQLite full-stack and standalone suites, and Docker PostgreSQL full-stack and standalone suites.
+description: Build release artifacts and execute the live Granian HTTP/1.1 comparison, SQLite full-stack and standalone suites, and Docker PostgreSQL full-stack and standalone suites.
 status: stable
 state: pending
 priority: P1
 verification_strategy: integration_acceptance
 worksheet_format: compact
 depends_on:
-  - "runtime-perf-remediation:ch04:t04"
+  - "runtime-perf-remediation:ch04:t01"
+  - "runtime-perf-remediation:ch04:t05"
 read_set:
   - .agents/bundles/specs/runtime-perf-remediation/spec.md
   - .agents/bundles/specs/runtime-perf-remediation/chapters/ch04-data-benchmarks-and-verification/spec.md
@@ -19,8 +20,8 @@ read_set:
 files: []
 tests: []
 estimated_loc: 0
-plan_revision: 2
-plan_commit: "86527cf1"
+plan_revision: 3
+plan_commit: "9dfbd408"
 commit: null
 sources:
   - id: src-root-spec
@@ -28,7 +29,7 @@ sources:
     title: Root flow acceptance scenarios and baseline run 20261126-213834-f73052
   - id: src-ch04-spec
     resource: .agents/bundles/specs/runtime-perf-remediation/chapters/ch04-data-benchmarks-and-verification/spec.md
-    title: Chapter 4 empirical verification matrix and replan triggers
+    title: Chapter 4 empirical verification matrix
   - id: src-bench-fixtures
     resource: tools/benchmarks/fixtures.py::FixtureLauncher
     title: Local postgres:17-alpine Docker fixture launcher
@@ -44,9 +45,9 @@ tags:
 
 ## Objective & Scope Boundary
 
-Build release artifacts via `make build`, run the full verification checks, and capture live benchmark evidence across HTTP/1.1, SQLite, and PostgreSQL matrices [^src-ch04-spec].
+Build release artifacts (with `t01` tuning applied), run `make lint-all` and `make rs-test`, and capture live benchmark evidence across HTTP/1.1, SQLite, and PostgreSQL matrices [^src-ch04-spec].
 
-Validate every acceptance target in root `spec.md` Section 2.5 and evaluate the chapter `replan_trigger` before syncing OKF knowledge chapters [^src-root-spec].
+Validate every acceptance target in root `spec.md` Section 2.5 before syncing OKF knowledge chapters [^src-root-spec].
 
 ## Bounded Read Manifest
 
@@ -57,26 +58,24 @@ Validate every acceptance target in root `spec.md` Section 2.5 and evaluate the 
 
 ## Contracts & Edge Cases
 
-- Execute release build (`make build`) before collecting any latency or RPS numbers; never benchmark debug wheels.
+- Rebuild release `vertebra-server` and release PyO3 extensions (`make build` or release `cargo build` + `maturin develop -r` across touched crates) before collecting any RPS or latency measurements; never benchmark debug wheels.
 - Run Suite A (HTTP/1.1 vs Granian):
-  - Targets: `granian-asgi,granian-rsgi,vtb-embedded-asgi,vtb-embedded-rsgi,vtb-embedded-native,vtb-embedded-wsgi,vtb-shm-asgi-1w,vtb-shm-native-1w,vtb-shm-wsgi-4w,vtb-embedded-native-4w,vtb-shm-native-4w` with `-s default`.
-  - Run Embedded 1w A/B comparison with `VERTEBRA_TOKIO_THREADS=1` versus `VERTEBRA_TOKIO_THREADS=2` on `vtb-embedded-native`, `vtb-embedded-asgi`, and `vtb-embedded-rsgi`.
+  - Targets: `granian-asgi,granian-rsgi,vtb-embedded-asgi,vtb-embedded-rsgi,vtb-embedded-native,vtb-embedded-wsgi,vtb-shm-asgi-1w,vtb-shm-native-1w,vtb-shm-wsgi-4w,vtb-embedded-native-4w,vtb-shm-native-4w` with `-s default` (`c=128`), verifying `vtb-embedded-wsgi` and `vtb-shm-wsgi-4w` hit `>= 10,000 RPS` on `io_10ms` and `>= 200k RPS` on `plaintext` (`/hello`), and 1w Embedded beats Granian 1w across all scenarios.
 - Run Suite B (SQLite full-stack & standalone):
   - Full-stack HTTP with `VTB_BENCH_DB_BACKEND=sqlite` and a temporary WAL file path across `native`, `sqlspec`, and `advanced_alchemy` targets plus Granian/Uvicorn baselines.
   - Standalone comparators via `tools.benchmarks.adapters.sql capture`: `--engine sqlite`, `--engine sqlspec --sqlspec-engine sqlite`, and `--engine advanced_alchemy --aa-engine sqlite`, followed by `check`.
 - Run Suite C (PostgreSQL full-stack & standalone):
-  - Start `postgres:17-alpine` using `FixtureLauncher(get_fixture_spec("postgres"))` [^src-bench-fixtures] and poll `SELECT 1` until post-`initdb` startup completes.
-  - Full-stack HTTP with `VTB_BENCH_DB_BACKEND=postgres` across `native` (per-worker vs SHM broker), `sqlspec`, and `advanced_alchemy` targets plus Granian/Uvicorn baselines.
-  - Standalone comparators: `make postgres-bench`, `--engine sqlspec --sqlspec-engine postgres`, and `--engine advanced_alchemy --aa-engine postgres`, followed by `check`.
-- If Docker is unavailable, report the exact blocker immediately rather than fabricating PostgreSQL numbers.
-- Evaluate `replan_trigger`: if `VERTEBRA_TOKIO_THREADS=2` materially outperforms `1`, if `WsgiExecutor` misses `>= 10,000 RPS` on `io_10ms` or `>= 200k RPS` on `hello`, or if SQLSpec/Advanced Alchemy/Postgres show an unexpected regression, trigger a targeted spec revision before running `t06` and `t07`.
+  - Start `postgres:17-alpine` using `FixtureLauncher(get_fixture_spec("postgres"))` [^src-bench-fixtures] (requires host Docker daemon socket access) and poll `SELECT 1` until post-`initdb` startup completes.
+  - Full-stack HTTP with `VTB_BENCH_DB_BACKEND=postgres` across `native` (per-worker vs SHM broker), `sqlspec`, and `advanced_alchemy` targets plus Granian/Uvicorn baselines (note: upstream `stdlib`/`sqlspec-upstream`/`advanced_alchemy-vanilla` Postgres baselines require `psycopg`/`asyncpg` from `--group postgres-bench` if installed).
+  - Standalone comparators: `--engine postgres`, `--engine sqlspec --sqlspec-engine postgres`, and `--engine advanced_alchemy --aa-engine postgres`, followed by `check` (using `--allow-missing` only if optional `psycopg`/`asyncpg` comparators are absent).
+- If the host Docker daemon is unavailable, report the exact blocker immediately rather than fabricating PostgreSQL numbers.
 
 ## Test Matrix
 
 | Suite | Acceptance Bar | Evidence Artifact |
 | :--- | :--- | :--- |
-| WSGI concurrency | `>= 10,000 RPS` on `io_10ms` and `>= 200k RPS` on `hello` | `benchmarks.duckdb` run ID |
-| Embedded 1w parity | Beats `granian-asgi` / `granian-rsgi` on `default` with `0` errors | `benchmarks.duckdb` + Tokio 1 vs 2 table |
+| WSGI concurrency | `>= 10,000 RPS` on `io_10ms` and `>= 200k RPS` on `plaintext` (`/hello`) | `benchmarks.duckdb` run ID |
+| Embedded 1w parity | Beats `granian-asgi` / `granian-rsgi` on `default` with `0` errors | `benchmarks.duckdb` run ID |
 | Multi-worker loopback | Improves peak 4w RPS and P99 over `20261126-213834-f73052` | `make bench-diff` output |
 | SQLite & Postgres data | Zero HTTP errors across `native`, `sqlspec`, `advanced_alchemy` | `benchmarks.duckdb` + adapter JSON reports |
 | Repo gates | `make lint-all` and `make rs-test` green | Command exit status `0` |
@@ -98,8 +97,7 @@ uv run --no-sync python -m tools.benchmarks.adapters.sql check --report /tmp/ben
 
 - Release build, `make lint-all`, and `make rs-test` pass with zero failures.
 - Suites A, B, and C complete with recorded run IDs and JSON comparator reports, and all root `spec.md` Section 2.5 acceptance scenarios pass.
-- Replan trigger decisions (Tokio 1 vs 2, WSGI threshold, DB hot paths) are explicitly resolved with empirical measurements.
 
 [^src-root-spec]: `.agents/bundles/specs/runtime-perf-remediation/spec.md` — Root flow acceptance scenarios and baseline run 20261126-213834-f73052.
-[^src-ch04-spec]: `.agents/bundles/specs/runtime-perf-remediation/chapters/ch04-data-benchmarks-and-verification/spec.md` — Chapter 4 empirical verification matrix and replan triggers.
+[^src-ch04-spec]: `.agents/bundles/specs/runtime-perf-remediation/chapters/ch04-data-benchmarks-and-verification/spec.md` — Chapter 4 empirical verification matrix.
 [^src-bench-fixtures]: `tools/benchmarks/fixtures.py::FixtureLauncher` — Local postgres:17-alpine Docker fixture launcher.

@@ -20,8 +20,8 @@ chapter_id: null
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-plan_revision: 2
-plan_commit: "86527cf1"
+plan_revision: 3
+plan_commit: "9dfbd408"
 last_verified_checkpoint: "cf919307"
 last_reviewed_chapter: ch03-ingress-and-worker-hotpaths
 last_reviewed_commit: "cf919307"
@@ -32,6 +32,9 @@ verified:
   - by: user:cofin
     at: "2026-11-27T01:58:43Z"
     commit: "86527cf1"
+  - by: user:cofin
+    at: "2026-11-27T16:25:21Z"
+    commit: "9dfbd408"
 sources:
   - id: src-wsgi-runner
     resource: src/rs/vertebra-py/src/wsgi/runner.rs::drive_wsgi_batch
@@ -107,10 +110,10 @@ tags:
 # Runtime Performance Remediation and Full-Stack Data Benchmarks
 
 <!-- truth: start -->
-- Replace serial `drive_wsgi_batch` with an adaptive inline-plus-Rust `WsgiExecutor` pool (`VERTEBRA_WSGI_MODE=auto|concurrent|inline`, `VERTEBRA_WSGI_THREADS`) that preserves ~220k RPS on zero-I/O routes while restoring concurrent blocking I/O (`io_10ms` and sync DB drivers) across GIL and free-threaded Python.
-- Eliminate the 1.3×–2.5× 1-worker Embedded slowdown by defaulting GIL 1w Embedded to a 1-thread `current_thread` Tokio runtime and consumer-aligned `RequestBatcher` sharding (`shard_count = 1`), batch-locking `BridgeCorrelation` allocation and completion (`BatchResponseSink`), eliminating `path`/`query` copies in `InProcessRequest`, and removing double-copy response submission in `transport.rs`.
-- Raise the ~235k RPS HTTP ingress ceiling and trim per-request Python/PyO3 overhead via lazy `IdleTimeoutStream`, per-connection collector shard affinity, zero-Arc `AdmissionPermit` + coarse circuit clock, batch-amortized `Instant::now()` in `InFlightRequests`, reusable `ShmDispatcher` scratch buffers, single-pass native mixed sync/async dispatch, direct `Request::body`, specialized 1-arg extractors, lazy `RsgiHttpProtocol` stream state, and eventfd-aware `_drain_readable`.
-- Wire real SQLite and PostgreSQL backends across native drivers, SQLSpec, and Advanced Alchemy in `tools/benchmarks/` and verify end-to-end against Granian (`granian-asgi`, `granian-rsgi`), Uvicorn, and standalone SQL/ORM comparators.
+- Replace serial `drive_wsgi_batch` with an adaptive inline-plus-Rust `WsgiExecutor` pool (`VERTEBRA_WSGI_MODE=auto|concurrent|inline`, `VERTEBRA_WSGI_THREADS` defaulting to `cpus * 12` clamped `64..128`, `VERTEBRA_WSGI_STALL_US` defaulting to `2,000 µs`) that preserves `>= 200k RPS` on zero-I/O routes while sustaining `>= 10,000 RPS` on concurrent blocking I/O across GIL and free-threaded Python.
+- Eliminate the 1.3×–2.5× 1-worker Embedded slowdown by defaulting GIL 1w Embedded to `available_cpus.clamp(1, 2)` Tokio threads (`multi_thread(2)` on `>= 2`-core hosts) and consumer-aligned `RequestBatcher` sharding (`shard_count = 1`), batch-locking `BridgeCorrelation` allocation and completion (`BatchResponseSink`), eliminating `path`/`query` copies in `InProcessRequest`, and removing double-copy response submission in `transport.rs`.
+- Raise the ~235k RPS HTTP ingress ceiling and trim per-request Python/PyO3 overhead via lazy `IdleTimeoutStream`, per-connection collector shard affinity, zero-Arc `AdmissionPermit` + coarse circuit clock, batch-amortized `Instant::now()` in `InFlightRequests`, reusable `ShmDispatcher` scratch buffers, single-pass native mixed sync/async dispatch, direct `Request::body`, specialized 1-arg extractors, lazy `RsgiHttpProtocol` stream state, and eventfd-aware `_drain_batches`.
+- Wire real SQLite and PostgreSQL backends across native drivers (`SyncPostgreSQLDriver`/`AsyncPostgreSQLDriver`), SQLSpec, and Advanced Alchemy (`BrokerPool`/`AsyncBrokerPool`) in `tools/benchmarks/` and verify end-to-end against Granian (`granian-asgi`, `granian-rsgi`), Uvicorn, and standalone SQL/ORM comparators.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -156,9 +159,9 @@ Objectives:
 
 ### 2.1 Functional & Performance Requirements
 
-- **R1 (Adaptive WSGI concurrency)**: `drive_wsgi_batch` must execute zero-I/O WSGI batches inline on GIL builds for peak throughput and automatically hand off stalled (`> 250 µs` configurable) and subsequent batches to a native Rust OS thread pool (`WsgiExecutor`) submitting each response immediately upon completion, with `VERTEBRA_WSGI_MODE=auto|concurrent|inline` and `VERTEBRA_WSGI_THREADS` overrides and default `concurrent` mode on `Py_GIL_DISABLED`.
+- **R1 (Adaptive WSGI concurrency)**: `drive_wsgi_batch` must execute zero-I/O WSGI batches inline on GIL builds for peak throughput and automatically hand off stalled (`> 2,000 µs` configurable via `VERTEBRA_WSGI_STALL_US`) and subsequent batches to a lazy native Rust OS thread pool (`WsgiExecutor`, default `cpus * 12` clamped `64..128` via `VERTEBRA_WSGI_THREADS`) submitting each response immediately upon completion, with `VERTEBRA_WSGI_MODE=auto|concurrent|inline` overrides and default `concurrent` mode on `Py_GIL_DISABLED`.
 - **R2 (Zero-allocation WSGI batch metadata)**: Share batch-level `(root_path, server_name, server_port, url_scheme)` via `Arc<WsgiServerConfig>` across `WsgiEnviron` instances created in `drive_wsgi_batch` so per-request `String` cloning is eliminated.
-- **R3 (Embedded 1w thread & shard right-sizing)**: Default GIL 1w Embedded (when `VERTEBRA_TOKIO_THREADS` is unset) to `worker_threads = 1` (`Builder::new_current_thread`) and size `RequestBatcher` `shard_count` to active Python consumer count (`1` for GIL Embedded, `py_threads.clamp(1, 8)` for FT Embedded, `workers.count.clamp(1, 8)` for SHM). Align `EmbeddedSupervisor` CPU detection with cgroup `cpu.max`.
+- **R3 (Embedded 1w thread & shard right-sizing)**: Default GIL 1w Embedded (when `VERTEBRA_TOKIO_THREADS` is unset) to `available_cpus.clamp(1, 2)` Tokio threads (`2` on `>= 2`-core hosts, `1` on 1-core hosts) and size `RequestBatcher` `shard_count` to active Python consumer count (`1` for GIL Embedded, `py_threads.clamp(1, 8)` for FT Embedded, `workers.count.clamp(1, 8)` for SHM). Keep multi-worker `EmbeddedSupervisor` children at `1` Tokio thread per process with cgroup `cpu.max`-aware CPU detection.
 - **R4 (Batch-locked bridge correlation & zero-copy bridge handoff)**: Batch-allocate correlation IDs under one shard `Mutex` in `BridgeCorrelation::dispatch_bridge_vec`, store `http::uri::PathAndQuery` directly in `InProcessRequest` without copying `path`/`query` slices, register a `BatchResponseSink` on `BatchBridge` calling a single-shard fast-path `BridgeCorrelation::complete_many`, and transfer owned `headers_raw`/`body` `Vec<u8>` via `Bytes::from` in `ResponseSubmitter::submit_batch_flushed`.
 - **R5 (Rust HTTP ingress overhead reduction)**:
   - Replace per-I/O timer resets in `IdleTimeoutStream` with an activity flag checked on timer fire.
@@ -275,14 +278,14 @@ async def capture_advanced_alchemy_report(
 - `Worker._process_batch` -> `drive_wsgi_batch` -> `WsgiExecutor` (inline fastpath or Rust OS thread pool) -> `ResponseSubmitter::{submit_batch_flushed, submit_raw_inner}`.
 - `serve_plain` -> `IdleTimeoutStream` -> `handle_with_peer` (connection-pinned collector shard) -> `BackpressureController::try_acquire_for_path` -> `RequestBatcher` (with owned `ShmDispatchScratch`) -> `Dispatcher::{BridgeCorrelation, ShmDispatcher}` -> `BatchBridge` / `RingPair`.
 - `Worker._run_inline_event_loop` -> `_on_notify_readable` / `_drain_batches` -> `Worker._process_batch` (`native_only` / `drive_asgi_batch` / `drive_rsgi_batch` / `drive_wsgi_batch`) -> `ResponseSubmitter::submit_batch_flushed` -> `BatchBridge::submit_responses` -> `BatchResponseSink` -> `BridgeCorrelation::complete_many`.
-- `tools.benchmarks.cli` -> `DataBackend(db_backend, db_adapter)` -> `{Sync,Async}{SQLite,Postgres}Driver` / `vertebra.extensions.sqlspec` / `advanced_alchemy` (`+vtb`) + `tools.benchmarks.adapters.sql::{capture_sqlite_report, capture_postgres_adapter_report, capture_sqlspec_report, capture_advanced_alchemy_report}`.
+- `tools.benchmarks.cli` -> `DataBackend(db_backend, db_adapter)` -> `{Sync,Async}{SQLite,PostgreSQL}Driver` / `vertebra.extensions.sqlspec` / `advanced_alchemy` (`+vtb` + `BrokerPool`/`AsyncBrokerPool`) + `tools.benchmarks.adapters.sql::{capture_sqlite_report, capture_postgres_adapter_report, capture_sqlspec_report, capture_advanced_alchemy_report}`.
 
 ### 2.4 Edge-Case & Failure-Mode Matrix
 
 | Edge Case / Failure Mode | Required Behavior |
 | :--- | :--- |
 | WSGI app raises exception or violates PEP 3333 in concurrent pool mode | Log exception via `log_app_exception`, emit HTTP `500` immediately via `submit_raw_inner`, never stall worker thread or leak `WsgiEnviron`. |
-| WSGI blocking call stalls item 0 of a batch while items `1..N` wait | Watchdog detects stall past threshold (`250 µs`), wakes pool threads to drain remaining items `1..N` in parallel without waiting for item 0. |
+| WSGI blocking call stalls item 0 of a batch while items `1..N` wait | Watchdog detects stall past threshold (`2,000 µs` default), wakes pool threads to drain remaining items `1..N` in parallel without waiting for item 0. |
 | Worker shutdown while WSGI pool has in-flight tasks | Drain in-flight WSGI tasks cleanly on shutdown without panicking or holding GIL across thread join (`py.detach`). |
 | `VERTEBRA_TOKIO_THREADS` explicitly set by user on Embedded 1w | Always honor explicit `VERTEBRA_TOKIO_THREADS`; default clamping applies only when unset. |
 | Multi-shard responses in `complete_many` (when shard 0 overflowed to shard 1) | Fast path checks if all IDs share `first_shard`; falls back cleanly to multi-shard grouping when mixed. |
@@ -302,24 +305,24 @@ async def capture_advanced_alchemy_report(
 
 - **Python `ThreadPoolExecutor` for WSGI**: Rejected for maximum performance because Python `Future`, queue locks, closure overhead, and `Response` allocations depress both zero-I/O and blocking-I/O throughput compared to a native Rust `WsgiExecutor`.
 - **Always-concurrent WSGI pool without inline fastpath**: Rejected because acquiring/bouncing the GIL across OS threads on every 3 µs `/hello` request would regress zero-I/O WSGI throughput on GIL Python.
-- **Keep 2-thread Tokio default for 1w GIL Embedded**: Deferred to an empirical A/B check in `ch04`; defaulting to 1 `current_thread` Tokio runtime matches `EmbeddedSupervisor`'s proven 244k RPS configuration and minimizes cross-thread wakeup latency.
+- **1-thread `current_thread` vs 2-thread `multi_thread` Tokio default for 1w GIL Embedded**: Empirical release A/B benchmarking after `ch01`–`ch03` proved `tokio=2` beats `tokio=1` by +34%–+82% across ASGI (`144k` vs `108k`), RSGI (`178k` vs `104k`), and Native (`170k` vs `121k`) while avoiding the ASGI `/echo` contention cliff observed at `tokio=3/4` (`78k`/`65k` vs `115k`). Multi-worker `EmbeddedSupervisor` processes continue using `1` Tokio thread per process (`264k RPS` on 4w).
 
 ## 3. Documentation & OKF Knowledge Plan
 
 - `[0/6 files documented]`
-  - `.agents/bundles/knowledge/architecture/worker/asgi-and-wsgi-runners.md` (`ch04:t07`) — Document adaptive `WsgiExecutor` (`VERTEBRA_WSGI_MODE`, `VERTEBRA_WSGI_THREADS`), shared `WsgiServerConfig`, lazy `RsgiHttpProtocol`, and `AsgiScope` bitmask drop.
-  - `.agents/bundles/knowledge/architecture/runtime/topologies-and-embedding.md` (`ch04:t06`) — Document 1w GIL Embedded Tokio thread default, consumer-aligned `RequestBatcher` sharding, and cgroup-aware `EmbeddedSupervisor`.
-  - `.agents/bundles/knowledge/architecture/ipc/tiered-rings-and-batch-bridge.md` (`ch04:t06`) — Document `BatchResponseSink`, `InProcessRequest` `PathAndQuery`, and `submit_batch_flushed`.
-  - `.agents/bundles/knowledge/architecture/http/batching-dispatch-and-backpressure.md` (`ch04:t06`) — Document lazy `IdleTimeoutStream`, connection-pinned collector shards, single-lock `BridgeCorrelation` batch registration/completion, `BackpressureController` fastpath, and reusable `ShmDispatcher` scratch buffers.
-  - `.agents/bundles/knowledge/patterns/python/hot-path-and-async-dispatch.md` (`ch04:t07`) — Document split `_on_notify_readable`/`_drain_batches`, `native_only` mixed sync/async fast path, direct `Request::body`, and specialized 1-arg simple extractors.
-  - `.agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md` (`ch04:t07`) — Document SQLite/PostgreSQL native, SQLSpec, and Advanced Alchemy full-stack and standalone comparator benchmarks.
+  - `.agents/bundles/knowledge/architecture/worker/asgi-and-wsgi-runners.md` (`ch04:t08`) — Document adaptive `WsgiExecutor` (`VERTEBRA_WSGI_MODE`, `VERTEBRA_WSGI_THREADS`, `VERTEBRA_WSGI_STALL_US`), shared `WsgiServerConfig`, lazy `RsgiHttpProtocol`, and `AsgiScope` bitmask drop.
+  - `.agents/bundles/knowledge/architecture/runtime/topologies-and-embedding.md` (`ch04:t07`) — Document 1w GIL Embedded `available_cpus.clamp(1, 2)` Tokio thread default, consumer-aligned `RequestBatcher` sharding, and cgroup-aware `EmbeddedSupervisor`.
+  - `.agents/bundles/knowledge/architecture/ipc/tiered-rings-and-batch-bridge.md` (`ch04:t07`) — Document `BatchResponseSink`, `InProcessRequest` `PathAndQuery`, and `submit_batch_flushed`.
+  - `.agents/bundles/knowledge/architecture/http/batching-dispatch-and-backpressure.md` (`ch04:t07`) — Document lazy `IdleTimeoutStream`, connection-pinned collector shards, single-lock `BridgeCorrelation` batch registration/completion, `BackpressureController` fastpath, and reusable `ShmDispatcher` scratch buffers.
+  - `.agents/bundles/knowledge/patterns/python/hot-path-and-async-dispatch.md` (`ch04:t08`) — Document split `_on_notify_readable`/`_drain_batches`, `native_only` mixed sync/async fast path, direct `Request::body`, and specialized 1-arg simple extractors.
+  - `.agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md` (`ch04:t08`) — Document SQLite/PostgreSQL native, SQLSpec, and Advanced Alchemy full-stack and standalone comparator benchmarks.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
 | Requirement | Owning Chapter | Verification Strategy |
 | :--- | :--- | :--- |
-| R1, R2 | `ch01-wsgi-adaptive-pool` | `regression_tdd`, `behavior_tdd` |
-| R3, R4 | `ch02-embedded-bridge-and-batching` | `behavior_tdd`, `regression_tdd` |
+| R1, R2 | `ch01-wsgi-adaptive-pool`, `ch04-data-benchmarks-and-verification` | `regression_tdd`, `behavior_tdd` |
+| R3, R4 | `ch02-embedded-bridge-and-batching`, `ch04-data-benchmarks-and-verification` | `behavior_tdd`, `regression_tdd` |
 | R5, R6 | `ch03-ingress-and-worker-hotpaths` | `behavior_tdd`, `regression_tdd` |
 | R7 | `ch04-data-benchmarks-and-verification` | `integration_acceptance`, `documentation_validation` |
 
@@ -328,7 +331,7 @@ async def capture_advanced_alchemy_report(
 - [x] [6768cf7c] ch01-wsgi-adaptive-pool — Adaptive Rust `WsgiExecutor` pool and zero-allocation `WsgiServerConfig` (chapters/ch01-wsgi-adaptive-pool/spec.md)
 - [x] [9df526b0] ch02-embedded-bridge-and-batching — Embedded 1w Tokio/shard right-sizing, batch-locked `BridgeCorrelation`, `BatchResponseSink`, and zero-copy bridge handoff (chapters/ch02-embedded-bridge-and-batching/spec.md)
 - [x] [cf919307] ch03-ingress-and-worker-hotpaths — Lazy `IdleTimeoutStream`, connection-pinned shards, `BackpressureController`/`InFlightRequests`/`ShmDispatcher` hot paths, and Python/PyO3 worker/ASGI/RSGI/native optimizations (chapters/ch03-ingress-and-worker-hotpaths/spec.md)
-- [ ] ch04-data-benchmarks-and-verification — SQLite and PostgreSQL (native, SQLSpec, Advanced Alchemy) benchmark wiring, Granian/DB empirical verification gate, and OKF doc sync (chapters/ch04-data-benchmarks-and-verification/spec.md)
+- [ ] ch04-data-benchmarks-and-verification — Empirical Tokio/WSGI tuning, SQLite and PostgreSQL (native, SQLSpec, Advanced Alchemy) benchmark wiring, Granian/DB verification gate, and OKF doc sync (chapters/ch04-data-benchmarks-and-verification/spec.md)
 
 ### Chapter / Phase Recovery Checkpoint
 
@@ -336,9 +339,9 @@ Each chapter runs a `< 60s` targeted Rust + Python unit test and lint gate (`car
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Chapter**: `ch04-data-benchmarks-and-verification` (`planned`, `empirical_dependent` — requires `/flow:revise runtime-perf-remediation ch04-data-benchmarks-and-verification` before execution; `ch01` reviewed at `6768cf7c`, `ch02` reviewed at `9df526b0`, `ch03` reviewed at `cf919307`).
+- **Active Chapter**: `ch04-data-benchmarks-and-verification` (`planned`, `planning_status: complete` — revised at `plan_revision: 3` after empirical A/B probing; `ch01` reviewed at `6768cf7c`, `ch02` reviewed at `9df526b0`, `ch03` reviewed at `cf919307`).
 - **Remaining Chapters**: `ch04-data-benchmarks-and-verification`.
-- **Empirical Triggers**: `ch04-data-benchmarks-and-verification` is marked `empirical_dependent` to incorporate A/B measurements for Embedded 1w Tokio thread count (`1` vs `2`), `WsgiExecutor` stall threshold tuning, and live SQLite/PostgreSQL/SQLSpec/Advanced Alchemy profiles.
+- **Empirical Findings Resolved**: 1w GIL Embedded `VERTEBRA_TOKIO_THREADS=2` (`available_cpus.clamp(1, 2)`) and `WsgiExecutor` (`DEFAULT_STALL_THRESHOLD_US = 2_000`, `default_threads = cpus * 12` clamped `64..128`) are locked into `ch04:t01` with verified release measurements.
 
 [^src-wsgi-runner]: `src/rs/vertebra-py/src/wsgi/runner.rs::drive_wsgi_batch` — Native Rust WSGI batch runner currently executing requests serially.
 [^src-wsgi-environ]: `src/rs/vertebra-py/src/wsgi/environ.rs::WsgiEnviron` — Lazy PEP 3333 WSGI environ mapping.

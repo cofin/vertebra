@@ -1,6 +1,6 @@
 ---
 type: Task
-id: "runtime-perf-remediation:ch04:t01"
+id: "runtime-perf-remediation:ch04:t02"
 chapter_id: ch04-data-benchmarks-and-verification
 title: Implement pluggable native and stdlib DB drivers
 description: Extend DataBackendConfig with db_adapter and db_adapter_flavor, decouple async DB paths from _db_lock, and implement native and stdlib SQLite/PostgreSQL WorldDriver backends.
@@ -15,15 +15,19 @@ read_set:
   - tools/benchmarks/apps/_data_backend.py
   - src/py/vertebra/db/adapters/sqlite/__init__.py
   - src/py/vertebra/db/adapters/postgres/__init__.py
+  - src/py/vertebra/db/adapters/postgres/config.py
+  - src/py/tests/unit/tools/test_data_apps_native.py
 files:
   - tools/benchmarks/apps/_data_backend.py
   - tools/benchmarks/apps/_db_drivers.py
+  - src/py/tests/unit/tools/test_data_apps_native.py
 tests:
+  - src/py/tests/unit/tools/test_data_apps_native.py
   - src/py/tests/unit/tools/test_e2e_benchmarks.py
   - src/py/tests/unit/test_bench_infrastructure.py
-estimated_loc: 220
-plan_revision: 2
-plan_commit: "86527cf1"
+estimated_loc: 230
+plan_revision: 3
+plan_commit: "9dfbd408"
 commit: null
 sources:
   - id: src-ch04-spec
@@ -32,6 +36,9 @@ sources:
   - id: src-bench-backend
     resource: tools/benchmarks/apps/_data_backend.py::DataBackend
     title: Existing shared benchmark backend and DataBackendConfig
+  - id: src-pg-config
+    resource: src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig
+    title: Vertebra PostgreSQLConfig min_size and max_size fields
 tags:
   - benchmarks
   - sqlite
@@ -45,7 +52,7 @@ tags:
 
 Add `db_adapter` and `db_adapter_flavor` configuration to `DataBackendConfig`, extract a `WorldDriver` protocol in `_db_drivers.py`, and implement `native` and `stdlib` SQLite/PostgreSQL drivers [^src-ch04-spec].
 
-Route `sqlspec` and `advanced_alchemy` driver construction lazily to `tools.benchmarks.apps._db_orm_drivers.build_orm_world_driver` so `t02` lands without editing `_data_backend.py` or `_db_drivers.py`.
+Route `sqlspec` and `advanced_alchemy` driver construction lazily to `tools.benchmarks.apps._db_orm_drivers.build_orm_world_driver` so `t03` lands without editing `_data_backend.py` or `_db_drivers.py`.
 
 Keep `db_backend="memory"` and `db_adapter="native"` as defaults so all existing offline benchmark apps keep unchanged behavior [^src-bench-backend].
 
@@ -55,21 +62,26 @@ Keep `db_backend="memory"` and `db_adapter="native"` as defaults so all existing
 - `tools/benchmarks/apps/_data_backend.py`
 - `src/py/vertebra/db/adapters/sqlite/__init__.py`
 - `src/py/vertebra/db/adapters/postgres/__init__.py`
+- `src/py/vertebra/db/adapters/postgres/config.py`
+- `src/py/tests/unit/tools/test_data_apps_native.py`
 
 ## Contracts & Edge Cases
 
 - Implement `DataBackendConfig` (`db_adapter`, `db_adapter_flavor`), `WorldDriver`, and `build_world_driver` per chapter `spec.md` Section 2.2 [^src-ch04-spec].
 - `load_backend_config` reads `VTB_BENCH_DB_ADAPTER` (default `"native"`) and `VTB_BENCH_DB_ADAPTER_FLAVOR` (default `"vertebra"`), rejecting unknown `db_backend`, `db_adapter`, or `db_adapter_flavor` values with `ValueError`.
-- Native SQLite uses `SyncSQLiteDriver` and `AsyncSQLiteDriver`; stdlib SQLite uses `sqlite3` and lazy `aiosqlite`.
-- Native PostgreSQL uses `SyncPostgresDriver` and `AsyncPostgresDriver`, honoring `pool_size` and appending `shm_broker=true` when `broker_mode == "shm_broker"`.
-- Stdlib PostgreSQL uses `psycopg` (or `psycopg_pool` sized to `pool_size`) for sync and lazy `asyncpg.create_pool(min_size=1, max_size=pool_size)` for async.
+- Provide a shared broker helper `resolve_benchmark_broker(broker_mode: str)` in `_db_drivers.py`: when `broker_mode == "shm_broker"`, attach to `VERTEBRA_BROKER_SHM` via `BrokerConfig(shm_name=..., role="worker")` (`SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport` or native broker) if `VERTEBRA_BROKER_SHM` is set and `VERTEBRA_BROKER_SHM_FD` is absent, otherwise fall back to `DatabaseRegistry.default_broker()`. Return `None` when `broker_mode != "shm_broker"`.
+- Native SQLite uses `SyncSQLiteDriver` and lazy loop-bound `AsyncSQLiteDriver` with `SQLiteConfig`. Stdlib SQLite uses `sqlite3` and lazy loop-bound `aiosqlite`.
+- Native PostgreSQL uses `SyncPostgreSQLDriver` and lazy loop-bound `AsyncPostgreSQLDriver` with `PostgreSQLConfig.from_url(dsn, min_size=1, max_size=pool_size, broker=resolved_broker)` (passing `broker` explicitly because `PostgreSQLConfig.from_url` ignores `shm_broker=true` query parameters) [^src-pg-config].
+- Stdlib PostgreSQL imports `psycopg` / `psycopg_pool` (sync) and `asyncpg` (lazy loop-bound pool via `asyncpg.create_pool(min_size=1, max_size=pool_size)`) via `import_optional`, raising an actionable `RuntimeError` citing `uv sync --group postgres-bench` when absent.
+- Initialize all async drivers and pools lazily on the first `async def` call (guarded by per-loop `asyncio.Lock` keyed by running event loop) because benchmark apps call `DataBackend()` synchronously at module import time before worker event loops start. Keep table seeding synchronous.
 - Seed `world` (10,000 rows) idempotently:
   - SQLite: enable `WAL`, `synchronous=NORMAL`, and `busy_timeout=5000` on file-backed DBs, then `INSERT OR IGNORE` missing rows; seed `:memory:` connections on creation.
-  - PostgreSQL: `CREATE TABLE IF NOT EXISTS world (id INTEGER PRIMARY KEY, randomnumber INTEGER NOT NULL)` followed by set-based `INSERT INTO world ... SELECT g, ... FROM generate_series(1, 10000) AS g ON CONFLICT (id) DO NOTHING`.
+  - PostgreSQL: `CREATE TABLE IF NOT EXISTS world (id INTEGER PRIMARY KEY, randomnumber INTEGER NOT NULL)` followed by set-based `INSERT INTO world (id, randomnumber) SELECT g, ((g * 1103515245 + 12345) % 10000) + 1 FROM generate_series(1, 10000) AS g ON CONFLICT (id) DO NOTHING`.
 - Never hold `DataBackend._db_lock` across SQLite/Postgres driver I/O; use thread-local `random.Random` for row ID generation and await driver async methods directly in `DataBackend.{get_world,get_worlds,update_worlds,get_cached_worlds}`.
 - Fail loud with `ValueError` when `db_backend == "postgres"` and `db_dsn` is empty.
 - Strip accidental query strings before passing file paths to SQLite drivers unless using SQLite URI mode.
-- Provide `aclose()` on `DataBackend` alongside `close()` to cleanly release async pools and sync connections.
+- Provide `aclose()` on `DataBackend` alongside `close()`, ensuring synchronous `DataBackend.close()` cleanly releases sync and best-effort async driver handles when `aclose()` is not awaited.
+- Update `src/py/tests/unit/tools/test_data_apps_native.py::test_sqlite_in_memory_isolation` to assert `:memory:` isolation through the public `DataBackend` API (instead of asserting private `first._sqlite_conn is not None`).
 
 ## Test Matrix
 
@@ -78,15 +90,15 @@ Keep `db_backend="memory"` and `db_adapter="native"` as defaults so all existing
 | Config defaults | `load_backend_config({})` | `db_backend="memory"`, `db_adapter="native"`, `db_adapter_flavor="vertebra"` |
 | Invalid adapter | `load_backend_config({"VTB_BENCH_DB_ADAPTER": "bogus"})` | Raises `ValueError` listing valid adapters |
 | Missing Postgres DSN | `DataBackend(DataBackendConfig(db_backend="postgres"))` | Raises `ValueError` citing `VTB_BENCH_DB_DSN` |
-| SQLite `native` sync & async | File-backed `tmp_path / "w.db"` | Seeds 10,000 rows idempotently; sync/async fetch and update persist |
-| SQLite `stdlib` sync & async | File-backed `tmp_path / "w.db"` | Sync `sqlite3` and async `aiosqlite` fetch and update without deadlock |
-| Postgres SHM broker DSN | `broker_mode="shm_broker"` helper test | `shm_broker=true` appended once to `postgresql://` URL, skipped for SQLite paths |
+| SQLite `native` sync & async | File-backed `tmp_path / "w.db"` and `:memory:` | Seeds 10,000 rows idempotently; sync/async fetch and update persist; `:memory:` backends remain isolated |
+| SQLite `stdlib` sync & async | File-backed `tmp_path / "w.db"` | Sync `sqlite3` and lazy async `aiosqlite` fetch and update without deadlock |
+| Postgres SHM broker config | `broker_mode="shm_broker"` vs `"per_worker"` | Attaches explicit `broker` only in `shm_broker` mode (`None` in `per_worker`) |
 
 ## Verification
 
 ```bash
-uv run --no-sync pytest src/py/tests/unit/tools/test_e2e_benchmarks.py src/py/tests/unit/test_bench_infrastructure.py
-uv run --no-sync ruff check tools/benchmarks/apps/_data_backend.py tools/benchmarks/apps/_db_drivers.py
+uv run --no-sync pytest src/py/tests/unit/tools/test_data_apps_native.py src/py/tests/unit/tools/test_e2e_benchmarks.py src/py/tests/unit/test_bench_infrastructure.py
+uv run --no-sync ruff check tools/benchmarks/apps/_data_backend.py tools/benchmarks/apps/_db_drivers.py src/py/tests/unit/tools/test_data_apps_native.py
 uv run --no-sync mypy tools/benchmarks/apps/_data_backend.py tools/benchmarks/apps/_db_drivers.py
 ```
 
@@ -98,3 +110,4 @@ uv run --no-sync mypy tools/benchmarks/apps/_data_backend.py tools/benchmarks/ap
 
 [^src-ch04-spec]: `.agents/bundles/specs/runtime-perf-remediation/chapters/ch04-data-benchmarks-and-verification/spec.md` — Chapter 4 specification and WorldDriver contracts.
 [^src-bench-backend]: `tools/benchmarks/apps/_data_backend.py::DataBackend` — Existing shared benchmark backend and DataBackendConfig.
+[^src-pg-config]: `src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig` — Vertebra PostgreSQLConfig min_size and max_size fields.

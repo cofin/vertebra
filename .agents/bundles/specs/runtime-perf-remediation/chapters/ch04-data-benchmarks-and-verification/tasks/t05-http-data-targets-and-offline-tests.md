@@ -1,6 +1,6 @@
 ---
 type: Task
-id: "runtime-perf-remediation:ch04:t04"
+id: "runtime-perf-remediation:ch04:t05"
 chapter_id: ch04-data-benchmarks-and-verification
 title: Add HTTP data targets and offline benchmark tests
 description: Register SQLSpec, Advanced Alchemy, and stdlib HTTP data targets with Target.adapter tags in tools/benchmarks/targets.py and add comprehensive offline unit tests in test_e2e_benchmarks.py.
@@ -10,9 +10,9 @@ priority: P1
 verification_strategy: regression_tdd
 worksheet_format: compact
 depends_on:
-  - "runtime-perf-remediation:ch04:t01"
   - "runtime-perf-remediation:ch04:t02"
   - "runtime-perf-remediation:ch04:t03"
+  - "runtime-perf-remediation:ch04:t04"
 read_set:
   - .agents/bundles/specs/runtime-perf-remediation/chapters/ch04-data-benchmarks-and-verification/spec.md
   - tools/benchmarks/targets.py
@@ -25,8 +25,8 @@ tests:
   - src/py/tests/unit/tools/test_e2e_benchmarks.py
   - src/py/tests/unit/test_bench_infrastructure.py
 estimated_loc: 210
-plan_revision: 2
-plan_commit: "86527cf1"
+plan_revision: 3
+plan_commit: "9dfbd408"
 commit: null
 sources:
   - id: src-ch04-spec
@@ -66,8 +66,20 @@ Preserve all existing target names, ports, and metadata invariants verified by `
 - Update `_vtb`, `_vtb_data`, `_granian_data`, `_uvicorn_data`, and `_shm_broker_env` in `tools/benchmarks/targets.py` to accept `adapter: str = "none"` and optional `extra_env: dict[str, str] | None = None`.
 - Guard `apply_shm_broker_dsn` so `shm_broker=true` is only appended to PostgreSQL URLs (`postgres://`, `postgresql://`, `postgresql+...`), leaving SQLite paths untouched.
 - Register the ten targets listed in chapter `spec.md` Section 2.3 on unique ports `8160`–`8169` [^src-ch04-spec]:
-  - Vertebra (`category="data"`): `vtb-data-sqlspec-native-4w` (`8160`), `vtb-data-sqlspec-shm-4w-broker` (`8161`), `vtb-data-aa-native-4w` (`8162`), `vtb-data-aa-shm-4w-broker` (`8163`).
-  - Baselines (`category="data-baseline"`): `granian-asgi-data-stdlib` (`8164`), `granian-asgi-data-sqlspec` (`8165`), `granian-asgi-data-aa` (`8166`), `uvicorn-httptools-data-stdlib` (`8167`), `uvicorn-httptools-data-sqlspec` (`8168`), `uvicorn-httptools-data-aa` (`8169`).
+
+| Name | Port | App | Topology | Broker | Category | Adapter | Factory | `extra_env` |
+| :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `vtb-data-sqlspec-native-4w` | `8160` | `_DATA_NATIVE` | `SHM` | `False` | `data` | `sqlspec` | — | `VTB_BENCH_DB_ADAPTER=sqlspec`, `VTB_BENCH_DB_ADAPTER_FLAVOR=vertebra` |
+| `vtb-data-sqlspec-shm-4w-broker` | `8161` | `_DATA_NATIVE` | `SHM` | `True` | `data` | `sqlspec` | — | `VTB_BENCH_DB_ADAPTER=sqlspec`, `VTB_BENCH_DB_ADAPTER_FLAVOR=vertebra` |
+| `vtb-data-aa-native-4w` | `8162` | `_DATA_NATIVE` | `SHM` | `False` | `data` | `advanced_alchemy` | — | `VTB_BENCH_DB_ADAPTER=advanced_alchemy`, `VTB_BENCH_DB_ADAPTER_FLAVOR=vertebra` |
+| `vtb-data-aa-shm-4w-broker` | `8163` | `_DATA_NATIVE` | `SHM` | `True` | `data` | `advanced_alchemy` | — | `VTB_BENCH_DB_ADAPTER=advanced_alchemy`, `VTB_BENCH_DB_ADAPTER_FLAVOR=vertebra` |
+| `granian-asgi-data-stdlib` | `8164` | `tools.benchmarks.apps.data_asgi:asgi_app` | `BASELINE` | `False` | `data-baseline` | `stdlib` | `False` | `VTB_BENCH_DB_ADAPTER=stdlib`, `VTB_BENCH_DB_ADAPTER_FLAVOR=upstream` |
+| `granian-asgi-data-sqlspec` | `8165` | `tools.benchmarks.apps.data_asgi:asgi_app` | `BASELINE` | `False` | `data-baseline` | `sqlspec-upstream` | `False` | `VTB_BENCH_DB_ADAPTER=sqlspec`, `VTB_BENCH_DB_ADAPTER_FLAVOR=upstream` |
+| `granian-asgi-data-aa` | `8166` | `tools.benchmarks.apps.data_asgi:asgi_app` | `BASELINE` | `False` | `data-baseline` | `advanced_alchemy-vanilla` | `False` | `VTB_BENCH_DB_ADAPTER=advanced_alchemy`, `VTB_BENCH_DB_ADAPTER_FLAVOR=upstream` |
+| `uvicorn-httptools-data-stdlib` | `8167` | `tools.benchmarks.apps.data_asgi:asgi_app` | `BASELINE` | `False` | `data-baseline` | `stdlib` | `False` | `VTB_BENCH_DB_ADAPTER=stdlib`, `VTB_BENCH_DB_ADAPTER_FLAVOR=upstream` |
+| `uvicorn-httptools-data-sqlspec` | `8168` | `tools.benchmarks.apps.data_asgi:asgi_app` | `BASELINE` | `False` | `data-baseline` | `sqlspec-upstream` | `False` | `VTB_BENCH_DB_ADAPTER=sqlspec`, `VTB_BENCH_DB_ADAPTER_FLAVOR=upstream` |
+| `uvicorn-httptools-data-aa` | `8169` | `tools.benchmarks.apps.data_asgi:asgi_app` | `BASELINE` | `False` | `data-baseline` | `advanced_alchemy-vanilla` | `False` | `VTB_BENCH_DB_ADAPTER=advanced_alchemy`, `VTB_BENCH_DB_ADAPTER_FLAVOR=upstream` |
+
 - Each new target sets `Target.adapter` cleanly for DuckDB matrix filtering and exports `VTB_BENCH_DB_ADAPTER` plus `VTB_BENCH_DB_ADAPTER_FLAVOR`.
 - Add offline tests in `test_e2e_benchmarks.py` [^src-test-e2e-bench] covering:
   - `DataBackend` SQLite sync and async operations across all four adapters (`native`, `sqlspec`, `advanced_alchemy`, `stdlib`), plus `DataBackendConfig` validation and Postgres missing-DSN error.
@@ -87,7 +99,7 @@ Preserve all existing target names, ports, and metadata invariants verified by `
 ## Verification
 
 ```bash
-uv run --no-sync pytest src/py/tests/unit/tools/test_e2e_benchmarks.py src/py/tests/unit/test_bench_infrastructure.py
+uv run --no-sync pytest src/py/tests/unit/tools/test_e2e_benchmarks.py src/py/tests/unit/tools/test_matrix_targets_and_scenarios.py src/py/tests/unit/tools/test_cli_matrix_filters.py src/py/tests/unit/test_bench_infrastructure.py
 uv run --no-sync ruff check tools/benchmarks/ src/py/tests/unit/tools/test_e2e_benchmarks.py
 uv run --no-sync mypy tools/benchmarks/apps/_data_backend.py tools/benchmarks/apps/_db_drivers.py tools/benchmarks/apps/_db_orm_drivers.py tools/benchmarks/adapters/sql.py tools/benchmarks/targets.py
 ```
