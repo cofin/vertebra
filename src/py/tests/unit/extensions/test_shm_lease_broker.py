@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import inspect
 import multiprocessing as mp
 import os
@@ -66,6 +68,20 @@ def _worker_hold_and_pause(
     if g1 is not None and g2 is not None:
         ready_event.set()
         stop_event.wait()
+
+
+def _worker_hold_and_release_named(
+    name: str,
+    ready_event: mp.synchronize.Event,
+    release_event: mp.synchronize.Event,
+) -> None:
+    """Acquire the sole lease in a named SHM broker and release it once signaled."""
+    broker = LeaseBroker.open_named(name, pool_size=1, max_overflow=0)
+    grant = broker.acquire(worker_pid=os.getpid(), ttl_ns=0, timeout_ms=2000, bind_key_hash=0)
+    assert grant is not None
+    ready_event.set()
+    release_event.wait(timeout=10.0)
+    assert broker.release(grant.slot_index, grant.generation) is True
 
 
 def test_native_lease_broker_named_cross_process_cap() -> None:
@@ -501,4 +517,175 @@ async def test_async_broker_release_bypasses_sync_pool_waiters(
 
     monkeypatch.setattr(transport_mod, "SyncPool", _ForbidSyncPool)
     assert await transport.release(lease.lease_id) is True
+    assert transport.metrics().active_leases == 0
+
+
+@pytest.mark.anyio
+async def test_async_broker_c128_contention_bypasses_sync_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify c=128 concurrent async acquires over 10 slots complete without SyncPool submissions."""
+    from vertebra.extensions.broker import transport as transport_mod
+
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=10, max_overflow=0, acquire_timeout_ms=5000))
+
+    class _ForbidSyncPool:
+        @classmethod
+        def default(cls) -> _ForbidSyncPool:
+            raise AssertionError("acquire() must not submit contended waits to SyncPool.default()")
+
+    monkeypatch.setattr(transport_mod, "SyncPool", _ForbidSyncPool)
+
+    completed = 0
+
+    async def _worker(idx: int) -> None:
+        nonlocal completed
+        lease = await transport.acquire(worker_id=idx + 1, timeout_ms=5000)
+        try:
+            await asyncio.sleep(0.001)
+            completed += 1
+        finally:
+            assert await transport.release(lease.lease_id) is True
+
+    await asyncio.gather(*(_worker(i) for i in range(128)))
+    assert completed == 128
+    assert transport.metrics().active_leases == 0
+    assert transport.metrics().total_acquired == 128
+    assert transport.metrics().total_released == 128
+
+
+@pytest.mark.anyio
+async def test_async_broker_leader_cancel_promotes_follower() -> None:
+    """Verify cancelling the active leader waiter immediately promotes a waiting follower."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=2000))
+    held = await transport.acquire(worker_id=1)
+
+    leader_task = asyncio.create_task(transport.acquire(worker_id=2, timeout_ms=2000))
+    await asyncio.sleep(0.005)
+
+    completed: list[int] = []
+
+    async def _follower(idx: int) -> None:
+        lease = await transport.acquire(worker_id=3 + idx, timeout_ms=2000)
+        try:
+            completed.append(idx)
+        finally:
+            assert await transport.release(lease.lease_id) is True
+
+    followers = [asyncio.create_task(_follower(idx)) for idx in range(10)]
+    await asyncio.sleep(0.005)
+
+    leader_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await leader_task
+
+    assert await transport.release(held.lease_id) is True
+
+    await asyncio.wait_for(asyncio.gather(*followers), timeout=2.0)
+    assert sorted(completed) == list(range(10))
+    assert transport.metrics().active_leases == 0
+
+
+@pytest.mark.anyio
+async def test_async_broker_release_sync_wakes_local_waiter() -> None:
+    """Verify lease.release_sync() wakes a queued async waiter directly on the same loop."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=2000))
+    held = await transport.acquire(worker_id=1)
+
+    waiter_one = asyncio.create_task(transport.acquire(worker_id=2, timeout_ms=2000))
+    waiter_two = asyncio.create_task(transport.acquire(worker_id=3, timeout_ms=2000))
+    await asyncio.sleep(0.005)
+
+    started = time.monotonic()
+    held.release_sync()
+
+    done, pending = await asyncio.wait({waiter_one, waiter_two}, return_when=asyncio.FIRST_COMPLETED, timeout=1.0)
+    elapsed_ms = (time.monotonic() - started) * 1000.0
+    assert len(done) == 1
+    assert elapsed_ms < 200.0
+
+    first_lease = next(iter(done)).result()
+    first_lease.release_sync()
+    second_lease = await asyncio.wait_for(next(iter(pending)), timeout=1.0)
+    second_lease.release_sync()
+    assert transport.metrics().active_leases == 0
+
+
+@pytest.mark.anyio
+async def test_async_broker_cross_process_wake_via_named_shm() -> None:
+    """Verify a remote OS process releasing a named SHM slot wakes AsyncSHMBrokerTransport promptly."""
+    name = f"/vtb-test-async-wake-{os.getpid()}-{time.monotonic_ns()}"
+    transport = AsyncSHMBrokerTransport(
+        BrokerConfig(pool_size=1, max_overflow=0, shm_name=name, role="owner", acquire_timeout_ms=2000)
+    )
+    ctx = mp.get_context("spawn")
+    ready_event = ctx.Event()
+    release_event = ctx.Event()
+    proc = ctx.Process(target=_worker_hold_and_release_named, args=(name, ready_event, release_event))
+    try:
+        proc.start()
+        assert ready_event.wait(timeout=10.0)
+        waiter = asyncio.create_task(transport.acquire(worker_id=os.getpid(), timeout_ms=3000))
+        await asyncio.sleep(0.01)
+        assert not waiter.done()
+
+        started = time.monotonic()
+        release_event.set()
+        lease = await asyncio.wait_for(waiter, timeout=2.0)
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        assert elapsed_ms < 500.0
+        assert await transport.release(lease.lease_id) is True
+        proc.join(timeout=10.0)
+        assert proc.exitcode == 0
+        assert transport.metrics().active_leases == 0
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=5.0)
+        with contextlib.suppress(Exception):
+            transport.unlink()
+
+
+@pytest.mark.anyio
+async def test_async_broker_multi_partition_waiters_no_starvation() -> None:
+    """Verify releasing partition A wakes a waiter blocked on global capacity in partition B."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=2000))
+    part_a = transport.register_partition("pool-a", pool_size=1, max_overflow=0)
+    part_b = transport.register_partition("pool-b", pool_size=1, max_overflow=0)
+
+    lease_a = await transport.acquire(worker_id=1, bind_key="pool-a", partition=part_a)
+    waiter_b = asyncio.create_task(transport.acquire(worker_id=2, bind_key="pool-b", partition=part_b, timeout_ms=2000))
+    await asyncio.sleep(0.01)
+    assert not waiter_b.done()
+
+    assert await transport.release(lease_a.lease_id) is True
+    lease_b = await asyncio.wait_for(waiter_b, timeout=1.0)
+    assert lease_b.pool_id == part_b
+    assert await transport.release(lease_b.lease_id) is True
+    assert transport.metrics().active_leases == 0
+
+
+@pytest.mark.anyio
+async def test_async_broker_zero_and_short_timeout_cleanup() -> None:
+    """Verify zero-timeout fails immediately and short timeouts leave zero leaked waiters or leases."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=2000))
+    held = await transport.acquire(worker_id=1)
+
+    with pytest.raises(TimeoutError, match="Connection broker pool exhausted"):
+        await transport.acquire(worker_id=2, timeout_ms=0)
+    with pytest.raises(TimeoutError, match="Connection broker pool exhausted"):
+        await transport.acquire(worker_id=3, timeout=0.0)
+
+    results = await asyncio.gather(
+        *(transport.acquire(worker_id=10 + idx, timeout_ms=20) for idx in range(5)),
+        return_exceptions=True,
+    )
+    assert all(isinstance(exc, TimeoutError) for exc in results)
+
+    loop = asyncio.get_running_loop()
+    queue = transport._waiter_queues[loop][None]
+    assert queue.leader_active is False
+    assert len(queue.waiters) == 0
+
+    assert await transport.release(held.lease_id) is True
     assert transport.metrics().active_leases == 0
