@@ -5,7 +5,7 @@ chapter_id: ch04-data-benchmarks-and-verification
 title: Sync worker, Python hot-path, and benchmark OKF chapters
 description: Update asgi-and-wsgi-runners.md, hot-path-and-async-dispatch.md, and benchmarks-and-free-threaded.md in present-tense OKF v0.2 format matching verified ch01, ch03, and ch04 implementations.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 worksheet_format: compact
@@ -24,7 +24,7 @@ tests: []
 estimated_loc: 150
 plan_revision: 3
 plan_commit: "9dfbd408"
-commit: null
+commit: "ff8c4272"
 sources:
   - id: src-root-spec
     resource: .agents/bundles/specs/runtime-perf-remediation/spec.md

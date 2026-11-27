@@ -5,7 +5,7 @@ chapter_id: ch04-data-benchmarks-and-verification
 title: Implement SQLSpec and Advanced Alchemy DB drivers
 description: Implement sqlspec and advanced_alchemy WorldDriver backends for SQLite and PostgreSQL supporting both Vertebra extensions (+vtb, BrokerPool, AsyncBrokerPool) and upstream/vanilla baselines.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -24,7 +24,7 @@ tests:
 estimated_loc: 230
 plan_revision: 3
 plan_commit: "9dfbd408"
-commit: null
+commit: "ff8c4272"
 sources:
   - id: src-ch04-spec
     resource: .agents/bundles/specs/runtime-perf-remediation/chapters/ch04-data-benchmarks-and-verification/spec.md

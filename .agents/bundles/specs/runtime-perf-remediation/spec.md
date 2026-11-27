@@ -13,7 +13,7 @@ chapters:
   - ch02-embedded-bridge-and-batching
   - ch03-ingress-and-worker-hotpaths
   - ch04-data-benchmarks-and-verification
-current_chapter: ch04-data-benchmarks-and-verification
+current_chapter: null
 current_task: null
 parent_flow: null
 chapter_id: null
@@ -22,9 +22,9 @@ depends_on_chapters: []
 replan_trigger: null
 plan_revision: 3
 plan_commit: "9dfbd408"
-last_verified_checkpoint: "cf919307"
-last_reviewed_chapter: ch03-ingress-and-worker-hotpaths
-last_reviewed_commit: "cf919307"
+last_verified_checkpoint: "ff8c4272"
+last_reviewed_chapter: ch04-data-benchmarks-and-verification
+last_reviewed_commit: "ff8c4272"
 generated:
   by: flow/0.26.0
   at: "2026-11-27T01:36:00Z"
@@ -309,7 +309,7 @@ async def capture_advanced_alchemy_report(
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- `[0/6 files documented]`
+- `[6/6 files documented]`
   - `.agents/bundles/knowledge/architecture/worker/asgi-and-wsgi-runners.md` (`ch04:t08`) — Document adaptive `WsgiExecutor` (`VERTEBRA_WSGI_MODE`, `VERTEBRA_WSGI_THREADS`, `VERTEBRA_WSGI_STALL_US`), shared `WsgiServerConfig`, lazy `RsgiHttpProtocol`, and `AsgiScope` bitmask drop.
   - `.agents/bundles/knowledge/architecture/runtime/topologies-and-embedding.md` (`ch04:t07`) — Document 1w GIL Embedded `available_cpus.clamp(1, 2)` Tokio thread default, consumer-aligned `RequestBatcher` sharding, and cgroup-aware `EmbeddedSupervisor`.
   - `.agents/bundles/knowledge/architecture/ipc/tiered-rings-and-batch-bridge.md` (`ch04:t07`) — Document `BatchResponseSink`, `InProcessRequest` `PathAndQuery`, and `submit_batch_flushed`.
@@ -331,7 +331,7 @@ async def capture_advanced_alchemy_report(
 - [x] [6768cf7c] ch01-wsgi-adaptive-pool — Adaptive Rust `WsgiExecutor` pool and zero-allocation `WsgiServerConfig` (chapters/ch01-wsgi-adaptive-pool/spec.md)
 - [x] [9df526b0] ch02-embedded-bridge-and-batching — Embedded 1w Tokio/shard right-sizing, batch-locked `BridgeCorrelation`, `BatchResponseSink`, and zero-copy bridge handoff (chapters/ch02-embedded-bridge-and-batching/spec.md)
 - [x] [cf919307] ch03-ingress-and-worker-hotpaths — Lazy `IdleTimeoutStream`, connection-pinned shards, `BackpressureController`/`InFlightRequests`/`ShmDispatcher` hot paths, and Python/PyO3 worker/ASGI/RSGI/native optimizations (chapters/ch03-ingress-and-worker-hotpaths/spec.md)
-- [ ] ch04-data-benchmarks-and-verification — Empirical Tokio/WSGI tuning, SQLite and PostgreSQL (native, SQLSpec, Advanced Alchemy) benchmark wiring, Granian/DB verification gate, and OKF doc sync (chapters/ch04-data-benchmarks-and-verification/spec.md)
+- [x] [ff8c4272] ch04-data-benchmarks-and-verification — Empirical Tokio/WSGI tuning, SQLite and PostgreSQL (native, SQLSpec, Advanced Alchemy) benchmark wiring, Granian/DB verification gate, and OKF doc sync (chapters/ch04-data-benchmarks-and-verification/spec.md)
 
 ### Chapter / Phase Recovery Checkpoint
 
@@ -339,9 +339,8 @@ Each chapter runs a `< 60s` targeted Rust + Python unit test and lint gate (`car
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Chapter**: `ch04-data-benchmarks-and-verification` (`planned`, `planning_status: complete` — revised at `plan_revision: 3` after empirical A/B probing; `ch01` reviewed at `6768cf7c`, `ch02` reviewed at `9df526b0`, `ch03` reviewed at `cf919307`).
-- **Remaining Chapters**: `ch04-data-benchmarks-and-verification`.
-- **Empirical Findings Resolved**: 1w GIL Embedded `VERTEBRA_TOKIO_THREADS=2` (`available_cpus.clamp(1, 2)`) and `WsgiExecutor` (`DEFAULT_STALL_THRESHOLD_US = 2_000`, `default_threads = cpus * 12` clamped `64..128`) are locked into `ch04:t01` with verified release measurements.
+- **Flow State**: `completed` (`ch01` reviewed at `6768cf7c`, `ch02` reviewed at `9df526b0`, `ch03` reviewed at `cf919307`, `ch04` reviewed and approved by both `code-reviewer` and `quality-reviewer` at `ff8c4272`).
+- **Remaining Chapters**: None — ready for `/flow:finish runtime-perf-remediation`.
 
 [^src-wsgi-runner]: `src/rs/vertebra-py/src/wsgi/runner.rs::drive_wsgi_batch` — Native Rust WSGI batch runner currently executing requests serially.
 [^src-wsgi-environ]: `src/rs/vertebra-py/src/wsgi/environ.rs::WsgiEnviron` — Lazy PEP 3333 WSGI environ mapping.

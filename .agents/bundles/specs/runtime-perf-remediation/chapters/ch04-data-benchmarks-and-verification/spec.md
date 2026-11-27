@@ -5,7 +5,7 @@ chapter_id: ch04-data-benchmarks-and-verification
 title: Empirical Tuning, Data Benchmarks, Verification, and OKF Sync
 description: Apply empirically validated Embedded Tokio and WSGI pool defaults, wire SQLite and PostgreSQL native, SQLSpec, and Advanced Alchemy benchmarks, run live verification gates, and sync OKF knowledge chapters.
 status: stable
-state: planned
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 planning_status: complete
@@ -17,8 +17,8 @@ replan_trigger: null
 plan_revision: 3
 plan_commit: "9dfbd408"
 current_task: null
-last_verified_checkpoint: null
-last_reviewed_commit: null
+last_verified_checkpoint: "ff8c4272"
+last_reviewed_commit: "ff8c4272"
 generated:
   by: flow/0.26.0
   at: "2026-11-27T16:10:00Z"
@@ -219,7 +219,7 @@ New HTTP data targets in `tools/benchmarks/targets.py` (ports `8160`–`8169`):
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- `[0/6 files documented]`
+- `[6/6 files documented]`
   - `.agents/bundles/knowledge/architecture/runtime/topologies-and-embedding.md` (`t07`) — 1w GIL Embedded `available_cpus.clamp(1, 2)` Tokio thread default, consumer-aligned `RequestBatcher` sharding, cgroup-aware `EmbeddedSupervisor`.
   - `.agents/bundles/knowledge/architecture/ipc/tiered-rings-and-batch-bridge.md` (`t07`) — `BatchResponseSink`, `InProcessRequest` `PathAndQuery`, `submit_batch_flushed`.
   - `.agents/bundles/knowledge/architecture/http/batching-dispatch-and-backpressure.md` (`t07`) — Lazy `IdleTimeoutStream`, connection-pinned shards, batch-locked `BridgeCorrelation`, `BackpressureController` fastpath, reusable `ShmDispatcher` scratch buffers.
@@ -241,14 +241,14 @@ New HTTP data targets in `tools/benchmarks/targets.py` (ports `8160`–`8169`):
 
 ## 5. Implementation Plan
 
-- [ ] t01-empirical-tokio-and-wsgi-tuning — Apply empirically verified 1w Embedded Tokio `clamp(1, 2)` and `WsgiExecutor` `2,000 µs` / `64..128` thread defaults (tasks/t01-empirical-tokio-and-wsgi-tuning.md)
-- [ ] t02-pluggable-native-stdlib-db-drivers — Extend `DataBackendConfig` and implement `native` and `stdlib` SQLite/PostgreSQL `WorldDriver` backends (tasks/t02-pluggable-native-stdlib-db-drivers.md)
-- [ ] t03-sqlspec-and-advanced-alchemy-db-drivers — Implement `sqlspec` and `advanced_alchemy` SQLite/PostgreSQL `WorldDriver` adapters (tasks/t03-sqlspec-and-advanced-alchemy-db-drivers.md)
-- [ ] t04-advanced-alchemy-standalone-comparator — Add `capture_advanced_alchemy_report`, `COMPARATOR_PAIRS`, and CLI dispatch to `tools/benchmarks/adapters/sql.py` (tasks/t04-advanced-alchemy-standalone-comparator.md)
-- [ ] t05-http-data-targets-and-offline-tests — Register SQLSpec, Advanced Alchemy, and stdlib HTTP data targets and offline pytest coverage (tasks/t05-http-data-targets-and-offline-tests.md)
-- [ ] t06-empirical-release-benchmark-gate — Build release binaries and run live Granian, SQLite, and PostgreSQL benchmark matrices (tasks/t06-empirical-release-benchmark-gate.md)
-- [ ] t07-okf-sync-runtime-ipc-http — Update runtime, IPC, and HTTP OKF knowledge chapters (tasks/t07-okf-sync-runtime-ipc-http.md)
-- [ ] t08-okf-sync-worker-python-benchmarks — Update worker, Python hot-path, and benchmark OKF knowledge chapters (tasks/t08-okf-sync-worker-python-benchmarks.md)
+- [x] [5b1eb80f] t01-empirical-tokio-and-wsgi-tuning — Apply empirically verified 1w Embedded Tokio `clamp(1, 2)` and `WsgiExecutor` `2,000 µs` / `64..128` thread defaults (tasks/t01-empirical-tokio-and-wsgi-tuning.md)
+- [x] [ff8c4272] t02-pluggable-native-stdlib-db-drivers — Extend `DataBackendConfig` and implement `native` and `stdlib` SQLite/PostgreSQL `WorldDriver` backends (tasks/t02-pluggable-native-stdlib-db-drivers.md)
+- [x] [ff8c4272] t03-sqlspec-and-advanced-alchemy-db-drivers — Implement `sqlspec` and `advanced_alchemy` SQLite/PostgreSQL `WorldDriver` adapters (tasks/t03-sqlspec-and-advanced-alchemy-db-drivers.md)
+- [x] [ff8c4272] t04-advanced-alchemy-standalone-comparator — Add `capture_advanced_alchemy_report`, `COMPARATOR_PAIRS`, and CLI dispatch to `tools/benchmarks/adapters/sql.py` (tasks/t04-advanced-alchemy-standalone-comparator.md)
+- [x] [ff8c4272] t05-http-data-targets-and-offline-tests — Register SQLSpec, Advanced Alchemy, and stdlib HTTP data targets and offline pytest coverage (tasks/t05-http-data-targets-and-offline-tests.md)
+- [x] [1a4fcd7b] t06-empirical-release-benchmark-gate — Build release binaries and run live Granian, SQLite, and PostgreSQL benchmark matrices (tasks/t06-empirical-release-benchmark-gate.md)
+- [x] [48938aee] t07-okf-sync-runtime-ipc-http — Update runtime, IPC, and HTTP OKF knowledge chapters (tasks/t07-okf-sync-runtime-ipc-http.md)
+- [x] [ff8c4272] t08-okf-sync-worker-python-benchmarks — Update worker, Python hot-path, and benchmark OKF knowledge chapters (tasks/t08-okf-sync-worker-python-benchmarks.md)
 
 ### Fast Chapter Gate (`< 60s`)
 
@@ -265,9 +265,8 @@ uv run --no-sync mypy tools/benchmarks/apps/_data_backend.py tools/benchmarks/ap
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Chapter State**: `planned` (`planning_status: complete`, `plan_revision: 3`, approved and ready for execution).
-- **Remaining Tasks**: `t01`, `t02`, `t03`, `t04`, `t05`, `t06`, `t07`, `t08`.
-- **Empirical Findings Resolved**: `t01` locks in `available_cpus.clamp(1, 2)` for 1w GIL Embedded Tokio and `2,000 µs` / `64..128` lazy threads for `WsgiExecutor` based on live release A/B runs on `9dfbd408`.
+- **Chapter State**: `completed` (`plan_revision: 3`, verified and independently reviewed at `ff8c4272` by both `code-reviewer` and `quality-reviewer`).
+- **Remaining Tasks**: None (`t01`–`t08` complete, all 6 OKF chapters synced, live Granian/SQLite/PostgreSQL benchmark suites verified with zero errors).
 
 [^src-root-spec]: `.agents/bundles/specs/runtime-perf-remediation/spec.md` — Root flow specification and acceptance criteria.
 [^src-http-config]: `src/rs/vertebra-http/src/config.rs::ServerConfig::apply_runtime_thread_env` — Embedded Tokio thread default and RequestBatcher shard sizing.

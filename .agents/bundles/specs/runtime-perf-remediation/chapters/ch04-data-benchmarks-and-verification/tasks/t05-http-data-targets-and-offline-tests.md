@@ -5,7 +5,7 @@ chapter_id: ch04-data-benchmarks-and-verification
 title: Add HTTP data targets and offline benchmark tests
 description: Register SQLSpec, Advanced Alchemy, and stdlib HTTP data targets with Target.adapter tags in tools/benchmarks/targets.py and add comprehensive offline unit tests in test_e2e_benchmarks.py.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 worksheet_format: compact
@@ -27,7 +27,7 @@ tests:
 estimated_loc: 210
 plan_revision: 3
 plan_commit: "9dfbd408"
-commit: null
+commit: "ff8c4272"
 sources:
   - id: src-ch04-spec
     resource: .agents/bundles/specs/runtime-perf-remediation/chapters/ch04-data-benchmarks-and-verification/spec.md

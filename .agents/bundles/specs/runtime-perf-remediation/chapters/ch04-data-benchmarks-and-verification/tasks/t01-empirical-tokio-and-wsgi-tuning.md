@@ -5,7 +5,7 @@ chapter_id: ch04-data-benchmarks-and-verification
 title: Apply empirical 1w Tokio and WSGI pool tuning
 description: Update 1w GIL Embedded Tokio default to available_cpus.clamp(1, 2) and tune WsgiExecutor stall threshold (2000 us), lazy thread count (64..128), and single now_ns() per inline item.
 status: stable
-state: pending
+state: completed
 priority: P0
 verification_strategy: regression_tdd
 worksheet_format: compact
@@ -25,7 +25,7 @@ tests:
 estimated_loc: 55
 plan_revision: 3
 plan_commit: "9dfbd408"
-commit: null
+commit: "5b1eb80f"
 sources:
   - id: src-ch04-spec
     resource: .agents/bundles/specs/runtime-perf-remediation/chapters/ch04-data-benchmarks-and-verification/spec.md

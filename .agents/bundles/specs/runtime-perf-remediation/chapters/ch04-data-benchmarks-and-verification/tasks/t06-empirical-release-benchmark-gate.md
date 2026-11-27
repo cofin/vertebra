@@ -5,7 +5,7 @@ chapter_id: ch04-data-benchmarks-and-verification
 title: Run release build and live empirical benchmark gate
 description: Build release artifacts and execute the live Granian HTTP/1.1 comparison, SQLite full-stack and standalone suites, and Docker PostgreSQL full-stack and standalone suites.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: integration_acceptance
 worksheet_format: compact
@@ -22,7 +22,7 @@ tests: []
 estimated_loc: 0
 plan_revision: 3
 plan_commit: "9dfbd408"
-commit: null
+commit: "1a4fcd7b"
 sources:
   - id: src-root-spec
     resource: .agents/bundles/specs/runtime-perf-remediation/spec.md

@@ -5,7 +5,7 @@ chapter_id: ch04-data-benchmarks-and-verification
 title: Sync runtime, IPC, and HTTP OKF knowledge chapters
 description: Update topologies-and-embedding.md, tiered-rings-and-batch-bridge.md, and batching-dispatch-and-backpressure.md in present-tense OKF v0.2 format matching verified ch02, ch03, and ch04:t01 implementations.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 worksheet_format: compact
@@ -24,7 +24,7 @@ tests: []
 estimated_loc: 150
 plan_revision: 3
 plan_commit: "9dfbd408"
-commit: null
+commit: "48938aee"
 sources:
   - id: src-root-spec
     resource: .agents/bundles/specs/runtime-perf-remediation/spec.md

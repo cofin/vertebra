@@ -5,7 +5,7 @@ chapter_id: ch04-data-benchmarks-and-verification
 title: Add standalone Advanced Alchemy benchmark comparator
 description: Add capture_advanced_alchemy_report, register four SQLite/PostgreSQL COMPARATOR_PAIRS entries, and wire --engine advanced_alchemy --aa-engine sqlite|postgres CLI flags in tools/benchmarks/adapters/sql.py.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -23,7 +23,7 @@ tests:
 estimated_loc: 190
 plan_revision: 3
 plan_commit: "9dfbd408"
-commit: null
+commit: "ff8c4272"
 sources:
   - id: src-ch04-spec
     resource: .agents/bundles/specs/runtime-perf-remediation/chapters/ch04-data-benchmarks-and-verification/spec.md
