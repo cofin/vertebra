@@ -15,8 +15,8 @@ from vertebra.agent.mcp.controllers import (
     mcp_tool,
 )
 from vertebra.agent.mcp.models import MCPConfig
-from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
-from vertebra.agent.mcp.routes import WsgiMcpApp, render_well_known_mcp_json
+from vertebra.agent.mcp.registry import ToolRegistry
+from vertebra.agent.mcp.routes import WsgiMCPApp, render_well_known_mcp_json
 from vertebra.agent.mcp.service import MCPCore
 from vertebra.agent.mcp.skills import MCPSkillsConfig, SkillCatalog
 from vertebra.agent.mcp.webmcp import (
@@ -32,14 +32,13 @@ from vertebra.utils.module_loader import import_optional
 __all__ = (
     "MCPConfig",
     "MCPCore",
-    "MCPRegistry",
     "PromptController",
     "SkillController",
     "ToolRegistry",
     "WebMCPConfig",
     "WebMCPManifest",
     "WebMCPToolDescriptor",
-    "WsgiMcpApp",
+    "WsgiMCPApp",
     "attach_mcp_routes",
     "build_webmcp_manifest",
     "dispatch_mcp_request",
@@ -57,18 +56,18 @@ def dispatch_mcp_request(
     *,
     skills: MCPSkillsConfig | SkillCatalog | None = None,
 ) -> Any:
-    """Execute an MCP HTTP request via shared ``WsgiMcpApp`` over ``MCPCore``."""
+    """Execute an MCP HTTP request via shared ``WsgiMCPApp`` over ``MCPCore``."""
     resolved = config or MCPConfig(server_name="vertebra-django-mcp")
     cached_app = getattr(registry, "_mcp_app", None)
     if (
-        not isinstance(cached_app, WsgiMcpApp)
+        not isinstance(cached_app, WsgiMCPApp)
         or cached_app.config != resolved
         or (skills is not None and getattr(cached_app, "_skills_source", None) != skills)
     ):
         resolved_skills = SkillCatalog.coerce(skills)
         core = MCPCore(config=resolved, registry=registry, skill_catalog=resolved_skills)
         core.validate()
-        cached_app = WsgiMcpApp(core)
+        cached_app = WsgiMCPApp(core)
         cast("Any", cached_app)._skills_source = skills
         cast("Any", registry)._mcp_app = cached_app
 
@@ -123,10 +122,10 @@ def attach_mcp_routes(
     config: MCPConfig | None = None,
     *,
     skills: MCPSkillsConfig | SkillCatalog | None = None,
-) -> tuple[MCPRegistry, dict[str, Response]]:
+) -> tuple[ToolRegistry, dict[str, Response]]:
     """Scan Django views for ``@mcp_tool``, ``@mcp_resource``, and ``@mcp_prompt``."""
     resolved = config or MCPConfig(server_name="vertebra-django-mcp")
-    registry = MCPRegistry()
+    registry = ToolRegistry()
 
     if isinstance(compiler_or_views, RouteCompiler):
         for entry in compiler_or_views.entries:
@@ -139,7 +138,7 @@ def attach_mcp_routes(
     resolved_skills = SkillCatalog.coerce(skills)
     core = MCPCore(config=resolved, registry=registry, skill_catalog=resolved_skills)
     core.validate()
-    mcp_app = WsgiMcpApp(core)
+    mcp_app = WsgiMCPApp(core)
     cast("Any", mcp_app)._skills_source = skills
     cast("Any", registry)._mcp_app = mcp_app
 

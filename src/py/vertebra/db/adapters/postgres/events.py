@@ -15,13 +15,13 @@ if TYPE_CHECKING:
 
 __all__ = (
     "EventSessionRegistry",
-    "PostgresNotificationDriver",
+    "AsyncPostgresNotificationDriver",
     "PostgresReplicationDriver",
     "SyncPostgresNotificationDriver",
 )
 
 
-class PostgresNotificationDriver(Protocol):
+class AsyncPostgresNotificationDriver(Protocol):
     """Structural protocol for PostgreSQL drivers supporting notification publish and listen."""
 
     @property

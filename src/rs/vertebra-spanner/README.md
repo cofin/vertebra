@@ -1,6 +1,6 @@
 # vertebra-spanner
 
-Native Rust Google Cloud Spanner client extension for [Vertebra](https://cofin.github.io/vertebra/).
+Google Cloud Spanner client extension for [Vertebra](https://cofin.github.io/vertebra/).
 
 This package contains the compiled `vertebra._spanner` module that Vertebra's Google Cloud Spanner drivers run on. You don't import it directly. Install it through the `vertebra-core` extra so both packages stay on the same version:
 
@@ -16,7 +16,7 @@ Without it, the Google Cloud Spanner drivers raise `MissingDependencyError`.
 - GoogleSQL and PostgreSQL-dialect databases, built on the official `google-cloud-spanner` Rust client.
 - Multiplexed sessions, automatic retry of aborted transactions, and `BatchWrite`.
 - Data Boost partitioned reads into Arrow with `select_to_arrow`.
-- Change stream sources, and support for the Spanner Emulator.
+- Change stream sources and support for the Spanner Emulator.
 
 ## Usage
 
@@ -28,7 +28,7 @@ Without it, the Google Cloud Spanner drivers raise `MissingDependencyError`.
 
 ## Compatibility
 
-- Python 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
+- Python 3.12 to 3.15, including free-threaded builds.
 - Prebuilt wheels for Linux (x86_64, aarch64; glibc 2.28+), macOS (x86_64, arm64), and Windows (x64).
 
 ## Links

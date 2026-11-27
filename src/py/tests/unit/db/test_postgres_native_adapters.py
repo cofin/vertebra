@@ -25,7 +25,7 @@ from vertebra.db.adapters.postgres._sync import SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.types import PgJson
-from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope, TenantScopeConfig
+from vertebra.db.rls import AsyncTenantConnectionScope, SyncTenantConnectionScope, TenantScopeConfig
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import ImproperConfigurationError
 
@@ -129,20 +129,20 @@ def test_sync_transaction_savepoints_and_rollback_eviction() -> None:
 
 
 def test_sync_tenant_scope_and_reset_failure_eviction() -> None:
-    """``TenantConnectionScope`` pins a session GUC and evicts the physical connection if reset fails."""
+    """``SyncTenantConnectionScope`` pins a session GUC and evicts the physical connection if reset fails."""
     cluster = FakePostgresCluster()
     pool = FakeSyncPostgresPool(cluster, max_size=2)
     drv = SyncPostgreSQLDriver(PostgreSQLConfig(), pool=pool)
     scope_cfg = TenantScopeConfig(setting_name="app.tenant_id")
 
-    with TenantConnectionScope(drv, "tenant-a", scope_cfg):
+    with SyncTenantConnectionScope(drv, "tenant-a", scope_cfg):
         assert drv.execute_tuples("SELECT current_setting($1)", ("app.tenant_id",)) == [("tenant-a",)]
         assert len(pool.active) == 1
     assert len(pool.active) == 0
     assert drv.execute_tuples("SELECT current_setting($1)", ("app.tenant_id",)) == [("",)]
 
     cluster.set_config_reset_failures_remaining = 1
-    with pytest.raises(OperationalError), TenantConnectionScope(drv, "tenant-b", scope_cfg):
+    with pytest.raises(OperationalError), SyncTenantConnectionScope(drv, "tenant-b", scope_cfg):
         assert drv.execute_tuples("SELECT current_setting($1)", ("app.tenant_id",)) == [("tenant-b",)]
     assert len(pool.evicted) == 1
     assert len(pool.active) == 0
@@ -650,7 +650,7 @@ def test_sync_cursor_method_session_and_lazy_begin_contracts() -> None:
         assert len(broker.release_calls) == 1
 
         scope_cfg = TenantScopeConfig(setting_name="app.tenant_id")
-        with TenantConnectionScope(drv, "tenant-cur", scope_cfg):
+        with SyncTenantConnectionScope(drv, "tenant-cur", scope_cfg):
             assert len(broker.acquire_calls) == 2
             tenant_cur = drv.cursor(lazy_begin=True)
             tenant_cur.execute("SELECT current_setting($1)", ("app.tenant_id",))
@@ -846,7 +846,7 @@ def test_sync_single_call_pinned_transaction_and_tenant_routes() -> None:
         pool.calls.clear()
         tx_all_client.calls.clear()
         scope_cfg = TenantScopeConfig(setting_name="app.tenant_id")
-        with TenantConnectionScope(drv, "tenant-z", scope_cfg):
+        with SyncTenantConnectionScope(drv, "tenant-z", scope_cfg):
             tenant_client = pool.active[0]
             assert isinstance(tenant_client, _CountingSyncClient)
             assert drv.select("SELECT id FROM items WHERE id = $1", (10,)) == [{"id": 10}]

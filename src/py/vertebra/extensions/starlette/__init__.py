@@ -18,9 +18,9 @@ if TYPE_CHECKING:
         preseed_request_body,
     )
     from vertebra.extensions.starlette.mcp import (
-        MCPRegistry,
         PromptController,
         SkillController,
+        ToolRegistry,
         WebMCPConfig,
         WebMCPManifest,
         WebMCPToolDescriptor,
@@ -164,7 +164,7 @@ __all__ = (
     "JWKSConfig",
     "JWKSVerifier",
     "LocalConfig",
-    "MCPRegistry",
+    "ToolRegistry",
     "MemoryConfig",
     "OffloadPlan",
     "OpenAPIConfig",
@@ -273,7 +273,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "JWKSConfig": ("vertebra.extensions.starlette.security", "JWKSConfig"),
     "JWKSVerifier": ("vertebra.extensions.starlette.security", "JWKSVerifier"),
     "LocalConfig": ("vertebra.extensions.starlette.storage", "LocalConfig"),
-    "MCPRegistry": ("vertebra.extensions.starlette.mcp", "MCPRegistry"),
+    "ToolRegistry": ("vertebra.extensions.starlette.mcp", "ToolRegistry"),
     "MemoryConfig": ("vertebra.extensions.starlette.storage", "MemoryConfig"),
     "OffloadPlan": ("vertebra.extensions.starlette.offload", "OffloadPlan"),
     "OpenAPIConfig": ("vertebra.extensions.starlette.openapi", "OpenAPIConfig"),

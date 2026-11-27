@@ -1,6 +1,6 @@
 # Storage authentication and signed URLs
 
-Configure signing on an explicit store and generate method-specific URLs:
+Configure signing on a store to generate method-specific presigned URLs:
 
 ```python
 from vertebra.storage import MemoryConfig, SigningConfig, SyncObjectStore
@@ -17,13 +17,13 @@ upload_url = store.presign_put("avatars/user-1.png", expires_in_secs=300)
 print(store.verify_presigned_url(download_url, method="GET"))
 ```
 
-Output: `True`. HMAC URLs require your application to serve the configured origin and validate the URL before serving an object. The memory store here makes signing locally reproducible.
+Output: True. HMAC URLs are verified by your own application before serving an object.
 
-`presign_get` and `presign_put` return strings and take `expires_in_secs`; `sign(key, expires_in=3600, method="GET")` is the general method; all three default to one-hour expiry. Async stores expose the same methods as awaitables. `verify_presigned_url` verifies HMAC and S3 SigV4 locally; GCS, Azure, and OCI verification raises `NotImplementedError`.
+`presign_get`, `presign_put`, and the general `sign` method all default to one-hour expiry and have awaitable equivalents on async stores. `verify_presigned_url` verifies HMAC and S3 SigV4 locally; calling it on GCS, Azure, or OCI raises `NotImplementedError`.
 
 ## Google Cloud credentials and token caches
 
-Use ADC when deployed with a Google Cloud identity, or supply explicit credentials:
+Use Application Default Credentials (ADC) in Google Cloud environments, or pass explicit credentials:
 
 ```python
 import os
@@ -37,14 +37,14 @@ config = GCSConfig(
 store = SyncObjectStore(config)
 ```
 
-`application_credentials` accepts an ADC file. A service-account JSON key can instead be supplied through `service_account_path` or inline `service_account_key`. `access_token` provides an explicit bearer token when the caller manages its lifecycle. When no explicit credential is supplied, canonical ADC discovery evaluates sources in strict order:
+Credential resolution follows a strict order:
 
-1. Explicit options (`access_token`, `service_account_key` / `service_account_path`, or `application_credentials`, plus optional `target_service_account` impersonation).
-2. Ambient ADC file (`GOOGLE_APPLICATION_CREDENTIALS`, then the platform's well-known gcloud `application_default_credentials.json`).
+1. Explicit options (access token, service account key or path, or application credentials, plus optional target service account impersonation).
+2. Ambient ADC file (`GOOGLE_APPLICATION_CREDENTIALS`, then the local gcloud ADC path).
 3. Ambient environment bearer tokens (`GOOGLE_OAUTH_ACCESS_TOKEN` or `CLOUDSDK_AUTH_ACCESS_TOKEN`).
 4. GCE metadata server (`metadata.google.internal`).
 
-The token cache types come from the core `vertebra._vertebra` extension and are re-exported from `vertebra.storage`:
+Import the token cache types from `vertebra.storage`:
 
 ```python
 from vertebra.storage import (
@@ -57,9 +57,7 @@ from vertebra.storage import (
 )
 ```
 
-`GCSConfig.sync_token_cache()` and `async_token_cache()` build OAuth bearer caches with GCS scopes; both factories accept `allow_ambient_adc` and `scopes`. Without an explicit cache, each GCS store builds its own.
-
-Pass one cache as `token_cache=` to several stores so they share a single token and refresh schedule:
+Build a cache from a GCS config with `sync_token_cache()` or `async_token_cache()`, then pass it as `token_cache` to share one token and refresh schedule across multiple stores:
 
 ```python
 import os
@@ -74,15 +72,16 @@ assets = SyncObjectStore(config, token_cache=cache)
 reports = SyncObjectStore(GCSConfig(bucket="app-reports"), token_cache=cache)
 ```
 
-The cache reaches the storage extension as a named C-ABI capsule, so both modules use the same native cache rather than copies. A store uses it for every GCS request: reads, writes, listings, server-side `compose`, and the IAM `signBlob` call behind keyless presigning. `cache.to_async()` and `cache.to_sync()` return handles over the same cache, and an `AsyncObjectStore` given a `SyncGcpTokenCache` converts it the same way. Converting a store with `.to_async()` / `.to_sync()` shares its engine and its cache.
+Cache and store behavior:
 
-The cache refreshes tokens before expiry using `refresh_skew_seconds` (default `300`) and coalesces concurrent refreshes. When IAM signing or `compose` receives a `401`, the store discards the rejected token and retries once with a fresh one. `quota_project_id` is sent as the `x-goog-user-project` header on storage and IAM requests.
-
-To stop the store from falling back to ambient credentials (environment variables, the gcloud ADC file, or the metadata server), pass `options={"allow_ambient_adc": "false"}`; only explicitly configured credentials are then used. `skip_signature=True` sends unauthenticated requests for public buckets and emulators. When `STORAGE_EMULATOR_HOST` is set and no `endpoint` or explicit credentials are configured, the store targets the emulator without signing.
+- **Shared handles**: Converting a cache between sync and async shares the same underlying token state. Passing a sync cache to an async store converts it automatically, and converting a store between sync and async preserves its shared cache.
+- **Proactive refresh**: Tokens refresh before expiry (default 300 seconds skew), coalescing concurrent refreshes. If IAM signing or server-side compose gets HTTP 401, the store drops the rejected token and retries once.
+- **Quota project**: Setting `quota_project_id` sends the `x-goog-user-project` header on storage and IAM calls.
+- **Ambient opt-out and emulators**: Pass `options={"allow_ambient_adc": "false"}` to require explicit credentials. Set `skip_signature=True` for public buckets or emulators. When `STORAGE_EMULATOR_HOST` is set without an explicit endpoint or credentials, the store targets the emulator unsigned.
 
 ### Audience-bound ID tokens (Cloud Run and IAP)
 
-`SyncGcpIdTokenCache` and `AsyncGcpIdTokenCache` mint, cache, and coalesce OIDC ID tokens keyed by `audience`. `get_token(audience, *, force_refresh=False)` returns a `GcpIdTokenSnapshot` (with `.to_async()` / `.to_sync()` converting handles over the same native cache):
+Use `SyncGcpIdTokenCache` or `AsyncGcpIdTokenCache` to mint and cache OIDC ID tokens keyed by audience via `get_token`:
 
 ```python
 from vertebra.embeddings import RemoteEmbedder
@@ -96,12 +95,12 @@ embedder = RemoteEmbedder(
 )
 ```
 
-- **Service-account keys, GCE metadata, and impersonation**: Mint arbitrary target audiences, including Cloud Run service URLs (`https://...run.app`) and IAP OAuth client IDs (`<client_id>.apps.googleusercontent.com`).
-- **Developer `authorized_user` ADC (`gcloud auth application-default login`)**: Exchanges the stored refresh token at Google's OAuth token endpoint. Google's OAuth token endpoint accepts only the credential's own `client_id` as the returned `id_token` `aud` claim; pass `target_service_account` to impersonate a service account via IAM Credentials `generateIdToken` when invoking Cloud Run, or add the ADC `client_id` to the IAP backend's `programmaticClients` allowlist.
+- **Service-account keys, GCE metadata, and impersonation**: Mint tokens for any audience, including Cloud Run URLs and IAP OAuth client IDs.
+- **Developer user ADC**: Google's OAuth endpoint only issues ID tokens whose audience matches the ADC credential's own client ID. Pass `target_service_account` to impersonate a service account for Cloud Run, or add the ADC client ID to your IAP backend's programmatic clients allowlist.
 
 ## GCS V4: local RSA or IAM signing
 
-A configured service-account identity enables `GOOG4-RSA-SHA256` URLs. With a service-account private key, signing runs locally. With `service_account_email` or `target_service_account` and no local key, signing calls IAM Credentials `signBlob` using ADC or the explicit access token:
+Configuring a service-account identity enables GCS V4 presigned URLs (1 to 604,800 seconds). With a local private key, signing runs locally. With a service account email or target impersonation account and no local key, signing calls IAM Credentials `signBlob` using ADC or an explicit bearer token:
 
 ```python
 import os
@@ -114,13 +113,11 @@ store = SyncObjectStore(GCSConfig(
 upload_url = store.presign_put("incoming/report.parquet", expires_in_secs=900)
 ```
 
-The configured identity needs permission to invoke `signBlob` for the signing service account. `target_service_account` selects keyless impersonation. Both synchronous and asynchronous signing use native credential handling. GCS V4 expiry must be between 1 and 604800 seconds.
-
-`GCSConfig(endpoint=...)` changes the origin of both data requests and presigned URLs, which is useful behind a private gateway or against an emulator. The signature covers the custom host, so the URL is valid only at that origin.
+The calling identity must have permission to invoke `signBlob` for the signing account. Setting a custom `endpoint` changes the host for both data requests and presigned URLs, so generated URLs are valid only at that custom origin.
 
 ## S3 SigV4 and R2
 
-S3 configurations with explicit access keys derive URL signing automatically:
+`S3Config` with explicit access keys derives SigV4 presigning automatically (1 to 604,800 seconds):
 
 ```python
 import os
@@ -134,11 +131,14 @@ store = SyncObjectStore(S3Config(
 download_url = store.presign_get("reports/latest.parquet", expires_in_secs=900)
 ```
 
-SigV4 uses RFC 3986 path encoding and `UNSIGNED-PAYLOAD`; expiry is 1–604800 seconds. Custom S3-compatible origins use `endpoint`; local HTTP endpoints require `allow_http=True`. With `virtual_hosted_style=True`, presigned URLs put the bucket in the host (`https://app-assets.s3.us-east-1.amazonaws.com/key`) instead of the path; a custom `endpoint` must then be a DNS name, because an IP address cannot carry a bucket subdomain. `R2Config` derives SigV4 signing from its access keys and resolved account/jurisdiction endpoint, using region `auto`; presigned R2 URLs always target the R2 S3 API host, even when `custom_domain` is set. An explicit `SigningConfig(provider="s3", ...)` can override signing configuration.
+- **Endpoints**: Set `endpoint` for S3-compatible services, and `allow_http=True` for local HTTP endpoints.
+- **Virtual-hosted style**: Setting `virtual_hosted_style=True` places the bucket in the host subdomain. Any custom endpoint must then be a DNS name rather than an IP address.
+- **Cloudflare R2**: `R2Config` derives SigV4 signing using region auto and always targets the R2 S3 API host, even when a custom domain is configured.
+- **Overrides**: Pass an explicit `SigningConfig` to override derived settings.
 
 ## Azure Blob SAS
 
-`AzureConfig(account=..., container=..., access_key=...)` derives SAS signing from its Base64 shared key. For URL generation without constructing a store:
+`AzureConfig` with an access key derives SAS signing automatically. You can also sign URLs directly without constructing a store:
 
 ```python
 import os
@@ -151,11 +151,13 @@ upload_url = SigningConfig.sign_azure_sas(
 )
 ```
 
-GET URLs grant read permission; PUT URLs grant create/write permission. `SigningConfig(provider="azure", account=..., container=..., azure_access_key=...)` configures the same operation on a store. SAS tokens and service-principal credentials also configure Azure object access; generating a new service SAS requires the shared signing key. A service principal needs `tenant_id`, `client_id`, and `client_secret` together. A partial or blank set, or a blank `sas_token`, raises `ImproperConfigurationError` when the store is built.
+- GET URLs grant read permission; PUT URLs grant create and write permission.
+- Generating a new service SAS requires the Base64 shared key.
+- Existing SAS tokens and service principals work for object access; service principals require tenant ID, client ID, and client secret together. Partial or blank credentials raise `ImproperConfigurationError`.
 
 ## OCI pre-authenticated requests
 
-Use an existing OCI PAR token or URL prefix with a native OCI store:
+Use an existing OCI PAR token or URL prefix with `OCIConfig`:
 
 ```python
 import os
@@ -168,6 +170,8 @@ store = SyncObjectStore(OCIConfig(
 download_url = store.presign_get("reports/latest.parquet", expires_in_secs=900)
 ```
 
-The prefix ends in `/o/`; generated URLs append the encoded object key. The PAR's granted access and provider expiry remain authoritative: `expires_in_secs` must be positive and does not extend an existing PAR. `OCIConfig` also accepts tenancy/user OCIDs, key fingerprint, and an RSA private key for native OCI API authentication. Supply all four together; a partial or blank set raises `ImproperConfigurationError` when the store is built. `SigningConfig.sign_oci_headers(...)` produces RSA-SHA256 Cavage request headers; PAR URL generation uses `par_token` or `par_url_prefix`.
+The prefix ends in `/o/`, and generated URLs append the encoded object key. The PAR's existing permissions and expiry stay authoritative; the expiry argument must be positive but does not extend the PAR.
+
+For native OCI API authentication, pass tenancy OCID, user OCID, key fingerprint, and RSA private key together (partial or blank sets raise `ImproperConfigurationError`). Use `SigningConfig.sign_oci_headers` to generate signed request headers.
 
 See [object storage](storage.md), [Parquet and framework adapters](storage-parquet-and-orm.md), and the [storage API reference](../reference/storage.md).

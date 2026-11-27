@@ -67,7 +67,7 @@ __all__ = (
     "subscription",
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __lazy_modules__ = [
     "vertebra.agent",

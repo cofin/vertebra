@@ -1,6 +1,6 @@
 # vertebra-duckdb
 
-Native Rust DuckDB client extension for [Vertebra](https://cofin.github.io/vertebra/).
+DuckDB client extension for [Vertebra](https://cofin.github.io/vertebra/).
 
 This package contains the compiled `vertebra._duckdb` module that Vertebra's DuckDB drivers run on. You don't import it directly. Install it through the `vertebra-core` extra so both packages stay on the same version:
 
@@ -15,7 +15,7 @@ Without it, the DuckDB drivers raise `MissingDependencyError`.
 
 - Embedded DuckDB with single-writer, multi-reader access and savepoints.
 - Zero-copy Arrow results over shared memory, plus the DuckDB `Appender` for bulk loads.
-- Pipelines (`SyncDuckDBPipeline`, `AsyncDuckDBPipeline`) and rotating GCS bearer secrets for `httpfs`.
+- Query pipelines and rotating GCS bearer secrets for `httpfs`.
 - Add `vertebra-core[sqlalchemy-duckdb]` for SQLAlchemy `duckdb+vtb://` URLs.
 
 ## Usage
@@ -28,7 +28,7 @@ Without it, the DuckDB drivers raise `MissingDependencyError`.
 
 ## Compatibility
 
-- Python 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
+- Python 3.12 to 3.15, including free-threaded builds.
 - Prebuilt wheels for Linux (x86_64, aarch64; glibc 2.28+), macOS (x86_64, arm64), and Windows (x64).
 
 ## Links

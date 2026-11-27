@@ -13,7 +13,7 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyList, PyString, PyTuple};
 use tokio::sync::Mutex as AsyncMutex;
 use vertebra_db::lease_guard::LeaseGuard;
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, block_on_db, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
+    TaskAwaitable, block_on_db, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
 
 use crate::arrow_ipc::{
@@ -1262,7 +1262,7 @@ fn shm_batches_to_py_list(
     Ok(out.into_any().unbind())
 }
 
-fn spawn_mysql_task<F, T, M>(py: Python<'_>, fut: F, map_ok: M) -> PyResult<RustDbTaskAwaitable>
+fn spawn_mysql_task<F, T, M>(py: Python<'_>, fut: F, map_ok: M) -> PyResult<TaskAwaitable>
 where
     F: std::future::Future<Output = Result<T, MySQLError>> + Send + 'static,
     T: Send + 'static,
@@ -1696,7 +1696,7 @@ impl_mysql_client_pymethods!(
             py: Python<'_>,
             sql: &str,
             parameters: Option<&Bound<'_, PyAny>>,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
             let core = Arc::clone(&self.core);
             spawn_mysql_task(
@@ -1714,7 +1714,7 @@ impl_mysql_client_pymethods!(
             py: Python<'_>,
             sql: &str,
             parameter_sets: &Bound<'_, PyAny>,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let (normalized_sql, compiled_sets) = compile_many_params(sql, parameter_sets)?;
             let core = Arc::clone(&self.core);
             spawn_mysql_task(
@@ -1724,7 +1724,7 @@ impl_mysql_client_pymethods!(
             )
         }
 
-        pub fn execute_script(&self, py: Python<'_>, sql: &str) -> PyResult<RustDbTaskAwaitable> {
+        pub fn execute_script(&self, py: Python<'_>, sql: &str) -> PyResult<TaskAwaitable> {
             let script = sql.to_string();
             let core = Arc::clone(&self.core);
             spawn_mysql_task(
@@ -1740,7 +1740,7 @@ impl_mysql_client_pymethods!(
             py: Python<'_>,
             sql: &str,
             parameters: Option<&Bound<'_, PyAny>>,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
             let core = Arc::clone(&self.core);
             spawn_mysql_task(
@@ -1756,7 +1756,7 @@ impl_mysql_client_pymethods!(
             py: Python<'_>,
             isolation_level: Option<String>,
             readonly: bool,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let core = Arc::clone(&self.core);
             spawn_mysql_task(
                 py,
@@ -1765,14 +1765,14 @@ impl_mysql_client_pymethods!(
             )
         }
 
-        pub fn commit(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        pub fn commit(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
             let core = Arc::clone(&self.core);
             spawn_mysql_task(py, async move { core.commit().await }, |py, ()| {
                 Ok(py.None())
             })
         }
 
-        pub fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        pub fn rollback(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
             let core = Arc::clone(&self.core);
             spawn_mysql_task(py, async move { core.rollback().await }, |py, ()| {
                 Ok(py.None())
@@ -1780,7 +1780,7 @@ impl_mysql_client_pymethods!(
         }
 
         #[pyo3(signature = (name="vtb_sp"))]
-        pub fn savepoint(&self, py: Python<'_>, name: &str) -> PyResult<RustDbTaskAwaitable> {
+        pub fn savepoint(&self, py: Python<'_>, name: &str) -> PyResult<TaskAwaitable> {
             let core = Arc::clone(&self.core);
             let sp = name.to_string();
             spawn_mysql_task(py, async move { core.savepoint(sp).await }, |py, s| {
@@ -1789,11 +1789,7 @@ impl_mysql_client_pymethods!(
         }
 
         #[pyo3(signature = (name="vtb_sp"))]
-        pub fn release_savepoint(
-            &self,
-            py: Python<'_>,
-            name: &str,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        pub fn release_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<TaskAwaitable> {
             let core = Arc::clone(&self.core);
             let sp = name.to_string();
             spawn_mysql_task(
@@ -1804,11 +1800,7 @@ impl_mysql_client_pymethods!(
         }
 
         #[pyo3(signature = (name="vtb_sp"))]
-        pub fn rollback_to_savepoint(
-            &self,
-            py: Python<'_>,
-            name: &str,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        pub fn rollback_to_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<TaskAwaitable> {
             let core = Arc::clone(&self.core);
             let sp = name.to_string();
             spawn_mysql_task(
@@ -1818,14 +1810,14 @@ impl_mysql_client_pymethods!(
             )
         }
 
-        pub fn ping(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        pub fn ping(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
             let core = Arc::clone(&self.core);
             spawn_mysql_task(py, async move { core.ping().await }, |py, b| {
                 Ok(PyBool::new(py, b).to_owned().into_any().unbind())
             })
         }
 
-        pub fn cancel(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        pub fn cancel(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
             let core = Arc::clone(&self.core);
             spawn_mysql_task(
                 py,
@@ -1834,11 +1826,7 @@ impl_mysql_client_pymethods!(
             )
         }
 
-        pub fn cancel_query(
-            &self,
-            py: Python<'_>,
-            connection_id: u32,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        pub fn cancel_query(&self, py: Python<'_>, connection_id: u32) -> PyResult<TaskAwaitable> {
             let core = Arc::clone(&self.core);
             spawn_mysql_task(
                 py,
@@ -1847,7 +1835,7 @@ impl_mysql_client_pymethods!(
             )
         }
 
-        pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        pub fn close(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
             let core = Arc::clone(&self.core);
             let lease_ok = Arc::clone(&self.lease);
             let lease_err = Arc::clone(&self.lease);
@@ -1873,7 +1861,7 @@ impl_mysql_client_pymethods!(
             sql: &str,
             parameters: Option<&Bound<'_, PyAny>>,
             batch_size: usize,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
             let core = Arc::clone(&self.core);
             spawn_mysql_task(
@@ -1895,7 +1883,7 @@ impl_mysql_client_pymethods!(
             sql: &str,
             parameters: Option<&Bound<'_, PyAny>>,
             batch_size: usize,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let (norm_sql, params) = prepare_sql_and_params(sql, parameters)?;
             let core = Arc::clone(&self.core);
             spawn_mysql_task(
@@ -1916,7 +1904,7 @@ impl_mysql_client_pymethods!(
             source: &Bound<'_, PyAny>,
             columns: Option<Vec<String>>,
             batch_size: usize,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let (resolved_cols, rows) = extract_arrow_load_payload(py, source, columns)?;
             let table = table_name.to_string();
             let core = Arc::clone(&self.core);

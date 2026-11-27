@@ -1,8 +1,8 @@
 """Universal OpenTelemetry gen_ai.* spans, token metrics, and audit logging.
 
 This module provides the AgentTelemetryRecorder that automatically instruments
-MCP tools, resources, prompts, skills, A2A messages/tasks, agent turns, SpecTree
-nodes, and DynamicWorkflow steps with OpenTelemetry spans, metrics, and non-blocking audit events.
+MCP tools, resources, prompts, skills, A2A messages/tasks, agent turns, PlanTree
+nodes, and Workflow steps with OpenTelemetry spans, metrics, and non-blocking audit events.
 """
 
 import time
@@ -303,28 +303,28 @@ class AgentTelemetryRecorder:
             TraceContext.set_current(parent_ctx)
 
     @contextmanager
-    def span_spectree_node(
+    def span_plan_node(
         self,
-        tree_id: str,
+        plan_id: str,
         node_id: str,
         title: str,
     ) -> Iterator[TraceContext]:
-        """Span context manager for SpecTree node execution."""
+        """Span context manager for PlanTree node execution."""
         parent_ctx = TraceContext.current()
         ctx = parent_ctx.new_child() if parent_ctx is not None else TraceContext.generate()
         TraceContext.set_current(ctx)
         start_ns = time.perf_counter_ns()
         attributes: dict[str, Any] = {
-            "spectree.tree_id": tree_id,
-            "spectree.node_id": node_id,
-            "spectree.title": title,
+            "plan.id": plan_id,
+            "plan.node_id": node_id,
+            "plan.title": title,
         }
 
         try:
             yield ctx
-            self._record_lifecycle("gen_ai.spectree.node", ctx, parent_ctx, start_ns, attributes)
+            self._record_lifecycle("gen_ai.plan.node", ctx, parent_ctx, start_ns, attributes)
         except BaseException as exc:
-            self._record_lifecycle("gen_ai.spectree.node", ctx, parent_ctx, start_ns, attributes, exc)
+            self._record_lifecycle("gen_ai.plan.node", ctx, parent_ctx, start_ns, attributes, exc)
             raise
         finally:
             TraceContext.set_current(parent_ctx)
@@ -336,7 +336,7 @@ class AgentTelemetryRecorder:
         run_id: str,
         node_name: str,
     ) -> Iterator[TraceContext]:
-        """Span context manager for DynamicWorkflow step execution."""
+        """Span context manager for Workflow step execution."""
         parent_ctx = TraceContext.current()
         ctx = parent_ctx.new_child() if parent_ctx is not None else TraceContext.generate()
         TraceContext.set_current(ctx)

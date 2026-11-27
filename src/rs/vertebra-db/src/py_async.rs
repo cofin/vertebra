@@ -14,7 +14,7 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 pub use vertebra_core::py_async::{
     CompletedTask as CompletedDbTask, CompletionDrainer as DbCompletionDrainer,
-    OutcomeProducer as DbOutcomeProducer, ReadyAwaitable, RustTaskAwaitable as RustDbTaskAwaitable,
+    OutcomeProducer as DbOutcomeProducer, ReadyAwaitable, TaskAwaitable,
     block_on_runtime as block_on_db, ready_err, ready_ok, runtime_handle as db_runtime_handle,
     spawn_rust_task_with_attr as spawn_rust_db_task_with_attr,
     spawn_rust_task_with_attr_and_cancel as spawn_rust_db_task_with_attr_and_cancel,

@@ -7,6 +7,10 @@ from vertebra.framework.queues._asgi import (
     get_queue_service,
     queue_lifespan,
 )
+from vertebra.framework.queues._resp import (
+    AsyncRESPStreamClient,
+    SyncRESPStreamClient,
+)
 from vertebra.framework.queues.backends import (
     SHMQueueBackend,
 )
@@ -36,8 +40,6 @@ from vertebra.framework.queues.postgres import (
 )
 from vertebra.framework.queues.redis import (
     RedisQueueBackend,
-    RedisStreamClient,
-    SyncRedisStreamClient,
 )
 from vertebra.framework.queues.scheduler import (
     CronExpression,
@@ -48,9 +50,7 @@ from vertebra.framework.queues.spanner import (
     SpannerQueueExecutor,
 )
 from vertebra.framework.queues.valkey import (
-    SyncValkeyStreamClient,
     ValkeyQueueBackend,
-    ValkeyStreamClient,
 )
 from vertebra.server.lanes import (
     LaneConfig,
@@ -61,6 +61,7 @@ from vertebra.server.lanes import (
 )
 
 __all__ = (
+    "AsyncRESPStreamClient",
     "CronExpression",
     "CronLease",
     "CronSchedule",
@@ -78,19 +79,16 @@ __all__ = (
     "QueueConfig",
     "QueueService",
     "RedisQueueBackend",
-    "RedisStreamClient",
     "SHMQueueBackend",
     "SpannerQueueBackend",
     "SpannerQueueExecutor",
-    "SyncRedisStreamClient",
-    "SyncValkeyStreamClient",
+    "SyncRESPStreamClient",
     "TaskDef",
     "TaskEnvelope",
     "TaskLane",
     "TaskResultRecord",
     "TaskRetryPolicy",
     "ValkeyQueueBackend",
-    "ValkeyStreamClient",
     "WorkerRunner",
     "attach_queue_service",
     "get_queue_service",

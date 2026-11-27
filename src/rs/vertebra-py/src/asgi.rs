@@ -1,6 +1,7 @@
 //! Lazy ASGI 3.0 scope with a 20-slot inline key table (`0..14` ASGI + `14..20` Litestar v2/v3).
 
 use std::collections::HashMap;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -187,7 +188,7 @@ fn build_extensions_dict<'py>(py: Python<'py>, is_tls: bool) -> PyResult<Bound<'
     dict_ref.bind(py).copy()
 }
 
-/// Lazy ASGI 3.0 scope with a 20-slot inline cache and freelist pooling.
+/// Lazy ASGI 3.0 scope with a 24-slot bitmask-tracked inline cache and freelist pooling.
 #[cfg_attr(
     not(Py_GIL_DISABLED),
     pyclass(mapping, name = "AsgiScope", freelist = 128, immutable_type)
@@ -196,21 +197,50 @@ fn build_extensions_dict<'py>(py: Python<'py>, is_tls: bool) -> PyResult<Bound<'
 pub struct AsgiScope {
     batch: Arc<BatchSnapshot>,
     index: usize,
-    root_path: String,
-    cached: [Option<Py<PyAny>>; KNOWN_KEYS.len()],
+    root_path: Arc<str>,
+    cached: [MaybeUninit<Py<PyAny>>; KNOWN_KEYS.len()],
+    populated_mask: u32,
     state_cache: Option<Py<PyDict>>,
     deleted_known: u32,
     extras: Option<HashMap<String, Py<PyAny>>>,
 }
 
+impl Drop for AsgiScope {
+    fn drop(&mut self) {
+        let mut mask = self.populated_mask;
+        self.populated_mask = 0;
+        while mask != 0 {
+            let idx = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            // SAFETY: Every set bit in `populated_mask` corresponds to an initialized
+            // `self.cached[idx]` slot (`idx < KNOWN_KEYS.len()`), and `self.populated_mask`
+            // was zeroed upfront so each slot is dropped at most once.
+            unsafe {
+                self.cached[idx].assume_init_drop();
+            }
+        }
+    }
+}
+
 impl AsgiScope {
-    /// Build a fresh `AsgiScope` over a `BatchSnapshot` entry.
+    /// Build a fresh `AsgiScope` over a `BatchSnapshot` entry with an owned `root_path`.
     pub fn new(batch: Arc<BatchSnapshot>, index: usize, root_path: String) -> Self {
+        Self::new_with_shared_root(batch, index, Arc::from(root_path))
+    }
+
+    /// Build a fresh `AsgiScope` sharing a batch-level `Arc<str>` `root_path`.
+    #[inline]
+    pub(crate) fn new_with_shared_root(
+        batch: Arc<BatchSnapshot>,
+        index: usize,
+        root_path: Arc<str>,
+    ) -> Self {
         Self {
             batch,
             index,
             root_path,
-            cached: [const { None }; KNOWN_KEYS.len()],
+            cached: [const { MaybeUninit::uninit() }; KNOWN_KEYS.len()],
+            populated_mask: 0,
             state_cache: None,
             deleted_known: INITIAL_UNSET_MASK,
             extras: None,
@@ -218,9 +248,50 @@ impl AsgiScope {
     }
 
     #[inline]
+    fn get_cached(&self, idx: usize) -> Option<&Py<PyAny>> {
+        debug_assert!(idx < KNOWN_KEYS.len());
+        if (self.populated_mask & (1u32 << idx)) != 0 {
+            // SAFETY: Bit `idx` in `populated_mask` is set iff `self.cached[idx]` is initialized.
+            Some(unsafe { self.cached[idx].assume_init_ref() })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn set_cached(&mut self, idx: usize, value: Py<PyAny>) {
+        debug_assert!(idx < KNOWN_KEYS.len());
+        let bit = 1u32 << idx;
+        if (self.populated_mask & bit) != 0 {
+            self.populated_mask &= !bit;
+            // SAFETY: Bit `idx` was set so `self.cached[idx]` held an initialized `Py<PyAny>`;
+            // clearing the bit before `assume_init_drop` guarantees no double-drop on unwind.
+            unsafe {
+                self.cached[idx].assume_init_drop();
+            }
+        }
+        self.cached[idx].write(value);
+        self.populated_mask |= bit;
+    }
+
+    #[inline]
+    fn clear_cached(&mut self, idx: usize) {
+        debug_assert!(idx < KNOWN_KEYS.len());
+        let bit = 1u32 << idx;
+        if (self.populated_mask & bit) != 0 {
+            self.populated_mask &= !bit;
+            // SAFETY: Bit `idx` was set so `self.cached[idx]` held an initialized `Py<PyAny>`;
+            // clearing the bit before `assume_init_drop` prevents double-drop.
+            unsafe {
+                self.cached[idx].assume_init_drop();
+            }
+        }
+    }
+
+    #[inline]
     pub(crate) fn set_initial_state(&mut self, py: Python<'_>, state_dict: Bound<'_, PyDict>) {
         let stored = state_dict.unbind();
-        self.cached[IDX_STATE] = Some(stored.clone_ref(py).into_any());
+        self.set_cached(IDX_STATE, stored.clone_ref(py).into_any());
         self.state_cache = Some(stored);
     }
 
@@ -266,31 +337,35 @@ impl AsgiScope {
             }
             5 => {
                 let full_path = self.batch.path(self.index);
-                let stripped =
-                    if !self.root_path.is_empty() && full_path.starts_with(&self.root_path) {
-                        let rem = &full_path[self.root_path.len()..];
-                        if rem.is_empty() { "/" } else { rem }
-                    } else {
-                        full_path
-                    };
+                let stripped = if !self.root_path.is_empty()
+                    && full_path.starts_with(self.root_path.as_ref())
+                {
+                    let rem = &full_path[self.root_path.len()..];
+                    if rem.is_empty() { "/" } else { rem }
+                } else {
+                    full_path
+                };
                 PyString::new(py, stripped).into_any().unbind()
             }
             6 => {
                 let full_path = self.batch.path(self.index);
-                let stripped =
-                    if !self.root_path.is_empty() && full_path.starts_with(&self.root_path) {
-                        let rem = &full_path[self.root_path.len()..];
-                        if rem.is_empty() { "/" } else { rem }
-                    } else {
-                        full_path
-                    };
+                let stripped = if !self.root_path.is_empty()
+                    && full_path.starts_with(self.root_path.as_ref())
+                {
+                    let rem = &full_path[self.root_path.len()..];
+                    if rem.is_empty() { "/" } else { rem }
+                } else {
+                    full_path
+                };
                 PyBytes::new(py, stripped.as_bytes()).into_any().unbind()
             }
             7 => {
                 let q = self.batch.query(self.index).unwrap_or("");
                 PyBytes::new(py, q.as_bytes()).into_any().unbind()
             }
-            8 => PyString::new(py, &self.root_path).into_any().unbind(),
+            8 => PyString::new(py, self.root_path.as_ref())
+                .into_any()
+                .unbind(),
             9 => {
                 let raw = self.batch.headers_raw(self.index);
                 decode_asgi_headers(py, raw)?.into_any().unbind()
@@ -317,7 +392,7 @@ impl AsgiScope {
             }
             12 => PyDict::new(py).into_any().unbind(),
             13 => {
-                let is_tls = if let Some(ref c) = self.cached[4] {
+                let is_tls = if let Some(c) = self.get_cached(4) {
                     c.bind(py)
                         .extract::<&str>()
                         .map(|s| s == "https" || s == "wss")
@@ -375,9 +450,9 @@ impl AsgiScope {
             http_version,
         );
         let mut scope = Self::new(snapshot, 0, root_path.to_string());
-        scope.cached[4] = Some(PyString::new(py, scheme).into_any().unbind());
-        scope.cached[5] = Some(PyString::new(py, path).into_any().unbind());
-        scope.cached[6] = Some(PyBytes::new(py, path.as_bytes()).into_any().unbind());
+        scope.set_cached(4, PyString::new(py, scheme).into_any().unbind());
+        scope.set_cached(5, PyString::new(py, path).into_any().unbind());
+        scope.set_cached(6, PyBytes::new(py, path.as_bytes()).into_any().unbind());
         Ok(scope)
     }
 
@@ -431,21 +506,21 @@ impl AsgiScope {
                 if let Some(ref d) = self.state_cache {
                     return Ok(d.clone_ref(py).into_any());
                 }
-                if let Some(ref c) = self.cached[idx] {
+                if let Some(c) = self.get_cached(idx) {
                     return Ok(c.clone_ref(py));
                 }
                 let val = self.build_known(py, idx)?;
                 if let Ok(d) = val.bind(py).clone().cast_into::<PyDict>() {
                     self.state_cache = Some(d.unbind());
                 }
-                self.cached[idx] = Some(val.clone_ref(py));
+                self.set_cached(idx, val.clone_ref(py));
                 return Ok(val);
             }
-            if let Some(ref c) = self.cached[idx] {
+            if let Some(c) = self.get_cached(idx) {
                 return Ok(c.clone_ref(py));
             }
             let val = self.build_known(py, idx)?;
-            self.cached[idx] = Some(val.clone_ref(py));
+            self.set_cached(idx, val.clone_ref(py));
             return Ok(val);
         }
         if let Some(ref extras) = self.extras
@@ -467,7 +542,7 @@ impl AsgiScope {
                     self.state_cache = None;
                 }
             }
-            self.cached[idx] = Some(value);
+            self.set_cached(idx, value);
             return;
         }
         let extras = self.extras.get_or_insert_with(HashMap::new);
@@ -480,7 +555,7 @@ impl AsgiScope {
                 return Err(PyKeyError::new_err(key.to_string()));
             }
             self.deleted_known |= 1u32 << idx;
-            self.cached[idx] = None;
+            self.clear_cached(idx);
             if idx == IDX_STATE {
                 self.state_cache = None;
             }
@@ -576,7 +651,7 @@ impl AsgiScope {
                 if let Some(ref cached_state) = self.state_cache {
                     return Ok(cached_state.clone_ref(py).into_any());
                 }
-                if let Some(ref existing) = self.cached[IDX_STATE] {
+                if let Some(existing) = self.get_cached(IDX_STATE) {
                     return Ok(existing.clone_ref(py));
                 }
             }
@@ -588,7 +663,7 @@ impl AsgiScope {
                     let ret_ref = stored_dict.clone_ref(py).into_any();
                     self.deleted_known &= !(1u32 << IDX_STATE);
                     self.state_cache = Some(stored_dict);
-                    self.cached[IDX_STATE] = Some(any_ref);
+                    self.set_cached(IDX_STATE, any_ref);
                     return Ok(ret_ref);
                 }
                 let clone = def_val.clone_ref(py);
@@ -598,14 +673,14 @@ impl AsgiScope {
         }
         if key == "extensions" {
             if !self.is_known_deleted(IDX_EXTENSIONS)
-                && let Some(ref existing) = self.cached[IDX_EXTENSIONS]
+                && let Some(existing) = self.get_cached(IDX_EXTENSIONS)
             {
                 return Ok(existing.clone_ref(py));
             }
             if let Some(def_val) = default {
                 let clone = def_val.clone_ref(py);
                 self.deleted_known &= !(1u32 << IDX_EXTENSIONS);
-                self.cached[IDX_EXTENSIONS] = Some(def_val);
+                self.set_cached(IDX_EXTENSIONS, def_val);
                 return Ok(clone);
             }
         }
@@ -757,16 +832,16 @@ pub(crate) fn push_compact_header(buf: &mut Vec<u8>, name: &[u8], value: &[u8]) 
 /// Immediately completed zero-suspension awaitable resolving to `None`.
 #[cfg_attr(
     not(Py_GIL_DISABLED),
-    pyclass(name = "PyEmptyAwaitable", frozen, freelist = 128, immutable_type)
+    pyclass(name = "EmptyAwaitable", frozen, freelist = 128, immutable_type)
 )]
 #[cfg_attr(
     Py_GIL_DISABLED,
-    pyclass(name = "PyEmptyAwaitable", frozen, immutable_type)
+    pyclass(name = "EmptyAwaitable", frozen, immutable_type)
 )]
-pub struct PyEmptyAwaitable;
+pub struct EmptyAwaitable;
 
 #[pymethods]
-impl PyEmptyAwaitable {
+impl EmptyAwaitable {
     #[new]
     pub fn py_new() -> Self {
         Self
@@ -785,14 +860,13 @@ impl PyEmptyAwaitable {
     }
 }
 
-static EMPTY_AWAITABLE: pyo3::sync::PyOnceLock<Py<PyEmptyAwaitable>> =
-    pyo3::sync::PyOnceLock::new();
+static EMPTY_AWAITABLE: pyo3::sync::PyOnceLock<Py<EmptyAwaitable>> = pyo3::sync::PyOnceLock::new();
 
 #[inline]
-pub fn get_empty_awaitable(py: Python<'_>) -> PyResult<Py<PyEmptyAwaitable>> {
+pub fn get_empty_awaitable(py: Python<'_>) -> PyResult<Py<EmptyAwaitable>> {
     EMPTY_AWAITABLE
         .get_or_try_init(py, || {
-            let empty = Py::new(py, PyEmptyAwaitable)?;
+            let empty = Py::new(py, EmptyAwaitable)?;
             mark_immortal_if_supported(empty.bind(py).as_any());
             Ok(empty)
         })
@@ -802,17 +876,17 @@ pub fn get_empty_awaitable(py: Python<'_>) -> PyResult<Py<PyEmptyAwaitable>> {
 /// Immediately completed zero-suspension awaitable resolving to a stored Python value.
 #[cfg_attr(
     not(Py_GIL_DISABLED),
-    pyclass(name = "PyValueAwaitable", frozen, freelist = 128, immutable_type)
+    pyclass(name = "ValueAwaitable", frozen, freelist = 128, immutable_type)
 )]
 #[cfg_attr(
     Py_GIL_DISABLED,
-    pyclass(name = "PyValueAwaitable", frozen, immutable_type)
+    pyclass(name = "ValueAwaitable", frozen, immutable_type)
 )]
-pub struct PyValueAwaitable {
+pub struct ValueAwaitable {
     value: Py<PyAny>,
 }
 
-impl PyValueAwaitable {
+impl ValueAwaitable {
     #[inline]
     pub fn with_value(py: Python<'_>, value: Py<PyAny>) -> PyResult<Py<Self>> {
         Py::new(py, Self { value })
@@ -820,7 +894,7 @@ impl PyValueAwaitable {
 }
 
 #[pymethods]
-impl PyValueAwaitable {
+impl ValueAwaitable {
     #[new]
     #[pyo3(signature = (value=None))]
     pub fn py_new(py: Python<'_>, value: Option<Py<PyAny>>) -> Self {
@@ -1509,13 +1583,13 @@ impl AsgiProtocol {
             st.body_received = true;
             drop(st);
             let msg = build_http_request_dict(py, self.body_source.as_slice())?;
-            return Ok(PyValueAwaitable::with_value(py, msg.into_any().unbind())?.into_any());
+            return Ok(ValueAwaitable::with_value(py, msg.into_any().unbind())?.into_any());
         }
 
         if self.disconnected.load(Ordering::Acquire) {
             drop(st);
             let disc = build_http_disconnect_dict(py)?;
-            return Ok(PyValueAwaitable::with_value(py, disc.into_any().unbind())?.into_any());
+            return Ok(ValueAwaitable::with_value(py, disc.into_any().unbind())?.into_any());
         }
 
         if let Some(ref fut) = st.disconnect_future {
@@ -1543,7 +1617,7 @@ impl AsgiProtocol {
         &self,
         py: Python<'_>,
         message: &Bound<'_, PyDict>,
-    ) -> PyResult<Py<PyEmptyAwaitable>> {
+    ) -> PyResult<Py<EmptyAwaitable>> {
         self.send(py, message)
     }
 
@@ -1554,7 +1628,7 @@ impl AsgiProtocol {
         status: u16,
         headers: Option<&Bound<'_, PyAny>>,
         body: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyEmptyAwaitable>> {
+    ) -> PyResult<Py<EmptyAwaitable>> {
         let mut immediate_flush: Option<FlushedProtocolResponse> = None;
         {
             let mut st = self
@@ -1610,7 +1684,7 @@ impl AsgiProtocol {
         &self,
         py: Python<'_>,
         message: &Bound<'_, PyDict>,
-    ) -> PyResult<Py<PyEmptyAwaitable>> {
+    ) -> PyResult<Py<EmptyAwaitable>> {
         let type_obj = message
             .get_item(pyo3::intern!(py, "type"))?
             .ok_or_else(|| PyKeyError::new_err("type"))?;
@@ -2663,24 +2737,13 @@ fn resolve_inline_loop<'py>(
 
 fn flush_and_gather_inline(
     py: Python<'_>,
-    ready_responses: &[FlushedProtocolResponse],
+    ready_responses: Vec<FlushedProtocolResponse>,
     spawned_tasks: &[Bound<'_, PyAny>],
     active_loop: Option<&Bound<'_, PyAny>>,
     drive_until_complete: bool,
 ) -> PyResult<()> {
     if !ready_responses.is_empty() {
-        let items: Vec<(u64, u16, &[u8], &[u8])> = ready_responses
-            .iter()
-            .map(|r| {
-                (
-                    r.request_id,
-                    r.status,
-                    r.headers_raw.as_slice(),
-                    r.body.as_slice(py),
-                )
-            })
-            .collect();
-        ResponseSubmitter::submit_batch_raw_inner(py, &items)?;
+        ResponseSubmitter::submit_batch_flushed(py, ready_responses)?;
     }
 
     if drive_until_complete
@@ -2710,6 +2773,7 @@ fn drive_asgi_targets_inline(
     }
 
     let normalized_root = root_path.trim_end_matches('/');
+    let shared_root: Arc<str> = Arc::from(normalized_root);
     let has_lifespan = lifespan_state.is_some_and(|d| !d.is_empty());
     let loop_py_opt = active_loop.map(|l| l.clone().unbind());
     let mut ready_responses: Vec<FlushedProtocolResponse> = Vec::with_capacity(targets.len());
@@ -2717,7 +2781,8 @@ fn drive_asgi_targets_inline(
     let mut completed_inline = 0usize;
 
     targets.for_each(|snap, idx| {
-        let mut scope = AsgiScope::new(Arc::clone(snap), idx, normalized_root.to_string());
+        let mut scope =
+            AsgiScope::new_with_shared_root(Arc::clone(snap), idx, Arc::clone(&shared_root));
         if has_lifespan && let Some(ls) = lifespan_state {
             scope.set_initial_state(py, ls.copy()?);
         }
@@ -2780,7 +2845,7 @@ fn drive_asgi_targets_inline(
 
     flush_and_gather_inline(
         py,
-        &ready_responses,
+        ready_responses,
         &spawned_tasks,
         active_loop,
         drive_until_complete,
@@ -2969,7 +3034,7 @@ fn drive_native_items_inline(
 
     flush_and_gather_inline(
         py,
-        &ready_responses,
+        ready_responses,
         &spawned_tasks,
         active_loop,
         drive_until_complete,

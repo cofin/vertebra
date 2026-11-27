@@ -66,6 +66,37 @@ pub fn intern_static_wsgi_key<'py>(py: Python<'py>, key: &str) -> Bound<'py, PyS
     }
 }
 
+/// Batch-shared PEP 3333 WSGI server metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WsgiServerConfig {
+    pub root_path: String,
+    pub server_name: String,
+    pub server_port: u16,
+    pub server_port_str: String,
+    pub url_scheme: String,
+}
+
+impl WsgiServerConfig {
+    pub fn new(
+        root_path: impl Into<String>,
+        server_name: impl Into<String>,
+        server_port: u16,
+        url_scheme: impl Into<String>,
+    ) -> Self {
+        let mut normalized_root = root_path.into();
+        while normalized_root.ends_with('/') {
+            normalized_root.pop();
+        }
+        Self {
+            root_path: normalized_root,
+            server_name: server_name.into(),
+            server_port,
+            server_port_str: server_port.to_string(),
+            url_scheme: url_scheme.into(),
+        }
+    }
+}
+
 /// Lazy WSGI environ with freelist pooling and interned PEP 3333 keys.
 #[cfg_attr(
     not(Py_GIL_DISABLED),
@@ -78,10 +109,7 @@ pub fn intern_static_wsgi_key<'py>(py: Python<'py>, key: &str) -> Bound<'py, PyS
 pub struct WsgiEnviron {
     batch: Arc<BatchSnapshot>,
     index: usize,
-    root_path: String,
-    server_name: String,
-    server_port: u16,
-    url_scheme: String,
+    config: Arc<WsgiServerConfig>,
     wsgi_input: Option<Py<PyAny>>,
     cached: Option<HashMap<String, Py<PyAny>>>,
     extras: Option<HashMap<String, Py<PyAny>>>,
@@ -90,6 +118,23 @@ pub struct WsgiEnviron {
 }
 
 impl WsgiEnviron {
+    pub fn with_config(
+        batch: Arc<BatchSnapshot>,
+        index: usize,
+        config: Arc<WsgiServerConfig>,
+    ) -> Self {
+        Self {
+            batch,
+            index,
+            config,
+            wsgi_input: None,
+            cached: None,
+            extras: None,
+            deleted: None,
+            header_cache: None,
+        }
+    }
+
     pub fn new(
         batch: Arc<BatchSnapshot>,
         index: usize,
@@ -97,13 +142,15 @@ impl WsgiEnviron {
         server_port: u16,
         url_scheme: String,
     ) -> Self {
-        Self::with_root_path(
+        Self::with_config(
             batch,
             index,
-            String::new(),
-            server_name,
-            server_port,
-            url_scheme,
+            Arc::new(WsgiServerConfig::new(
+                String::new(),
+                server_name,
+                server_port,
+                url_scheme,
+            )),
         )
     }
 
@@ -115,24 +162,16 @@ impl WsgiEnviron {
         server_port: u16,
         url_scheme: String,
     ) -> Self {
-        let normalized_root = if root_path == "/" {
-            String::new()
-        } else {
-            root_path.trim_end_matches('/').to_string()
-        };
-        Self {
+        Self::with_config(
             batch,
             index,
-            root_path: normalized_root,
-            server_name,
-            server_port,
-            url_scheme,
-            wsgi_input: None,
-            cached: None,
-            extras: None,
-            deleted: None,
-            header_cache: None,
-        }
+            Arc::new(WsgiServerConfig::new(
+                root_path,
+                server_name,
+                server_port,
+                url_scheme,
+            )),
+        )
     }
 
     #[inline]
@@ -170,29 +209,34 @@ impl WsgiEnviron {
                     .unbind()
             }
             "SCRIPT_NAME" => {
-                if self.root_path.is_empty() {
+                if self.config.root_path.is_empty() {
                     pyo3::intern!(py, "").clone().into_any().unbind()
                 } else {
-                    PyString::new(py, &self.root_path).into_any().unbind()
+                    PyString::new(py, &self.config.root_path)
+                        .into_any()
+                        .unbind()
                 }
             }
             "PATH_INFO" => {
                 let raw_path = self.batch.path(self.index);
-                let path_info =
-                    if !self.root_path.is_empty() && raw_path.starts_with(&self.root_path) {
-                        let stripped = &raw_path[self.root_path.len()..];
-                        if stripped.is_empty() { "/" } else { stripped }
-                    } else {
-                        raw_path
-                    };
+                let path_info = if !self.config.root_path.is_empty()
+                    && raw_path.starts_with(&self.config.root_path)
+                {
+                    let stripped = &raw_path[self.config.root_path.len()..];
+                    if stripped.is_empty() { "/" } else { stripped }
+                } else {
+                    raw_path
+                };
                 PyString::new(py, path_info).into_any().unbind()
             }
             "QUERY_STRING" => match self.batch.query(self.index) {
                 Some(q) if !q.is_empty() => PyString::new(py, q).into_any().unbind(),
                 _ => pyo3::intern!(py, "").clone().into_any().unbind(),
             },
-            "SERVER_NAME" => PyString::new(py, &self.server_name).into_any().unbind(),
-            "SERVER_PORT" => PyString::new(py, &self.server_port.to_string())
+            "SERVER_NAME" => PyString::new(py, &self.config.server_name)
+                .into_any()
+                .unbind(),
+            "SERVER_PORT" => PyString::new(py, &self.config.server_port_str)
                 .into_any()
                 .unbind(),
             "SERVER_PROTOCOL" => {
@@ -223,12 +267,14 @@ impl WsgiEnviron {
                 tup.clone_ref(py).into_any()
             }
             "wsgi.url_scheme" => {
-                if self.url_scheme == "http" {
+                if self.config.url_scheme == "http" {
                     pyo3::intern!(py, "http").clone().into_any().unbind()
-                } else if self.url_scheme == "https" {
+                } else if self.config.url_scheme == "https" {
                     pyo3::intern!(py, "https").clone().into_any().unbind()
                 } else {
-                    PyString::new(py, &self.url_scheme).into_any().unbind()
+                    PyString::new(py, &self.config.url_scheme)
+                        .into_any()
+                        .unbind()
                 }
             }
             "wsgi.input" => {
@@ -719,5 +765,73 @@ impl WsgiEnvironIterator {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wsgi_server_config_normalizes_root_path() {
+        assert_eq!(
+            WsgiServerConfig::new("/", "localhost", 8000, "http").root_path,
+            ""
+        );
+        assert_eq!(
+            WsgiServerConfig::new("/v1/", "localhost", 8000, "http").root_path,
+            "/v1"
+        );
+        assert_eq!(
+            WsgiServerConfig::new("/v1///", "localhost", 8000, "http").root_path,
+            "/v1"
+        );
+        assert_eq!(
+            WsgiServerConfig::new("", "localhost", 8000, "http").root_path,
+            ""
+        );
+    }
+
+    #[test]
+    fn wsgi_environ_with_config_shares_arc_without_cloning_strings() {
+        let snap = SyntheticRequest::build("GET", "/v1/items", None, b"", b"", 0, 1, "1.1");
+        let cfg = Arc::new(WsgiServerConfig::new("/v1/", "api.local", 8443, "https"));
+        let env1 = WsgiEnviron::with_config(Arc::clone(&snap), 0, Arc::clone(&cfg));
+        let env2 = WsgiEnviron::with_config(Arc::clone(&snap), 0, Arc::clone(&cfg));
+        assert_eq!(Arc::strong_count(&cfg), 3);
+        assert!(Arc::ptr_eq(&env1.config, &env2.config));
+        assert_eq!(env1.config.root_path, "/v1");
+        assert_eq!(env1.config.server_name, "api.local");
+        assert_eq!(env1.config.server_port, 8443);
+        assert_eq!(env1.config.url_scheme, "https");
+    }
+
+    #[test]
+    fn wsgi_environ_compat_constructors_preserve_metadata() {
+        let snap = SyntheticRequest::build("GET", "/legacy/orders", None, b"", b"", 0, 2, "1.1");
+        let env_new = WsgiEnviron::new(
+            Arc::clone(&snap),
+            0,
+            "example.com".to_string(),
+            8080,
+            "https".to_string(),
+        );
+        assert_eq!(env_new.config.root_path, "");
+        assert_eq!(env_new.config.server_name, "example.com");
+        assert_eq!(env_new.config.server_port, 8080);
+        assert_eq!(env_new.config.url_scheme, "https");
+
+        let env_root = WsgiEnviron::with_root_path(
+            snap,
+            0,
+            "/legacy/".to_string(),
+            "internal".to_string(),
+            9000,
+            "http".to_string(),
+        );
+        assert_eq!(env_root.config.root_path, "/legacy");
+        assert_eq!(env_root.config.server_name, "internal");
+        assert_eq!(env_root.config.server_port, 9000);
+        assert_eq!(env_root.config.url_scheme, "http");
     }
 }

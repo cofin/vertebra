@@ -33,8 +33,8 @@ if TYPE_CHECKING:
     )
     from vertebra.db.adapters.postgres.embeddings import PostgresEmbeddingPushdown
     from vertebra.db.adapters.postgres.events import (
+        AsyncPostgresNotificationDriver,
         EventSessionRegistry,
-        PostgresNotificationDriver,
         PostgresReplicationDriver,
     )
     from vertebra.db.adapters.postgres.notify import (
@@ -130,7 +130,7 @@ __all__ = (
     "PostgresEmbeddingPushdown",
     "PostgresErrorInfo",
     "PostgresJsonValue",
-    "PostgresNotificationDriver",
+    "AsyncPostgresNotificationDriver",
     "PostgresNotifyConfig",
     "PostgresPipelineOperation",
     "PostgresPipelineOutcome",
@@ -223,7 +223,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "PostgresEmbeddingPushdown": ("vertebra.db.adapters.postgres.embeddings", "PostgresEmbeddingPushdown"),
     "PostgresErrorInfo": ("vertebra.db.adapters.postgres.types", "PostgresErrorInfo"),
     "PostgresJsonValue": ("vertebra.db.adapters.postgres.types", "PostgresJsonValue"),
-    "PostgresNotificationDriver": ("vertebra.db.adapters.postgres.events", "PostgresNotificationDriver"),
+    "AsyncPostgresNotificationDriver": ("vertebra.db.adapters.postgres.events", "AsyncPostgresNotificationDriver"),
     "PostgresNotifyConfig": ("vertebra.db.adapters.postgres.notify", "PostgresNotifyConfig"),
     "PostgresPipelineOperation": ("vertebra.db.adapters.postgres.types", "PostgresPipelineOperation"),
     "PostgresPipelineOutcome": ("vertebra.db.adapters.postgres.types", "PostgresPipelineOutcome"),

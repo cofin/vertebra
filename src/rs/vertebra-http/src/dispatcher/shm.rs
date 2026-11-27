@@ -51,6 +51,40 @@ struct StagedShmRequest {
     body: bytes::Bytes,
 }
 
+/// Reusable per-batcher scratch storage for `ShmDispatcher` to avoid per-batch heap allocations.
+#[derive(Default)]
+pub struct ShmDispatchScratch {
+    staged: Vec<StagedShmRequest>,
+    nodes: Vec<TransportNode>,
+    components: Vec<&'static [u8]>,
+    rejected_replies: Vec<oneshot::Sender<PendingResponse>>,
+}
+
+impl ShmDispatchScratch {
+    #[inline]
+    fn reclaim_writer(
+        nodes_slot: &mut Vec<TransportNode>,
+        components_slot: &mut Vec<&'static [u8]>,
+        writer: ShmBatchWriter<'_>,
+    ) {
+        let ShmBatchWriter {
+            mut nodes,
+            components,
+            ..
+        } = writer;
+        nodes.clear();
+        *nodes_slot = nodes;
+        *components_slot = recycle_slice_vec(components);
+    }
+}
+
+/// Reclaim the heap allocation of an empty `Vec<&'a [u8]>` as `Vec<&'b [u8]>` without unsafe code.
+#[inline]
+fn recycle_slice_vec<'a, 'b>(mut v: Vec<&'a [u8]>) -> Vec<&'b [u8]> {
+    v.clear();
+    v.into_iter().map(|_| -> &'b [u8] { &[] }).collect()
+}
+
 /// SharedMemory dispatcher with whole-batch routing, warm-worker affinity, and sharded O(1) correlation.
 pub struct ShmDispatcher {
     workers: Vec<WorkerState>,
@@ -223,7 +257,7 @@ impl ShmDispatcher {
         components.push(headers_mp.as_ref());
         components.push(body.as_ref());
 
-        let writer = ShmBatchWriter {
+        let mut writer = ShmBatchWriter {
             nodes: vec![node],
             components,
             flags: req_flags,
@@ -423,6 +457,17 @@ impl ShmDispatcher {
         batcher_shard: Option<usize>,
         requests: &mut Vec<crate::batcher::PendingRequest>,
     ) -> usize {
+        let mut scratch = ShmDispatchScratch::default();
+        self.dispatch_shm_vec_from_shard_with_scratch(batcher_shard, requests, &mut scratch)
+    }
+
+    /// Dispatch requests from an optional batcher shard using caller-owned reusable scratch buffers.
+    pub fn dispatch_shm_vec_from_shard_with_scratch(
+        &self,
+        batcher_shard: Option<usize>,
+        requests: &mut Vec<crate::batcher::PendingRequest>,
+        scratch: &mut ShmDispatchScratch,
+    ) -> usize {
         use vertebra_core::protocol::flags;
 
         if requests.is_empty() {
@@ -465,8 +510,9 @@ impl ShmDispatcher {
             .payload_capacity();
 
         let batch_len = requests.len();
-        let mut staged = Vec::with_capacity(batch_len);
-        let mut rejected_replies = Vec::new();
+        scratch.staged.clear();
+        scratch.staged.reserve(batch_len);
+        scratch.rejected_replies.clear();
         let mut allocated_non_fnf = 0usize;
 
         let mut shard_idx = if batcher_shard.is_some() {
@@ -475,6 +521,7 @@ impl ShmDispatcher {
             self.next_batch.fetch_add(1, Ordering::Relaxed) & SHM_CORRELATION_MASK
         };
 
+        let now = std::time::Instant::now();
         {
             let mut shard_guard = self.correlation_shards[shard_idx].lock().unwrap();
             for req in requests.drain(..) {
@@ -502,7 +549,7 @@ impl ShmDispatcher {
                 #[cfg(not(unix))]
                 if batch_snapshot_serialized_size(1, req_slab_bytes) > max_payload {
                     if !is_fnf {
-                        rejected_replies.push(reply);
+                        scratch.rejected_replies.push(reply);
                     }
                     continue;
                 }
@@ -528,16 +575,17 @@ impl ShmDispatcher {
                         } else {
                             shard_guard = self.correlation_shards[shard_idx].lock().unwrap();
                             if let Some(tx) = reply_opt.take() {
-                                rejected_replies.push(tx);
+                                scratch.rejected_replies.push(tx);
                             }
                             continue;
                         }
                     }
                     let cid = shard_guard
-                        .insert(
+                        .insert_with_now(
                             shard_idx as u8,
                             reply_opt.take().unwrap(),
                             worker_idx as u32,
+                            now,
                         )
                         .expect("correlation slot should be available after capacity check");
                     allocated_non_fnf += 1;
@@ -559,7 +607,7 @@ impl ShmDispatcher {
                     body_offset: 0,
                     body_len: body.len() as u32,
                 };
-                staged.push(StagedShmRequest {
+                scratch.staged.push(StagedShmRequest {
                     node,
                     flags: req_flags,
                     slab_bytes: req_slab_bytes,
@@ -580,31 +628,32 @@ impl ShmDispatcher {
                 .fetch_add(allocated_non_fnf, Ordering::AcqRel);
         }
 
-        if !rejected_replies.is_empty() {
+        if !scratch.rejected_replies.is_empty() {
             warn!(
                 worker = worker_idx,
-                rejected = rejected_replies.len(),
+                rejected = scratch.rejected_replies.len(),
                 "rejecting SHM requests exceeding slot or correlation capacity with 503"
             );
-            for tx in rejected_replies {
+            for tx in scratch.rejected_replies.drain(..) {
                 let _ = tx.send(service_unavailable_response());
             }
         }
 
-        if staged.is_empty() {
+        if scratch.staged.is_empty() {
             return 0;
         }
 
         let worker = &self.workers[worker_idx];
         let mut dispatched_count = 0usize;
         let mut start = 0usize;
-        while start < staged.len() {
-            let sub_flags = staged[start].flags;
+        let staged_len = scratch.staged.len();
+        while start < staged_len {
+            let sub_flags = scratch.staged[start].flags;
             let mut end = start + 1;
-            let mut sub_slab = staged[start].slab_bytes;
+            let mut sub_slab = scratch.staged[start].slab_bytes;
 
-            while end < staged.len() && staged[end].flags == sub_flags {
-                let next_slab = sub_slab + staged[end].slab_bytes;
+            while end < staged_len && scratch.staged[end].flags == sub_flags {
+                let next_slab = sub_slab + scratch.staged[end].slab_bytes;
                 if batch_snapshot_serialized_size((end - start) + 1, next_slab) > max_payload {
                     break;
                 }
@@ -612,9 +661,12 @@ impl ShmDispatcher {
                 end += 1;
             }
 
-            let slice = &staged[start..end];
-            let mut nodes = Vec::with_capacity(slice.len());
-            let mut components = Vec::with_capacity(slice.len() * 4);
+            let slice = &scratch.staged[start..end];
+            let mut nodes = std::mem::take(&mut scratch.nodes);
+            nodes.clear();
+            nodes.reserve(slice.len());
+            let mut components = recycle_slice_vec(std::mem::take(&mut scratch.components));
+            components.reserve(slice.len() * 4);
             for item in slice {
                 nodes.push(item.node);
                 components.push(item.path_and_query.path().as_bytes());
@@ -624,7 +676,7 @@ impl ShmDispatcher {
                 components.push(item.headers_mp.as_ref());
                 components.push(item.body.as_ref());
             }
-            let writer = ShmBatchWriter {
+            let mut writer = ShmBatchWriter {
                 nodes,
                 components,
                 flags: sub_flags,
@@ -664,6 +716,11 @@ impl ShmDispatcher {
                         self.fail_staged_slice(slice);
                     }
                 }
+                ShmDispatchScratch::reclaim_writer(
+                    &mut scratch.nodes,
+                    &mut scratch.components,
+                    writer,
+                );
                 start = end;
                 continue;
             }
@@ -677,12 +734,19 @@ impl ShmDispatcher {
                     dispatched_count += slice.len();
                 }
                 Err(e) => {
-                    debug!(worker = worker_idx, error = %e, "request ring send failed during sub-batch flush");
+                    debug!(
+                        worker = worker_idx,
+                        error = %e,
+                        "request ring send failed during sub-batch flush"
+                    );
                     self.fail_staged_slice(slice);
                 }
             }
+            ShmDispatchScratch::reclaim_writer(&mut scratch.nodes, &mut scratch.components, writer);
             start = end;
         }
+
+        scratch.staged.clear();
 
         if dispatched_count > 0 {
             let _ = worker.ring_pair.notify_request_if_sleeping();
@@ -777,7 +841,35 @@ impl ShmDispatcher {
         }
     }
 
-    /// Complete multiple requests with grouped per-shard locks, sending outside locks.
+    #[inline]
+    fn flush_completed_ready(
+        &self,
+        ready: &mut Vec<(oneshot::Sender<PendingResponse>, PendingResponse, u32)>,
+    ) {
+        if ready.is_empty() {
+            return;
+        }
+        self.decrement_active(ready.len());
+        let mut batch_worker = u32::MAX;
+        let mut batch_worker_count = 0usize;
+        for (tx, response, worker_id) in ready.drain(..) {
+            if worker_id == batch_worker {
+                batch_worker_count += 1;
+            } else {
+                if batch_worker_count > 0 {
+                    self.decrement_worker_active(batch_worker as usize, batch_worker_count);
+                }
+                batch_worker = worker_id;
+                batch_worker_count = 1;
+            }
+            let _ = tx.send(response);
+        }
+        if batch_worker_count > 0 {
+            self.decrement_worker_active(batch_worker as usize, batch_worker_count);
+        }
+    }
+
+    /// Complete multiple requests with single-shard fast path or grouped per-shard locks, sending outside locks.
     pub fn complete_many(&self, mut responses: Vec<(u64, PendingResponse)>) {
         if responses.is_empty() {
             return;
@@ -787,6 +879,32 @@ impl ShmDispatcher {
             if !self.complete_one(cid, resp) {
                 debug!(id = cid, "no pending SHM request for correlation ID");
             }
+            return;
+        }
+
+        let first_shard = CorrelationId::from_raw(responses[0].0).shard() & SHM_CORRELATION_MASK;
+        let all_same_shard = responses[1..].iter().all(|(id, _)| {
+            (CorrelationId::from_raw(*id).shard() & SHM_CORRELATION_MASK) == first_shard
+        });
+        if all_same_shard {
+            let mut ready: Vec<(oneshot::Sender<PendingResponse>, PendingResponse, u32)> =
+                Vec::with_capacity(responses.len());
+            {
+                let mut slab = self.correlation_shards[first_shard].lock().unwrap();
+                for (raw_id, response) in responses {
+                    let cid = CorrelationId::from_raw(raw_id);
+                    if let Some((tx, worker_id)) = slab.take_completed_with_worker(cid) {
+                        ready.push((tx, response, worker_id));
+                    } else {
+                        debug!(
+                            id = cid.raw(),
+                            shard = first_shard,
+                            "no pending SHM request for correlation ID"
+                        );
+                    }
+                }
+            }
+            self.flush_completed_ready(&mut ready);
             return;
         }
 
@@ -819,26 +937,7 @@ impl ShmDispatcher {
                     }
                 }
             }
-            if !ready.is_empty() {
-                self.decrement_active(ready.len());
-                let mut batch_worker = u32::MAX;
-                let mut batch_worker_count = 0usize;
-                for (tx, response, worker_id) in ready.drain(..) {
-                    if worker_id == batch_worker {
-                        batch_worker_count += 1;
-                    } else {
-                        if batch_worker_count > 0 {
-                            self.decrement_worker_active(batch_worker as usize, batch_worker_count);
-                        }
-                        batch_worker = worker_id;
-                        batch_worker_count = 1;
-                    }
-                    let _ = tx.send(response);
-                }
-                if batch_worker_count > 0 {
-                    self.decrement_worker_active(batch_worker as usize, batch_worker_count);
-                }
-            }
+            self.flush_completed_ready(&mut ready);
         }
     }
 
@@ -867,6 +966,228 @@ impl ShmDispatcher {
             if (item.flags & flags::FIRE_AND_FORGET) == 0 {
                 let _ = self.complete_one(item.node.correlation_id, service_unavailable_response());
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use http::uri::PathAndQuery;
+    use vertebra_core::transport::BatchSnapshot;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    fn make_pending(
+        path: &'static str,
+    ) -> (
+        crate::batcher::PendingRequest,
+        oneshot::Receiver<PendingResponse>,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        (
+            crate::batcher::PendingRequest {
+                handler_id: 1,
+                method_tag: 0,
+                http_version_tag: 1,
+                flags: 0,
+                path_and_query: PathAndQuery::from_static(path),
+                headers_mp: Bytes::new(),
+                body: Bytes::from_static(b"payload"),
+                reply: tx,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn dispatch_with_scratch_reuses_buffers_and_completes_single_and_mixed_shards() {
+        let rp = Arc::new(RingPair::create(RingPairConfig::default()).expect("ring pair"));
+        let shm = ShmDispatcher::new(vec![Arc::clone(&rp)], 64);
+        let mut scratch = ShmDispatchScratch::default();
+
+        // Batch 1: single-shard dispatch + complete_many single-shard fast path.
+        let (r1, mut rx1) = make_pending("/one");
+        let (r2, mut rx2) = make_pending("/two?k=v");
+        let mut batch = vec![r1, r2];
+        assert_eq!(
+            shm.dispatch_shm_vec_from_shard_with_scratch(Some(0), &mut batch, &mut scratch),
+            2
+        );
+        assert!(scratch.staged.is_empty(), "staged cleared after dispatch");
+        assert!(scratch.nodes.capacity() >= 2, "nodes capacity retained");
+        assert!(
+            scratch.components.capacity() >= 4,
+            "components capacity retained"
+        );
+
+        let view1 = rp.request_ring.try_recv_view().expect("batch 1 view");
+        let snap1 = BatchSnapshot::from_mpmc_slot(view1).expect("batch 1 snap");
+        assert_eq!(snap1.len(), 2);
+        let cid1 = snap1.node(0).correlation_id;
+        let cid2 = snap1.node(1).correlation_id;
+        assert_eq!(
+            CorrelationId::from_raw(cid1).shard(),
+            CorrelationId::from_raw(cid2).shard()
+        );
+        shm.complete_many(vec![
+            (
+                cid1,
+                PendingResponse {
+                    status: 200,
+                    headers_mp: Bytes::new(),
+                    body: Bytes::from_static(b"r1"),
+                    stream_rx: None,
+                },
+            ),
+            (
+                cid2,
+                PendingResponse {
+                    status: 201,
+                    headers_mp: Bytes::new(),
+                    body: Bytes::from_static(b"r2"),
+                    stream_rx: None,
+                },
+            ),
+        ]);
+        assert_eq!(rx1.try_recv().unwrap().body.as_ref(), b"r1");
+        assert_eq!(rx2.try_recv().unwrap().body.as_ref(), b"r2");
+        assert_eq!(shm.in_flight(), 0);
+
+        // Batch 2 & 3 on different shards to exercise mixed-shard complete_many fallback.
+        let (r3, mut rx3) = make_pending("/three");
+        let (r4, mut rx4) = make_pending("/four");
+        let mut b2 = vec![r3];
+        let mut b3 = vec![r4];
+        assert_eq!(
+            shm.dispatch_shm_vec_from_shard_with_scratch(None, &mut b2, &mut scratch),
+            1
+        );
+        assert_eq!(
+            shm.dispatch_shm_vec_from_shard_with_scratch(None, &mut b3, &mut scratch),
+            1
+        );
+        let snap2 =
+            BatchSnapshot::from_mpmc_slot(rp.request_ring.try_recv_view().unwrap()).unwrap();
+        let snap3 =
+            BatchSnapshot::from_mpmc_slot(rp.request_ring.try_recv_view().unwrap()).unwrap();
+        let cid3 = snap2.node(0).correlation_id;
+        let cid4 = snap3.node(0).correlation_id;
+        assert_ne!(
+            CorrelationId::from_raw(cid3).shard(),
+            CorrelationId::from_raw(cid4).shard()
+        );
+        shm.complete_many(vec![
+            (
+                cid3,
+                PendingResponse {
+                    status: 200,
+                    headers_mp: Bytes::new(),
+                    body: Bytes::from_static(b"r3"),
+                    stream_rx: None,
+                },
+            ),
+            (
+                cid4,
+                PendingResponse {
+                    status: 200,
+                    headers_mp: Bytes::new(),
+                    body: Bytes::from_static(b"r4"),
+                    stream_rx: None,
+                },
+            ),
+        ]);
+        assert_eq!(rx3.try_recv().unwrap().body.as_ref(), b"r3");
+        assert_eq!(rx4.try_recv().unwrap().body.as_ref(), b"r4");
+        assert_eq!(shm.in_flight(), 0);
+        assert_eq!(shm.worker_in_flight(0), 0);
+    }
+
+    #[test]
+    fn scratch_handles_mixed_flag_sub_batches_overflow_and_stale_single_shard_ids() {
+        let rp = Arc::new(RingPair::create(RingPairConfig::default()).expect("ring pair"));
+        let shm = ShmDispatcher::new(vec![Arc::clone(&rp)], 64);
+        let mut scratch = ShmDispatchScratch::default();
+
+        let (mut r_a, mut rx_a) = make_pending("/flag-a");
+        r_a.flags = 0;
+        let (mut r_b, mut rx_b) = make_pending("/flag-b");
+        r_b.flags = 1;
+        let mut batch = vec![r_a, r_b];
+        assert_eq!(
+            shm.dispatch_shm_vec_from_shard_with_scratch(Some(0), &mut batch, &mut scratch),
+            2
+        );
+        let s1 = BatchSnapshot::from_mpmc_slot(rp.request_ring.try_recv_view().unwrap()).unwrap();
+        let s2 = BatchSnapshot::from_mpmc_slot(rp.request_ring.try_recv_view().unwrap()).unwrap();
+        assert_eq!(s1.flags(), 0);
+        assert_eq!(s2.flags(), 1);
+        let cid_a = s1.node(0).correlation_id;
+        let cid_b = s2.node(0).correlation_id;
+        let stale_same_shard =
+            CorrelationId::encode(CorrelationId::from_raw(cid_a).shard() as u8, 0, 999).raw();
+        shm.complete_many(vec![
+            (
+                cid_a,
+                PendingResponse {
+                    status: 200,
+                    headers_mp: Bytes::new(),
+                    body: Bytes::from_static(b"a"),
+                    stream_rx: None,
+                },
+            ),
+            (
+                stale_same_shard,
+                PendingResponse {
+                    status: 200,
+                    headers_mp: Bytes::new(),
+                    body: Bytes::from_static(b"stale"),
+                    stream_rx: None,
+                },
+            ),
+            (
+                cid_b,
+                PendingResponse {
+                    status: 200,
+                    headers_mp: Bytes::new(),
+                    body: Bytes::from_static(b"b"),
+                    stream_rx: None,
+                },
+            ),
+        ]);
+        assert_eq!(rx_a.try_recv().unwrap().body.as_ref(), b"a");
+        assert_eq!(rx_b.try_recv().unwrap().body.as_ref(), b"b");
+        assert_eq!(shm.in_flight(), 0);
+
+        #[cfg(unix)]
+        {
+            let big_body = Bytes::from(vec![b'z'; rp.request_ring.payload_capacity() + 2048]);
+            let (mut r_big, mut rx_big) = make_pending("/overflow");
+            r_big.body = big_body.clone();
+            let mut overflow_batch = vec![r_big];
+            assert_eq!(
+                shm.dispatch_shm_vec_from_shard_with_scratch(
+                    Some(0),
+                    &mut overflow_batch,
+                    &mut scratch
+                ),
+                1
+            );
+            assert!(scratch.nodes.capacity() >= 1);
+            let view = rp.request_ring.try_recv_view().expect("overflow view");
+            let snap = BatchSnapshot::from_mpmc_slot(view).expect("overflow snap");
+            assert_eq!(snap.body(0), big_body.as_ref());
+            assert!(shm.complete_one(
+                snap.node(0).correlation_id,
+                PendingResponse {
+                    status: 200,
+                    headers_mp: Bytes::new(),
+                    body: Bytes::from_static(b"ok"),
+                    stream_rx: None,
+                },
+            ));
+            assert_eq!(rx_big.try_recv().unwrap().status, 200);
+            assert_eq!(shm.in_flight(), 0);
         }
     }
 }

@@ -17,9 +17,9 @@ from vertebra._vertebra import (
     STREAM_FLAG_TRAILERS,
     AsgiProtocol,
     AsgiScope,
-    PyEmptyAwaitable,
-    PyValueAwaitable,
+    EmptyAwaitable,
     Request,
+    ValueAwaitable,
     _set_stream_sink,
     drive_asgi_batch,
     drive_native_batch,
@@ -562,9 +562,9 @@ def test_asgi_runner_handle_path_convenience() -> None:
 
 
 def test_rust_empty_and_value_awaitables_complete_without_suspension() -> None:
-    """Verify PyEmptyAwaitable and PyValueAwaitable resolve synchronously and thread-safely."""
-    shared_empty = PyEmptyAwaitable()
-    shared_val = PyValueAwaitable({"ok": True})
+    """Verify EmptyAwaitable and ValueAwaitable resolve synchronously and thread-safely."""
+    shared_empty = EmptyAwaitable()
+    shared_val = ValueAwaitable({"ok": True})
 
     def _step_worker(_idx: int) -> tuple[object, object]:
         coro_empty = shared_empty.__await__()

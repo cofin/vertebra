@@ -74,15 +74,28 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 from sqlalchemy.pool import StaticPool
 
 import vertebra
+import vertebra._bundler as native_bundler_mod
+import vertebra._storage as native_storage_mod
+import vertebra._vertebra as native_core_mod
+import vertebra.agent as agent_mod
+import vertebra.agent.mcp as mcp_mod
+import vertebra.build as build_mod
+import vertebra.db.adapters.postgres as postgres_adapter_mod
+import vertebra.db.rls as rls_mod
 import vertebra.extensions.alchemy as alchemy_ext
+import vertebra.extensions.broker as broker_mod
 import vertebra.extensions.django as django_ext
 import vertebra.extensions.fastapi as fastapi_ext
 import vertebra.extensions.flask as flask_ext
 import vertebra.extensions.litestar as litestar_ext
+import vertebra.extensions.sqlalchemy as sa_ext_mod
 import vertebra.extensions.sqlspec as sqlspec_ext
 import vertebra.extensions.starlette as starlette_ext
 import vertebra.framework as vtb_framework
+import vertebra.framework.email as email_mod
 import vertebra.framework.procedures as vtb_procedures
+import vertebra.framework.queues as queues_mod
+import vertebra.framework.stores as stores_mod
 from vertebra.build.codegen import CodegenConfig, CodegenPlugin
 from vertebra.cli.plugin_registry import (
     CLIPluginProtocol,
@@ -256,6 +269,63 @@ def test_canonical_extension_exports() -> None:
     assert hasattr(alchemy_ext, "create_alchemy_plugin")
     assert hasattr(sqlspec_ext, "create_sqlspec_plugin")
     assert hasattr(sqlspec_ext, "SQLSpecPlugin")
+
+    assert not hasattr(agent_mod, "SpecTree")
+    assert not hasattr(agent_mod, "SpecNode")
+    assert not hasattr(agent_mod, "SpecNodeStatus")
+    assert not hasattr(agent_mod, "DynamicWorkflow")
+    assert not hasattr(agent_mod, "WorkflowNode")
+    assert not hasattr(agent_mod, "StepResult")
+    assert not hasattr(agent_mod, "JSONRPCErrorException")
+    assert not hasattr(agent_mod, "McpHttpRequest")
+    assert not hasattr(agent_mod, "McpHttpResponse")
+    assert not hasattr(agent_mod, "McpToolBridge")
+    assert not hasattr(agent_mod, "A2aAgentBridge")
+    assert not hasattr(mcp_mod, "MCPRegistry")
+    assert not hasattr(mcp_mod, "McpIcon")
+    assert not hasattr(mcp_mod, "McpLogLevel")
+    assert not hasattr(mcp_mod, "AsgiMcpApp")
+    assert not hasattr(mcp_mod, "WsgiMcpApp")
+    assert hasattr(mcp_mod, "ToolRegistry")
+    assert hasattr(mcp_mod, "MCPIcon")
+    assert hasattr(mcp_mod, "AsgiMCPApp")
+    assert hasattr(mcp_mod, "WsgiMCPApp")
+    assert not hasattr(stores_mod, "BaseNativeKVStore")
+    assert hasattr(stores_mod, "BaseKeyValueStore")
+    assert not hasattr(rls_mod, "TenantConnectionScope")
+    assert hasattr(rls_mod, "SyncTenantConnectionScope")
+    assert not hasattr(broker_mod, "BrokerStream")
+    assert hasattr(broker_mod, "SyncBrokerStream")
+    assert not hasattr(sa_ext_mod, "BrokerPool")
+    assert hasattr(sa_ext_mod, "SyncBrokerPool")
+    assert not hasattr(postgres_adapter_mod, "PostgresNotificationDriver")
+    assert hasattr(postgres_adapter_mod, "AsyncPostgresNotificationDriver")
+    assert not hasattr(email_mod, "SesEmailTransport")
+    assert not hasattr(email_mod, "SmtpEmailTransport")
+    assert hasattr(email_mod, "SESEmailTransport")
+    assert hasattr(email_mod, "SMTPEmailTransport")
+    assert not hasattr(queues_mod, "RedisStreamClient")
+    assert not hasattr(queues_mod, "SyncRedisStreamClient")
+    assert not hasattr(queues_mod, "ValkeyStreamClient")
+    assert not hasattr(queues_mod, "SyncValkeyStreamClient")
+    assert hasattr(queues_mod, "AsyncRESPStreamClient")
+    assert hasattr(queues_mod, "SyncRESPStreamClient")
+    assert not hasattr(native_bundler_mod, "DevConfig")
+    assert not hasattr(native_bundler_mod, "BuildResult")
+    assert not hasattr(native_bundler_mod, "OutputFile")
+    assert hasattr(build_mod, "Bundler")
+    assert hasattr(build_mod, "BundleConfig")
+    assert hasattr(build_mod, "BundleDevConfig")
+    assert hasattr(build_mod, "BundleResult")
+    assert hasattr(build_mod, "BundleOutput")
+    assert not hasattr(native_core_mod, "PyEmptyAwaitable")
+    assert not hasattr(native_core_mod, "PyValueAwaitable")
+    assert not hasattr(native_core_mod, "RustDbTaskAwaitable")
+    assert hasattr(native_core_mod, "EmptyAwaitable")
+    assert hasattr(native_core_mod, "ValueAwaitable")
+    assert hasattr(native_core_mod, "TaskAwaitable")
+    assert not hasattr(native_storage_mod, "RustTaskAwaitable")
+    assert hasattr(native_storage_mod, "TaskAwaitable")
 
     plugin = VertebraPlugin(VertebraConfig(enable_health_endpoint=True))
     assert plugin.config.enable_health_endpoint is True

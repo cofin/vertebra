@@ -1,13 +1,13 @@
-# `vertebra.server` — Worker Runtime, Execution Lanes & Protocol Adapters
+# Server Runtime, Execution Lanes & Protocol Adapters
 
-Multi-protocol worker lifecycle (`Worker`), pre-compiled batch dispatch (`HandlerSpec`, `BatchDispatchPlan`), isolated execution lanes (`LaneConfig`, `LaneMetrics`), sharded `asyncio` event loops (`EventLoopPool`), ASGI/RSGI/WSGI bridges, and container cgroup platform introspection. See the [Server & Workers Usage Guide](../usage/server-and-workers.md) for topology and tuning guidance.
+`vertebra.server` manages the worker lifecycle, pre-compiled batch dispatch, isolated execution lanes, sharded `asyncio` event loops, ASGI/RSGI/WSGI adapters, and container cgroup introspection. See the [Server & Workers Usage Guide](../usage/server-and-workers.md) for topology and tuning guidance.
 
-| Subsystem | Key Classes | Responsibility |
-| --- | --- | --- |
-| **Worker & Batch Dispatch** | `Worker`, `HandlerSpec`, `BatchDispatchPlan` | Poll request batches from `vertebra-core` transport, partition by execution mode, and submit responses |
-| **Lanes & Event Loops** | `LaneConfig`, `LaneMetrics`, `EventLoopPool` | Isolate `io`, `cpu`, and `agent` concurrency and shard `asyncio` loops across worker threads |
-| **Protocol Runners** | `AsgiRunner`, `RsgiAdapter`, `WsgiAdapter` | Run ASGI 3.0, RSGI 1.6, and PEP 3333 WSGI applications (`Litestar`, `FastAPI`, `Flask`, `Django`) |
-| **Platform & GIL Audit** | `CgroupQuota`, `SHMAllocationPolicy`, `LameDuckController`, `ZPagesRegistry`, `GilAuditReport` | Inspect cgroup v2 CPU/SHM limits, serve `/healthz` and `/statusz`, drain traffic on `SIGTERM`, and audit 3.14t GIL state |
+| Subsystem | Responsibility |
+| --- | --- |
+| **Worker & Batch Dispatch** | Poll request batches from `vertebra-core`, partition them by handler lane, and submit responses. |
+| **Lanes & Event Loops** | Isolate `io`, `cpu`, and `agent` work and shard `asyncio` loops across worker threads. |
+| **Protocol Runners** | Run ASGI 3.0, RSGI 1.6, and PEP 3333 WSGI applications such as Litestar, FastAPI, Flask, and Django. |
+| **Platform & GIL Audit** | Read cgroup v2 CPU and shared-memory quotas, serve `/healthz` and `/statusz`, drain traffic on `SIGTERM`, and audit GIL state on free-threaded Python. |
 
 ## Worker Lifecycle & Batch Dispatch
 
@@ -43,7 +43,7 @@ Multi-protocol worker lifecycle (`Worker`), pre-compiled batch dispatch (`Handle
     options:
       heading_level: 3
 
-## Protocol Runners (ASGI 3.0, RSGI 1.6 & PEP 3333 WSGI)
+## Protocol Runners
 
 ::: vertebra.server._asgi._runner.AsgiRunner
     options:
@@ -82,7 +82,7 @@ Multi-protocol worker lifecycle (`Worker`), pre-compiled batch dispatch (`Handle
       heading_level: 4
       members: false
 
-## Container Cgroups, Z-Pages, Graceful Drain & Free-Threaded Audit
+## Cgroups, Z-Pages, Graceful Drain & GIL Audit
 
 ::: vertebra.server.platform.CgroupQuota
     options:

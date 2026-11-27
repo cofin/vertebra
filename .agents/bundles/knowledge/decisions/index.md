@@ -1,10 +1,10 @@
 # Architectural Decision Records (`decisions/`)
 
-Durable architectural decisions that govern cross-language boundaries, runtime topologies, data-plane execution, and packaging in Vertebra.
+Durable architectural decisions governing cross-language boundaries, runtime topologies, data-plane execution, and packaging in Vertebra.
 
-- **[ADR-001: Dual-Topology Embedded and Shared-Memory Runtime](adr-001-dual-topology-embedded-and-shm-runtime.md)** — Why Vertebra supports both in-process `Embedded` (`BatchBridge` + `SO_REUSEPORT`) and multi-process `Shm` (`MpmcRing` + `TieredRingSet`) topologies with automatic selection based on worker count and GIL vs. free-threaded Python.
-- **[ADR-002: Shared-Memory Database Broker and Arrow IPC Data Plane](adr-002-two-tier-shm-database-and-arrow-data-plane.md)** — Why Vertebra combines pure-Rust native drivers (`vertebra-db` + `ShmLeaseTable` + `ArrowCursor`) with a universal shared-memory broker proxy (`ProxySyncConfig` / `ProxyAsyncConfig`) for SQLSpec and Advanced Alchemy.
-- **[ADR-003: PyPI `vertebra-core` Distribution and Wheel-Bundled TypeScript Client](adr-003-pypi-vertebra-core-distribution-and-wheel-bundled-client.md)** — Why the PyPI package is published as `vertebra-core` while preserving the `vertebra` import namespace and embedding pre-built `@vertebra/client` bundles inside the Python wheel.
-- **[ADR-004: Optional Driver Wheels and Shared-Memory Ownership](adr-004-optional-driver-wheels-and-shm-ownership.md)** — Database client dependency isolation, canonical Python objects, and producer-owned zero-copy Arrow handoff across extension wheels.
-- **[ADR-005: Persistent Object-Store TTL Envelopes](adr-005-persistent-object-store-ttl-envelopes.md)** — Why Litestar stores deadlines and payloads in one versioned body when backend metadata may be discarded.
-- **[ADR-006: Native Cursor and Connection-Scoped Leases](adr-006-native-cursor-and-connection-scoped-leases.md)** — Why each SQL extension owns a PEP 249-shaped cursor and why broker leases follow connection checkout.
+- **[ADR-001: Dual-Topology Embedded and Shared-Memory Runtime](adr-001-dual-topology-embedded-and-shm-runtime.md)** — Why Vertebra supports both in-process embedded and multi-process shared-memory topologies with automatic selection.
+- **[ADR-002: Shared-Memory Database Broker and Arrow IPC Data Plane](adr-002-two-tier-shm-database-and-arrow-data-plane.md)** — Why Vertebra pairs Rust native drivers and Arrow IPC transport with a universal shared-memory broker proxy.
+- **[ADR-003: PyPI `vertebra-core` Distribution and Wheel-Bundled TypeScript Client](adr-003-pypi-vertebra-core-distribution-and-wheel-bundled-client.md)** — Why the PyPI package is named `vertebra-core` while exposing `import vertebra` and bundling pre-built `@vertebra/client` assets.
+- **[ADR-004: Optional Driver Wheels and Shared-Memory Ownership](adr-004-optional-driver-wheels-and-shm-ownership.md)** — Dependency isolation, canonical Python exception/cursor types, and producer-owned Arrow handoff across extension wheels.
+- **[ADR-005: Persistent Object-Store TTL Envelopes](adr-005-persistent-object-store-ttl-envelopes.md)** — Why Litestar object-store entries wrap deadlines and payloads in one versioned envelope.
+- **[ADR-006: Native Cursor and Connection-Scoped Leases](adr-006-native-cursor-and-connection-scoped-leases.md)** — Why each SQL extension owns a PEP 249-shaped cursor and why broker leases bind to connection checkout.

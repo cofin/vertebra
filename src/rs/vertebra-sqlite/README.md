@@ -1,6 +1,6 @@
 # vertebra-sqlite
 
-Native Rust SQLite client extension for [Vertebra](https://cofin.github.io/vertebra/).
+SQLite client extension for [Vertebra](https://cofin.github.io/vertebra/).
 
 This package contains the compiled `vertebra._sqlite` module that Vertebra's SQLite drivers run on. You don't import it directly. Install it through the `vertebra-core` extra so both packages stay on the same version:
 
@@ -13,7 +13,7 @@ Without it, the SQLite drivers raise `MissingDependencyError`.
 
 ## Features
 
-- Pure Rust driver with SQLite 3.45+ bundled. No system SQLite required.
+- Rust driver with SQLite 3.45+ bundled. No system SQLite required.
 - WAL-mode connection pooling, `mmap_size`, and binary `JSONB`.
 - Online `backup_to` and `restore_from`, pipelines, and Arrow result streaming.
 
@@ -27,7 +27,7 @@ Without it, the SQLite drivers raise `MissingDependencyError`.
 
 ## Compatibility
 
-- Python 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
+- Python 3.12 to 3.15, including free-threaded builds.
 - Prebuilt wheels for Linux (x86_64, aarch64; glibc 2.28+), macOS (x86_64, arm64), and Windows (x64).
 
 ## Links

@@ -16,7 +16,7 @@ use vertebra_db::arrow_shm::{
 };
 use vertebra_db::broker_capsule::{BrokerEngineBackend, BrokerPoolBackend};
 use vertebra_db::py_async::{
-    ReadyAwaitable, RustDbTaskAwaitable, construct_py_arrow_cursor, ready_ok,
+    ReadyAwaitable, TaskAwaitable, construct_py_arrow_cursor, ready_ok,
     spawn_rust_db_task_with_attr_and_cancel,
 };
 use vertebra_db::py_broker::{BrokerPoolRegistry, next_shm_name};
@@ -887,7 +887,8 @@ impl SyncSQLiteCursor {
         let this = slf.get();
         this.require_open(py)?;
         let bound = BoundParams::from_py(params).map_err(|e| this.fail(py, e))?;
-        this.run_and_install(py, this.lazy_begin, move |pool| pool.run(sql, bound))?;
+        let begin = this.lazy_begin && this.pool.statement_facts(sql).needs_lazy_begin;
+        this.run_and_install(py, begin, move |pool| pool.run(sql, bound))?;
         Ok(slf.clone())
     }
 
@@ -1025,7 +1026,7 @@ impl AsyncSQLiteCursor {
         guard: ExecutingGuard,
         begin: bool,
         run: F,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>>
+    ) -> PyResult<Bound<'py, TaskAwaitable>>
     where
         F: FnOnce(&SqlitePool, u64) -> Result<StatementOutcome, SqliteClientError> + Send + 'static,
     {
@@ -1139,13 +1140,14 @@ impl AsyncSQLiteCursor {
         slf: &Bound<'py, Self>,
         sql: &str,
         params: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let py = slf.py();
         let this = slf.get();
         let guard = this.begin_statement(py)?;
         let bound = BoundParams::from_py(params).map_err(|e| e.into_py_err(py))?;
+        let begin = this.lazy_begin && this.pool.statement_facts(sql).needs_lazy_begin;
         let sql_owned = sql.to_string();
-        Self::spawn_statement(slf, guard, this.lazy_begin, move |pool, op_id| {
+        Self::spawn_statement(slf, guard, begin, move |pool, op_id| {
             pool.run_with_op_id(op_id, &sql_owned, bound)
         })
     }
@@ -1154,7 +1156,7 @@ impl AsyncSQLiteCursor {
         slf: &Bound<'py, Self>,
         sql: &str,
         seq_of_params: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let py = slf.py();
         let this = slf.get();
         let guard = this.begin_statement(py)?;
@@ -1520,7 +1522,7 @@ impl AsyncSQLiteClient {
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
         map_ok: M,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>>
+    ) -> PyResult<Bound<'py, TaskAwaitable>>
     where
         M: FnOnce(Python<'_>, StatementOutcome) -> PyResult<Py<PyAny>> + Send + 'static,
     {
@@ -1642,7 +1644,7 @@ impl AsyncSQLiteClient {
         py: Python<'py>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let bound = BoundParams::from_py(params).map_err(|e| e.into_py_err(py))?;
         let pool = Arc::clone(&self.pool);
         let sql_owned = sql.to_string();
@@ -1677,7 +1679,7 @@ impl AsyncSQLiteClient {
         py: Python<'py>,
         sql: &str,
         params_seq: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let seq = extract_params_sequence(params_seq).map_err(|e| e.into_py_err(py))?;
         let pool = Arc::clone(&self.pool);
         let sql_owned = sql.to_string();
@@ -1711,7 +1713,7 @@ impl AsyncSQLiteClient {
         &self,
         py: Python<'py>,
         sql_script: &str,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let pool = Arc::clone(&self.pool);
         let script_owned = sql_script.to_string();
         let op_id = pool.next_op_id();
@@ -1746,7 +1748,7 @@ impl AsyncSQLiteClient {
         py: Python<'py>,
         operations: &Bound<'_, PyAny>,
         use_savepoint: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let ops = extract_operations(operations).map_err(|e| e.into_py_err(py))?;
         let pool = Arc::clone(&self.pool);
         let op_id = pool.next_op_id();
@@ -1788,7 +1790,7 @@ impl AsyncSQLiteClient {
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
         batch_size: usize,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let bound = BoundParams::from_py(params).map_err(|e| e.into_py_err(py))?;
         let pool = Arc::clone(&self.pool);
         let sql_owned = sql.to_string();
@@ -1823,7 +1825,7 @@ impl AsyncSQLiteClient {
         py: Python<'py>,
         table_name: &str,
         arrow_ipc_bytes: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let bytes: Vec<u8> = arrow_ipc_bytes.extract()?;
         let pool = Arc::clone(&self.pool);
         let tbl_owned = table_name.to_string();
@@ -1860,7 +1862,7 @@ impl AsyncSQLiteClient {
         target_path: &str,
         pages_per_step: i32,
         sleep_ms: u64,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let pool = Arc::clone(&self.pool);
         let target_owned = target_path.to_string();
         let op_id = pool.next_op_id();
@@ -1896,7 +1898,7 @@ impl AsyncSQLiteClient {
         source_path: &str,
         pages_per_step: i32,
         sleep_ms: u64,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let pool = Arc::clone(&self.pool);
         let source_owned = source_path.to_string();
         let op_id = pool.next_op_id();
@@ -1926,11 +1928,7 @@ impl AsyncSQLiteClient {
     }
 
     #[pyo3(signature = (mode = "IMMEDIATE"))]
-    pub fn begin<'py>(
-        &self,
-        py: Python<'py>,
-        mode: &str,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn begin<'py>(&self, py: Python<'py>, mode: &str) -> PyResult<Bound<'py, TaskAwaitable>> {
         let pool = Arc::clone(&self.pool);
         let mode_owned = mode.to_string();
         let op_id = pool.next_op_id();
@@ -1957,7 +1955,7 @@ impl AsyncSQLiteClient {
         )
     }
 
-    pub fn commit<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn commit<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let pool = Arc::clone(&self.pool);
         let op_id = pool.next_op_id();
         let cancel_pool = Arc::clone(&pool);
@@ -1983,7 +1981,7 @@ impl AsyncSQLiteClient {
         )
     }
 
-    pub fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let pool = Arc::clone(&self.pool);
         let op_id = pool.next_op_id();
         let cancel_pool = Arc::clone(&pool);
@@ -2009,7 +2007,7 @@ impl AsyncSQLiteClient {
         )
     }
 
-    pub fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let pool = Arc::clone(&self.pool);
         let op_id = pool.next_op_id();
         let cancel_pool = Arc::clone(&pool);
@@ -2056,7 +2054,7 @@ impl AsyncSQLiteClient {
         py: Python<'py>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_single_call(py, sql, params, |py, outcome| {
             let (rows, names) = outcome_to_rows(py, outcome)?;
             Ok((rows, names).into_pyobject(py)?.into_any().unbind())
@@ -2069,7 +2067,7 @@ impl AsyncSQLiteClient {
         py: Python<'py>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_single_call(py, sql, params, |py, outcome| {
             Ok(outcome_to_dicts(py, outcome)?.into_any().unbind())
         })
@@ -2081,7 +2079,7 @@ impl AsyncSQLiteClient {
         py: Python<'py>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_single_call(py, sql, params, |py, outcome| {
             outcome_to_value(py, outcome).map_err(|e| e.into_py_err(py))
         })
@@ -2093,7 +2091,7 @@ impl AsyncSQLiteClient {
         py: Python<'py>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_single_call(py, sql, params, |py, outcome| {
             Ok(outcome_to_dml(&outcome)
                 .into_pyobject(py)?

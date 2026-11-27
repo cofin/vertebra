@@ -22,12 +22,14 @@ from vertebra._vertebra import (
     cancel_request_sleep,
     clear_request_notification,
     drive_asgi_batch,
+    drive_native_batch,
     drive_rsgi_batch,
     drive_wsgi_batch,
     get_batch,
     get_request_notify_fd,
     init_transport,
     prepare_request_sleep,
+    shutdown_wsgi_executor,
     submit_batch_raw,
     submit_response,
     submit_response_raw,
@@ -43,8 +45,11 @@ from vertebra.server._dispatch import (
     _RAW_BUFFER_TYPES,
     _ZPAGES_HANDLER_ID,
     HandlerSpec,
+    _AsyncErrorStub,
+    _await_async_item,
     _is_potential_special_return,
     _resolve_asgi_batch_timeout,
+    _schedule_coros,
     _submit_coerced,
     build_error_response,
     compile_handler_table,
@@ -600,6 +605,7 @@ class Worker:
             mount_lookup = {prefix: (adapter, proto) for prefix, adapter, proto in mount_runners}
             has_mounts = bool(mount_runners)
             all_sync_native = not has_mounts and not has_async_handlers and not has_sync_thread
+            native_only = not has_mounts and not has_sync_thread
 
             single_root_asgi: AsgiRunner | None = None
             single_root_rsgi: RsgiAdapter | None = None
@@ -630,6 +636,7 @@ class Worker:
                     mount_runners=mount_runners,
                     mount_lookup=mount_lookup,
                     all_sync_native=all_sync_native,
+                    native_only=native_only,
                     single_root_asgi=single_root_asgi,
                     single_root_rsgi=single_root_rsgi,
                     single_root_wsgi=single_root_wsgi,
@@ -649,6 +656,7 @@ class Worker:
                         mount_runners=mount_runners,
                         mount_lookup=mount_lookup,
                         all_sync_native=all_sync_native,
+                        native_only=native_only,
                         single_root_asgi=single_root_asgi,
                         single_root_rsgi=single_root_rsgi,
                         single_root_wsgi=single_root_wsgi,
@@ -682,6 +690,10 @@ class Worker:
             if executor is not None:
                 executor.shutdown(wait=True)
             shutdown_worker_executor(wait=True)
+            try:
+                shutdown_wsgi_executor()
+            except Exception:
+                logger.exception("WSGI executor shutdown error")
             loop_pool.stop()
 
     def _attach_loop_telemetry(self, loop_pool: EventLoopPool, *, loop_runs_continuously: bool) -> None:
@@ -793,6 +805,7 @@ class Worker:
         mount_runners: list[tuple[str, Any, str]],
         mount_lookup: dict[str, tuple[Any, str]],
         all_sync_native: bool,
+        native_only: bool = False,
         single_root_asgi: AsgiRunner | None,
         single_root_rsgi: RsgiAdapter | None,
         single_root_wsgi: WsgiAdapter | None = None,
@@ -803,21 +816,43 @@ class Worker:
         asyncio.set_event_loop(loop)
         batches_processed = 0
         watchdog_sec = max(0.01, min(0.1, timeout_sec))
+        drain_handle: asyncio.Handle | None = None
 
-        def _drain_readable() -> None:
-            nonlocal batches_processed
+        def _schedule_drain() -> None:
+            nonlocal drain_handle
+            if drain_handle is None or drain_handle.cancelled():
+                drain_handle = loop.call_soon(_run_scheduled_drain)
+
+        def _run_scheduled_drain() -> None:
+            nonlocal drain_handle
+            drain_handle = None
+            _drain_batches()
+
+        def _on_notify_readable() -> None:
+            nonlocal drain_handle
             cancel_request_sleep()
             clear_request_notification()
+            if drain_handle is not None:
+                drain_handle.cancel()
+                drain_handle = None
+            _drain_batches()
+
+        def _drain_batches() -> None:
+            nonlocal batches_processed
             drained = 0
             while drained < _INLINE_DRAIN_BUDGET:
                 if self._should_stop(batches_processed):
+                    cancel_request_sleep()
                     loop.stop()
                     return
                 batch = try_get_batch()
                 if batch is None or len(batch) == 0:
+                    if drained > 0:
+                        _schedule_drain()
+                        return
                     if not prepare_request_sleep():
                         cancel_request_sleep()
-                        loop.call_soon(_drain_readable)
+                        _schedule_drain()
                     elif self._should_stop(batches_processed):
                         cancel_request_sleep()
                         loop.stop()
@@ -828,6 +863,7 @@ class Worker:
                     mount_runners=mount_runners,
                     mount_lookup=mount_lookup,
                     all_sync_native=all_sync_native,
+                    native_only=native_only,
                     single_root_asgi=single_root_asgi,
                     single_root_rsgi=single_root_rsgi,
                     single_root_wsgi=single_root_wsgi,
@@ -836,7 +872,7 @@ class Worker:
                 )
                 batches_processed += 1
                 drained += 1
-            loop.call_soon(_drain_readable)
+            _schedule_drain()
 
         def _watchdog() -> None:
             nonlocal batches_processed
@@ -853,6 +889,7 @@ class Worker:
                     mount_runners=mount_runners,
                     mount_lookup=mount_lookup,
                     all_sync_native=all_sync_native,
+                    native_only=native_only,
                     single_root_asgi=single_root_asgi,
                     single_root_rsgi=single_root_rsgi,
                     single_root_wsgi=single_root_wsgi,
@@ -860,15 +897,17 @@ class Worker:
                     executor=executor,
                 )
                 batches_processed += 1
-                loop.call_soon(_drain_readable)
+                _schedule_drain()
             loop.call_later(watchdog_sec, _watchdog)
 
-        loop.add_reader(notify_fd, _drain_readable)
-        loop.call_soon(_drain_readable)
+        loop.add_reader(notify_fd, _on_notify_readable)
+        _schedule_drain()
         loop.call_later(watchdog_sec, _watchdog)
         try:
             loop.run_forever()
         finally:
+            if drain_handle is not None:
+                drain_handle.cancel()
             cancel_request_sleep()
             with suppress(Exception):
                 loop.remove_reader(notify_fd)
@@ -882,6 +921,7 @@ class Worker:
         mount_runners: list[tuple[str, Any, str]],
         mount_lookup: dict[str, tuple[Any, str]],
         all_sync_native: bool,
+        native_only: bool = False,
         loop_pool: EventLoopPool,
         executor: ThreadPoolExecutor | None = None,
         single_root_asgi: AsgiRunner | None = None,
@@ -906,10 +946,15 @@ class Worker:
                     return
                 batch = remaining
 
-            if all_sync_native:
+            if all_sync_native or native_only:
                 raw_items: list[tuple[int, int, Any] | tuple[int, int, Any, bytes]] = []
                 append_raw = raw_items.append
                 get_spec = compiled_handlers.get
+                use_drive_native = (
+                    not all_sync_native and self._error_handler is None and getattr(loop_pool, "size", 1) == 1
+                )
+                async_native_items: list[tuple[int, Any, int]] | None = None
+                async_coros: list[Coroutine[Any, Any, None]] | None = None
                 for req in batch:
                     if req.handler_id == _ZPAGES_HANDLER_ID:
                         self._handle_zpage_request(req, loop_pool)
@@ -918,6 +963,34 @@ class Worker:
                     spec = get_spec(req.handler_id)
                     if spec is None:
                         append_raw((req_id, 404, b"not found"))
+                        continue
+                    if not all_sync_native and spec.is_async:
+                        try:
+                            coro = spec.invoker(req)
+                        except Exception as exc:
+                            err_resp = build_error_response(exc, req, self._error_handler, Response)
+                            submit_response(err_resp)
+                            continue
+                        if use_drive_native:
+                            if async_native_items is None:
+                                async_native_items = []
+                            async_native_items.append((req_id, coro, spec.status_code))
+                        else:
+                            if async_coros is None:
+                                async_coros = []
+                            err_target = req if self._error_handler is not None else _AsyncErrorStub(req_id)
+                            async_coros.append(
+                                _await_async_item(
+                                    coro,
+                                    req_id,
+                                    err_target,
+                                    self._error_handler,
+                                    Response,
+                                    submit_response,
+                                    submit_response_raw,
+                                    status_code=spec.status_code,
+                                )
+                            )
                         continue
                     try:
                         raw = spec.invoker(req)
@@ -950,6 +1023,10 @@ class Worker:
                         submit_response(err_resp)
                 if raw_items:
                     submit_batch_raw(raw_items)
+                if async_native_items:
+                    drive_native_batch(async_native_items, loop_obj=loop_pool.primary_loop)
+                if async_coros:
+                    _schedule_coros(loop_pool, async_coros)
                 return
 
             if single_root_asgi is not None and isinstance(batch, RequestBatch):

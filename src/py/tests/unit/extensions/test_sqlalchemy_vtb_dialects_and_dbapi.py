@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import array
+import asyncio
+import contextlib
 import importlib.util
 import subprocess
 import sys
@@ -46,7 +48,7 @@ from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
 from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
-from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.dbapi import (
     BFILE,
     BLOB,
@@ -106,7 +108,7 @@ from vertebra.extensions.sqlalchemy.dialects import (
     AsyncSQLiteDialect,
     SyncMSSQLDialect,
 )
-from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool
+from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, SyncBrokerPool
 from vertebra.storage import SyncObjectStore
 
 _HAS_DUCKDB_ENGINE = importlib.util.find_spec("duckdb_engine") is not None
@@ -915,11 +917,11 @@ def test_sqlalchemy_and_alchemy_extensions_import_without_sqlspec(module_name: s
         "sys.modules['sqlspec'] = None; "
         f"importlib.import_module({module_name!r}); "
         "from vertebra.extensions.alchemy import create_sync_alchemy_config; "
-        "from vertebra.extensions.sqlalchemy.pool import BrokerPool; "
+        "from vertebra.extensions.sqlalchemy.pool import SyncBrokerPool; "
         "from vertebra.extensions.broker import BrokerConfig, SyncSHMBrokerTransport; "
         "t = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0)); "
         "cfg = create_sync_alchemy_config('sqlite+vtb:///:memory:', broker=t); "
-        "p = BrokerPool(broker=t, url='sqlite+vtb:///%3Amemory%3A'); "
+        "p = SyncBrokerPool(broker=t, url='sqlite+vtb:///%3Amemory%3A'); "
         "p.dispose(); t.close(); "
         "assert 'sqlspec' not in sys.modules or sys.modules['sqlspec'] is None"
     )
@@ -1749,14 +1751,14 @@ def test_sqlite_get_pool_class_broker_routes_to_bound_broker_pool(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Verify SQLite ?broker=true returns a bound BrokerPool / AsyncBrokerPool from DatabaseRegistry."""
+    """Verify SQLite ?broker=true returns a bound SyncBrokerPool / AsyncBrokerPool from DatabaseRegistry."""
     fake_broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
     db_path = tmp_path / "brokered.db"
     try:
         monkeypatch.setattr(DatabaseRegistry, "default_broker", classmethod(lambda cls: fake_broker))
         sync_pool_cls = SyncSQLiteDialect.get_pool_class(make_url(f"sqlite+vtb:///{db_path}?broker=true"))
         async_pool_cls = AsyncSQLiteDialect.get_pool_class(make_url(f"sqlite+vtb_async:///{db_path}?broker=true"))
-        assert issubclass(sync_pool_cls, BrokerPool)
+        assert issubclass(sync_pool_cls, SyncBrokerPool)
         assert issubclass(async_pool_cls, AsyncBrokerPool)
     finally:
         fake_broker.close()
@@ -2228,3 +2230,154 @@ async def test_asyncio_adapter_receives_native_async_cursor() -> None:
             await greenlet_spawn(cursor.close)
     finally:
         await greenlet_spawn(adapted.close)
+
+
+def test_sqlite_dialect_defaults_max_readers_zero_and_respects_override(tmp_path: Path) -> None:
+    """Verify SQLite +vtb/+vtb_async dialects default max_readers=0, extract URL overrides, and honor connect_args."""
+    db_path = tmp_path / "dialect_readers.db"
+    sync_dialect = cast("Any", SyncSQLiteDialect)()
+    async_dialect = cast("Any", AsyncSQLiteDialect)()
+
+    _, default_kwargs = sync_dialect.create_connect_args(make_url(f"sqlite+vtb:///{db_path}"))
+    assert default_kwargs["max_readers"] == 0
+
+    _, url_override_kwargs = async_dialect.create_connect_args(make_url(f"sqlite+vtb_async:///{db_path}?max_readers=3"))
+    assert url_override_kwargs["max_readers"] == 3
+    assert "max_readers" not in url_override_kwargs["url"]
+
+    engine = create_engine(f"sqlite+vtb:///{db_path}", connect_args={"share_pool": False})
+    try:
+        raw = engine.raw_connection()
+        try:
+            driver = cast("Any", raw.driver_connection).driver
+            assert driver.config.max_readers == 0
+        finally:
+            raw.close()
+    finally:
+        engine.dispose()
+
+    override_engine = create_engine(
+        f"sqlite+vtb:///{db_path}",
+        connect_args={"share_pool": False, "max_readers": 2},
+    )
+    try:
+        raw_override = override_engine.raw_connection()
+        try:
+            override_driver = cast("Any", raw_override.driver_connection).driver
+            assert override_driver.config.max_readers == 2
+        finally:
+            raw_override.close()
+    finally:
+        override_engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_async_sqlite_sqlalchemy_reads_succeed_while_writer_holds_lock(tmp_path: Path) -> None:
+    """Verify sqlite+vtb_async concurrent SELECTs do not block when another WAL connection holds BEGIN IMMEDIATE."""
+    db_path = tmp_path / "wal_read_concurrency.db"
+    setup = SyncSQLiteDriver(SQLiteConfig(path=str(db_path), wal_mode=True, max_readers=0))
+    try:
+        setup.execute("CREATE TABLE world (id INTEGER PRIMARY KEY, randomnumber INTEGER NOT NULL)")
+        for idx in range(1, 21):
+            setup.execute("INSERT INTO world (id, randomnumber) VALUES (?, ?)", (idx, idx * 7))
+        setup.begin()
+        setup.execute("UPDATE world SET randomnumber = 999 WHERE id = 1")
+
+        engine = create_async_engine(
+            f"sqlite+vtb_async:///{db_path}",
+            pool_size=8,
+            connect_args={"share_pool": False},
+        )
+        try:
+
+            async def _read_one(row_id: int) -> int:
+                async with engine.connect() as conn:
+                    res = await conn.execute(text("SELECT randomnumber FROM world WHERE id = :id"), {"id": row_id})
+                    return int(res.scalar_one())
+
+            values = await asyncio.wait_for(
+                asyncio.gather(*(_read_one((i % 20) + 1) for i in range(40))),
+                timeout=2.0,
+            )
+            assert values == [((i % 20) + 1) * 7 for i in range(40)]
+        finally:
+            await engine.dispose()
+    finally:
+        with contextlib.suppress(Exception):
+            setup.rollback()
+        setup.close()
+
+
+@pytest.mark.anyio
+async def test_async_sqlite_sqlalchemy_concurrent_read_modify_write_sessions(tmp_path: Path) -> None:
+    """Verify concurrent sqlite+vtb_async read-then-write sessions commit cleanly without SQLITE_BUSY upgrades."""
+    db_path = tmp_path / "wal_rmw.db"
+    setup = SyncSQLiteDriver(SQLiteConfig(path=str(db_path), wal_mode=True, max_readers=0))
+    try:
+        setup.execute("CREATE TABLE world (id INTEGER PRIMARY KEY, randomnumber INTEGER NOT NULL)")
+        for idx in range(1, 21):
+            setup.execute("INSERT INTO world (id, randomnumber) VALUES (?, ?)", (idx, idx))
+    finally:
+        setup.close()
+
+    engine = create_async_engine(
+        f"sqlite+vtb_async:///{db_path}",
+        pool_size=6,
+        connect_args={"share_pool": False},
+    )
+    try:
+
+        async def _update_row(row_id: int, new_val: int) -> int:
+            async with engine.begin() as conn:
+                current = int(
+                    (
+                        await conn.execute(text("SELECT randomnumber FROM world WHERE id = :id"), {"id": row_id})
+                    ).scalar_one()
+                )
+                assert current == row_id
+                await conn.execute(
+                    text("UPDATE world SET randomnumber = :val WHERE id = :id"),
+                    {"val": new_val, "id": row_id},
+                )
+                return new_val
+
+        results = await asyncio.gather(*(_update_row(i, i * 100) for i in range(1, 21)))
+        assert results == [i * 100 for i in range(1, 21)]
+        async with engine.connect() as verify_conn:
+            rows = (await verify_conn.execute(text("SELECT id, randomnumber FROM world ORDER BY id"))).all()
+            assert [(int(r[0]), int(r[1])) for r in rows] == [(i, i * 100) for i in range(1, 21)]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_sqlite_sqlalchemy_begin_nested_savepoint_and_outer_rollback(tmp_path: Path) -> None:
+    """Verify SQLAlchemy begin_nested SAVEPOINT opens an outer transaction and rolls back on outer abort."""
+    sync_db = tmp_path / "nested_sync.db"
+    sync_engine = create_engine(f"sqlite+vtb:///{sync_db}", connect_args={"share_pool": False})
+    try:
+        with sync_engine.begin() as conn:
+            conn.execute(text("CREATE TABLE nested_items (id INTEGER PRIMARY KEY)"))
+        with sync_engine.connect() as conn:
+            with conn.begin_nested():
+                conn.execute(text("INSERT INTO nested_items VALUES (1)"))
+            conn.rollback()
+        with sync_engine.connect() as verify_conn:
+            assert int(verify_conn.execute(text("SELECT COUNT(*) FROM nested_items")).scalar_one()) == 0
+    finally:
+        sync_engine.dispose()
+
+    async_db = tmp_path / "nested_async.db"
+    async_engine = create_async_engine(f"sqlite+vtb_async:///{async_db}", connect_args={"share_pool": False})
+    try:
+        async with async_engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE nested_items (id INTEGER PRIMARY KEY)"))
+        async with async_engine.connect() as conn:
+            async with conn.begin_nested():
+                await conn.execute(text("INSERT INTO nested_items VALUES (1)"))
+            await conn.rollback()
+        async with async_engine.connect() as verify_conn:
+            count = int((await verify_conn.execute(text("SELECT COUNT(*) FROM nested_items"))).scalar_one())
+            assert count == 0
+    finally:
+        await async_engine.dispose()

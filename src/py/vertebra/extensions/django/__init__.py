@@ -32,9 +32,9 @@ if TYPE_CHECKING:
     from vertebra.extensions.django.mail import EmailBackend
     from vertebra.extensions.django.mcp import (
         MCPConfig,
-        MCPRegistry,
         PromptController,
         SkillController,
+        ToolRegistry,
         WebMCPConfig,
         WebMCPManifest,
         WebMCPToolDescriptor,
@@ -101,7 +101,7 @@ __all__ = (
     "JWKSVerifier",
     "JWTAuthGuard",
     "MCPConfig",
-    "MCPRegistry",
+    "ToolRegistry",
     "MsgspecView",
     "ORMBridge",
     "OpenAPIConfig",
@@ -166,7 +166,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "JWKSVerifier": ("vertebra.extensions.django.security", "JWKSVerifier"),
     "JWTAuthGuard": ("vertebra.extensions.django.security", "JWTAuthGuard"),
     "MCPConfig": ("vertebra.extensions.django.mcp", "MCPConfig"),
-    "MCPRegistry": ("vertebra.extensions.django.mcp", "MCPRegistry"),
+    "ToolRegistry": ("vertebra.extensions.django.mcp", "ToolRegistry"),
     "MsgspecView": ("vertebra.extensions.django.fastpath", "MsgspecView"),
     "ORMBridge": ("vertebra.extensions.django.orm", "ORMBridge"),
     "OpenAPIConfig": ("vertebra.extensions.django.openapi", "OpenAPIConfig"),

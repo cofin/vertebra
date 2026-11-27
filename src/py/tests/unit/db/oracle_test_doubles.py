@@ -1648,7 +1648,7 @@ class _StubAsyncOraclePool:
 
 
 class _SyncDriverDouble:
-    """Minimal synchronous driver double for `TenantConnectionScope` reset/evict verification."""
+    """Minimal synchronous driver double for `SyncTenantConnectionScope` reset/evict verification."""
 
     def __init__(self, *, fail_reset: bool = False) -> None:
         self.fail_reset = fail_reset

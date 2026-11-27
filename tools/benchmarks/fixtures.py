@@ -59,6 +59,7 @@ FIXTURE_SPECS: dict[str, ContainerFixtureSpec] = {
         tmpfs_mounts=("/var/lib/postgresql/data:rw,noexec,nosuid",),
         shm_size="128m",
         env=(("POSTGRES_PASSWORD", "bench"), ("POSTGRES_DB", "bench")),
+        command=("postgres", "-c", "max_connections=300"),
     ),
     "mysql": ContainerFixtureSpec(
         name="mysql",

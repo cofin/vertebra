@@ -1,18 +1,18 @@
 # Implementation Patterns Index
 
-Every pattern chapter contains code-truth blocks (`<!-- truth: start -->` / `<!-- truth: end -->`) anchored directly to `src/py/vertebra/`, `src/rs/`, and `src/ts/vertebra-client/`.
+Every pattern chapter contains code-truth blocks anchored directly to `src/py/vertebra/`, `src/rs/`, and `src/ts/vertebra-client/`.
 
 ## Python (`python/`)
 
-- [Python Module Structure, Class Layout & PEP 695 Typing](python/module-and-class-layout.md) — Top-level imports, PEP 810 `__lazy_modules__` + PEP 562 `__getattr__` lazy root exports, frozen `msgspec.Struct(..., gc=False)` value objects, strict class member ordering, Google-style docstrings without inline `#` comments, and PEP 695/604/585 typing across Python 3.12–3.15/3.15t.
-- [Hot-Path Caching & Single-Wake Async Dispatch](python/hot-path-and-async-dispatch.md) — Startup `compile_handler_spec`, inline vectorized `"sync_inline"` batch execution (`submit_batch_raw`), `uvloop`-backed `EventLoopPool` and single-thread `loop.add_reader` Dekker polling, `O(1)` `MOUNT_HANDLER_BASE` mount dispatch, `drive_asgi_batch` / `drive_rsgi_batch`, and zero-copy `coerce_response`.
-- [Serialization & Python Utility Conventions](python/serialization-and-utils.md) — Centralized `JSONSerializer` (`encode_json`, `encode_json_bytes`, `encode_json_into`, `decode_json`, `format_json`), `dump_schema`, `Portal` sync/async bridging, `SyncLoopShardedResource` / `AsyncLoopShardedResource`, `SyncPool`, and `module_loader` guards.
+- [Python Module Structure, Class Layout & PEP 695 Typing](python/module-and-class-layout.md) — Lazy root exports, frozen `msgspec.Struct` value objects, class member ordering, docstring-only comments, and modern Python typing.
+- [Hot-Path Caching & Single-Wake Async Dispatch](python/hot-path-and-async-dispatch.md) — Startup handler compilation, inline vectorized sync batches, single-wake event loops, mount dispatch, and zero-copy response coercion.
+- [Serialization & Python Utility Conventions](python/serialization-and-utils.md) — Centralized JSON serialization, schema dumping, sync/async portals, loop-sharded resources, sync thread pools, and optional import guards.
 
 ## Rust & PyO3 (`rust/`)
 
-- [PyO3 0.30.1 FFI & GIL Discipline](rust/ffi-and-gil-discipline.md) — `#[pymodule(gil_used = false)]` across all ten PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`), conditional `freelist` / `immutable_type` on `Py_GIL_DISABLED`, PEP 782 `PyBytes::new_with`, PEP 814 `PyFrozenDict::empty` + `PyUnstable_SetImmortal` on Python 3.15, anchored `__getbuffer__` `Request`, and C-API `PyIter_Send` ASGI/RSGI drivers.
-- [Lock-Free Shared Memory & Sharded Concurrency](rust/lock-free-shm-and-sharding.md) — `CacheLine<T>` isolation (`ABI_VERSION = 3`), Dekker `SeqCst` `consumer_sleeping` and `active_flags` handshakes, generation-synchronized cached SPSC heads, cache-line-padded MPMC sequence slots, lock-free `ShmDispatcher` batch routing, and `BackpressureController` sliding-window atomics.
+- [PyO3 0.30.1 FFI & GIL Discipline](rust/ffi-and-gil-discipline.md) — Free-threaded module flags, GIL detachment, conditional freelists, cyclic GC, weakref caches, buffer anchoring, and cross-extension async bridges.
+- [Lock-Free Shared Memory & Sharded Concurrency](rust/lock-free-shm-and-sharding.md) — Cache-line isolation, Dekker wakeup handshakes, cached SPSC heads, MPMC sequence slots, sharded dispatch, and atomic circuit breakers.
 
 ## TypeScript (`typescript/`)
 
-- [Client SDK Root Exports, Subpaths & Build Entries](typescript/client-and-adapter-subpaths.md) — Zero-dependency `@vertebra/client` core, subpath exports (`vite`, `hmr`, `router`, `react`, `vue`, `svelte`, `angular`, `htmx`, `store`, `wasm`, `arrow`, `live`, `apex`, `telemetry`, `webmcp`, `agent`), `tsup` build entries, Biome lint rules, and codegen parity.
+- [Client SDK Root Exports, Subpaths & Build Entries](typescript/client-and-adapter-subpaths.md) — Zero-dependency `@vertebra/client` core, framework and protocol subpath exports, `tsup` entries, Biome rules, and codegen parity.

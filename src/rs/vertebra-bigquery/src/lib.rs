@@ -16,7 +16,7 @@ use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, block_on_db, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
+    TaskAwaitable, block_on_db, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
 
 use crate::client::{BigQueryClient as NativeBigQueryClient, BigQueryClientConfig};
@@ -672,7 +672,7 @@ impl PyAsyncBigQueryClient {
         job_timeout_ms: Option<u64>,
         priority: Option<String>,
         labels: Option<HashMap<String, String>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| bigquery_error_to_py(py, e))?;
@@ -706,7 +706,7 @@ impl PyAsyncBigQueryClient {
         py: Python<'_>,
         sql: String,
         params_json: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| bigquery_error_to_py(py, e))?;
@@ -742,7 +742,7 @@ impl PyAsyncBigQueryClient {
         row_restriction: Option<String>,
         max_streams: i32,
         compression: &str,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| bigquery_error_to_py(py, e))?;
@@ -779,7 +779,7 @@ impl PyAsyncBigQueryClient {
         parent_table: String,
         arrow_ipc_bytes: &Bound<'_, PyAny>,
         mode: &str,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| bigquery_error_to_py(py, e))?;

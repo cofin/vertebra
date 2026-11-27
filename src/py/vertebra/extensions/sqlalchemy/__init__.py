@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     )
     from vertebra.extensions.sqlalchemy.pool import (
         AsyncBrokerPool,
-        BrokerPool,
+        SyncBrokerPool,
         broker_creator,
     )
     from vertebra.extensions.sqlalchemy.types import (
@@ -84,7 +84,7 @@ __all__ = (
     "AsyncSpannerDialect",
     "BigQueryAlembicImpl",
     "BigQueryGeography",
-    "BrokerPool",
+    "SyncBrokerPool",
     "CreateVectorIndexOp",
     "CreateViewOp",
     "DropVectorIndexOp",
@@ -143,7 +143,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "AsyncSpannerDialect": ("vertebra.extensions.sqlalchemy.dialects", "AsyncSpannerDialect"),
     "BigQueryAlembicImpl": ("vertebra.extensions.sqlalchemy.alembic", "BigQueryAlembicImpl"),
     "BigQueryGeography": ("vertebra.extensions.sqlalchemy.types", "BigQueryGeography"),
-    "BrokerPool": ("vertebra.extensions.sqlalchemy.pool", "BrokerPool"),
+    "SyncBrokerPool": ("vertebra.extensions.sqlalchemy.pool", "SyncBrokerPool"),
     "CreateVectorIndexOp": ("vertebra.extensions.sqlalchemy.alembic", "CreateVectorIndexOp"),
     "CreateViewOp": ("vertebra.extensions.sqlalchemy.alembic", "CreateViewOp"),
     "DropVectorIndexOp": ("vertebra.extensions.sqlalchemy.alembic", "DropVectorIndexOp"),

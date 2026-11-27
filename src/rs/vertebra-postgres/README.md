@@ -1,6 +1,6 @@
 # vertebra-postgres
 
-Native Rust PostgreSQL Protocol 3.0 client and pool extension for [Vertebra](https://cofin.github.io/vertebra/).
+PostgreSQL Protocol 3.0 client and pool extension for [Vertebra](https://cofin.github.io/vertebra/).
 
 This package contains the compiled `vertebra._postgres` module that Vertebra's PostgreSQL drivers run on. You don't import it directly. Install it through the `vertebra-core` extra so both packages stay on the same version:
 
@@ -13,9 +13,9 @@ Without it, the PostgreSQL drivers raise `MissingDependencyError`.
 
 ## Features
 
-- Pure Rust Protocol 3.0 client. No `libpq` required.
+- Rust Protocol 3.0 client. No `libpq` required.
 - Single round-trip `pipeline()`, binary `COPY`, `pgvector`, and `JSONB`.
-- Logical replication change streams (`PostgresChangeSource`).
+- Logical replication change streams.
 - Works behind PgBouncer, PgCat, and pgdog, with Cloud SQL and AlloyDB dialers and IAM auth.
 
 ## Usage
@@ -28,7 +28,7 @@ Without it, the PostgreSQL drivers raise `MissingDependencyError`.
 
 ## Compatibility
 
-- Python 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
+- Python 3.12 to 3.15, including free-threaded builds.
 - Prebuilt wheels for Linux (x86_64, aarch64; glibc 2.28+), macOS (x86_64, arm64), and Windows (x64).
 
 ## Links

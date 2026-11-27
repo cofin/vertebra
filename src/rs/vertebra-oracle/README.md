@@ -1,6 +1,6 @@
 # vertebra-oracle
 
-Native Rust Oracle Thin 26ai client and pool extension for [Vertebra](https://cofin.github.io/vertebra/).
+Oracle Thin 26ai client and pool extension for [Vertebra](https://cofin.github.io/vertebra/).
 
 This package contains the compiled `vertebra._oracle` module that Vertebra's Oracle drivers run on. You don't import it directly. Install it through the `vertebra-core` extra so both packages stay on the same version:
 
@@ -13,8 +13,8 @@ Without it, the Oracle drivers raise `MissingDependencyError`.
 
 ## Features
 
-- Pure Rust Thin protocol. No Oracle Instant Client required.
-- Connection pools (`SyncOraclePool`, `AsyncOraclePool`) with DRCP support (`cclass`, `purity`, `connection_tag`).
+- Rust Thin protocol. No Oracle Instant Client required.
+- Connection pools with DRCP support (`cclass`, `purity`, `connection_tag`).
 - Autonomous Database wallet mTLS and IAM token authentication.
 - 26ai `VECTOR` and `OSON` binary JSON types, Arrow reads and writes, and change notifications.
 
@@ -28,7 +28,7 @@ Without it, the Oracle drivers raise `MissingDependencyError`.
 
 ## Compatibility
 
-- Python 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
+- Python 3.12 to 3.15, including free-threaded builds.
 - Prebuilt wheels for Linux (x86_64, aarch64; glibc 2.28+), macOS (x86_64, arm64), and Windows (x64).
 
 ## Links

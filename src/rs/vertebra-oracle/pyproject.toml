@@ -4,12 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "vertebra-oracle"
-version = "0.3.0"
+version = "0.4.0"
 description = "Native Rust Oracle Thin 26ai client and pool extension for Vertebra."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-dependencies = ["vertebra-core==0.3.0"]
+dependencies = ["vertebra-core==0.4.0"]
 classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",

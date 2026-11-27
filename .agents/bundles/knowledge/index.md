@@ -1,31 +1,31 @@
 # Vertebra Knowledge Base Index
 
-Curated current-state engineering documentation for **Vertebra** (`src/py/vertebra/`, `src/rs/`, `src/ts/vertebra-client/`).
+Curated current-state engineering documentation for Vertebra (`src/py/vertebra/`, `src/rs/`, `src/ts/vertebra-client/`).
 
 ## Workflow & Quality Gates
 
-- **[Project Workflow & Commands](workflow.md)** — Canonical `Makefile` targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make lint-all`, `make review-check`, `make check`, `make build`, `make build-pgo`, `make bench`, `make bench-ft`, `make bench-baseline`, `make bench-check`, `make upgrade`), polyglot rebuild discipline across the core and optional native extensions, and Flow OKF v0.2 execution rules.
+- **[Project Workflow & Commands](workflow.md)** — Canonical Makefile targets, polyglot extension rebuild rules, CI matrix tiers, and Flow chapter-batch loop.
 
 ## Architecture (`architecture/`)
 
 - **[Architecture Index](architecture/index.md)**
 - **Runtime (`architecture/runtime/`)**:
-  - [Runtime Topologies & Python Embedding](architecture/runtime/topologies-and-embedding.md) — `Topology::{Auto, Embedded, Shm}`, explicit `tokio::runtime::Builder`, `EmbeddedSupervisor` `SO_REUSEPORT` multi-process supervision, `BatchBridge`, `RingFactory`, and `3.14t`/`3.15t` free-threaded worker pools.
-  - [SHM Worker Spawn, Shutdown & Recovery Hooks](architecture/runtime/shm-supervision-and-recovery.md) — `RingFactory` FD inheritance, `RingPairFds` env handoff, `shutdown_workers`, and library-level recovery hooks (`WorkerLifecycle`, `RingPair::reclaim`, `cleanup_stale_shm`).
-  - [Server Platform & Process Lifecycle](architecture/runtime/platform-and-lifecycle.md) — `run_supervisor`, `find_server_binary`, `EventLoopPool` (`uvloop`/`winloop`/`rloop`/`zuvloop` + inline `add_reader`), `GilAuditReport`, `SHMAllocationPolicy`, `CgroupQuota`, `LameDuckController`, and `ZPagesRegistry`.
+  - [Runtime Topologies & Python Embedding](architecture/runtime/topologies-and-embedding.md) — Automatic, embedded, and shared-memory runtime modes, multi-process supervision, and free-threaded worker pools.
+  - [SHM Worker Spawn, Shutdown & Recovery Hooks](architecture/runtime/shm-supervision-and-recovery.md) — File-descriptor inheritance, graceful worker shutdown, crash recovery, and stale segment cleanup.
+  - [Server Platform & Process Lifecycle](architecture/runtime/platform-and-lifecycle.md) — Binary discovery, launcher, event loop pools, GIL auditing, cgroup sizing, lame-duck drain, and ZPages diagnostics.
 - **IPC & Shared Memory (`architecture/ipc/`)**:
-  - [Lock-Free Ring Buffers & Shared Memory](architecture/ipc/ring-buffers-and-shm.md) — `ShmHeader` (`ABI_VERSION = 3`) cache-line layout with Dekker `consumer_sleeping` and `active_flags`, cached-head `SpscRing` + `SlotView`, cache-line-padded Vyukov `MpmcRing` + `MpmcSlotView`, LZ4/Zstd compression, and Linux/macOS wake primitives.
-  - [Tiered Rings & In-Process Batch Bridge](architecture/ipc/tiered-rings-and-batch-bridge.md) — `RingPair`, container-aware `RingPairConfig::for_environment` (`46 MiB` default / `12 MiB` `compact` profile), right-sized `TieredRingSet` (`small` 4 KiB×512, `medium` 32 KiB×128, `large` 256 KiB×32, `xlarge` 2 MiB×8, `VRES`/`VQOV`/`VROV` wire frames with `/tmp/vtb-*` overflow fallback), `ResponseSlot`, and lock-free `BatchBridge` (`InProcessRequest`, `ResponseSink`, Dekker request `Notifier`).
+  - [Lock-Free Ring Buffers & Shared Memory](architecture/ipc/ring-buffers-and-shm.md) — Cache-line-aligned ring headers, SPSC and MPMC rings, payload compression, and OS wake primitives.
+  - [Tiered Rings & In-Process Batch Bridge](architecture/ipc/tiered-rings-and-batch-bridge.md) — Size-tiered response rings, overflow fallbacks, streaming frames, and the lock-free in-process request bridge.
 - **HTTP Ingress & Dispatch (`architecture/http/`)**:
-  - [HTTP Ingress, Request Pipeline & Native Routing](architecture/http/ingress-and-routing.md) — `run_with_listener` `SO_REUSEPORT` accept loop (`ServerState`), tuned `http1::Builder`, ALPN `TlsAcceptor` (`h2` + mTLS), `Router` (`normalize_typed_path` + FNV-1a `HandlerId`), and `RouteTable` (`MOUNT_HANDLER_BASE`).
-  - [Request Batching, Dispatch & Backpressure](architecture/http/batching-dispatch-and-backpressure.md) — Double-buffered `RequestBatcher` (`BatchLimit`, compact binary headers), `Dispatcher` (`DispatchBackend::{Direct, Bridge, Shm}`), lock-free batch-affinitized `ShmDispatcher` 8-shard `InFlightRequests` slabs, and lock-free atomic `BackpressureController`.
-  - [Protocol and Offload Modules in vertebra-http](architecture/http/protocol-and-offload-modules.md) — Wired `cors`, `compression`, `assets`, `openapi_cache`, and `health` offloads (`VERTEBRA_OFFLOAD_CONFIG`), plus `body`, `h2c`, `http3`, `grpc`, `sse`, `ws_mount`, `pubsub`, `mcp_bridge`, `payload`, `multipart`, `access_log`, `profile`, `discovery`, and `dispatcher/direct`.
+  - [HTTP Ingress, Request Pipeline & Native Routing](architecture/http/ingress-and-routing.md) — Accept loop, TLS/HTTP/3 termination, ordered ingress offloads, and Rust radix routing.
+  - [Request Batching, Dispatch & Backpressure](architecture/http/batching-dispatch-and-backpressure.md) — Sharded request batchers, bridge and SHM dispatchers, correlation slabs, stream pumps, and atomic admission control.
+  - [Protocol and Offload Modules in vertebra-http](architecture/http/protocol-and-offload-modules.md) — Inventory of wired HTTP offloads, wire protocols, realtime bridges, and crate helpers.
 - **Python Worker & Protocols (`architecture/worker/`)**:
-  - [PyO3 FFI & Vectorized Batch Dispatch](architecture/worker/pyo3-ffi-and-batch-dispatch.md) — Zero-copy `BatchSnapshot`-backed `Request` (`body_view` buffer protocol)/`Headers`/`Response`/`RequestBatch`, Python 3.15/3.15t `immutable_type` & conditional `freelist`, inline vectorized sync dispatch (`sync_to_thread`), `O(1)` mount routing, and `EventLoopPool`.
-  - [ASGI, RSGI & WSGI Runners](architecture/worker/asgi-and-wsgi-runners.md) — `AsgiRunner` + Rust `AsgiProtocol` / `PyEmptyAwaitable` / `drive_asgi_batch` (`PyIter_Send` + `_SteppedCoroutine`), `FastPath`, RSGI 1.6 (`RsgiAdapter`, lazy `RsgiScope`, direct-submitting `RsgiHttpProtocol`, `drive_rsgi_batch`), and PEP 3333 WSGI (`WsgiAdapter`, lazy `WsgiEnviron`, zero-copy `WsgiInput::from_snapshot`, `_WsgiStartResponse`, `drive_wsgi_batch`).
+  - [PyO3 FFI & Vectorized Batch Dispatch](architecture/worker/pyo3-ffi-and-batch-dispatch.md) — Zero-copy request and response bindings, inline sync batching, mount routing, and event-loop wakeups.
+  - [ASGI, RSGI & WSGI Runners](architecture/worker/asgi-and-wsgi-runners.md) — Rust-driven ASGI 3.0, RSGI 1.6, and PEP 3333 WSGI batch execution, lazy scopes, and framework fastpaths.
 - **Frontend, SSR & Codegen (`architecture/frontend/`)**:
-  - [Oxc Bundler, HMR Watcher & QuickJS SSR Pool](architecture/frontend/bundler-hmr-and-ssr.md) — Oxc `Bundler`, `rolldown-notify-debouncer-mini` `SourceWatcher`, `rquickjs` `SSRPool` (`ArrayQueue` + `DashMap` 60 s TTL cache), and `BuildOrchestrator`.
-  - [Route Codegen Targets & Inertia v3 Middleware](architecture/frontend/codegen-and-inertia.md) — `RouteCollector`, `TypeExtractor` (`TypeNode` IR), `TypeScriptGenerator`, `ZodGenerator`, `ValibotGenerator`, `OpenAPIGenerator`, `ProtobufGenerator`, `ProcedureClientGenerator`, `ManifestGenerator`, and `SyncInertiaMiddleware` / `AsyncInertiaMiddleware`.
+  - [Oxc Bundler, HMR Watcher & QuickJS SSR Pool](architecture/frontend/bundler-hmr-and-ssr.md) — Native TypeScript/JSX bundling, debounced file watching, SSR context pooling, and build orchestration.
+  - [Route Codegen Targets & Inertia v3 Middleware](architecture/frontend/codegen-and-inertia.md) — Type extraction, multi-target client codegen, import maps, and sync/async Inertia middleware.
 
 ## Domains (`domains/`)
 
@@ -40,7 +40,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
 - **Agent Protocols & Harness (`domains/agent/`)**:
   - [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](domains/agent/mcp-and-a2a-protocol-harness.md)
   - [MCP Implementation Limitations](domains/agent/mcp-limitations.md)
-  - [Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker](domains/agent/embeddings-and-vectors.md)
+  - [Shared-Memory Vector Slabs, Cloud & SQL Embeddings, and Local Broker](domains/agent/embeddings-and-vectors.md)
   - [Embeddings Limitations](domains/agent/embeddings-limitations.md)
 - **Server & Worker Runtime (`domains/server/`)**:
   - [Python Server, Worker Loop & Protocol Adapters Domain](domains/server/worker-and-protocols.md)
@@ -91,7 +91,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
 
 - **[Testing & Verification Index](testing/index.md)**
   - [Polyglot Test Matrix & Environment Setup](testing/polyglot-test-matrix.md)
-  - [Benchmark Suite & Free-Threaded Python 3.14t/3.15t](testing/benchmarks-and-free-threaded.md)
+  - [Benchmark Suite & Free-Threaded Python](testing/benchmarks-and-free-threaded.md)
   - [Agentic Review & Benchmark Gates](testing/agentic-review.md)
 
 ## Gotchas (`gotchas/`)

@@ -16,7 +16,7 @@ pub mod ssr;
 use pyo3::prelude::*;
 
 pub use bundler::Bundler;
-pub use config::{BuildResult, BundleConfig, DevConfig, OutputFile};
+pub use config::{BundleConfig, BundleDevConfig, BundleOutput, BundleResult};
 pub use css::minify_css;
 pub use declarations::IsolatedDeclarationsGenerator;
 pub use errors::BundlerError;
@@ -30,9 +30,9 @@ fn _bundler(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("GIL_USED", false)?;
     m.add_class::<Bundler>()?;
     m.add_class::<BundleConfig>()?;
-    m.add_class::<DevConfig>()?;
-    m.add_class::<BuildResult>()?;
-    m.add_class::<OutputFile>()?;
+    m.add_class::<BundleDevConfig>()?;
+    m.add_class::<BundleResult>()?;
+    m.add_class::<BundleOutput>()?;
     m.add_class::<PySourceWatcher>()?;
     m.add_class::<SSRPool>()?;
     m.add_class::<SSRResult>()?;

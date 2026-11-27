@@ -23,8 +23,8 @@ from vertebra.framework.email.providers import (
     UrllibHttpTransportClient,
     WebhookVerifier,
 )
-from vertebra.framework.email.ses import SesEmailTransport
-from vertebra.framework.email.smtp import SmtpEmailTransport
+from vertebra.framework.email.ses import SESEmailTransport
+from vertebra.framework.email.smtp import SMTPEmailTransport
 
 __all__ = (
     "EmailAttachment",
@@ -41,8 +41,8 @@ __all__ = (
     "MemoryEmailTransport",
     "ResendEmailTransport",
     "SendGridEmailTransport",
-    "SesEmailTransport",
-    "SmtpEmailTransport",
+    "SESEmailTransport",
+    "SMTPEmailTransport",
     "UrllibHttpTransportClient",
     "WebhookEvent",
     "WebhookVerifier",

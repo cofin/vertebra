@@ -1,98 +1,30 @@
 # Databases & Native Drivers
 
-Vertebra integrates first-class **SQLSpec** adapters (`vertebra.extensions.sqlspec`) on top of `vertebra.db` engine drivers. Each engine lives in its own package under `vertebra.db.adapters.<engine>`, keeping `import vertebra.db` lightweight until a concrete driver is requested. PostgreSQL, MySQL, Oracle 26ai, SQL Server, DuckDB, BigQuery, and Spanner run on standalone optional PyO3 native wheels, while SQLite, Redis, Valkey, and DataFusion run in core or protocol modules. Meanwhile, the Rust `vertebra-db` crate supplies shared wire codecs, Cloud SQL / AlloyDB dialers, and shared-memory Arrow transport. See the focused guides for [Cloud SQL & AlloyDB Dialers](cloud-dialers.md), [RLS, CDC & Arrow Analytics](analytics-and-cdc.md), and [SQLSpec & SQLAlchemy Extensions](extensions.md).
+Vertebra pairs native database drivers in `vertebra.db` with SQLSpec adapters in `vertebra.extensions.sqlspec`. Each engine lives in its own subpackage, so importing the database package stays fast until you request a specific driver.
 
-```mermaid
-flowchart LR
-    A["Route Handlers"] --> B["SQLSpec Plugin & provide_driver"]
-    B --> C["DatabaseRegistry & Adapter Configs"]
-    C --> D["Engine Drivers & vertebra-db Codecs"]
-    D --> E[("PostgreSQL / MySQL / SQLite / DuckDB / BigQuery / Spanner")]
-```
+See the focused guides for [Cloud SQL & AlloyDB Dialers](cloud-dialers.md), [RLS, CDC & Arrow Analytics](analytics-and-cdc.md), and [SQLSpec & SQLAlchemy Extensions](extensions.md).
 
 ## Optional Engine Extras
 
-Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standalone native cloud wheels and federated engines install via optional extras:
+Core database configuration contracts ship in `vertebra-core`. Install only the engine extras you need:
 
-=== "uv"
+```bash
+uv add "vertebra-core[postgres]"
+```
 
-    ```bash
-    uv add "vertebra-core[postgres]"
-    uv add "vertebra-core[mysql]"
-    uv add "vertebra-core[mssql]"
-    uv add "vertebra-core[bigquery]"
-    uv add "vertebra-core[duckdb]"
-    uv add "vertebra-core[oracle]"
-    uv add "vertebra-core[spanner]"
-    uv add "vertebra-core[sqlite]"
-    uv add "vertebra-core[redis]"
-    uv add "vertebra-core[valkey]"
-    uv add "vertebra-core[sqlalchemy-duckdb]"
-    uv add "vertebra-core[sqlalchemy-gcp]"
-    ```
+Available extras cover PostgreSQL (`postgres`), MySQL (`mysql`), SQL Server (`mssql`), Oracle (`oracle`), SQLite (`sqlite`), DuckDB (`duckdb`), BigQuery (`bigquery`), Spanner (`spanner`), Redis (`redis`), and Valkey (`valkey`), plus optional SQLAlchemy dialect add-ons (`sqlalchemy-duckdb` and `sqlalchemy-gcp`).
 
-=== "pip"
+All native drivers work on standard and free-threaded Python without external C client libraries like libpq or Oracle Instant Client. SQLite bundles SQLite 3.45+. Requesting a driver whose extra is not installed raises `MissingDependencyError`.
 
-    ```bash
-    pip install "vertebra-core[postgres]"
-    pip install "vertebra-core[mysql]"
-    pip install "vertebra-core[mssql]"
-    pip install "vertebra-core[bigquery]"
-    pip install "vertebra-core[duckdb]"
-    pip install "vertebra-core[oracle]"
-    pip install "vertebra-core[spanner]"
-    pip install "vertebra-core[sqlite]"
-    pip install "vertebra-core[redis]"
-    pip install "vertebra-core[valkey]"
-    pip install "vertebra-core[sqlalchemy-duckdb]"
-    pip install "vertebra-core[sqlalchemy-gcp]"
-    ```
+## Driver Interface
 
-=== "pdm"
+All SQL and analytical drivers pair a configuration struct with sync and async drivers that share one execution interface:
 
-    ```bash
-    pdm add "vertebra-core[postgres]"
-    pdm add "vertebra-core[mysql]"
-    pdm add "vertebra-core[mssql]"
-    pdm add "vertebra-core[bigquery]"
-    pdm add "vertebra-core[duckdb]"
-    pdm add "vertebra-core[oracle]"
-    pdm add "vertebra-core[spanner]"
-    pdm add "vertebra-core[sqlite]"
-    pdm add "vertebra-core[redis]"
-    pdm add "vertebra-core[valkey]"
-    pdm add "vertebra-core[sqlalchemy-duckdb]"
-    pdm add "vertebra-core[sqlalchemy-gcp]"
-    ```
-
-=== "poetry"
-
-    ```bash
-    poetry add "vertebra-core[postgres]"
-    poetry add "vertebra-core[mysql]"
-    poetry add "vertebra-core[mssql]"
-    poetry add "vertebra-core[bigquery]"
-    poetry add "vertebra-core[duckdb]"
-    poetry add "vertebra-core[oracle]"
-    poetry add "vertebra-core[spanner]"
-    poetry add "vertebra-core[sqlite]"
-    poetry add "vertebra-core[redis]"
-    poetry add "vertebra-core[valkey]"
-    poetry add "vertebra-core[sqlalchemy-duckdb]"
-    poetry add "vertebra-core[sqlalchemy-gcp]"
-    ```
-
-Installing `vertebra-core[postgres]` provides the standalone pure-Rust `vertebra-postgres` (`vertebra._postgres`) wheel with zero `libpq` or `libecpg` C dependency and `GIL_USED = False` compatibility across Python `3.12`–`3.15` (`3.14t`/`3.15t`); without it, `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` raise `MissingDependencyError`. Installing `vertebra-core[duckdb]` provides `vertebra-duckdb` (`vertebra._duckdb`), and `vertebra-core[sqlalchemy-duckdb]` adds `duckdb-engine` for SQLAlchemy `duckdb+vtb://` dialects. Installing `vertebra-core[sqlite]` provides the standalone pure-Rust `vertebra-sqlite` (`vertebra._sqlite`) wheel with bundled SQLite 3.45+, `GIL_USED = False`, and WAL pooling. Redis (`vertebra-core[redis]`, backed by `vertebra._redis`), Valkey (`vertebra-core[valkey]`, backed by `vertebra._valkey`), Oracle (`vertebra-core[oracle]`), MySQL (`vertebra-core[mysql]`), SQL Server (`vertebra-core[mssql]`), BigQuery (`vertebra-core[bigquery]`), and Spanner (`vertebra-core[spanner]`) drivers execute through their standalone native wheels and raise `MissingDependencyError` when absent, while `vertebra-core[sqlalchemy-gcp]` installs `sqlalchemy-bigquery` and `sqlalchemy-spanner` for BigQuery and Spanner SQLAlchemy dialects.
-
-## Unified Driver Contract & `provide_driver`
-
-The PostgreSQL, MySQL, SQLite, Oracle, MSSQL, DuckDB, BigQuery, and Spanner adapters pair a `BaseDatabaseConfig` struct (`url_schemes`, `from_url`, `pool_key`) with `SyncDatabaseDriver` and `AsyncDatabaseDriver` implementations sharing a uniform execution contract:
-
-- **DML & Tuple Execution**: `execute(sql, parameters) -> int`, `execute_many(sql, parameter_sets) -> int`, `execute_tuples(sql, parameters) -> list[tuple]`, and `execute_with_description(sql, parameters) -> tuple[list[tuple], tuple[str, ...]]`.
-- **Native cursor**: `driver.cursor()` returns a PEP 249-shaped cursor with `execute`, `executemany`, `fetchone`, `fetchmany`, `fetchall`, `description`, `rowcount`, `lastrowid`, `arraysize`, and `close`. Rows are tuples, and async drivers return awaitable forms of the cursor methods.
-- **Typed Row & Scalar Queries**: `select(sql, parameters, *, schema_type=None)`, `select_one(...)` (raises `NotFoundError` when `0` rows match), `select_one_or_none(...) -> Any | None`, and `select_value(sql, parameters, *, value_type=None)` (raises `NotFoundError` on `0` rows and returns `None` for a single-row SQL `NULL`).
-- **Transactions, Cancellation & Arrow SHM**: `with driver.transaction():` / `async with driver.transaction():`, `cancel()`, `select_to_arrow(...) -> ArrowCursor`, `stream_arrow_batches(...)`, and `load_from_arrow(table_name, data) -> int`.
-- **Capability Protocols**: Engine-specific extensions are exposed as `@runtime_checkable` protocols on `vertebra.db` (`SyncPipelineCapable`, `AsyncPipelineCapable`, `SyncNotificationSource`, `AsyncNotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `SyncQueueStore`, `AsyncQueueStore`, and `EmbeddingPushdown`).
+- **Statements and tuples**: Execute DML statements, batch parameter sets, or fetch raw tuple rows with optional column metadata.
+- **PEP 249 cursors**: Calling `driver.cursor()` returns a standard database cursor returning tuple rows; async drivers expose awaitable cursor methods.
+- **Typed rows and scalars**: Query methods decode rows directly into a target `schema_type` model. Single-row queries raise `NotFoundError` when zero rows match; scalar queries return None for a single SQL NULL.
+- **Transactions, cancellation, and Arrow**: Use `driver.transaction()` as a context manager, cancel running queries with `cancel()`, and move bulk data with Arrow streaming methods.
+- **Capability protocols**: Use `isinstance` with runtime-checkable protocols on `vertebra.db` (such as `SyncPipelineCapable` and `AsyncPipelineCapable`) to detect optional features like pipelining, notifications, change streams, queue stores, and embedding pushdown.
 
 ```python
 from vertebra.db import (
@@ -114,16 +46,17 @@ supports_pipelining = isinstance(db, SyncPipelineCapable)
 db.close()
 ```
 
-### Standalone DB-API 2.0 (`vertebra.db.dbapi`) & Broker Capabilities
+### DB-API 2.0
 
-`vertebra.db.dbapi` provides standalone PEP 249 synchronous and asynchronous connections (`SyncDBAPIConnection`, `SyncDBAPIModule`, `AsyncDBAPIConnection`, `AsyncDBAPIModule`, `connect`, and PEP 249 exception names) backed by `vertebra.db` drivers without importing `sqlalchemy`, `vertebra.extensions`, or adapter subpackages eagerly. Calling `connection.cursor()` returns the engine's native cursor, and `description is None` means the statement returned no rows. The DB-API exception names are the `vertebra.db` driver exception classes, so specific classes such as `QueryCancelledError` reach DB-API callers unchanged, and `InterfaceError` is a subclass of `DatabaseError`, which differs from PEP 249:
+`vertebra.db.dbapi` exposes PEP 249 sync and async connections backed by Vertebra's native drivers without importing SQLAlchemy or extension modules. Calling `cursor()` returns the engine's native cursor, where a None description indicates the statement returned no rows.
 
-- **Statement Autocommit Databases**: Setting `autocommit=False` on `bigquery`, `spanner`, or `spangres` DB-API connections raises PEP 249 `NotSupportedError` because those backends manage transactions at statement or RPC boundaries.
-- **Native Broker Engine Capsules**: `vertebra._postgres`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._mssql`, `vertebra._duckdb`, and `vertebra._sqlite` export C-ABI `BrokerEngineCapsule` (`broker_engine_capsule()`) hooks discovered by `BrokerEngineDiscovery`; `vertebra._bigquery` and `vertebra._spanner` use multiplexed HTTP/2 REST/gRPC channels and are excluded from in-process SHM broker capsule hosting.
+DB-API exception names alias the driver exception classes directly, so specific errors such as `QueryCancelledError` propagate unchanged. Note one PEP 249 difference: `InterfaceError` subclasses `DatabaseError`.
+
+BigQuery, Spanner, and Spangres manage transactions at statement or RPC boundaries. Passing `autocommit=False` to a DB-API connection for those engines raises `NotSupportedError`.
 
 ## SQLSpec & Litestar Integration
 
-Use `create_sqlspec_plugin` with an adapter configuration (such as `PostgresAsyncConfig`, `MySQLAsyncConfig`, or `SQLiteAsyncConfig`) to manage connection leasing, shared-memory statement caches, and dependency injection:
+Pass an adapter config to `create_sqlspec_plugin` to wire connection pooling, statement caching, and dependency injection into Litestar:
 
 ```python
 from litestar import Litestar, get
@@ -161,36 +94,37 @@ app = Litestar(
 )
 ```
 
-## Native Database Drivers & Adapters Matrix
+## Supported Engines
 
-`vertebra.db.adapters` and `vertebra.extensions.sqlspec` provide synchronous and asynchronous drivers across 11 relational, analytical, cloud-native, and key-value engines:
+| Engine | Extra | Native Config | Key Capabilities |
+| --- | --- | --- | --- |
+| **PostgreSQL** | `postgres` | `PostgreSQLConfig` | Pipelining, binary COPY, pgvector, JSONB, logical replication CDC, embedding pushdown, PgBouncer modes, IAM and Cloud SQL / AlloyDB dialers |
+| **MySQL / MariaDB** | `mysql` | `MySQLConfig` | Binary prepared statements, pipelining, Arrow streaming, out-of-band query cancellation, IAM and Cloud SQL mTLS dialers |
+| **SQLite / libSQL** | `sqlite` | `SQLiteConfig` | Bundled SQLite 3.45+, WAL reader pool, binary JSONB, delayed-commit pipelines, online backup/restore, Arrow streaming |
+| **Oracle 26ai** | `oracle` | `OracleConfig` | Thin driver (no Instant Client), native pooling with DRCP, Cloud Wallet mTLS and IAM auth, 26ai VECTOR and OSON, VPD tenancy, TxEventQ notifications, Arrow streaming |
+| **SQL Server** | `mssql` | `MSSQLConfig` | TDS 7.4, automatic parameter rewriting, bulk load, query cancellation, pipelining, Arrow streaming, Cloud SQL mTLS |
+| **DuckDB** | `duckdb` | `DuckDBConfig` | Single-writer/multi-reader OLAP, savepoints, pipelining, rotating GCS httpfs secrets, Arrow streaming and Appender |
+| **Google BigQuery** | `bigquery` | `BigQueryConfig` | Storage Read/Write API with Arrow streaming, Object Tables, dry-run cost ceilings, ADK and Litestar stores |
+| **Spanner** | `spanner` | `SpannerConfig` | GoogleSQL and Spangres, multiplexed sessions, automatic Aborted retry, BatchWrite, Data Boost partitioned Arrow reads, change streams |
+| **Redis** | `redis` | `RedisConfig` | RESP3, atomic pipelines, client-side tracking cache invalidation, Sentinel, Cluster |
+| **Valkey** | `valkey` | `ValkeyConfig` | RESP3 client-side caching, Valkey 9.0 hash-field expiration, redirect capability, Sentinel, Cluster, Memorystore IAM auth |
+| **DataFusion** | — | `DataFusionConfig` | Federated SQL across SQL engines and Parquet/CSV object storage |
 
-| Engine | SQLSpec Adapter Config | Native Config Class | Sync / Async Drivers | Key Capabilities |
-| --- | --- | --- | --- | --- |
-| **PostgreSQL** | `PostgresAsyncConfig`, `PostgresSyncConfig` | `PostgreSQLConfig` | `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver` | Pure-Rust Protocol 3.0 (`vertebra._postgres`) with `$1..$N` binds, single-`Sync` `pipeline()`, binary `PGCOPY`, `pgvector`, `JSONB`, typed `Pg*` wrappers, `PostgresChangeSource`, `PostgresEmbeddingPushdown`, PgBouncer/PgCat/pgdog modes, direct `:5432` IAM OAuth2 or `:5433` AlloyDB / `:3307` Cloud SQL dialers |
-| **MySQL / MariaDB** | `MySQLAsyncConfig`, `MySQLSyncConfig` | `MySQLConfig` | `SyncMySQLDriver`, `AsyncMySQLDriver` | Pure-Rust `vertebra._mysql` binary prepared statements (`COM_STMT_PREPARE` / `COM_STMT_EXECUTE`), `SyncMySQLPipeline` / `AsyncMySQLPipeline`, `VTBARROW` `ArrowCursor`, out-of-band `KILL QUERY` cancellation, direct `:3306` IAM OAuth2 token or Cloud SQL `:3307` mTLS dialer |
-| **SQLite / libSQL** | `SQLiteAsyncConfig`, `SQLiteSyncConfig` | `SQLiteConfig` | `SyncSQLiteDriver`, `AsyncSQLiteDriver` | Pure-Rust `vertebra-sqlite` (`vertebra._sqlite`), WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, delayed-commit `SyncSQLitePipeline` / `AsyncSQLitePipeline`, online `backup_to` / `restore_from`, and `VTBARROW` `ArrowCursor` streaming |
-| **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Pure-Rust Thin TNS/TTC (`vertebra._oracle`) with zero Instant Client dependency, `SyncOraclePool` / `AsyncOraclePool` + DRCP (`cclass`, `purity`, `connection_tag`), Autonomous Wallet mTLS & IAM token auth, 26ai `VECTOR` (`0xDB`) & `OSON` binary JSON, `VTBARROW` `ArrowCursor` (`select_to_arrow` / `load_from_arrow`), delayed-commit `pipeline()`, VPD tenancy, `SyncOracleNotificationSource` / `AsyncOracleNotificationSource` |
-| **SQL Server** | `MSSQLAsyncConfig`, `MSSQLSyncConfig` | `MSSQLConfig` | `SyncMSSQLDriver`, `AsyncMSSQLDriver` | Pure-Rust TDS 7.4 (`vertebra._mssql`), `?` / `$1` to `@P1` `sp_executesql` RPC rewriter, `BulkLoad`, `ATTENTION` cancellation, `VTBARROW` `ArrowCursor`, `SyncMSSQLPipeline` / `AsyncMSSQLPipeline`, Cloud SQL `:3307` mTLS |
-| **DuckDB** | `DuckDBAsyncConfig`, `DuckDBSyncConfig` | `DuckDBConfig` | `SyncDuckDBDriver`, `AsyncDuckDBDriver` | Native `vertebra._duckdb` (`vertebra-core[duckdb]`), single-writer/multi-reader OLAP, savepoints, `SyncDuckDBPipeline` / `AsyncDuckDBPipeline`, `SyncGcsBearerSecretProvider` / `AsyncGcsBearerSecretProvider` `httpfs` secret rotation, zero-copy Arrow SHM + `Appender` |
-| **Google BigQuery** | `BigQueryAsyncConfig`, `BigQuerySyncConfig` | `BigQueryConfig` | `SyncBigQueryDriver`, `AsyncBigQueryDriver` | Pure-Rust REST v2 + Storage Read/Write v1 (`VTBARROW` zero-copy Arrow SHM via `select_to_arrow` / `load_from_arrow`), `ObjectTableConfig` (`ObjectRef`), `dry_run` cost ceiling, ADK/Litestar/Events/Artifact stores |
-| **Spanner** | `SpannerAsyncConfig`, `SpannerSyncConfig` | `SpannerConfig` | `SyncSpannerDriver`, `AsyncSpannerDriver` | Pure-Rust GoogleSQL + `Spangres`, cached `multiplexed = true` sessions, wound-wait `Aborted` retry, `BatchWrite`, Data Boost `PartitionQuery` (`select_to_arrow`), `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` |
-| **Redis** | — | `RedisConfig` | `SyncRedisDriver`, `AsyncRedisDriver` | Standalone native `vertebra._redis` (`vertebra-core[redis]`), RESP3 (`HELLO 3`), atomic pipelines, `CLIENT TRACKING` local cache invalidation, Sentinel, and Cluster (`CRC16-XMODEM`) |
-| **Valkey** | — | `ValkeyConfig` | `SyncValkeyDriver`, `AsyncValkeyDriver` | Standalone native `vertebra._valkey` (`vertebra-core[valkey]`), Valkey 8.0+/9.0+ RESP3 client-side caching, Valkey 9.0 hash-field expiration (`hexpire`, `httl`), `CLIENT CAPA redirect`, Cluster/Sentinel, Google Cloud Memorystore IAM auth |
-| **DataFusion** | — | `DataFusionConfig` | `DataFusionEngine` | Federated SQL across PostgreSQL, MySQL, SQLite, DuckDB, BigQuery, Spanner, and Parquet/CSV object storage |
+Note that `memory://` is not a database engine URL:
 
-`memory://` is not an engine URL. `MySQLConfig` and `PostgreSQLConfig.from_url("memory://")` raise `ImproperConfigurationError` immediately during config construction; `PostgreSQLConfig(dsn="memory://")`, `RedisConfig`, and `ValkeyConfig` construct from it, while their drivers raise `ImproperConfigurationError` on initialization, and so do the `from_valkey` / `from_redis` factories of `KeyValueStore`, the Litestar `MemoryStore`, the Starlette `CacheStore`, and `SQLAlchemyCacheBackend`. `DatabaseRegistry.parse_url("memory://")` raises `ValueError`. `QueueConfig(backend_url="memory://")`, `SyncObjectStore("memory://")`, and `SQLAlchemyCacheBackend.from_url("memory://")` keep their in-process backends.
+- MySQL configs and `PostgreSQLConfig.from_url("memory://")` raise `ImproperConfigurationError` immediately.
+- Direct DSN construction on PostgreSQL, Redis, and Valkey accepts the string, then raises `ImproperConfigurationError` when initializing a driver or store factory.
+- Parsing it through `DatabaseRegistry.parse_url` raises `ValueError`.
+- In-process components (queues, object storage, and cache backends) continue to accept `memory://`.
 
 ### Spanner and BigQuery
 
-The native Spanner (`vertebra-core[spanner]`) and BigQuery (`vertebra-core[bigquery]`) drivers delegate gRPC Data, Database Admin, Storage Read, and Storage Write calls to the official Google Cloud Rust clients (`google-cloud-spanner` and `google-cloud-bigquery`):
+The Spanner and BigQuery drivers support native Arrow streaming and local emulator workflows:
 
-- **Partitioned Arrow Reads & Writes (`select_to_arrow`, `load_from_arrow`)**: `SyncSpannerDriver.select_to_arrow` and `AsyncSpannerDriver.select_to_arrow` execute a Data Boost partitioned query (`partitioned_query`), automatically falling back to a single-stream query when the statement is not root-partitionable, and materialize the rows into a shared-memory `ArrowCursor` (`VTBARROW`). `SyncBigQueryDriver.select_to_arrow` and `load_from_arrow` stream directly through BigQuery Storage Read/Write v1.
-- **Spanner DDL Endpoint (`SpannerConfig.admin_endpoint`)**: Database Admin DDL (`update_database_ddl`) runs over REST. When `admin_endpoint` is omitted, Vertebra derives `https://spanner.googleapis.com` for `*.googleapis.com` endpoints and maps the Spanner Emulator's `:9010` gRPC port to its `:9020` REST port (`http://localhost:9010` → `http://localhost:9020`). Any other non-Google endpoint requires an explicit `admin_endpoint` before running DDL.
-- **Custom CA Certificates (`ca_pem`)**:
-  - `SpannerConfig.ca_pem` configures TLS trust for Spanner Omni or private HTTPS endpoints only; passing `ca_pem` with a `*.googleapis.com` or `http://` endpoint raises an error.
-  - `BigQueryConfig.ca_pem` applies to the BigQuery REST v2 API only; Storage Read and Storage Write gRPC streams always use the system and bundled Mozilla trust roots.
-- **GoogleSQL Positional Placeholders**: In GoogleSQL mode (`dialect="googlesql"`), positional `$1..$N` placeholders outside single-, double-, triple-quoted, raw, or bytes literals, backtick identifiers, and `--`, `#`, or `/* */` comments are rewritten to `@p1..@pN`.
+- **Partitioned Arrow reads and writes**: Spanner executes Data Boost partitioned queries in `select_to_arrow` and falls back to a single stream when a query is not root-partitionable. BigQuery streams Arrow reads and writes through the Storage Read and Write APIs.
+- **Spanner DDL endpoint**: Admin DDL runs over REST. When `admin_endpoint` is omitted, Vertebra targets the standard Google endpoint for Google hosts and automatically maps the emulator port 9010 to REST port 9020. Other custom endpoints must set `admin_endpoint` explicitly.
+- **Custom CA certificates**: `SpannerConfig.ca_pem` is for Spanner Omni or private HTTPS endpoints only; passing it with a Google or plain HTTP endpoint raises an error. `BigQueryConfig.ca_pem` applies to REST API calls only, while Storage Read and Write gRPC streams use system and Mozilla trust roots.
+- **GoogleSQL placeholders**: In GoogleSQL mode, positional `$1..$N` placeholders outside strings, identifiers, and comments are rewritten to `@p1..@pN`.
 
 ```python
 from vertebra.db.adapters.spanner import SpannerConfig, SyncSpannerDriver
@@ -204,9 +138,9 @@ emulator_config = SpannerConfig(
 driver = SyncSpannerDriver(emulator_config)
 ```
 
-### PostgreSQL Native Driver
+### PostgreSQL
 
-The native PostgreSQL driver (`vertebra-core[postgres]`, backed by `vertebra._postgres`) supports Protocol 3.0 pipelining, `$1..$N` typed parameters (`PgJson`, `PgParameter`, `PgVector`), logical replication CDC, and pushdown vector embeddings:
+Install the `postgres` extra for native PostgreSQL support, including pipelining, typed positional parameter wrappers, logical replication CDC, and vector embedding pushdown:
 
 ```python
 import msgspec
@@ -259,23 +193,15 @@ async with AsyncPostgreSQLDriver(config) as driver:
     )
 ```
 
-### Oracle 26ai Native Driver
+### Oracle 26ai
 
-The native Oracle 26ai driver (`vertebra-core[oracle]`, backed by `vertebra._oracle`) speaks Oracle Thin TNS/TTC directly from Rust with zero Oracle Instant Client (`libclntsh` / ODPI-C) dependency and `GIL_USED == False` compatibility on free-threaded Python:
+Install the `oracle` extra to connect to Oracle without Instant Client:
 
-```mermaid
-flowchart LR
-    A["OracleConfig & Wallet"] --> B["SyncOracleDriver / AsyncOracleDriver"]
-    B --> C["SyncOraclePool / AsyncOraclePool"]
-    C --> D["DRCP, TTC Piggyback & VPD Scope"]
-    D --> E[("Oracle Database 26ai")]
-```
-
-- **Connect Descriptor Precedence, Wallet mTLS & IAM Tokens**: `OracleConfig.connect_descriptor()` resolves targets in priority order: explicit `connect_descriptor_str`, Autonomous Database Cloud Wallet aliases, multi-host RAC/Data Guard `OracleTopologyConfig`, explicit `dsn`, and `host`/`port`/`service_name` (or `sid`). Cloud Wallet archives (`wallet_zip` bytes/path or `wallet_path` + `tns_alias`) extract in memory via `OracleWallet.from_zip_bytes` without temporary files. Set `auth_mode="token"` with `access_token` or `token_auth_options` for IAM/OAuth2 bearer authentication.
-- **Reset relay**: `OracleConfig(enable_reset_relay=False)` connects to the resolved address directly. The default is `True`, and the relay provides the break fallback path.
-- **Native Pools, DRCP & Zero-RTT Session Piggyback**: `SyncOraclePool` and `AsyncOraclePool` run each physical connection on a dedicated Rust worker thread with out-of-band `cancel()` (`ORA-01013` → `QueryCancelledError`), Database Resident Connection Pooling (`OracleDrcpConfig` with `cclass`, `purity="SELF"` or `"NEW"`, and `connection_tag`), and Two-Task Common (`TTC`) piggybacking for `client_identifier`, `module`, `action`, and `ecid`.
-- **Oracle 26ai `VECTOR`, `OSON`, `RETURNING` & Arrow SHM**: Decodes binary `OSON` JSON into Python objects and binary `0xDB` `VECTOR` (`FLOAT32`, `FLOAT64`, `INT8`, `BINARY`) embeddings alongside `OracleEmbeddingPushdown`, supports single-round-trip `DML ... RETURNING ... INTO` out-binds, streams large queries into shared-memory `ArrowCursor` (`VTBARROW`) via `select_to_arrow()`, and ingests Arrow batches via `load_from_arrow()`.
-- **Delayed-Commit Pipelines, VPD Tenancy & TxEventQ Notifications**: `driver.pipeline()` holds an ambient transaction (or nested `SAVEPOINT`) across `results()` and commits only when the `with` / `async with` block exits cleanly so post-fetch checks roll back the batch. `TenantConnectionScope` and `AsyncTenantConnectionScope` apply trusted VPD procedures (`context_package_proc` / `context_clear_proc`) or `DBMS_SESSION.SET_IDENTIFIER` and evict the pooled session if lease-exit reset fails. `SyncOracleNotificationSource` and `AsyncOracleNotificationSource` (`OracleNotifyConfig`) publish and stream Oracle 26ai TxEventQ / `DBMS_AQ` events with exponential reconnect backoff, `wait_timeout_seconds` idle session liveness probing (`SELECT 1 FROM DUAL`), and optional `ChangeFeed` envelopes.
+- **Target resolution and auth**: `OracleConfig` checks explicit connect descriptors, Cloud Wallet aliases, RAC/Data Guard topology, explicit DSNs, and host/port/service settings in order. Wallet zip archives extract in memory without temporary files. Set `auth_mode="token"` for IAM or OAuth2 bearer authentication.
+- **Reset relay**: Enabled by default (`enable_reset_relay=True`) as a break fallback path. Set it to False to connect directly to the resolved address.
+- **Pooling and DRCP**: Native pools run each physical connection on a dedicated worker thread, support out-of-band cancellation (`QueryCancelledError`), configure DRCP pooling, and piggyback client identifier, module, action, and ECID session metadata without extra round trips.
+- **26ai types and Arrow**: Decodes binary OSON JSON and VECTOR embeddings (FLOAT32, FLOAT64, INT8, BINARY), supports single-round-trip DML RETURNING out-binds, and streams Arrow batches directly.
+- **Pipelines, VPD tenancy, and notifications**: Pipelines hold an ambient transaction or nested savepoint and commit only when the block exits cleanly. Tenant scopes apply trusted VPD procedures or client identifiers and evict the pooled session if reset fails. Notification sources stream TxEventQ and AQ events with reconnect backoff and liveness probes.
 
 ```python
 import msgspec
@@ -342,14 +268,14 @@ async with AsyncOraclePool(
         await notifications.close()
 ```
 
-### SQLite Native Driver
+### SQLite
 
-The native SQLite driver (`vertebra-core[sqlite]`, backed by `vertebra._sqlite`) runs on a pure-Rust worker engine bundling SQLite 3.45+ with `GIL_USED = False` compatibility on free-threaded Python:
+Install the `sqlite` extra for a bundled SQLite 3.45+ engine safe on free-threaded Python:
 
-- **Single-Writer / Multi-Reader WAL Pool**: By default, SQLite databases run in WAL mode with a 1-writer thread plus `max_readers` read worker pool. Write transactions and `:memory:` databases are automatically pinned to the dedicated writer worker connection.
-- **Delayed-Commit Pipelines**: `SyncSQLitePipeline` and `AsyncSQLitePipeline` implement `SyncPipeline` and `AsyncPipeline` over `driver.pipeline()`, queueing operations and executing them in a single batch within an ambient transaction or nested `SAVEPOINT`.
-- **Online Backup and Restore**: `driver.backup_to(target_path)` and `driver.restore_from(source_path)` invoke SQLite's online backup API in stepped pages (`pages_per_step=256`) without blocking concurrent reader threads.
-- **Zero-Copy Arrow Streaming**: `driver.select_to_arrow()` streams query results directly into shared-memory `ArrowCursor` (`VTBARROW`) without intermediate Python object allocation.
+- **WAL reader pool**: Runs in WAL mode by default with one dedicated writer thread and configurable concurrent readers. Write transactions and in-memory databases always run on the writer thread.
+- **Pipelines**: `driver.pipeline()` queues operations and executes them in one batch inside an ambient transaction or nested savepoint.
+- **Online backup and restore**: `backup_to` and `restore_from` step through pages (256 pages per step by default) without blocking concurrent readers.
+- **Arrow streaming**: `select_to_arrow()` writes query results straight to a shared-memory Arrow cursor.
 
 ```python
 import msgspec
@@ -382,9 +308,11 @@ async with AsyncSQLiteDriver(config) as driver:
     await driver.backup_to("backup.db")
 ```
 
-### Redis Native Driver
+### Redis and Valkey
 
-The native Redis driver (`vertebra-core[redis]`, backed by `vertebra._redis`) provides pure-Rust RESP3 execution, pipeline batching, `CLIENT TRACKING` local cache invalidation, Sentinel, and Cluster topology routing:
+Install the `redis` or `valkey` extra for native RESP3 drivers with pipelining, client-side cache tracking invalidation, Sentinel, and Cluster routing.
+
+Redis example:
 
 ```python
 from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig
@@ -397,9 +325,7 @@ async with AsyncRedisDriver(config) as driver:
     await notifications.subscribe(["user_events"])
 ```
 
-### Valkey Native Driver
-
-The native Valkey driver (`vertebra-core[valkey]`, backed by `vertebra._valkey`) provides pure-Rust RESP3 execution, Valkey 9.0 hash-field expiration (`hexpire`, `hpexpire`, `httl`, `hpersist`), `CLIENT CAPA redirect`, pipeline batching, `CLIENT TRACKING` local cache invalidation, Sentinel, and Cluster topology routing:
+Valkey adds support for Valkey 9.0 hash-field expiration, client redirect capability, and Google Cloud Memorystore IAM auth:
 
 ```python
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, ValkeyConfig
@@ -416,15 +342,13 @@ async with AsyncValkeyDriver(config) as driver:
     await notifications.subscribe(["user_events"])
 ```
 
-### Typed `DatabaseError` Hierarchy & Google Cloud Exceptions
+### Errors and Cancellation
 
-All relational, analytical, and cloud drivers raise typed exceptions rooted at `vertebra.db.DatabaseError(VertebraError)` with `sqlstate`, `vendor_code`, and `is_transient` metadata:
+All database drivers raise exceptions rooted at `DatabaseError`, carrying SQLSTATE, vendor code, and an `is_transient` retry flag:
 
-- **Core SQL Exceptions (`vertebra.db`)**: `DatabaseError`, `InterfaceError`, `DataError`, `NotFoundError(DataError, ValueError)`, `OperationalError`, `ConnectionFailure`, `PoolExhaustedError`, `QueryCancelledError`, `SerializationFailure`, `IntegrityError`, `InternalError`, `ProgrammingError`, and `NotSupportedError`.
-- **Multi-Base Google Cloud Exceptions (`vertebra._vertebra`)**:
-  - `GoogleCloudError(VertebraError)` and `GoogleCloudAuthError(GoogleCloudError)` carry `code` (`int`, canonical gRPC status `0..16`), `code_name`, `message`, `http_status`, `retry_delay_ms`, and `reason`.
-  - `SpannerError(GoogleCloudError, DatabaseError)` and `SpannerAbortedError(SpannerError, SerializationFailure)` (`code == 10`, `ABORTED`) match both `except GoogleCloudError:` and `except DatabaseError:` handlers.
-  - `BigQueryError(GoogleCloudError, DatabaseError)` and `BigQueryRowError(BigQueryError, DataError)` expose `row_errors` (`list[dict[str, Any]]`, each shaped `{"index": int, "code": int, "message": str}`) on streaming write failures.
+- **SQL errors**: Common subclasses include `NotFoundError`, `IntegrityError`, `OperationalError`, `ConnectionFailure`, `PoolExhaustedError`, `QueryCancelledError`, and `SerializationFailure`. See the [database API reference](../reference/db.md) for the full hierarchy.
+- **Google Cloud errors**: `GoogleCloudError` and `GoogleCloudAuthError` expose gRPC status codes, HTTP status, and server retry delays.
+- **Cloud DB dual inheritance**: `SpannerError` and `BigQueryError` inherit from both `GoogleCloudError` and `DatabaseError`. `SpannerAbortedError` also subclasses `SerializationFailure`, and `BigQueryRowError` subclasses `DataError` with per-row failure details on streaming writes.
 
 ```python
 from vertebra._vertebra import SpannerAbortedError, SpannerError
@@ -441,11 +365,11 @@ except (SpannerError, NotFoundError, DatabaseError) as exc:
     is_retryable = exc.is_transient
 ```
 
-Cancelling an awaited async driver call aborts its background Rust task at the next suspension point; RPCs already transmitted on the wire may still complete server-side. In debug builds, an unexpected Rust task panic surfaces on the awaiting coroutine as `vertebra._vertebra.TaskPanicError` rather than leaving the future pending.
+Cancelling an awaited async driver call aborts its background task at the next suspension point. Requests already sent on the wire may still finish on the server.
 
-## Native Statement Pipelining
+## Statement Pipelining
 
-Drivers implementing `SyncPipelineCapable` or `AsyncPipelineCapable` expose `driver.pipeline()`:
+Drivers that implement pipelining expose `driver.pipeline()`:
 
 ```python
 with driver.pipeline() as pipe:
@@ -456,14 +380,14 @@ with driver.pipeline() as pipe:
     order_rows, total_rows = pipe.results()
 ```
 
-The async form uses `async with driver.pipeline()` and `await pipe.results()`. Results follow queue order. Statements are independent SQL operations; each result contains its own rows or affected count.
+Async drivers use an async context manager and await `pipe.results()`. Results come back in queue order, one entry per statement.
 
-SQLSpec `execute_stack` uses the capability when the stack contains multiple `execute` operations and `continue_on_error=False`. SQLSpec prepares each statement and its binds once, and its processed row metadata selects the native `select` or `execute` operation. Other stacks execute sequentially through the corresponding adapter methods in a transaction. With `continue_on_error=True`, each operation commits or rolls back separately, captures its error, and permits later operations to run. Spanner retains native batch DML for raw all-DML stacks; BigQuery retains its session transaction behavior.
+SQLSpec `execute_stack` automatically uses native pipelining when a stack has multiple execute operations and `continue_on_error=False`. Other stacks run sequentially inside a transaction. When `continue_on_error=True`, each operation commits or rolls back independently so later operations still run. Spanner keeps native batch DML for all-DML stacks, and BigQuery keeps its session transaction behavior.
 
 ## Topic Guides
 
 | Guide | What You Will Learn |
 | --- | --- |
-| **[Cloud SQL & AlloyDB Dialers](cloud-dialers.md)** | Connect directly to Cloud SQL (`:3307`) and AlloyDB (`:5433`) with ephemeral mTLS and IAM auth without sidecars. |
-| **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Enforce `TenantPredicate` Row-Level Security, stream `ChangeFeed` events, and query zero-copy `ArrowCursor` tables. |
-| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | Configure `SQLSpecPlugin`, Advanced Alchemy, SQLAlchemy 2.1+ `+vtb` dialects, `Vector`, and `MsgspecJSON` column types. |
+| **[Cloud SQL & AlloyDB Dialers](cloud-dialers.md)** | Direct mTLS and IAM auth for Cloud SQL, AlloyDB, AWS RDS, Aurora DSQL, and Azure Entra ID. |
+| **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Multi-tenant row-level security, logical replication change feeds, and shared-memory Arrow queries. |
+| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | Integrations for Litestar, SQLSpec, SQLAlchemy, Advanced Alchemy, Django, gRPC, Oracle APEX, and session brokers. |

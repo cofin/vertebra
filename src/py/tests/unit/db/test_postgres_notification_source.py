@@ -27,7 +27,7 @@ from tests.unit.db.postgres_notification_harness import (
 from vertebra._postgres import AsyncPostgresClient, AsyncPostgresListener, SyncPostgresPool
 from vertebra.db import CDCConfig, ChangeFeed, InterfaceError
 from vertebra.db.adapters.postgres.config import PoolerMode, PostgreSQLConfig
-from vertebra.db.adapters.postgres.events import PostgresNotificationDriver
+from vertebra.db.adapters.postgres.events import AsyncPostgresNotificationDriver
 from vertebra.db.adapters.postgres.notify import (
     AsyncPostgresNotificationSource,
     PostgresNotifyConfig,
@@ -136,7 +136,7 @@ def test_notification_source_end_to_end_publish_subscribe_reuse_and_reconnect() 
             drainer_ctl = _DrainerController(asyncio.get_running_loop())
             cfg = PostgreSQLConfig(dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb", max_size=1)
             concrete_port = NativeNotificationDriverPort(cfg)
-            port: PostgresNotificationDriver = concrete_port
+            port: AsyncPostgresNotificationDriver = concrete_port
             try:
                 async with AsyncPostgresNotificationSource(
                     port,
@@ -294,7 +294,7 @@ def test_notification_source_change_feed_spill_hydration_and_missing_spill_error
         async def _run() -> None:
             cfg = PostgreSQLConfig(dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb", max_size=1)
             concrete_port = NativeNotificationDriverPort(cfg)
-            port: PostgresNotificationDriver = concrete_port
+            port: AsyncPostgresNotificationDriver = concrete_port
             feed = ChangeFeed(
                 CDCConfig(
                     channel="cdc_bus",
@@ -402,7 +402,7 @@ def test_notification_source_pooler_mode_and_direct_dsn_validation(
                 max_size=1,
             )
             concrete_port = NativeNotificationDriverPort(cfg)
-            port: PostgresNotificationDriver = concrete_port
+            port: AsyncPostgresNotificationDriver = concrete_port
             try:
                 async with AsyncPostgresNotificationSource(port) as source:
                     await source.subscribe(["orders"])
@@ -453,7 +453,7 @@ def test_notification_source_channel_bounds_are_atomic_without_io(bad_channel: s
         async def _run() -> None:
             cfg = PostgreSQLConfig(dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb", max_size=1)
             concrete_port = NativeNotificationDriverPort(cfg)
-            port: PostgresNotificationDriver = concrete_port
+            port: AsyncPostgresNotificationDriver = concrete_port
             try:
                 async with AsyncPostgresNotificationSource(port) as source:
                     assert source.subscribed_channels == []
@@ -519,7 +519,7 @@ def test_notification_source_rejects_invalid_constructor_options(
     with _running_pg_server() as srv:
         cfg = PostgreSQLConfig(dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb")
         concrete_port = NativeNotificationDriverPort(cfg)
-        port: PostgresNotificationDriver = concrete_port
+        port: AsyncPostgresNotificationDriver = concrete_port
         try:
             with pytest.raises(expected_exc, match="queue_capacity|reconnect"):
                 AsyncPostgresNotificationSource(
@@ -558,7 +558,7 @@ def test_notification_source_concurrent_listen_guard_and_lazy_extension_imports(
         async def _run() -> None:
             cfg = PostgreSQLConfig(dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb", max_size=1)
             concrete_port = NativeNotificationDriverPort(cfg)
-            port: PostgresNotificationDriver = concrete_port
+            port: AsyncPostgresNotificationDriver = concrete_port
             try:
                 async with AsyncPostgresNotificationSource(port, queue_capacity=16) as source:
                     bad_source: Any = source
@@ -630,7 +630,7 @@ def test_notification_source_startup_reconciliation_and_concurrent_subscriptions
             nonlocal gated_startup_idx
             cfg = PostgreSQLConfig(dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb", max_size=1)
             concrete_port = NativeNotificationDriverPort(cfg)
-            port: PostgresNotificationDriver = concrete_port
+            port: AsyncPostgresNotificationDriver = concrete_port
             try:
                 async with AsyncPostgresNotificationSource(port, queue_capacity=16) as source:
                     await source.subscribe(["a"])

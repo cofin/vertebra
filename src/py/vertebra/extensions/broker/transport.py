@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import inspect
 import os
 import threading
 import time
+from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast, runtime_checkable
+from weakref import WeakKeyDictionary
 
 import msgspec
 
@@ -51,7 +54,7 @@ __all__ = (
     "AsyncSHMBrokerTransport",
     "BrokerConfig",
     "BrokerMetrics",
-    "BrokerStream",
+    "SyncBrokerStream",
     "ChannelMessage",
     "PoolMetrics",
     "StatementPlan",
@@ -59,6 +62,21 @@ __all__ = (
     "SyncConnectionLease",
     "SyncSHMBrokerTransport",
 )
+
+_DEFAULT_BIND_KEY_HASH: int = stable_hash64("default")
+
+
+class _PartitionWaitQueue:
+    """Per-event-loop FIFO waiter deque and single-watcher state for a broker partition."""
+
+    __slots__ = ("local_wakes", "waiters", "watcher_active", "watcher_seq", "watcher_task")
+
+    def __init__(self) -> None:
+        self.waiters: deque[asyncio.Future[bool]] = deque()
+        self.local_wakes = 0
+        self.watcher_active = False
+        self.watcher_seq = 0
+        self.watcher_task: asyncio.Task[None] | None = None
 
 
 @runtime_checkable
@@ -454,10 +472,10 @@ class _BaseBrokerStream:
         return chunk_iter
 
 
-class BrokerStream(_BaseBrokerStream):
+class SyncBrokerStream(_BaseBrokerStream):
     """Streaming cursor over DBRPC query execution or chunk sources with cancellation quarantine."""
 
-    def __iter__(self) -> BrokerStream:
+    def __iter__(self) -> SyncBrokerStream:
         return self
 
     def __next__(self) -> DbRpcResponse:
@@ -505,7 +523,7 @@ class BrokerStream(_BaseBrokerStream):
             with contextlib.suppress(Exception):
                 close_fn()
 
-    def __enter__(self) -> BrokerStream:
+    def __enter__(self) -> SyncBrokerStream:
         return self
 
     def __exit__(
@@ -654,7 +672,10 @@ class _BaseSHMBrokerTransport:
         self._partition_names: dict[int, str] = {}
         self._pool_counters: dict[str, dict[str, int]] = {}
         self._lease_partitions: dict[tuple[int, int], str] = {}
+        self._lease_partition_ids: dict[tuple[int, int], int] = {}
         self._quarantined_partitions: dict[tuple[int, int], str] = {}
+        self._quarantined_partition_ids: dict[tuple[int, int], int] = {}
+        self._has_partition_count = callable(getattr(self._native, "partition_count", None))
         self._request_seq = 0
         self._lock = threading.Lock()
 
@@ -780,6 +801,8 @@ class _BaseSHMBrokerTransport:
     def _resolve_partition(self, partition: int | None, bind_key: str | None, bind_hash: int) -> int | None:
         if partition is not None or bind_key is None:
             return partition
+        if self._has_partition_count and self._native.partition_count() == 0:
+            return None
         with self._lock:
             resolved = self._partitions.get(bind_key)
         if resolved is not None:
@@ -806,6 +829,7 @@ class _BaseSHMBrokerTransport:
             if partition is not None:
                 pool_name = self._partition_names.get(partition, bind_key or f"partition-{partition}")
                 self._lease_partitions[(slot_index, generation)] = pool_name
+                self._lease_partition_ids[(slot_index, generation)] = partition
                 self._pool_counters.setdefault(pool_name, self._empty_pool_counters())
                 self._pool_counters[pool_name]["total_acquired"] += 1
                 self._pool_counters[pool_name]["active_leases"] += 1
@@ -816,6 +840,8 @@ class _BaseSHMBrokerTransport:
     def _bind_key_hash(bind_key: str | None) -> int:
         if bind_key is None:
             return 0
+        if bind_key == "default":
+            return _DEFAULT_BIND_KEY_HASH
         return stable_hash64(bind_key)
 
     @property
@@ -963,14 +989,18 @@ class _BaseSHMBrokerTransport:
             pools=pools,
         )
 
-    def _record_pool_release(self, slot_index: int, generation: int) -> None:
+    def _record_pool_release(self, slot_index: int, generation: int) -> int | None:
         with self._lock:
             pool_name = self._lease_partitions.pop((slot_index, generation), None)
+            partition_id = self._lease_partition_ids.pop((slot_index, generation), None)
             if pool_name and pool_name in self._pool_counters:
                 counters = self._pool_counters[pool_name]
                 if counters["active_leases"] > 0:
                     counters["active_leases"] -= 1
                 counters["total_released"] += 1
+            if pool_name and pool_name in self._partitions:
+                return self._partitions[pool_name]
+            return partition_id
 
     def _record_pool_quarantine(
         self,
@@ -983,8 +1013,13 @@ class _BaseSHMBrokerTransport:
     ) -> None:
         with self._lock:
             pool_name = self._lease_partitions.pop((slot_index, old_generation), None)
+            partition_id = self._lease_partition_ids.pop((slot_index, old_generation), None)
+            if partition_id is None and pool_id is not None and pool_id in self._partition_names:
+                partition_id = pool_id
             if not pool_name and pool_id is not None:
                 pool_name = self._partition_names.get(pool_id, "")
+            if partition_id is not None:
+                self._quarantined_partition_ids[(slot_index, new_generation)] = partition_id
             if pool_name and pool_name in self._pool_counters:
                 counters = self._pool_counters[pool_name]
                 if counters["active_leases"] > 0:
@@ -995,14 +1030,21 @@ class _BaseSHMBrokerTransport:
                     counters["total_reclaimed"] += 1
                 self._quarantined_partitions[(slot_index, new_generation)] = pool_name
 
-    def _record_pool_dispose(self, slot_index: int, generation: int) -> None:
+    def _record_pool_dispose(self, slot_index: int, generation: int) -> int | None:
         with self._lock:
             pool_name = self._quarantined_partitions.pop((slot_index, generation), None)
+            partition_id = self._quarantined_partition_ids.pop((slot_index, generation), None)
             if pool_name and pool_name in self._pool_counters:
                 counters = self._pool_counters[pool_name]
                 if counters["quarantined"] > 0:
                     counters["quarantined"] -= 1
                 counters["total_disposed"] += 1
+            if pool_name and pool_name in self._partitions:
+                return self._partitions[pool_name]
+            return partition_id
+
+    def _on_slot_freed(self, partition: int | None) -> None:
+        """Hook invoked after a local release or quarantined disposal frees a slot."""
 
     def _acquire_sync(
         self,
@@ -1087,7 +1129,8 @@ class _BaseSHMBrokerTransport:
                 )
             released = self._native.release(lease.slot_index, lease.generation)
             if released:
-                self._record_pool_release(lease.slot_index, lease.generation)
+                freed_partition = self._record_pool_release(lease.slot_index, lease.generation)
+                self._on_slot_freed(freed_partition)
             return released
 
         try:
@@ -1097,7 +1140,8 @@ class _BaseSHMBrokerTransport:
                 gen = int(parts[1])
                 released = self._native.release(slot_idx, gen)
                 if released:
-                    self._record_pool_release(slot_idx, gen)
+                    freed_partition = self._record_pool_release(slot_idx, gen)
+                    self._on_slot_freed(freed_partition)
                 return released
         except (ValueError, TypeError):
             pass
@@ -1153,7 +1197,8 @@ class _BaseSHMBrokerTransport:
     ) -> None:
         _, slot_idx, gen = self._resolve_slot_generation(target, generation)
         self._native.dispose_quarantined(slot_idx, gen)
-        self._record_pool_dispose(slot_idx, gen)
+        freed_partition = self._record_pool_dispose(slot_idx, gen)
+        self._on_slot_freed(freed_partition)
 
     def _reclaim_worker_leases_impl(self, worker_pid: int) -> list[ReclaimedLease]:
         reclaimed = self._native.reclaim_worker_leases(worker_pid)
@@ -1483,9 +1528,9 @@ class SyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         | Callable[[], Iterator[DbRpcResponse | bytes | str]]
         | None = None,
         on_cancel: Callable[[], None] | None = None,
-    ) -> BrokerStream:
+    ) -> SyncBrokerStream:
         """Open a streaming DBRPC cursor supporting ``VTBARROW`` and row chunk responses."""
-        return BrokerStream(
+        return SyncBrokerStream(
             self,
             dialect_tag,
             engine_pool_id,
@@ -1517,6 +1562,200 @@ class SyncSHMBrokerTransport(_BaseSHMBrokerTransport):
 class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
     """Production asynchronous shared-memory connection broker and statement cache transport."""
 
+    def __init__(
+        self,
+        config: BrokerConfig | None = None,
+        *,
+        native: LeaseBroker | None = None,
+    ) -> None:
+        super().__init__(config=config, native=native)
+        self._waiter_lock = threading.Lock()
+        self._waiter_queues: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[int | None, _PartitionWaitQueue]] = (
+            WeakKeyDictionary()
+        )
+        self._has_native_wake = callable(getattr(self._native, "wait_for_wake_async", None)) and callable(
+            getattr(self._native, "wake_seq", None)
+        )
+        self._has_record_timeout = callable(getattr(self._native, "record_timeout", None))
+
+    @staticmethod
+    def _resolve_future(fut: asyncio.Future[bool], from_broker: bool) -> None:
+        if not fut.done():
+            fut.set_result(from_broker)
+
+    def _record_timeout(self) -> None:
+        if self._has_record_timeout:
+            self._native.record_timeout()
+
+    def _try_acquire_once(
+        self,
+        resolved_partition: int | None,
+        worker: int,
+        ttl_ns: int,
+        bind_hash: int,
+    ) -> Any:
+        if resolved_partition is not None:
+            return self._native.try_acquire_in(
+                partition=resolved_partition,
+                worker_pid=worker,
+                ttl_ns=ttl_ns,
+                bind_key_hash=bind_hash,
+            )
+        return self._native.try_acquire(worker_pid=worker, ttl_ns=ttl_ns, bind_key_hash=bind_hash)
+
+    def _get_wait_queue(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        partition: int | None,
+    ) -> _PartitionWaitQueue:
+        with self._waiter_lock:
+            loop_queues = self._waiter_queues.get(loop)
+            if loop_queues is None:
+                loop_queues = {}
+                self._waiter_queues[loop] = loop_queues
+            queue = loop_queues.get(partition)
+            if queue is None:
+                queue = _PartitionWaitQueue()
+                loop_queues[partition] = queue
+            return queue
+
+    def _pop_live_waiter_locked(self, queue: _PartitionWaitQueue) -> asyncio.Future[bool] | None:
+        while queue.waiters:
+            candidate = queue.waiters.popleft()
+            if not candidate.done():
+                return candidate
+        return None
+
+    def _discard_waiter(self, queue: _PartitionWaitQueue, waiter: asyncio.Future[bool]) -> None:
+        task_to_cancel: asyncio.Task[None] | None = None
+        with self._waiter_lock:
+            with contextlib.suppress(ValueError):
+                queue.waiters.remove(waiter)
+            while queue.waiters and queue.waiters[0].done():
+                queue.waiters.popleft()
+            if not queue.waiters and queue.watcher_task is not None:
+                task_to_cancel = queue.watcher_task
+                queue.watcher_active = False
+                queue.watcher_task = None
+                queue.local_wakes = 0
+        if task_to_cancel is not None and not task_to_cancel.done():
+            task_to_cancel.cancel()
+
+    async def _watch_broker_wakes(self, queue: _PartitionWaitQueue, initial_seq: int) -> None:
+        """Watch cross-process SHM wake sequence updates for a non-empty partition waiter queue."""
+        seq = initial_seq
+        current = asyncio.current_task()
+        try:
+            while True:
+                with self._waiter_lock:
+                    if queue.watcher_task is None:
+                        queue.watcher_task = current
+                    while queue.waiters and queue.waiters[0].done():
+                        queue.waiters.popleft()
+                    if not queue.waiters:
+                        queue.local_wakes = 0
+                        queue.watcher_active = False
+                        queue.watcher_task = None
+                        return
+
+                next_seq = await self._native.wait_for_wake_async(seq, 25)
+                to_wake: list[asyncio.Future[bool]] = []
+                with self._waiter_lock:
+                    while queue.waiters and queue.waiters[0].done():
+                        queue.waiters.popleft()
+                    if not queue.waiters:
+                        queue.local_wakes = 0
+                        queue.watcher_active = False
+                        queue.watcher_task = None
+                        return
+                    if next_seq != seq:
+                        delta = (next_seq - seq) & 0xFFFFFFFF
+                        consumed_local = min(delta, queue.local_wakes)
+                        queue.local_wakes -= consumed_local
+                        remote_wakes = delta - consumed_local
+                        for _ in range(min(remote_wakes, len(queue.waiters))):
+                            fut = self._pop_live_waiter_locked(queue)
+                            if fut is None:
+                                break
+                            to_wake.append(fut)
+                    seq = next_seq
+                    queue.watcher_seq = next_seq
+                for fut in to_wake:
+                    self._resolve_future(fut, True)
+        finally:
+            with self._waiter_lock:
+                if queue.watcher_task is current or (queue.watcher_task is None and queue.watcher_active):
+                    queue.watcher_active = False
+                    queue.watcher_task = None
+                    if not queue.waiters:
+                        queue.local_wakes = 0
+
+    @staticmethod
+    def _credit_local_wake_locked(queue: _PartitionWaitQueue, post_release_seq: int | None) -> None:
+        if post_release_seq is None or not queue.watcher_active:
+            return
+        pending_delta = (post_release_seq - queue.watcher_seq) & 0xFFFFFFFF
+        if 0 < pending_delta < 0x80000000 and queue.local_wakes < pending_delta:
+            queue.local_wakes += 1
+
+    def _on_slot_freed(self, partition: int | None) -> None:
+        """Wake a local async waiter directly on its event loop without touching SyncPool."""
+        try:
+            running_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        post_release_seq = self._native.wake_seq() if self._has_native_wake else None
+        to_wake: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[bool]]] = []
+        with self._waiter_lock:
+            if not self._waiter_queues:
+                return
+            ordered_loops: list[tuple[asyncio.AbstractEventLoop, dict[int | None, _PartitionWaitQueue]]] = []
+            if running_loop is not None and not running_loop.is_closed() and running_loop in self._waiter_queues:
+                ordered_loops.append((running_loop, self._waiter_queues[running_loop]))
+            for loop, loop_queues in self._waiter_queues.items():
+                if loop is not running_loop and not loop.is_closed():
+                    ordered_loops.append((loop, loop_queues))
+
+            for loop, loop_queues in ordered_loops:
+                queue = loop_queues.get(partition)
+                if queue is not None:
+                    fut = self._pop_live_waiter_locked(queue)
+                    if fut is not None:
+                        self._credit_local_wake_locked(queue, post_release_seq)
+                        to_wake.append((loop, fut))
+                        break
+
+            if partition is not None:
+                for loop, loop_queues in ordered_loops:
+                    unpart_queue = loop_queues.get(None)
+                    if unpart_queue is not None:
+                        fut = self._pop_live_waiter_locked(unpart_queue)
+                        if fut is not None:
+                            self._credit_local_wake_locked(unpart_queue, post_release_seq)
+                            to_wake.append((loop, fut))
+                            break
+
+            if not to_wake:
+                for loop, loop_queues in ordered_loops:
+                    for key, queue in loop_queues.items():
+                        if key == partition or key is None:
+                            continue
+                        fut = self._pop_live_waiter_locked(queue)
+                        if fut is not None:
+                            self._credit_local_wake_locked(queue, post_release_seq)
+                            to_wake.append((loop, fut))
+                            break
+                    if to_wake:
+                        break
+
+        for loop, fut in to_wake:
+            if loop is running_loop:
+                self._resolve_future(fut, True)
+            else:
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(self._resolve_future, fut, True)
+
     async def acquire(
         self,
         worker_id: int | None = None,
@@ -1533,44 +1772,106 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
 
         resolved_partition = self._resolve_partition(partition, bind_key, bind_hash)
 
-        if resolved_partition is not None:
-            grant = self._native.try_acquire_in(
-                partition=resolved_partition,
-                worker_pid=worker,
-                ttl_ns=ttl_ns,
-                bind_key_hash=bind_hash,
-            )
-        else:
-            grant = self._native.try_acquire(worker_pid=worker, ttl_ns=ttl_ns, bind_key_hash=bind_hash)
+        grant = self._try_acquire_once(resolved_partition, worker, ttl_ns, bind_hash)
         if grant is not None:
             return self._build_async_lease(grant, worker, resolved_partition, resolved_bind_key)
 
-        effective_timeout = (
-            int(timeout * 1000)
-            if timeout is not None
-            else (timeout_ms if timeout_ms is not None else self._config.acquire_timeout_ms)
-        )
-        if resolved_partition is not None:
-            blocking_grant = await SyncPool.default().submit_async(
-                self._native.acquire_in,
-                resolved_partition,
-                worker,
-                ttl_ns,
-                effective_timeout,
-                bind_hash,
-            )
+        if timeout is not None:
+            if timeout <= 0:
+                self._record_timeout()
+                raise TimeoutError("Connection broker pool exhausted")
+            timeout_s = timeout
+            effective_timeout_ms = max(1, int(timeout * 1000))
         else:
-            blocking_grant = await SyncPool.default().submit_async(
-                self._native.acquire,
-                worker,
-                ttl_ns,
-                effective_timeout,
-                bind_hash,
-            )
-        if blocking_grant is None:
-            raise TimeoutError("Connection broker pool exhausted")
+            effective_timeout_ms = timeout_ms if timeout_ms is not None else self._config.acquire_timeout_ms
+            if effective_timeout_ms <= 0:
+                self._record_timeout()
+                raise TimeoutError("Connection broker pool exhausted")
+            timeout_s = effective_timeout_ms / 1000.0
 
-        return self._build_async_lease(blocking_grant, worker, resolved_partition, resolved_bind_key)
+        if not self._has_native_wake:
+            if resolved_partition is not None:
+                blocking_grant = await SyncPool.default().submit_async(
+                    self._native.acquire_in,
+                    resolved_partition,
+                    worker,
+                    ttl_ns,
+                    effective_timeout_ms,
+                    bind_hash,
+                )
+            else:
+                blocking_grant = await SyncPool.default().submit_async(
+                    self._native.acquire,
+                    worker,
+                    ttl_ns,
+                    effective_timeout_ms,
+                    bind_hash,
+                )
+            if blocking_grant is None:
+                raise TimeoutError("Connection broker pool exhausted")
+            return self._build_async_lease(blocking_grant, worker, resolved_partition, resolved_bind_key)
+
+        loop = asyncio.get_running_loop()
+        queue = self._get_wait_queue(loop, resolved_partition)
+        deadline = time.monotonic() + timeout_s
+
+        while True:
+            seq = self._native.wake_seq()
+            grant = self._try_acquire_once(resolved_partition, worker, ttl_ns, bind_hash)
+            if grant is not None:
+                return self._build_async_lease(grant, worker, resolved_partition, resolved_bind_key)
+
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                self._record_timeout()
+                raise TimeoutError("Connection broker pool exhausted")
+
+            waiter: asyncio.Future[bool] = loop.create_future()
+            start_watcher = False
+            with self._waiter_lock:
+                queue.waiters.append(waiter)
+                if not queue.watcher_active:
+                    queue.watcher_active = True
+                    queue.local_wakes = 0
+                    queue.watcher_seq = seq
+                    start_watcher = True
+
+            if start_watcher:
+                try:
+                    task = loop.create_task(self._watch_broker_wakes(queue, seq))
+                except BaseException:
+                    with self._waiter_lock:
+                        queue.watcher_active = False
+                        queue.watcher_task = None
+                    self._discard_waiter(queue, waiter)
+                    raise
+                if not task.done():
+                    with self._waiter_lock:
+                        if queue.watcher_active and queue.watcher_task is None:
+                            queue.watcher_task = task
+
+            timer = loop.call_later(remaining_s, self._resolve_future, waiter, False)
+            woken_by_broker = False
+            try:
+                woken_by_broker = await waiter
+            except asyncio.CancelledError:
+                consumed_wake = waiter.done() and not waiter.cancelled() and bool(waiter.result())
+                if not waiter.done():
+                    waiter.cancel()
+                relay_fut: asyncio.Future[bool] | None = None
+                if consumed_wake:
+                    with self._waiter_lock:
+                        relay_fut = self._pop_live_waiter_locked(queue)
+                else:
+                    self._discard_waiter(queue, waiter)
+                woken_by_broker = True
+                if relay_fut is not None:
+                    self._resolve_future(relay_fut, True)
+                raise
+            finally:
+                timer.cancel()
+                if not woken_by_broker:
+                    self._discard_waiter(queue, waiter)
 
     def _build_async_lease(
         self,
@@ -1604,20 +1905,20 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         return lease
 
     async def release(self, lease_id: str) -> bool:
-        """Release an acquired connection lease asynchronously."""
-        return await SyncPool.default().submit_async(self._release_impl, lease_id)
+        """Release an acquired connection lease asynchronously without blocking on SyncPool waiters."""
+        return self._release_impl(lease_id)
 
     async def quarantine(self, target: _BaseConnectionLease | str | tuple[int, int]) -> None:
-        """Move an active lease into quarantine asynchronously."""
-        await SyncPool.default().submit_async(self._quarantine_impl, target)
+        """Move an active lease into quarantine asynchronously without blocking on SyncPool waiters."""
+        self._quarantine_impl(target)
 
     async def dispose_quarantined(
         self,
         target: _BaseConnectionLease | int | tuple[int, int],
         generation: int | None = None,
     ) -> None:
-        """Return a quarantined slot back to the free pool asynchronously."""
-        await SyncPool.default().submit_async(self._dispose_quarantined_impl, target, generation)
+        """Return a quarantined slot back to the free pool asynchronously without blocking on SyncPool waiters."""
+        self._dispose_quarantined_impl(target, generation)
 
     def quarantined_count(self) -> int:
         """Return count of currently quarantined connection slots."""

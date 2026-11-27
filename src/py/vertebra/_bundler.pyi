@@ -1,19 +1,20 @@
 """Type stubs for the vertebra._bundler native extension module."""
 
-from typing import final
+from types import TracebackType
+from typing import Self, final
 
 FREE_THREADED: bool
 GIL_USED: bool
 
 __all__ = [
-    "BuildResult",
     "BundleConfig",
+    "BundleDevConfig",
+    "BundleOutput",
+    "BundleResult",
     "Bundler",
-    "DevConfig",
     "FREE_THREADED",
     "GIL_USED",
     "IsolatedDeclarationsGenerator",
-    "OutputFile",
     "SSRPool",
     "SSRResult",
     "SourceWatcher",
@@ -21,30 +22,30 @@ __all__ = [
 ]
 
 @final
-class OutputFile:
+class BundleOutput:
     @property
     def path(self) -> str: ...
     @property
     def size(self) -> int: ...
     @property
     def is_entry(self) -> bool: ...
-    def __new__(cls, path: str, size: int, is_entry: bool) -> OutputFile: ...
+    def __new__(cls, path: str, size: int, is_entry: bool) -> BundleOutput: ...
     def __repr__(self) -> str: ...
 
 @final
-class BuildResult:
+class BundleResult:
     @property
-    def outputs(self) -> list[OutputFile]: ...
+    def outputs(self) -> list[BundleOutput]: ...
     @property
     def duration_ms(self) -> int: ...
     @property
     def warnings(self) -> list[str]: ...
     def __new__(
         cls,
-        outputs: list[OutputFile],
+        outputs: list[BundleOutput],
         duration_ms: int,
         warnings: list[str],
-    ) -> BuildResult: ...
+    ) -> BundleResult: ...
     def __repr__(self) -> str: ...
 
 @final
@@ -66,7 +67,7 @@ class BundleConfig:
     def output_path(self) -> str: ...
 
 @final
-class DevConfig:
+class BundleDevConfig:
     entry: str
     watch_dirs: list[str]
     hmr_port: int
@@ -79,7 +80,7 @@ class DevConfig:
         hmr_port: int = 5173,
         extensions: list[str] = ...,
         debounce_ms: int = 100,
-    ) -> DevConfig: ...
+    ) -> BundleDevConfig: ...
 
 @final
 class SourceWatcher:
@@ -121,9 +122,32 @@ class IsolatedDeclarationsGenerator:
 
 @final
 class Bundler:
-    def __new__(cls) -> Bundler: ...
-    def build(self, config: BundleConfig) -> BuildResult: ...
-    def start_dev(self, config: DevConfig) -> None: ...
+    @property
+    def config(self) -> BundleConfig | None: ...
+    @property
+    def dev_config(self) -> BundleDevConfig | None: ...
+    def __new__(
+        cls,
+        config: BundleConfig | None = None,
+        *,
+        dev_config: BundleDevConfig | None = None,
+    ) -> Bundler: ...
+    @classmethod
+    def from_config(
+        cls,
+        config: BundleConfig,
+        *,
+        dev_config: BundleDevConfig | None = None,
+    ) -> Bundler: ...
+    def __enter__(self) -> Self: ...
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None = None,
+        _exc_value: BaseException | None = None,
+        _traceback: TracebackType | None = None,
+    ) -> bool: ...
+    def build(self, config: BundleConfig | None = None) -> BundleResult: ...
+    def start_dev(self, config: BundleDevConfig | None = None) -> None: ...
     def stop_dev(self) -> None: ...
     def poll_events(self, timeout_ms: int | None = None) -> list[str]: ...
     def transform_file(self, path: str, source: str) -> str: ...

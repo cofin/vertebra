@@ -1,10 +1,10 @@
-# `vertebra.framework` — Dependency Injection, Security, OpenAPI & Realtime
+# Framework Primitives
 
-Core framework primitives for dependency injection (`Provide`, `Container`), security guards (`Guard`, `Principal`, `SecurityConfig`), OpenAPI 3.1 and AsyncAPI 3.0 specification generation, real-time `LiveState` synchronization, typed RPC procedures (`ProcedureRouter`), and transactional email and response cache stores. See [Framework Features](../usage/framework-features.md) for usage examples.
+Core primitives in `vertebra.framework` for dependency injection, security guards, OpenAPI and AsyncAPI specs, live state sync, typed RPC procedures, email, and key-value stores. See [Framework Features](../usage/framework-features.md) for usage examples.
 
-## Dependency Injection (`vertebra.framework.di`)
+## Dependency Injection
 
-`Provide` and `Container` compile a static dependency graph at route registration time, supporting synchronous, asynchronous, and generator-scoped dependencies without per-request reflection overhead.
+`Provide` and `Container` compile a static dependency graph at route registration time. They support sync, async, and generator-scoped dependencies without per-request reflection.
 
 ::: vertebra.framework.di.Provide
     options:
@@ -14,7 +14,7 @@ Core framework primitives for dependency injection (`Provide`, `Container`), sec
     options:
       heading_level: 3
 
-## Security & Guards (`vertebra.framework.security`)
+## Security & Guards
 
 ::: vertebra.framework.security.Principal
     options:
@@ -30,7 +30,7 @@ Core framework primitives for dependency injection (`Provide`, `Container`), sec
     options:
       heading_level: 3
 
-## OpenAPI & AsyncAPI (`vertebra.framework.openapi`, `vertebra.framework.asyncapi`)
+## OpenAPI & AsyncAPI
 
 ::: vertebra.framework.openapi.OpenAPIConfig
     options:
@@ -46,7 +46,7 @@ Core framework primitives for dependency injection (`Provide`, `Container`), sec
       heading_level: 4
       members: false
 
-## Real-Time `LiveState` & Procedures (`vertebra.framework.live`, `vertebra.framework.procedures`)
+## Live State & Procedures
 
 ::: vertebra.framework.live.LiveState
     options:
@@ -56,7 +56,7 @@ Core framework primitives for dependency injection (`Provide`, `Container`), sec
     options:
       heading_level: 3
 
-## Email & Stores (`vertebra.framework.email`, `vertebra.framework.stores`)
+## Email & Stores
 
 ::: vertebra.framework.email.base.EmailService
     options:

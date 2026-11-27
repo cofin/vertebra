@@ -99,10 +99,10 @@ The frontend surface spans the [`_bundler`](../../../../../src/rs/vertebra-bundl
 
 | Symbol | Python import | Responsibility |
 | --- | --- | --- |
-| `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile` | `vertebra._bundler` | Single-entry Oxc transform with optional minify and dev watcher control (`start_dev`, `stop_dev`, `poll_events`). |
-| `SourceWatcher` (`PySourceWatcher`), `HmrEvent` | `_bundler` only | Debounced file watcher; Python drains changed paths with `poll_events(timeout_ms=None)`. |
-| `SSRPool`, `SSRResult` | `_bundler` only | QuickJS slot pool, fixed 60 s render cache, generation-based reload, `PoolExhausted` when all slots are busy. |
-| `IsolatedDeclarationsGenerator`, `minify_css` | `_bundler` only | `.d.ts` isolated declaration emission and CSS comment/whitespace minification. |
+| `Bundler`, `BundleConfig`, `BundleDevConfig`, `BundleResult`, `BundleOutput` | `vertebra.build` (lazy facade over `vertebra._bundler`) | Config-first single-entry Oxc transform (`Bundler(config, dev_config=...).build()`, context-managed dev watcher `start_dev`/`stop_dev`/`poll_events`). |
+| `SourceWatcher` (`PySourceWatcher`), `HmrEvent` | `vertebra.build` (`HmrEvent` Rust-internal) | Debounced file watcher; Python drains changed paths with `poll_events(timeout_ms=None)`. |
+| `SSRPool`, `SSRResult` | `_bundler` only (wrapped by `vertebra.framework.ssr`) | QuickJS slot pool, fixed 60 s render cache, generation-based reload, `PoolExhausted` when all slots are busy. |
+| `IsolatedDeclarationsGenerator`, `minify_css` | `vertebra.build` | `.d.ts` isolated declaration emission and CSS comment/whitespace minification. |
 | `BundlerError` | raised as `RuntimeError` | `Io`, `Parse`, `Transform`, `Watcher`, `Ssr`, `PoolExhausted`. |
 
 ## Python build package (`vertebra.build`)

@@ -1,34 +1,14 @@
 # Framework Extensions
 
-`vertebra.extensions` connects Vertebra's native HTTP server, shared-memory worker pools, and multicloud object storage to Litestar, SQLSpec, SQLAlchemy / Advanced Alchemy, gRPC, and Oracle APEX.
+`vertebra.extensions` connects Vertebra's HTTP server, worker pools, database drivers, and object storage to Litestar, SQLSpec, SQLAlchemy, Advanced Alchemy, Django, gRPC, and Oracle APEX.
 
-=== "uv"
+```bash
+uv add "vertebra-core[sqlspec,alchemy]"
+```
 
-    ```bash
-    uv add "vertebra-core[sqlspec,alchemy]"
-    ```
+## Litestar Integration
 
-=== "pip"
-
-    ```bash
-    pip install "vertebra-core[sqlspec,alchemy]"
-    ```
-
-=== "pdm"
-
-    ```bash
-    pdm add "vertebra-core[sqlspec,alchemy]"
-    ```
-
-=== "poetry"
-
-    ```bash
-    poetry add "vertebra-core[sqlspec,alchemy]"
-    ```
-
-## Litestar Integration & Middleware Offload (`vertebra.extensions.litestar`)
-
-Vertebra provides first-class support for Litestar applications. Use `VertebraPlugin` and `VertebraConfig` to run a Litestar application on Vertebra's native HTTP ingress while offloading CORS, response compression, and static asset serving directly to the native server:
+Use `VertebraPlugin` and `VertebraConfig` to run a Litestar app on Vertebra's native HTTP server while offloading CORS, response compression, and static files:
 
 ```python
 from litestar import Litestar, get
@@ -46,37 +26,36 @@ app = Litestar(
 )
 ```
 
-`VertebraConfig(swap_memory_response_cache=True)` opts into replacing Litestar's default response cache store with Vertebra's `MemoryStore` (off by default); attach `create_channels_plugin(...)` for realtime pub/sub channels.
+Pass `swap_memory_response_cache=True` to replace Litestar's default response cache store with Vertebra's memory store. Attach `create_channels_plugin` for pub/sub channels.
 
-### CLI Integration (`litestar run` Override & `vtb` CLI Extensions)
+### CLI Integration
 
-- **`litestar run` CLI Override**: `VertebraPlugin` implements Litestar's `CLIPluginProtocol` (`on_cli_init(cli)` and `server_lifespan(app)`). When `VertebraPlugin` is registered on a `Litestar` app, running `litestar --app app:app run` launches the native Vertebra HTTP/IPC server supervisor while supporting all standard `litestar run` flags (`--host`, `--port`, `--wc` / `--web-concurrency`, `--reload`, `--debug`, `--pdb`) plus Vertebra runtime options (`--workers`, `--topology`, `--threads`, `--loop`, `--drain-timeout`, `--jit` / `--no-jit`, `--no-banner`).
-- **Auto-Integration on `vtb run` / `vtb dev`**: Running an unmodified `Litestar`, `FastAPI`, `Starlette`, or `Flask` application with `vtb run app:app` (or `vtb --app app:app run`) automatically attaches and finalizes the corresponding `VertebraPlugin` (`ensure_vertebra_integration`) when native acceleration is enabled.
-- **Pluggable `vtb` CLI (`CLIPlugin`, `VertebraExtensionGroup`, `VertebraEnv`)**: Both `vertebra.App(plugins=[...])` and host-framework plugins implementing `on_cli_init(cli)` can register custom subcommands on `vtb`. Command callbacks declaring `app` or `env: VertebraEnv` parameters automatically receive the resolved application instance and `VertebraEnv` context when invoked via `vtb --app app:app <subcommand>`.
+- **Litestar CLI override**: When `VertebraPlugin` is registered on a Litestar app, running `litestar --app app:app run` launches Vertebra's server supervisor. Standard Litestar run flags work alongside Vertebra worker, topology, thread, and drain options.
+- **Auto-integration**: Running an unmodified Litestar, FastAPI, Starlette, or Flask app with `vtb run app:app` attaches the matching integration automatically.
+- **Custom CLI commands**: Plugins implementing `on_cli_init` can register subcommands on the `vtb` CLI. Callbacks declaring `app` or `env` parameters receive the resolved application and environment automatically.
 
-### Fast-Path Dispatch & Native Middleware Offload
+### Routing, Channels, and Stores
 
-- **Route Compiler**: `RouteCompiler` extracts Litestar routes into an optimized route table matched by the native HTTP router.
-- **Fast-Path Dispatch**: `FastPath` dispatches simple handlers directly, bypassing ASGI middleware layers when routes have no custom guards or intermediate transforms.
-- **Realtime Channels**: `create_channels_plugin` (`ChannelsBackend`) integrates Litestar `ChannelsPlugin` with the engine-neutral `ChannelBus` across Memory, Valkey (`vertebra._valkey`), Redis (`vertebra._redis`), PostgreSQL (`vertebra._postgres`), and Oracle (`vertebra._oracle`) over `SyncNotificationSource` and `AsyncNotificationSource` with origin-node deduplication and cancellation-shielded stream cleanup.
-- **Response & Key-Value Stores**: `ValkeyStore` (`vertebra._valkey` with RESP3 `CLIENT TRACKING` L1 invalidation), `RedisStore` (`vertebra._redis`), `MemoryStore`, and `ResponseCacheStore` implement `litestar.stores.base.Store` with prefix-scoped `SCAN` + `UNLINK` deletion.
+- **Compiled routing and fast path**: Vertebra compiles Litestar routes into its native HTTP router and dispatches simple handlers directly when no custom guards or middleware transforms apply.
+- **Realtime channels**: `create_channels_plugin` backs Litestar channels with Memory, Valkey, Redis, PostgreSQL, or Oracle pub/sub, including origin-node deduplication and clean shutdown.
+- **Stores**: Valkey (with RESP3 client-tracking invalidation), Redis, Memory, and response cache stores implement Litestar's Store interface with prefix-scoped deletion.
 
-### Litestar Ecosystem Plugins (`vertebra.extensions.litestar.*`)
+### Litestar Ecosystem Plugins
 
-Vertebra provides modular, independently installable extensions for the Litestar ecosystem under `vertebra.extensions.litestar`:
+Install optional Litestar ecosystem bridges as separate extras under `vertebra.extensions.litestar`:
 
-| Plugin | Module | Optional Extra | Description |
+| Plugin | Module | Extra | Purpose |
 | --- | --- | --- | --- |
-| **Queues** | `vertebra.extensions.litestar.queues` | `queues` | `litestar-queues>=0.14.0` integration: `StoreQueueBackend` (`StoreQueueBackendConfig`, `create_store_queue_config`) over `AsyncQueueStore`, `SHMQueueBackend` (`SHMQueueBackendConfig`, `create_shm_queue_config`), `SHMExecutionBackend`, `create_sqlspec_queue_config`, and `ContainerTaskDependencyProvider`. |
-| **Security** | `vertebra.extensions.litestar.security` | `security` | `JWTAuthenticationMechanism` accelerated by native `JWTGuard`, `IngressIdentityMechanism` for trusted mTLS/XFCC headers, and `RateLimitGuard`. |
-| **Autowire** | `vertebra.extensions.litestar.autowire` | `autowire` | `AutowireBridgeIntegration` running controller discovery deterministically before the route compiler. |
-| **Email** | `vertebra.extensions.litestar.email` | `email` | `SESEmailBackend` with native AWS SigV4 signing (`py_sign_aws_sigv4_headers`) requiring zero `botocore` dependency. |
-| **MCP** | `vertebra.extensions.litestar.mcp` | `mcp` | `ObjectStoreSkillSource`, `WellKnownAgentCardOffload` with ETag/304 caching, and `JSONRPCFrameAccelerator`. |
-| **Vite** | `vertebra.extensions.litestar.vite` | `vite` | `VitePlugin` integration with automatic resolution of wheel-native `@vertebra/client` assets. |
-| **AsyncAPI** | `vertebra.extensions.litestar.asyncapi` | `asyncapi` | Event and schema documentation for background tasks and WebSocket channels. |
-| **HTMX** | `vertebra.extensions.litestar.htmx` | `htmx` | HTMX response headers, partials, and push-URL directives. |
+| **Queues** | `vertebra.extensions.litestar.queues` | `queues` | Background queue backends over database queue stores, shared memory, SQLSpec, and DI container providers. |
+| **Security** | `vertebra.extensions.litestar.security` | `security` | Native JWT validation, trusted mTLS/XFCC ingress identity, and rate-limiting guards. |
+| **Autowire** | `vertebra.extensions.litestar.autowire` | `autowire` | Controller discovery wired ahead of route compilation. |
+| **Email** | `vertebra.extensions.litestar.email` | `email` | Amazon SES backend with native SigV4 signing and no botocore dependency. |
+| **MCP** | `vertebra.extensions.litestar.mcp` | `mcp` | Object-store skill loading, cached well-known agent cards, and accelerated JSON-RPC framing. |
+| **Vite** | `vertebra.extensions.litestar.vite` | `vite` | Vite plugin integration resolving bundled TypeScript client assets. |
+| **AsyncAPI** | `vertebra.extensions.litestar.asyncapi` | `asyncapi` | Schema documentation for background tasks and WebSocket channels. |
+| **HTMX** | `vertebra.extensions.litestar.htmx` | `htmx` | HTMX response headers, partials, and push-URL helpers. |
 
-Configure Litestar integration with `VertebraPlugin` and `VertebraConfig` (and attach any optional `vertebra.extensions.litestar.*` helper plugins listed above):
+Register `VertebraPlugin` alongside any of these optional plugins:
 
 ```python
 from litestar import Litestar
@@ -92,53 +71,20 @@ app = Litestar(
 )
 ```
 
-## SQLSpec 0.74.1+ Per-Engine Adapters, Stores & SHM Proxy (`vertebra.extensions.sqlspec`)
+## SQLSpec Integration
 
-Vertebra provides first-class support for `sqlspec>=0.74.1` across 8 per-engine adapter packages (`vertebra.extensions.sqlspec.adapters.{postgres,sqlite,mysql,oracle,mssql,duckdb,bigquery,spanner}`), native statement pipelining, shared-memory connection pooling, and Google ADK / Litestar / Events stores:
+`vertebra.extensions.sqlspec` provides per-engine adapters for SQLSpec 0.74.1+, statement pipelining, shared-memory connection proxying, and ADK, Events, and Litestar stores.
 
-=== "uv"
-
-    ```bash
-    uv add "vertebra-core[sqlspec,adk]"
-    ```
-
-=== "pip"
-
-    ```bash
-    pip install "vertebra-core[sqlspec,adk]"
-    ```
-
-=== "pdm"
-
-    ```bash
-    pdm add "vertebra-core[sqlspec,adk]"
-    ```
-
-=== "poetry"
-
-    ```bash
-    poetry add "vertebra-core[sqlspec,adk]"
-    ```
-
-```mermaid
-flowchart LR
-    App["Application / Litestar / ADK"]
-    Cfg["<Engine>SyncConfig / <Engine>AsyncConfig"]
-    Drv["BaseSyncDriver / BaseAsyncDriver"]
-    Stores["DataDictionary + ADK / Events / Litestar Stores"]
-    Obj["ObjectStoreBackend + ArtifactReference"]
-    App --> Cfg
-    Cfg --> Drv
-    Cfg --> Stores
-    Stores --> Obj
+```bash
+uv add "vertebra-core[sqlspec,adk]"
 ```
 
-- **Per-Engine Adapters & `DataDictionary`**: Dedicated `vertebra.extensions.sqlspec.adapters.<engine>` packages (`adapter_name = "vertebra_<engine>"`) export `PostgresSyncConfig` / `PostgresAsyncConfig`, `MySQLSyncConfig` / `MySQLAsyncConfig`, `SQLiteSyncConfig` / `SQLiteAsyncConfig`, `OracleSyncConfig` / `OracleAsyncConfig`, `MSSQLSyncConfig` / `MSSQLAsyncConfig`, `DuckDBSyncConfig` / `DuckDBAsyncConfig`, `BigQuerySyncConfig` / `BigQueryAsyncConfig`, and `SpannerSyncConfig` / `SpannerAsyncConfig` (`SpangresSyncConfig` / `SpangresAsyncConfig`), each paired with `<Engine>SyncDataDictionary` and `<Engine>AsyncDataDictionary` (`get_version`, `get_tables`, `get_columns`, `get_indexes`, `get_foreign_keys`, `get_optimal_type`, `get_feature_flag`).
-- **Google ADK, Events & Litestar Stores (`*_store_class` Wiring)**: Every engine config binds explicit `adk_session_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` attributes directly onto upstream `sqlspec>=0.74.0` store bases (`<Engine>{Sync,Async}ADKStore`, `<Engine>{Sync,Async}ADKMemoryStore`, `<Engine>{Sync,Async}ADKArtifactStore`, `<Engine>EventQueueStore`, `<Engine>LitestarStore`), offloading ADK binary artifacts through `vertebra.storage.ArtifactReference` (`canonical_uri`, `version`, `mime_type`, `size_bytes`, `etag`, `sha256_hex`) without storing raw blobs in database rows.
-- **Shared-Memory Proxy**: `ProxySyncConfig` and `ProxyAsyncConfig` (`ProxySyncDriver`, `ProxyAsyncDriver`) lease pooled connections over shared memory from the parent process so multi-worker deployments never multiply connection counts.
-- **Native Statement Pipelining**: SQLSpec `execute_stack` uses `SyncPipelineCapable` / `AsyncPipelineCapable` through `driver.pipeline()` for supported stacks and returns one ordered result per operation. Other stacks use sequential execution with transaction boundaries.
-- **Change Feed & Durable Checkpointing**: `ChangeFeedSyncEventBackend` and `ChangeFeedAsyncEventBackend` implement `sqlspec.extensions.events` protocols with durable checkpoint persistence and automatic `EventQueueStore` / object-store spillover for payloads exceeding `8,000` bytes (`PostgresSyncEventsBackend` / `PostgresAsyncEventsBackend` over `LISTEN/NOTIFY` and `OracleSyncEventsBackend` / `OracleAsyncEventsBackend` over TxEventQ / `DBMS_AQ`).
-- **Object Storage & Arrow Streaming**: `ObjectStoreBackend(ObjectStoreBase)` integrates with `sqlspec.storage.storage_registry`, providing native async/sync `stream_arrow_*`, `copy_*`, `move_*`, and `sign_*` presigned URLs over `vertebra._storage`.
+- **Per-engine adapters**: Dedicated subpackages cover PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB, BigQuery, Spanner, and Spangres, each paired with sync and async data dictionaries for schema introspection.
+- **ADK, Events, and Litestar stores**: Every engine config wires session, memory, artifact, event-queue, and Litestar stores. Binary ADK artifacts are stored in object storage via `ArtifactReference` instead of database columns.
+- **Shared-memory proxy**: `ProxySyncConfig` and `ProxyAsyncConfig` lease pooled connections from the parent process over shared memory so multi-worker deployments keep a bounded connection count.
+- **Pipelining**: `execute_stack` batches supported execute stacks through native pipelining and returns results in order. Other stacks run sequentially within a transaction.
+- **Change feeds and events**: Event backends persist durable checkpoints and spill payloads over 8,000 bytes to object storage or an event queue, using LISTEN/NOTIFY on PostgreSQL and TxEventQ/AQ on Oracle.
+- **Object storage**: `ObjectStoreBackend` integrates with SQLSpec's storage registry for streaming Arrow/Parquet I/O, copies, moves, and presigned URLs.
 
 ```python
 from vertebra.extensions.sqlspec import (
@@ -152,49 +98,25 @@ pg_cfg = PostgresAsyncConfig(dsn="postgresql://app_user:secret@localhost:5432/ap
 sqlspec_plugin = create_sqlspec_plugin(sqlite_cfg, pg_cfg)
 ```
 
-## SQLAlchemy 2.1+, Advanced Alchemy 1.12+, Native Caching & `+vtb` Dialects (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
+## SQLAlchemy and Advanced Alchemy
 
-`vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.1+, Alembic 1.18+, and Advanced Alchemy 1.12+ support backed by Vertebra's native drivers, connection leasing, and multi-tier caching. Install optional dialect extras when using DuckDB (`duckdb-engine`) or Google Cloud BigQuery / Spanner (`sqlalchemy-bigquery`, `sqlalchemy-spanner`) dialects:
+`vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` support SQLAlchemy 2.1+, Alembic 1.18+, and Advanced Alchemy 1.12+ on top of Vertebra's native drivers and caching backends.
 
-=== "uv"
+For DuckDB or GCP SQLAlchemy dialects, add the matching extra:
 
-    ```bash
-    uv add "vertebra-core[sqlalchemy-duckdb]"
-    uv add "vertebra-core[sqlalchemy-gcp]"
-    ```
+```bash
+uv add "vertebra-core[sqlalchemy-duckdb,sqlalchemy-gcp]"
+```
 
-=== "pip"
+- **URL schemes and pooling**: Registers sync and async `+vertebra` and `+vtb` dialect schemes across PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB, BigQuery, Spanner, and Spangres over [`vertebra.db.dbapi`](../reference/db.md).
+  - Relational file and TCP URLs default to queue pooling; in-memory SQLite uses static pooling; BigQuery, Spanner, and Spangres default to null pooling.
+  - Append `?broker=true` to use the default registered shared-memory broker (raises `ImproperConfigurationError` if unregistered), or `?shm_broker=true` for null pooling.
+- **Caching**: `create_cache_config` wires Advanced Alchemy and SQLAlchemy compiled/result caches over shared memory, Valkey, Redis, cloud or local object storage, or in-memory backends with no extra dependencies. Pass `use_dogpile=True` (with the `dogpile` extra) if you need dogpile cache plugins.
+- **Column types**: `Vector` columns (with engine-specific variants for PostgreSQL, Oracle, and Spanner) support cosine, L2, L1, and inner-product distance queries. `MsgspecJSON` maps to JSONB on PostgreSQL, CockroachDB, Spangres, and SQLite, NVARCHAR(MAX) on SQL Server, and JSON on Oracle.
+- **File attachments**: `ObjectStoreBackend` integrates with Advanced Alchemy file attachment model fields.
+- **Alembic migrations**: Registers DuckDB, BigQuery, Spanner, and Spangres migration implementations, batches online Spanner and Spangres DDL via update-DDL calls (emitting per-statement SQL in offline mode), supports autogenerate for vector and JSON columns, and adds vector index and view operations.
 
-    ```bash
-    pip install "vertebra-core[sqlalchemy-duckdb]"
-    pip install "vertebra-core[sqlalchemy-gcp]"
-    ```
-
-=== "pdm"
-
-    ```bash
-    pdm add "vertebra-core[sqlalchemy-duckdb]"
-    pdm add "vertebra-core[sqlalchemy-gcp]"
-    ```
-
-=== "poetry"
-
-    ```bash
-    poetry add "vertebra-core[sqlalchemy-duckdb]"
-    poetry add "vertebra-core[sqlalchemy-gcp]"
-    ```
-
-- **Dialects & Broker Pooling**: Registers all 36 `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`Sync<Engine>Dialect` / `Async<Engine>Dialect` across `postgresql`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`, and `spangres`) over standalone [`vertebra.db.dbapi`](../reference/db.md) PEP 249 interfaces (`SyncDBAPIModule` and `AsyncDBAPIModule`, adapted for async SQLAlchemy by `SQLAlchemyAsyncDBAPI` and `AsyncAdapt_vertebra_connection` with `AsyncAdapt_terminate` and `async_creator` support). `bigquery+vtb://`, `spanner+vtb://`, and `spangres+vtb://` default to `NullPool` and select `BrokerPool` / `AsyncBrokerPool` when `?broker=true` is set; `?shm_broker=true` selects `NullPool`; `:memory:` SQLite uses `StaticPool`; relational file/TCP URLs default to `QueuePool` / `AsyncAdaptedQueuePool`, and `?broker=true` resolves `DatabaseRegistry.default_broker()` (raising `ImproperConfigurationError` when unregistered). `create_sync_alchemy_config` and `create_async_alchemy_config` wire `BrokerPool` / `AsyncBrokerPool` when a shared-memory broker is attached.
-- **Native Caching (`SyncCacheBackend`, `AsyncCacheBackend`, `ShmCache`)**: `SyncCacheBackend` (implementing Advanced Alchemy's `SyncCacheRegionProtocol`) and `AsyncCacheBackend` support `shm://<segment>` (`vertebra._vertebra.ShmCache` seqlock POSIX shared memory + `ShmLeaseTable` ring-buffer L1 invalidation on `b"vtb:cache:inv"`), `valkey://` (`vertebra._valkey`), `redis://` (`vertebra._redis`), `s3://`/`gs://`/`az://`/`r2://`/`oci://`/`file://` (`vertebra._storage` `VTBSTORE\x01`), and `memory://`. `create_cache_config(use_dogpile=False)` wires Advanced Alchemy `CacheConfig(region_factory=...)` and `AsyncCacheManager` directly without third-party dependencies, while `use_dogpile=True` (`vertebra-core[dogpile]`) registers optional `dogpile.cache` backend plugins (`vertebra.shm`, `vertebra.memory`, `vertebra.valkey`, `vertebra.redis`, `vertebra.storage`). SQLAlchemy `CompiledCache` and `ResultCache` reuse the same backends.
-- **Type System**: Native `Vector(dimensions)` (and `PgVector`, `HalfVector`, `SparseVector`, `OracleVector`, `SpannerVector`) exposes `Vector.Comparator` (`cosine_distance`, `l2_distance`, `l1_distance`, `inner_product`, `max_inner_product`, `approx_cosine_distance`) producing dialect-compiled `_VectorDistance` expressions, alongside `MsgspecJSON` mapping PostgreSQL, CockroachDB, Spangres, and SQLite to `JSONB`, MSSQL to `NVARCHAR(MAX)`, and Oracle to `JSON`.
-- **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
-- **Alembic 1.18+ Custom Operations & Autogenerate**: Registers `DuckDBAlembicImpl`, `BigQueryAlembicImpl` (`transactional_ddl = False`), `SpannerAlembicImpl`, and `SpangresAlembicImpl` via `__dialect__` (while PostgreSQL, MySQL, SQLite, Oracle, and MSSQL use built-in `DefaultImpl` classes), batches online `DDLElement` statements in `SpannerAlembicImpl._exec()` and `SpangresAlembicImpl._exec()` via `update_ddl` while emitting per-statement SQL in offline `--sql` mode, registers 7-arg `"column"` comparators (`PriorityDispatchResult`) and `render_item` for `Vector` and `MsgspecJSON`, and registers `CreateVectorIndexOp`, `DropVectorIndexOp`, `CreateViewOp`, and `DropViewOp` via `Operations.register_operation`.
-
-BigQuery, Spanner, and Spangres DBAPI connections use statement autocommit. Their
-`commit()` and `rollback()` calls do not group or undo completed statements;
-setting `autocommit=False` raises `NotSupportedError`. Spangres dialects also set
-`supports_twophase = False` and raise `NotSupportedError` on two-phase commit
-operations.
+BigQuery, Spanner, and Spangres use statement autocommit: commit and rollback calls do not group or undo completed statements, and disabling autocommit raises `NotSupportedError`. Spangres also disables two-phase commit.
 
 ```python
 from vertebra.extensions.alchemy import (
@@ -216,9 +138,14 @@ store = SyncObjectStore("memory://")
 backend = ObjectStoreBackend(store=store, prefix="uploads")
 ```
 
-## Django 6.0+ Databases, Caching, Tasks & Channels (`vertebra.extensions.django`)
+## Django Integration
 
-Vertebra supports Django `6.0+` (`vertebra-core[django]`) with 5 native `DATABASES` engines over `vertebra.db.dbapi` (`vertebra.extensions.django.db.backends.{postgresql,mysql,oracle,sqlite3,spanner}`, with `spanner` guarded by `django-google-spanner`), native `CACHES` via `vertebra.extensions.django.cache.CacheBackend` (`SyncCacheBackend` / `AsyncCacheBackend`), `django.tasks` background execution via `vertebra.extensions.django.tasks.TaskBackend` (`enqueue` via `SyncQueueStore`, `aenqueue` via `AsyncQueueStore`, and `python manage.py vertebra_worker` with `Container.scope()` DI), and distributed `CHANNEL_LAYERS` via `vertebra.extensions.django.channels.ChannelLayer` across Memory, Valkey, Redis, PostgreSQL, and Oracle. BigQuery, DuckDB, and SQL Server are not supported as Django `DATABASES` backends and raise `ImproperConfigurationError` during startup validation (use SQLAlchemy or SQLSpec instead).
+Install the `django` extra for Django 6.0+ integration across databases, caching, background tasks, and channels:
+
+- **Databases**: Native backends for PostgreSQL, MySQL, Oracle, SQLite, and Spanner (requires `django-google-spanner`). BigQuery, DuckDB, and SQL Server are not supported as Django database backends and raise `ImproperConfigurationError` at startup; use SQLAlchemy or SQLSpec for those engines.
+- **Caching**: `CacheBackend` supports shared memory, Valkey, Redis, object storage, and in-memory stores.
+- **Background tasks**: `TaskBackend` backs Django tasks over Vertebra queue stores and runs workers via `python manage.py vertebra_worker` with scoped dependency injection.
+- **Channels**: `ChannelLayer` backs Django Channels over Memory, Valkey, Redis, PostgreSQL, or Oracle.
 
 ```python
 DATABASES = {
@@ -252,9 +179,9 @@ CHANNEL_LAYERS = {
 }
 ```
 
-## gRPC Services & Protobuf Schemas (`vertebra.extensions.grpc`)
+## gRPC Services
 
-`GrpcServiceRegistry` and `@grpc_method` route 5-byte length-prefixed HTTP/2 gRPC frames from `vertebra-http` directly to typed Python methods across all 4 RPC modes (`unary`, `server_streaming`, `client_streaming`, `bidi_streaming`), with automatic `.proto` generation from `msgspec.Struct` models (`ProtobufSchemaGenerator`):
+`GrpcServiceRegistry` and `@grpc_method` route HTTP/2 gRPC requests to typed Python handlers across unary, server-streaming, client-streaming, and bidirectional-streaming RPCs. `ProtobufSchemaGenerator` generates `.proto` definitions from your msgspec models:
 
 ```python
 import msgspec
@@ -288,34 +215,24 @@ schema_gen = ProtobufSchemaGenerator(package="inventory")
 proto_source = schema_gen.generate_from_registry(registry)
 ```
 
-## Oracle APEX Gateway, Islands & 26ai Duality Views (`vertebra.extensions.apex`)
+## Oracle APEX Gateway
 
-Modernize Oracle APEX applications incrementally without a full rewrite using `vertebra.extensions.apex` and `@vertebra/client/apex`:
+Extend Oracle APEX applications incrementally with `vertebra.extensions.apex` and `@vertebra/client/apex`:
 
-- **Session & Security**: `ApexSessionContext`, `OracleSessionManager.acquire_scoped` (`DBMS_SESSION.SET_IDENTIFIER` + automatic teardown), `ApexSessionAuth` (`verify_handoff_token`), `ApexGateway`, and `ConfirmationGate` for human-in-the-loop PL/SQL mutations.
-- **Islands & Offline Outbox**: `ApexIslandRegistry` mounts Vite-bundled React/Vue/Svelte islands inside APEX regions (`ApexRegion`), and `ApexOfflineSyncEngine` (`ApexOfflineOutbox`) replays offline mutations with HLC conflict detection.
-- **Federated Queries & 26ai Duality Views**: `ApexFederatedQuery` joins Oracle tables with Parquet/S3 datasets in DataFusion, while `ApexOpenAPIGenerator`, `DualityViewSpec`, and `DualityViewMcpHandler` expose Oracle 26ai JSON Relational Duality Views as OpenAPI endpoints and MCP agent tools with ETag optimistic concurrency.
+- **Session and security**: Scope Oracle sessions automatically with `DBMS_SESSION.SET_IDENTIFIER`, verify handoff tokens, and guard PL/SQL mutations with confirmation gates.
+- **Islands and offline sync**: Mount Vite-bundled React, Vue, or Svelte islands inside APEX regions and replay offline mutations with conflict detection.
+- **Federated queries and 26ai Duality Views**: Join Oracle tables with Parquet/S3 datasets through DataFusion, and expose Oracle 26ai JSON Relational Duality Views as OpenAPI endpoints and MCP tools with ETag concurrency checks.
 
-## Shared-Memory Session Broker (`vertebra.extensions.broker`)
+## Shared-Memory Session Broker
 
-`BrokerPlugin` (`BrokerConfig`, `BrokerHost`, `BrokerEngineDiscovery`, `SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport`, `SyncConnectionLease` / `AsyncConnectionLease`, `StatementPlan`, `LeaseQuarantinedError`) manages cross-worker database connection leases and prepared statement plans over shared memory so N Python worker processes share a bounded pool without multiplying database connections.
+`BrokerPlugin` lets multiple Python worker processes share one bounded database connection pool over shared memory instead of opening a separate pool per worker.
 
-```mermaid
-flowchart LR
-    W["Worker Processes (SQLSpec Proxy / BrokerPool)"]
-    T["SyncSHMBrokerTransport / AsyncSHMBrokerTransport"]
-    SHM["UDS SCM_RIGHTS Attach & ShmLeaseTable"]
-    H["BrokerHost (vtb broker serve)"]
-    C["BrokerEngineCapsule / Server Pools"]
-    W --> T
-    T --> SHM
-    SHM --> H
-    H --> C
-```
+![Shared-memory connection broker](../assets/diagrams/shm-broker-light.svg#only-light)
+![Shared-memory connection broker](../assets/diagrams/shm-broker-dark.svg#only-dark)
 
-- **Named SHM & Authenticated UDS Attach**: Owner segments write `ShmOwnerHeader` generation and PID ownership metadata; cross-process workers attach either by name or through `BrokerAttachClient` / `BrokerAttachServer` over a `0600` Unix domain socket inside a `0700` directory authenticated with `VERTEBRA_BROKER_SECRET` (`SCM_RIGHTS` FD passing).
-- **Supervision, Crash Recovery & Quarantine**: `vtb broker serve` runs `BrokerHost` and drains or rolls back active slots on shutdown (`ShutdownReport`), while `reclaim_worker_leases` transitions crashed worker slots into `Quarantined`, runs server `ROLLBACK` cleanup, and disposes dirty slots (`vtb broker status` and `DbPoolMetricSample` report `quarantined`, `total_quarantined`, and `total_disposed`). Session release or pool check-in failures quarantine the lease and raise `LeaseQuarantinedError`.
-- **SQLAlchemy & Advanced Alchemy Pool Sharing**: Pass `BrokerPool` / `AsyncBrokerPool` (and `broker_creator`) with `create_engine` / `create_async_engine`, or pass a transport to `create_sync_alchemy_config` / `create_async_alchemy_config` to partition broker leases by config `pool_key()`.
+- **Attaching workers**: Workers attach by shared-memory name or over an authenticated Unix domain socket using `VERTEBRA_BROKER_SECRET`.
+- **Supervision and recovery**: Run `vtb broker serve` to host pools and drain or roll back active connections on shutdown. If a worker crashes or a check-in fails, the broker quarantines the slot, rolls back the server transaction, disposes the dirty connection, and raises `LeaseQuarantinedError`. Inspect pool health with `vtb broker status`.
+- **SQLAlchemy and Advanced Alchemy**: Pass `SyncBrokerPool` (or its async variant) and `broker_creator` to engine creation, or pass a transport to your Advanced Alchemy config factory.
 
 ```python
 from sqlalchemy import create_engine, text
@@ -324,7 +241,7 @@ from vertebra.extensions.broker import (
     BrokerHost,
     SyncSHMBrokerTransport,
 )
-from vertebra.extensions.sqlalchemy import BrokerPool, broker_creator
+from vertebra.extensions.sqlalchemy import SyncBrokerPool, broker_creator
 
 config = BrokerConfig(pool_size=4, shm_name="/vtb-app-broker", role="owner")
 with BrokerHost(config) as host:
@@ -334,7 +251,7 @@ with BrokerHost(config) as host:
         role="worker",
     )
     transport = SyncSHMBrokerTransport(worker_cfg)
-    pool_cls = BrokerPool.bind_class(
+    pool_cls = SyncBrokerPool.bind_class(
         broker=transport,
         url="sqlite+vtb:///app.db",
     )

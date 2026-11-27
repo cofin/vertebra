@@ -192,8 +192,11 @@ def _ft_run(*args: str) -> list[str]:
 
 
 def apply_shm_broker_dsn(dsn: str, *, broker_mode: str = "shm_broker") -> str:
-    """Append ``shm_broker=true`` to a database DSN when SHM broker pooling is enabled."""
+    """Append ``shm_broker=true`` to PostgreSQL DSNs when SHM broker pooling is enabled."""
     if broker_mode.strip().lower() != "shm_broker" or not dsn:
+        return dsn
+    lowered = dsn.strip().lower()
+    if not lowered.startswith(("postgres://", "postgresql://", "postgresql+")):
         return dsn
     if "shm_broker=" in dsn:
         return dsn
@@ -201,7 +204,12 @@ def apply_shm_broker_dsn(dsn: str, *, broker_mode: str = "shm_broker") -> str:
     return f"{dsn}{separator}shm_broker=true"
 
 
-def _shm_broker_env(workers: int, total_budget: int = 40) -> Callable[[], dict[str, str]]:
+def _shm_broker_env(
+    workers: int,
+    total_budget: int = 40,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> Callable[[], dict[str, str]]:
     """Build a lazy environment factory for SHM broker targets with DSN parity."""
 
     def _factory() -> dict[str, str]:
@@ -211,6 +219,8 @@ def _shm_broker_env(workers: int, total_budget: int = 40) -> Callable[[], dict[s
             "VTB_BENCH_BROKER_MODE": "shm_broker",
             "VTB_BENCH_TOTAL_POOL_BUDGET": str(total_budget),
         }
+        if extra_env:
+            env.update(extra_env)
         dsn = os.environ.get("VTB_BENCH_DB_DSN", "").strip()
         if dsn:
             env["VTB_BENCH_DB_DSN"] = apply_shm_broker_dsn(dsn, broker_mode="shm_broker")
@@ -270,6 +280,7 @@ def _vtb(
     category: str = "vertebra",
     protocol: str = "http1",
     transport: str = "native",
+    adapter: str = "none",
     broker_mode: str = "none",
     pool_size: int | None = None,
     target_workers: int | None = None,
@@ -287,6 +298,7 @@ def _vtb(
         category=category,
         protocol=protocol,
         transport=transport,
+        adapter=adapter,
         broker_mode=broker_mode,
         pool_size=pool_size,
         workers=workers if target_workers is None else target_workers,
@@ -303,11 +315,18 @@ def _vtb_data(
     topology: Topology = Topology.EMBEDDED,
     broker: bool = False,
     category: str = "data",
+    adapter: str = "none",
+    extra_env: dict[str, str] | None = None,
     extra_args: tuple[str, ...] = (),
 ) -> tuple[str, Target]:
     flags = extra_args or (
         ("--asgi",) if transport == "asgi" else (("--interface", transport) if transport in ("rsgi", "wsgi") else ())
     )
+    env: dict[str, str] | Callable[[], dict[str, str]]
+    if broker:
+        env = _shm_broker_env(workers=4, total_budget=40, extra_env=extra_env)
+    else:
+        env = {**_VTB_DATA_4W_ENV, **(extra_env or {})}
     return _vtb(
         name,
         app,
@@ -316,9 +335,10 @@ def _vtb_data(
         topology=topology,
         workers=4,
         extra_args=flags,
-        env=_shm_broker_env(workers=4, total_budget=40) if broker else dict(_VTB_DATA_4W_ENV),
+        env=env,
         category=category,
         transport=transport,
+        adapter=adapter,
         broker_mode="shm_broker" if broker else "per_worker",
         pool_size=40 if broker else 10,
     )
@@ -333,20 +353,25 @@ def _granian_data(
     *,
     factory: bool = True,
     category: str = "framework-baseline",
+    adapter: str = "none",
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[str, Target]:
     args: list[str] = ["-m", "granian", app]
     if factory:
         args.append("--factory")
     args.extend(["--interface", interface, "--host", "127.0.0.1", "--port", str(port), "--workers", "4"])
+    if interface != "wsgi":
+        args.extend(["--loop", "uvloop"])
     return name, Target(
         name=name,
         topology=Topology.BASELINE,
         cmd=_py(*args),
         port=port,
-        env=dict(_DATA_PER_WORKER_ENV),
+        env={**_DATA_PER_WORKER_ENV, **(extra_env or {})},
         description=description,
         category=category,
         transport=interface,
+        adapter=adapter,
         broker_mode="per_worker",
         pool_size=10,
         workers=4,
@@ -361,6 +386,8 @@ def _uvicorn_data(
     *,
     factory: bool = True,
     category: str = "framework-baseline",
+    adapter: str = "none",
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[str, Target]:
     args: list[str] = ["-m", "uvicorn", app]
     if factory:
@@ -373,10 +400,11 @@ def _uvicorn_data(
         topology=Topology.BASELINE,
         cmd=_py(*args),
         port=port,
-        env=dict(_DATA_PER_WORKER_ENV),
+        env={**_DATA_PER_WORKER_ENV, **(extra_env or {})},
         description=description,
         category=category,
         transport="asgi",
+        adapter=adapter,
         broker_mode="per_worker",
         pool_size=10,
         workers=4,
@@ -937,6 +965,118 @@ ALL_TARGETS: dict[str, Target] = dict(
             8157,
             "wsgi",
             "Flask on Granian WSGI data framework baseline",
+        ),
+        _vtb_data(
+            "vtb-data-sqlspec-native-4w",
+            _DATA_NATIVE,
+            8160,
+            "Vertebra SHM data, SQLSpec adapter, 4 workers per-worker pool",
+            topology=Topology.SHM,
+            adapter="sqlspec",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "sqlspec", "VTB_BENCH_DB_ADAPTER_FLAVOR": "vertebra"},
+        ),
+        _vtb_data(
+            "vtb-data-sqlspec-shm-4w-broker",
+            _DATA_NATIVE,
+            8161,
+            "Vertebra SHM data, SQLSpec adapter, 4 workers SHM broker pool",
+            topology=Topology.SHM,
+            broker=True,
+            adapter="sqlspec",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "sqlspec", "VTB_BENCH_DB_ADAPTER_FLAVOR": "vertebra"},
+        ),
+        _vtb_data(
+            "vtb-data-aa-native-4w",
+            _DATA_NATIVE,
+            8162,
+            "Vertebra SHM data, Advanced Alchemy (+vtb) adapter, 4 workers per-worker pool",
+            topology=Topology.SHM,
+            adapter="advanced_alchemy",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "advanced_alchemy", "VTB_BENCH_DB_ADAPTER_FLAVOR": "vertebra"},
+        ),
+        _vtb_data(
+            "vtb-data-aa-shm-4w-broker",
+            _DATA_NATIVE,
+            8163,
+            "Vertebra SHM data, Advanced Alchemy (+vtb) adapter, 4 workers SHM broker pool",
+            topology=Topology.SHM,
+            broker=True,
+            adapter="advanced_alchemy",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "advanced_alchemy", "VTB_BENCH_DB_ADAPTER_FLAVOR": "vertebra"},
+        ),
+        _granian_data(
+            "granian-rsgi-data-stdlib",
+            "tools.benchmarks.apps.data_rsgi:rsgi_app",
+            8170,
+            "rsgi",
+            "Granian RSGI data baseline (stdlib drivers)",
+            factory=False,
+            category="data-baseline",
+            adapter="stdlib",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "stdlib", "VTB_BENCH_DB_ADAPTER_FLAVOR": "upstream"},
+        ),
+        _granian_data(
+            "granian-asgi-data-stdlib",
+            "tools.benchmarks.apps.data_asgi:asgi_app",
+            8164,
+            "asgi",
+            "Granian ASGI data baseline (stdlib drivers)",
+            factory=False,
+            category="data-baseline",
+            adapter="stdlib",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "stdlib", "VTB_BENCH_DB_ADAPTER_FLAVOR": "upstream"},
+        ),
+        _granian_data(
+            "granian-asgi-data-sqlspec",
+            "tools.benchmarks.apps.data_asgi:asgi_app",
+            8165,
+            "asgi",
+            "Granian ASGI data baseline (upstream SQLSpec)",
+            factory=False,
+            category="data-baseline",
+            adapter="sqlspec-upstream",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "sqlspec", "VTB_BENCH_DB_ADAPTER_FLAVOR": "upstream"},
+        ),
+        _granian_data(
+            "granian-asgi-data-aa",
+            "tools.benchmarks.apps.data_asgi:asgi_app",
+            8166,
+            "asgi",
+            "Granian ASGI data baseline (vanilla Advanced Alchemy)",
+            factory=False,
+            category="data-baseline",
+            adapter="advanced_alchemy-vanilla",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "advanced_alchemy", "VTB_BENCH_DB_ADAPTER_FLAVOR": "upstream"},
+        ),
+        _uvicorn_data(
+            "uvicorn-httptools-data-stdlib",
+            "tools.benchmarks.apps.data_asgi:asgi_app",
+            8167,
+            "Uvicorn httptools data baseline (stdlib drivers)",
+            factory=False,
+            category="data-baseline",
+            adapter="stdlib",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "stdlib", "VTB_BENCH_DB_ADAPTER_FLAVOR": "upstream"},
+        ),
+        _uvicorn_data(
+            "uvicorn-httptools-data-sqlspec",
+            "tools.benchmarks.apps.data_asgi:asgi_app",
+            8168,
+            "Uvicorn httptools data baseline (upstream SQLSpec)",
+            factory=False,
+            category="data-baseline",
+            adapter="sqlspec-upstream",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "sqlspec", "VTB_BENCH_DB_ADAPTER_FLAVOR": "upstream"},
+        ),
+        _uvicorn_data(
+            "uvicorn-httptools-data-aa",
+            "tools.benchmarks.apps.data_asgi:asgi_app",
+            8169,
+            "Uvicorn httptools data baseline (vanilla Advanced Alchemy)",
+            factory=False,
+            category="data-baseline",
+            adapter="advanced_alchemy-vanilla",
+            extra_env={"VTB_BENCH_DB_ADAPTER": "advanced_alchemy", "VTB_BENCH_DB_ADAPTER_FLAVOR": "upstream"},
         ),
     ]
 )

@@ -42,11 +42,11 @@ hide:
     poetry add vertebra-core
     ```
 
-The `@vertebra/client` TypeScript SDK is included natively within the wheel distribution and served directly by the server, eliminating external NPM package requirements.
+The `@vertebra/client` TypeScript SDK ships inside the Python wheel and is served directly by Vertebra, so you do not need npm to use it.
 
 ## First Application
 
-Define typed routes and controllers on `App` and run them with the `vtb` CLI:
+Define routes on `App` and run them with `vtb`:
 
 ```python
 from vertebra import App
@@ -69,31 +69,24 @@ vtb run app:app --host 127.0.0.1 --port 8000
 
 | Section | What You Will Find |
 | --- | --- |
-| **[Getting Started](getting-started/index.md)** | Installation, quickstart, configuration, `vtb` CLI commands, runnable examples, and release changelog. |
-| **[Usage](usage/index.md)** | Subsystem guides for routing & controllers, server & worker topologies, databases & native statement pipelining, object storage, frontend & SSR, and MCP/A2A agents. |
-| **[Architecture](architecture/index.md)** | How the Rust HTTP server, shared-memory worker rings, PyO3 bridge, and bundler work under the hood. |
-| **[Reference](reference/index.md)** | API documentation organized by Framework, Server & Runtime, Databases, Object Storage, Frontend & Client SDK, and Agents & Native SDKs. |
-| **[Examples](examples/index.md)** | Runnable Python examples covering routing, controllers, background queues, live state, storage, and MCP agent tools. |
+| **[Getting Started](getting-started/index.md)** | Installation, quickstart, configuration, CLI workflows, runnable examples, and changelog. |
+| **[Usage](usage/index.md)** | Guides for routing, workers, databases, object storage, frontend and SSR, and AI agents. |
+| **[Architecture](architecture/index.md)** | How the HTTP server, shared-memory transport, worker lanes, and bundler work together. |
+| **[Reference](reference/index.md)** | API documentation for Python packages, native extensions, the TypeScript client, and the CLI. |
+| **[Examples](examples/index.md)** | Runnable Python examples covering routing, queues, live state, storage, databases, and agents. |
 
 ## Core Capabilities
 
-| Capability | Summary |
+| Area | What's included |
 | --- | --- |
-| **Rust HTTP Server** | HTTP/1.1, HTTP/2, HTTP/3 (QUIC), gRPC, WebSockets, SSE, TLS, compression, and static file serving in `vertebra-http`. |
-| **Shared-Memory Workers** | Run in-process or scale across worker processes over shared memory in `vertebra-core`. |
-| **Free-Threaded Python Ready** | Supports Python 3.12–3.15 including free-threaded `3.14t`/`3.15t` builds with isolated worker lanes (`fast`, `async`, `cpu`, `blocking`). |
-| **Databases & Analytics** | PostgreSQL, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, BigQuery, Spanner, Redis, and Valkey drivers, native `driver.pipeline()` batching (`SyncPipelineCapable` / `AsyncPipelineCapable`), zero-sidecar Cloud SQL/AlloyDB dialers, RLS, CDC, and Arrow/DataFusion analytics. |
-| **Cloud & Local Object Storage** | Unified GIL-free `SyncObjectStore` / `AsyncObjectStore` across S3, GCS (with Google Cloud Application Default Credentials and DuckDB `httpfs` secret integration), Azure, Cloudflare R2, OCI, HTTP, Local, and Memory backends with HMAC/SigV4/Azure SAS/OCI Cavage presigning, and PyArrow `SyncReadableFile` / `AsyncReadableFile`. |
-| **Frontend Bundler & SSR** | Built-in JavaScript bundler (`vertebra-bundler`), QuickJS SSR pool, Inertia v3, HTMX, and TypeScript/Zod code generation. |
-| **Agent Protocols (MCP & A2A)** | Built-in Model Context Protocol (MCP) tools, resources, prompts, skills, stdio bridge, Agent-to-Agent (A2A) services, and DAG workflows. |
+| **HTTP server** | HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSockets, SSE, TLS, compression, and static files in Rust. |
+| **Workers & scaling** | Runs in-process by default and scales across worker processes over shared memory on standard Python, or across threads on free-threaded Python. |
+| **Databases & analytics** | Sync and async drivers for PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB, BigQuery, Spanner, Redis, and Valkey, with pipelining, cloud IAM dialers, change feeds, and Arrow/DataFusion support. |
+| **Object storage** | One sync and async API for S3, GCS, Azure Blob, Cloudflare R2, OCI, HTTP, local files, and in-memory stores, with streaming, presigned URLs, and Parquet range reads. |
+| **Frontend & SSR** | Built-in TypeScript/JSX bundler, QuickJS server-side rendering, Inertia, HTMX, and a bundled TypeScript client with schema codegen. |
+| **AI & agents** | Built-in MCP and A2A servers, a stdio bridge, tool workflows, and vector embeddings. |
 
 ## Runtime Overview
 
-```mermaid
-flowchart LR
-    Client["Browser / @vertebra/client / MCP Client"] --> Ingress["vertebra-http (HTTP/1.1, HTTP/2, HTTP/3, gRPC, WS, SSE)"]
-    Ingress --> Bridge["vertebra-core (In-Process or Shared-Memory Transport)"]
-    Bridge --> PyBridge["vertebra-py (PyO3 Bridge & Worker Lanes)"]
-    PyBridge --> Framework["Vertebra App / Litestar / ASGI / WSGI / RSGI"]
-    Framework --> Subsystems["vertebra-storage / vertebra-db / vertebra-bundler"]
-```
+![Vertebra runtime architecture](assets/diagrams/runtime-architecture-light.svg#only-light)
+![Vertebra runtime architecture](assets/diagrams/runtime-architecture-dark.svg#only-dark)

@@ -9,7 +9,7 @@ use vertebra_core::gcp_identity::{
     validate_id_token_audience,
 };
 
-use crate::async_bridge::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
+use crate::async_bridge::{TaskAwaitable, block_on_db, spawn_rust_db_task};
 use crate::errors::auth_error_to_py;
 
 #[pyclass(name = "GcpIdTokenSnapshot", frozen, immutable_type, from_py_object)]
@@ -189,7 +189,7 @@ impl PyAsyncGcpIdTokenCache {
         py: Python<'_>,
         audience: &str,
         force_refresh: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let aud = validate_id_token_audience(audience)
             .map_err(PyValueError::new_err)?
             .to_string();

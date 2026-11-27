@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from tools.benchmarks.adapters import (
@@ -20,6 +20,7 @@ from tools.benchmarks.adapters.sql import (
     COMPARATOR_PAIRS,
     COMPARATORLESS_CASES,
     SUPPORTED_SQL_ENGINES,
+    capture_advanced_alchemy_report,
     capture_duckdb_report,
     capture_oracle_report,
     capture_postgres_adapter_report,
@@ -160,7 +161,7 @@ def test_capture_sqlalchemy_report_vtb_vs_vanilla_sqlite_offline(monkeypatch: py
 
 
 def test_capture_sqlalchemy_report_broker_pool_binding_offline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify `BrokerPool.bind_class` wiring with a fake broker and `ValueError` when no broker is available."""
+    """Verify `SyncBrokerPool.bind_class` wiring with a fake broker and `ValueError` when no broker is available."""
     if import_optional("sqlalchemy") is None:
         pytest.skip("sqlalchemy is not installed")
 
@@ -168,13 +169,13 @@ def test_capture_sqlalchemy_report_broker_pool_binding_offline(monkeypatch: pyte
     assert pool_mod is not None
 
     bind_calls: list[dict[str, Any]] = []
-    real_bind_class = pool_mod.BrokerPool.bind_class
+    real_bind_class = pool_mod.SyncBrokerPool.bind_class
 
     def _spy_bind_class(**kwargs: Any) -> Any:
         bind_calls.append(kwargs)
         return real_bind_class(**kwargs)
 
-    monkeypatch.setattr(pool_mod.BrokerPool, "bind_class", _spy_bind_class)
+    monkeypatch.setattr(pool_mod.SyncBrokerPool, "bind_class", _spy_bind_class)
 
     fake_broker = _FakeBroker()
     report = asyncio.run(
@@ -808,3 +809,65 @@ def test_sql_cli_oracle_reset_relay_flag(monkeypatch: pytest.MonkeyPatch, tmp_pa
     parsed = parse_adapter_report_bytes(out_file.read_bytes())
     assert parsed.engine == "oracle"
     assert {item.driver for item in parsed.cases} == {"vertebra-oracle-sync", "vertebra-oracle-async"}
+
+
+def test_capture_advanced_alchemy_report_sqlite_and_cli(tmp_path: Path) -> None:
+    """Run offline Advanced Alchemy SQLite comparator, check comparator pairs, and verify CLI capture."""
+    has_aiosqlite = import_optional("aiosqlite") is not None
+
+    assert "advanced_alchemy" in SUPPORTED_SQL_ENGINES
+    assert COMPARATOR_PAIRS["vertebra-aa-sqlite-sync"] == ("vanilla-aa-sqlite-sync",)
+    assert COMPARATOR_PAIRS["vertebra-aa-sqlite-async"] == ("vanilla-aa-sqlite-async",)
+    assert COMPARATOR_PAIRS["vertebra-aa-postgres-sync"] == ("vanilla-aa-postgres-sync",)
+    assert COMPARATOR_PAIRS["vertebra-aa-postgres-async"] == ("vanilla-aa-postgres-async",)
+
+    with pytest.raises(ValueError, match="Unsupported Advanced Alchemy engine"):
+        asyncio.run(capture_advanced_alchemy_report(cast("Any", "duckdb"), ":memory:"))
+
+    report = asyncio.run(capture_advanced_alchemy_report("sqlite", ":memory:", iterations=3, warmup=1))
+    roundtripped = parse_adapter_report_bytes(format_adapter_report_bytes(report))
+    assert roundtripped.schema_version == ADAPTER_SCHEMA_VERSION
+    assert roundtripped.category == "orm"
+    assert roundtripped.engine == "advanced_alchemy:sqlite"
+
+    by_key = {(item.case, item.driver): item for item in roundtripped.cases}
+    for case_name in ("aa_point_select_1", "aa_multi_row_select_10"):
+        assert (case_name, "vertebra-aa-sqlite-sync") in by_key
+        assert (case_name, "vertebra-aa-sqlite-async") in by_key
+        assert (case_name, "vanilla-aa-sqlite-sync") in by_key
+        if has_aiosqlite:
+            assert (case_name, "vanilla-aa-sqlite-async") in by_key
+
+    outcomes = check_report_against_comparators(roundtripped, max_median_ratio=100.0)
+    assert outcomes
+    sync_outcomes = [outcome for outcome in outcomes if outcome.vertebra_driver == "vertebra-aa-sqlite-sync"]
+    async_outcomes = [outcome for outcome in outcomes if outcome.vertebra_driver == "vertebra-aa-sqlite-async"]
+    assert len(sync_outcomes) == 2
+    assert all(outcome.status != "missing" for outcome in sync_outcomes)
+    assert len(async_outcomes) == 2
+    if has_aiosqlite:
+        assert all(outcome.status != "missing" for outcome in async_outcomes)
+    else:
+        assert all(outcome.status == "missing" for outcome in async_outcomes)
+
+    out_file = tmp_path / "aa-sqlite.json"
+    rc = main(
+        [
+            "capture",
+            "--engine",
+            "advanced_alchemy",
+            "--aa-engine",
+            "sqlite",
+            "--dsn",
+            ":memory:",
+            "--iterations",
+            "2",
+            "--warmup",
+            "1",
+            "--output",
+            str(out_file),
+        ]
+    )
+    assert rc == 0
+    cli_report = parse_adapter_report_bytes(out_file.read_bytes())
+    assert cli_report.engine == "advanced_alchemy:sqlite"

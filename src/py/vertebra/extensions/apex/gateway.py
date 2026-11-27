@@ -10,7 +10,7 @@ import msgspec
 
 from vertebra.agent.a2a.models import AgentCard, AgentInterface, AgentSkill
 from vertebra.agent.core.schema import Tool
-from vertebra.agent.mcp.registry import MCPRegistry
+from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.extensions.apex.session import (
     ApexSessionContext,
@@ -188,7 +188,7 @@ class ApexGateway:
         self.policy_evaluator = policy_evaluator or ApexPolicyEvaluator()
         self.confirmation_gate = confirmation_gate or ConfirmationGate()
         self._ords_transport = ords_transport
-        self._mcp_registry = MCPRegistry()
+        self._mcp_registry = ToolRegistry()
         self._skills: list[AgentSkill] = []
         self._page_tools: dict[str, ApexPageToolSpec] = {}
 

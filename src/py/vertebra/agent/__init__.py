@@ -1,7 +1,7 @@
 """Vertebra Extendable Agentic Harness.
 
-This package provides native MCP 2026-07-28, A2A 1.0, multi-turn AgentRuntime,
-SpecTree task decomposition, DynamicWorkflow DAG orchestration, pluggable session stores,
+Provides native MCP 2026-07-28, A2A 1.0, multi-turn AgentRuntime,
+PlanTree task decomposition, Workflow DAG orchestration, pluggable session stores,
 streaming chat controllers, and GenAI telemetry.
 """
 
@@ -10,7 +10,82 @@ from typing import TYPE_CHECKING, Any
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
-    from vertebra.agent import tools
+    from vertebra.agent import a2a, bridges, mcp, tools
+    from vertebra.agent.a2a import (
+        A2AConfig,
+        A2AHttpHandler,
+        A2AService,
+        A2ATaskStore,
+        AgentCard,
+        AgentCardSigner,
+        PushNotificationDispatcher,
+    )
+    from vertebra.agent.agents import (
+        TRANSFER_TOOL_NAME,
+        Agent,
+        AgentGroup,
+        AgentMessage,
+    )
+    from vertebra.agent.bridges import (
+        A2AAgentBridge,
+        MCPToolBridge,
+        a2a_card_to_mcp_tools,
+        mcp_service_to_a2a,
+    )
+    from vertebra.agent.controller import (
+        AgentChatController,
+        ChatRequest,
+        ConfirmationDecisionRequest,
+        QueuedTurnTicket,
+        SessionHistory,
+        SessionNotFoundError,
+        TurnResult,
+    )
+    from vertebra.agent.core import (
+        AgentContext,
+        BudgetExceededError,
+        CallerIdentity,
+        CancellationToken,
+        CursorPage,
+        GuardCallable,
+        GuardChain,
+        GuardProtocol,
+        JSONRPCError,
+        JSONRPCException,
+        JSONRPCRequest,
+        JSONRPCResponse,
+        JSONRPCRouter,
+        PermissionDeniedError,
+        ProgressCallback,
+        ProgressReporter,
+        RateLimitExceededError,
+        RequireAuthenticated,
+        RequireRoles,
+        RequireScopes,
+        SchemaBuilder,
+        SchemaDigestCache,
+        SseFrame,
+        SseReplayBuffer,
+        SseStreamBroker,
+        TenantIsolationGuard,
+        TokenBucketGuard,
+        Tool,
+        ToolAnnotations,
+        ToolArgumentError,
+        ToolCall,
+        ToolExposure,
+        ToolResult,
+        ToolSpec,
+        TurnBudget,
+        authorize,
+        bind_agent_context,
+        current_agent_context,
+        decode_cursor,
+        encode_cursor,
+        execute_tool_calls,
+        paginate_sequence,
+        tool,
+    )
     from vertebra.agent.knowledge_catalog import (
         AsyncKnowledgeCatalogClient,
         CatalogEntryRecord,
@@ -19,20 +94,70 @@ if TYPE_CHECKING:
         KnowledgeCatalogConfig,
         SyncKnowledgeCatalogClient,
     )
+    from vertebra.agent.mcp import (
+        MCPCore,
+        MCPHttpRequest,
+        MCPHttpResponse,
+        ToolRegistry,
+    )
     from vertebra.agent.okf import (
         OkfBundle,
         OkfDocument,
         OkfSource,
         OkfValidationError,
     )
+    from vertebra.agent.planning import (
+        PlanNode,
+        PlanNodeStatus,
+        PlanTree,
+    )
+    from vertebra.agent.plugin import (
+        AgentPlugin,
+        AgentPluginConfig,
+    )
+    from vertebra.agent.runtime import (
+        AgentRuntime,
+        AgentStreamFrame,
+        ConfirmationCapacityError,
+        ConfirmationGate,
+        ConfirmationTicket,
+        GoogleGenAIProvider,
+        ModelDelta,
+        ModelProvider,
+        RetryPolicy,
+        TurnRequest,
+        TurnResponse,
+    )
+    from vertebra.agent.sessions import (
+        ANONYMOUS_OWNER,
+        AgentSessionStore,
+        AlchemySessionStore,
+        CacheSessionStore,
+        MemorySessionStore,
+        ObjectStoreSessionStore,
+        SQLSpecSessionStore,
+    )
+    from vertebra.agent.telemetry import (
+        AgentAuditEvent,
+        AgentTelemetryRecorder,
+    )
     from vertebra.agent.tools import build_tools
+    from vertebra.agent.workflow import (
+        Workflow,
+        WorkflowCheckpoint,
+        WorkflowContext,
+        WorkflowEngine,
+        WorkflowLiveState,
+        WorkflowStep,
+        WorkflowStepResult,
+    )
 
 __all__ = (
+    "A2AAgentBridge",
     "A2AConfig",
     "A2AHttpHandler",
     "A2AService",
     "A2ATaskStore",
-    "A2aAgentBridge",
     "ANONYMOUS_OWNER",
     "Agent",
     "AgentAuditEvent",
@@ -63,21 +188,20 @@ __all__ = (
     "ConfirmationGate",
     "ConfirmationTicket",
     "CursorPage",
-    "DynamicWorkflow",
     "GoogleGenAIProvider",
     "GuardCallable",
     "GuardChain",
     "GuardProtocol",
     "JSONRPCError",
-    "JSONRPCErrorException",
+    "JSONRPCException",
     "JSONRPCRequest",
     "JSONRPCResponse",
     "JSONRPCRouter",
     "KnowledgeCatalogConfig",
     "MCPCore",
-    "McpHttpRequest",
-    "McpHttpResponse",
-    "McpToolBridge",
+    "MCPHttpRequest",
+    "MCPHttpResponse",
+    "MCPToolBridge",
     "MemorySessionStore",
     "ModelDelta",
     "ModelProvider",
@@ -87,6 +211,9 @@ __all__ = (
     "OkfSource",
     "OkfValidationError",
     "PermissionDeniedError",
+    "PlanNode",
+    "PlanNodeStatus",
+    "PlanTree",
     "ProgressCallback",
     "ProgressReporter",
     "PushNotificationDispatcher",
@@ -101,13 +228,9 @@ __all__ = (
     "SchemaDigestCache",
     "SessionHistory",
     "SessionNotFoundError",
-    "SpecNode",
-    "SpecNodeStatus",
-    "SpecTree",
     "SseFrame",
     "SseReplayBuffer",
     "SseStreamBroker",
-    "StepResult",
     "SyncKnowledgeCatalogClient",
     "TRANSFER_TOOL_NAME",
     "TenantIsolationGuard",
@@ -124,11 +247,13 @@ __all__ = (
     "TurnRequest",
     "TurnResponse",
     "TurnResult",
+    "Workflow",
     "WorkflowCheckpoint",
     "WorkflowContext",
     "WorkflowEngine",
     "WorkflowLiveState",
-    "WorkflowNode",
+    "WorkflowStep",
+    "WorkflowStepResult",
     "a2a",
     "a2a_card_to_mcp_tools",
     "authorize",
@@ -159,7 +284,7 @@ _CORE_EXPORTS = frozenset(
         "GuardChain",
         "GuardProtocol",
         "JSONRPCError",
-        "JSONRPCErrorException",
+        "JSONRPCException",
         "JSONRPCRequest",
         "JSONRPCResponse",
         "JSONRPCRouter",
@@ -217,22 +342,27 @@ _A2A_EXPORTS = frozenset(
 
 _BRIDGE_EXPORTS = frozenset(
     {
-        "A2aAgentBridge",
-        "McpToolBridge",
+        "A2AAgentBridge",
+        "MCPToolBridge",
         "a2a_card_to_mcp_tools",
         "mcp_service_to_a2a",
     }
 )
 
-_SPEC_EXPORTS = frozenset(
+_AGENT_EXPORTS = frozenset(
     {
         "Agent",
         "AgentGroup",
         "AgentMessage",
-        "SpecNode",
-        "SpecNodeStatus",
-        "SpecTree",
         "TRANSFER_TOOL_NAME",
+    }
+)
+
+_PLANNING_EXPORTS = frozenset(
+    {
+        "PlanNode",
+        "PlanNodeStatus",
+        "PlanTree",
     }
 )
 
@@ -254,13 +384,13 @@ _RUNTIME_EXPORTS = frozenset(
 
 _WORKFLOW_EXPORTS = frozenset(
     {
-        "DynamicWorkflow",
-        "StepResult",
+        "Workflow",
         "WorkflowCheckpoint",
         "WorkflowContext",
         "WorkflowEngine",
         "WorkflowLiveState",
-        "WorkflowNode",
+        "WorkflowStep",
+        "WorkflowStepResult",
     }
 )
 
@@ -344,7 +474,7 @@ def __getattr__(name: str) -> Any:
         globals()["mcp"] = mod
         return mod
 
-    if name in ("ToolRegistry", "MCPCore", "McpHttpRequest", "McpHttpResponse"):
+    if name in ("ToolRegistry", "MCPCore", "MCPHttpRequest", "MCPHttpResponse"):
         mod = ensure_module("vertebra.agent.mcp")
         val = getattr(mod, name)
         globals()[name] = val
@@ -374,8 +504,14 @@ def __getattr__(name: str) -> Any:
         globals()[name] = val
         return val
 
-    if name in _SPEC_EXPORTS:
-        mod = ensure_module("vertebra.agent.spec")
+    if name in _AGENT_EXPORTS:
+        mod = ensure_module("vertebra.agent.agents")
+        val = getattr(mod, name)
+        globals()[name] = val
+        return val
+
+    if name in _PLANNING_EXPORTS:
+        mod = ensure_module("vertebra.agent.planning")
         val = getattr(mod, name)
         globals()[name] = val
         return val

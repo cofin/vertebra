@@ -17,7 +17,7 @@ repos:
       - id: mixed-line-ending
       - id: trailing-whitespace
   - repo: https://github.com/charliermarsh/ruff-pre-commit
-    rev: "v0.17.4"
+    rev: "v0.17.6"
     hooks:
       - id: ruff
         types_or: [python, pyi]
@@ -29,7 +29,7 @@ repos:
     hooks:
       - id: codespell
         args: ['--ignore-regex', '"te":\s*"trailers"']
-        exclude: "uv.lock|package.json|package-lock.json|bun.lock"
+        exclude: "uv.lock|package.json|package-lock.json|bun.lock|Cargo.lock"
         additional_dependencies:
           - tomli
   - repo: local

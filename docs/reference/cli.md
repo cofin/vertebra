@@ -60,6 +60,7 @@ vtb run [OPTIONS] [APP]
 | `--lane-concurrency` | `text` | - | Comma-separated lane=limit assignments (e.g. default=4,embeddings=1) |
 | `--zpages` | `flag` | `False` | Enable HTTP diagnostic Z-Pages (/taskz, /statusz, /varz, /rpcz, /brokerz) |
 | `--zpages-token` | `text` | - | Bearer token required for HTTP diagnostic Z-Pages |
+| `--mount` | `text` | - | Mount a sub-application as PREFIX=MODULE:ATTR[@PROTOCOL] (repeatable) |
 | `--no-banner` | `flag` | `False` | Disable startup banner |
 
 #### `vtb dev`

@@ -1,18 +1,18 @@
-# `vertebra.extensions` — Litestar, SQLSpec, SQLAlchemy, APEX, gRPC & Broker
+# Framework & Data Extensions
 
-First-party framework extensions connecting Vertebra's native HTTP/IPC runtime to Litestar (`VertebraPlugin`), Starlette, FastAPI, Flask, Django (`VertebraPlugin` / `VertebraConfig` / `VertebraAppConfig`), SQLSpec (`create_sqlspec_plugin`), SQLAlchemy / Advanced Alchemy (`create_alchemy_plugin`), Oracle APEX (`ApexGateway`), gRPC services (`GrpcServiceRegistry`), and shared-memory database session brokers (`BrokerPlugin`). See [Framework Extensions](../usage/extensions.md) for integration guides.
+`vertebra.extensions` connects Vertebra's HTTP and IPC runtime to Litestar, Starlette, FastAPI, Flask, Django, SQLSpec, SQLAlchemy, Advanced Alchemy, Oracle APEX, gRPC services, and shared-memory database session brokers. See [Framework Extensions](../usage/extensions.md) for integration guides.
 
-| Extension | Key Objects | Purpose |
-| --- | --- | --- |
-| **Litestar** | `VertebraConfig`, `VertebraPlugin`, `RouteCompiler` | Mount Litestar applications on Vertebra, override `litestar run`, and compile static Litestar routes directly into the native router |
-| **Litestar Ecosystem** | `queues`, `security`, `autowire`, `email`, `mcp`, `vite` | First-party decoupled plugins under `vertebra.extensions.litestar.*` |
-| **SQLSpec** | `create_sqlspec_plugin`, `PostgresAsyncConfig`, `ProxySyncConfig`, `ProxyAsyncConfig`, `ObjectStoreBackend` | Per-engine `sqlspec>=0.74.1` adapters (`adapters.<engine>`), `DataDictionary` classes, ADK/Events/Litestar stores, `StatementStack` pipelines, and `ObjectStoreBase` Arrow streaming |
-| **SQLAlchemy & Alchemy** | `create_alchemy_plugin`, `SyncCacheRegion`, `AsyncCacheRegion`, `ObjectStoreBackend` | Manage SQLAlchemy async/sync engines (`+vtb` dialects), multi-tier `ShmCache`/Redis/Valkey/ObjectStore caching, request-scoped sessions, and transactional file attachments |
-| **Django 6.0+** | `VertebraPlugin`, `CacheBackend`, `DjangoStorage`, `ArrowQuerySet` | Native Django `6.0+` database backends (`postgresql`, `mysql`, `oracle`, `sqlite3`, `spanner`), native `CacheBackend`, object storage, and fastpath routing |
-| **Oracle APEX** | `ApexIslandRegistry`, `ApexGateway` | Reverse-proxy Oracle ORDS/APEX sessions, verify ECID/session state, and hydrate TypeScript UI islands |
-| **gRPC & SHM Broker** | `GrpcServiceRegistry`, `BrokerHost`, `SyncSHMBrokerTransport`, `BrokerPlugin`, `BrokerPool`, `LeaseQuarantinedError` | Dispatch HTTP/2 gRPC methods and share cross-worker SHM broker connection pools and statement caches |
+| Extension | Purpose |
+| --- | --- |
+| **Litestar** | Mount Litestar apps on Vertebra, replace `litestar run`, and compile static routes into the Rust router. |
+| **Litestar Ecosystem** | Optional plugins under `vertebra.extensions.litestar.*` for queues, security, autowire, email, MCP, and Vite. |
+| **SQLSpec** | Per-engine `sqlspec>=0.74.1` adapters, data dictionaries, event and session stores, statement stacks, and object-store Arrow streaming. |
+| **SQLAlchemy & Alchemy** | Sync and async `+vtb` dialects, broker-backed pools, multi-tier cache regions, request-scoped sessions, and file attachment storage. |
+| **Django 6.0+** | Database backends for PostgreSQL, MySQL, Oracle, SQLite, and Spanner, plus cache, object storage, and Arrow query support. |
+| **Oracle APEX** | Reverse-proxy ORDS and APEX sessions, verify session state, and hydrate TypeScript UI islands. |
+| **gRPC & SHM Broker** | Dispatch HTTP/2 gRPC methods and share connection pools and statement caches across workers over shared memory. |
 
-## Litestar Integration (`vertebra.extensions.litestar`)
+## Litestar Integration
 
 ::: vertebra.extensions.litestar.config.VertebraConfig
     options:
@@ -28,7 +28,7 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
     options:
       heading_level: 3
 
-## SQLSpec Integration (`vertebra.extensions.sqlspec`)
+## SQLSpec Integration
 
 ::: vertebra.extensions.sqlspec._driver.SyncAdapterConfig
     options:
@@ -72,7 +72,7 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
       members: false
       summary: false
 
-## SQLAlchemy & Advanced Alchemy (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
+## SQLAlchemy & Advanced Alchemy
 
 ::: vertebra.extensions.alchemy.storage.ObjectStoreBackend
     options:
@@ -87,7 +87,7 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
         - delete_object
         - delete_object_async
 
-::: vertebra.extensions.sqlalchemy.pool.BrokerPool
+::: vertebra.extensions.sqlalchemy.pool.SyncBrokerPool
     options:
       heading_level: 4
       members: false
@@ -122,7 +122,7 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
       members: false
       summary: false
 
-## Oracle APEX Gateway & Island Bridge (`vertebra.extensions.apex`)
+## Oracle APEX Gateway & Island Bridge
 
 ::: vertebra.extensions.apex.bridge.ApexIslandRegistry
     options:
@@ -132,7 +132,7 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
     options:
       heading_level: 3
 
-## gRPC Wire Framing & SHM Broker (`vertebra.extensions.grpc`, `vertebra.extensions.broker`)
+## gRPC Wire Framing & SHM Broker
 
 ::: vertebra.extensions.grpc.GrpcServiceRegistry
     options:

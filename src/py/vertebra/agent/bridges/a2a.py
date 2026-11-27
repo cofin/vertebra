@@ -1,6 +1,6 @@
 """Bridge projecting MCP tools, prompts, and skills into an A2A 1.0 agent.
 
-This module provides A2aAgentBridge exposing a ToolRegistry or MCPCore
+This module provides A2AAgentBridge exposing a ToolRegistry or MCPCore
 as a full A2A 1.0 AgentCard and executable A2AService.
 """
 
@@ -23,12 +23,12 @@ from vertebra.agent.core.context import AgentContext
 from vertebra.agent.mcp.service import MCPCore
 
 __all__ = [
-    "A2aAgentBridge",
+    "A2AAgentBridge",
     "mcp_service_to_a2a",
 ]
 
 
-class A2aAgentBridge:
+class A2AAgentBridge:
     """Projects an MCP core engine and registry into an A2A 1.0 compliant agent service."""
 
     @classmethod
@@ -220,7 +220,7 @@ def mcp_service_to_a2a(
     description: str = "",
 ) -> A2AService:
     """Project an MCPCore instance into an A2AService."""
-    return A2aAgentBridge.from_mcp_service(
+    return A2AAgentBridge.from_mcp_service(
         mcp_service,
         base_url=base_url,
         path=path,

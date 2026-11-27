@@ -25,7 +25,7 @@ from vertebra.agent.core.guards import (
 from vertebra.agent.core.identity import CallableIdentitySource, MtlsIdentitySource
 from vertebra.agent.core.jsonrpc import (
     METHOD_NOT_FOUND,
-    JSONRPCErrorException,
+    JSONRPCException,
 )
 from vertebra.agent.core.schema import tool
 from vertebra.agent.mcp import (
@@ -38,9 +38,8 @@ from vertebra.agent.mcp import (
     MCPConfig,
     MCPCore,
     MCPHttpHandler,
-    McpHttpRequest,
-    McpHttpResponse,
-    MCPRegistry,
+    MCPHttpRequest,
+    MCPHttpResponse,
     MCPTaskStore,
     PromptArgument,
     PromptEntry,
@@ -64,7 +63,7 @@ from vertebra.agent.mcp import (
     resource,
 )
 from vertebra.agent.mcp.client import MCP_NAME_FIELDS
-from vertebra.agent.mcp.routes import AsgiMcpApp, WsgiMcpApp
+from vertebra.agent.mcp.routes import AsgiMCPApp, WsgiMCPApp
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.extensions.django.mcp import attach_mcp_routes as attach_django_mcp
@@ -81,10 +80,10 @@ async def _post_mcp(
     *,
     headers: dict[str, str] | None = None,
     context: AgentContext | None = None,
-) -> McpHttpResponse:
+) -> MCPHttpResponse:
     raw = body if isinstance(body, bytes) else encode_json_bytes(body)
     return await core.handle(
-        McpHttpRequest(method="POST", path="/mcp", headers=headers or {}, body=raw, context=context)
+        MCPHttpRequest(method="POST", path="/mcp", headers=headers or {}, body=raw, context=context)
     )
 
 
@@ -97,7 +96,7 @@ async def test_mcp_core_discover_and_removed_2024_methods() -> None:
         {"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {}},
         headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover"},
     )
-    assert isinstance(discover_resp, McpHttpResponse)
+    assert isinstance(discover_resp, MCPHttpResponse)
     assert discover_resp.status == 200
     discover_res = decode_json(discover_resp.body)["result"]
     assert discover_res["protocolVersion"] == "2026-07-28"
@@ -444,7 +443,7 @@ async def test_mcp_controllers_prompt_and_skill() -> None:
             return "system log entries"
 
     ctrl = AdminTools()
-    reg = MCPRegistry()
+    reg = ToolRegistry()
     reg.register_controller(ctrl)
 
     prompts = reg.list_prompts()
@@ -540,14 +539,14 @@ async def test_mcp_tool_call_requires_approved_confirmation_token() -> None:
     service.registry.register_tool(drop_workspace)
     service.registry.register_tool(archive_workspace)
 
-    with pytest.raises(JSONRPCErrorException) as first:
+    with pytest.raises(JSONRPCException) as first:
         await service.handle_tool_call({"name": "drop_workspace", "arguments": {"workspace_id": "w1"}})
     assert first.value.error.code == CONFIRMATION_REQUIRED
     assert first.value.error.data["tool"] == "drop_workspace"
     token = first.value.error.data["confirmationToken"]
     assert calls == []
 
-    with pytest.raises(JSONRPCErrorException) as unapproved:
+    with pytest.raises(JSONRPCException) as unapproved:
         await service.handle_tool_call(
             {
                 "name": "drop_workspace",
@@ -559,7 +558,7 @@ async def test_mcp_tool_call_requires_approved_confirmation_token() -> None:
     assert calls == []
 
     assert gate.approve(token) is True
-    with pytest.raises(JSONRPCErrorException) as wrong_tool:
+    with pytest.raises(JSONRPCException) as wrong_tool:
         await service.handle_tool_call(
             {
                 "name": "archive_workspace",
@@ -570,7 +569,7 @@ async def test_mcp_tool_call_requires_approved_confirmation_token() -> None:
     assert wrong_tool.value.error.code == CONFIRMATION_REQUIRED
     assert calls == []
 
-    with pytest.raises(JSONRPCErrorException) as wrong_arguments:
+    with pytest.raises(JSONRPCException) as wrong_arguments:
         await service.handle_tool_call(
             {
                 "name": "drop_workspace",
@@ -591,7 +590,7 @@ async def test_mcp_tool_call_requires_approved_confirmation_token() -> None:
     assert consumed is not None
     assert consumed.status == "consumed"
 
-    with pytest.raises(JSONRPCErrorException) as replayed:
+    with pytest.raises(JSONRPCException) as replayed:
         await service.handle_tool_call(
             {
                 "name": "drop_workspace",
@@ -620,7 +619,7 @@ async def test_mcp_confirmation_rejects_approval_by_another_owner() -> None:
     alice = AgentContext(identity=CallerIdentity(user_id="alice"))
     call = {"name": "drop_workspace", "arguments": {"workspace_id": "w1"}}
 
-    with pytest.raises(JSONRPCErrorException) as first:
+    with pytest.raises(JSONRPCException) as first:
         await service.handle_tool_call(call, context=alice)
     token = first.value.error.data["confirmationToken"]
     ticket = gate.get_ticket(token)
@@ -635,7 +634,7 @@ async def test_mcp_confirmation_rejects_approval_by_another_owner() -> None:
     assert ticket_after.status == "pending"
     assert gate.is_approved(token, owner_id="default:alice") is False
 
-    with pytest.raises(JSONRPCErrorException) as blocked:
+    with pytest.raises(JSONRPCException) as blocked:
         await service.handle_tool_call({**call, "_meta": {CONFIRMATION_TOKEN_META_KEY: token}}, context=alice)
     assert blocked.value.error.code == CONFIRMATION_REQUIRED
     assert calls == []
@@ -661,7 +660,7 @@ async def test_agent_plugin_mcp_confirmation_uses_runtime_gate() -> None:
         return "purged"
 
     plugin.mcp_service.registry.register_tool(purge_cache)
-    with pytest.raises(JSONRPCErrorException) as exc_info:
+    with pytest.raises(JSONRPCException) as exc_info:
         await plugin.mcp_service.handle_tool_call({"name": "purge_cache", "arguments": {}})
     token = exc_info.value.error.data["confirmationToken"]
 
@@ -961,7 +960,7 @@ async def test_mcp_core_binds_agent_context(entrypoint: str, user_id: str | None
     try:
         payload: bytes | None
         if entrypoint == "handle":
-            response = await core.handle(McpHttpRequest(method="POST", path="/mcp", body=body, context=context))
+            response = await core.handle(MCPHttpRequest(method="POST", path="/mcp", body=body, context=context))
             payload = response.body
         else:
             payload = await core.handle_payload(body, context=context)
@@ -1150,7 +1149,7 @@ async def test_mcp_adapters_propagate_agent_context(surface: str, identity_case:
         return f"{context.identity.user_id}|{context.identity.email}|{context.identity.client_cert_subject}"
 
     core.registry.register_tool(whoami)
-    app = AsgiMcpApp(core)
+    app = AsgiMCPApp(core)
     body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
     scope: dict[str, Any] = {
         "type": "http",
@@ -1196,7 +1195,7 @@ def test_mcp_wsgi_adapters_propagate_agent_context(surface: str) -> None:
         return f"{context.identity.user_id}|{context.identity.client_cert_subject}"
 
     core.registry.register_tool(whoami)
-    app = WsgiMcpApp(core)
+    app = WsgiMCPApp(core)
     body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
     if surface == "wsgi":
         response = app(
@@ -1255,7 +1254,7 @@ def test_mcp_native_request_adapter_propagates_explicit_identity() -> None:
     core.registry.register_tool(whoami)
     body = encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami"}})
     request = NativeRequest.from_parts("POST", "/mcp", body=body, headers=[("x-user", "ana")])
-    response = WsgiMcpApp(core).handle_vertebra_request(request)
+    response = WsgiMCPApp(core).handle_vertebra_request(request)
     assert decode_json(bytes(response.body))["result"]["content"][0]["text"] == "ana"
 
 

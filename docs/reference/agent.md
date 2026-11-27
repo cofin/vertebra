@@ -1,17 +1,17 @@
-# `vertebra.agent` — Model Context Protocol (MCP), A2A & Workflow Engine
+# Agent Runtime, MCP, A2A & Workflows
 
-Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPCore`, `MCPSessionStore`, `ToolRegistry`, `MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig`, `SkillCatalog`), Identity (`IapIdentitySource`, `MtlsIdentitySource`), Agent-to-Agent (`A2AService`, `A2AConfig`, `AgentCard`), bidirectional protocol bridges (`McpToolBridge`, `A2aAgentBridge`), hierarchical task planning (`SpecTree`), and multi-step DAG execution (`DynamicWorkflow`, `WorkflowEngine`). See [OKF v0.2 & Knowledge Catalog](okf-and-catalog.md) for bundle serialization and Dataplex synchronization, and [Agent Protocols Usage Guide](../usage/agent-protocols.md) for end-to-end walkthroughs.
+`vertebra.agent` provides the agent execution runtime, Model Context Protocol (MCP) and Agent-to-Agent (A2A) services, identity verification, protocol bridges, task planning trees, and DAG workflows. See [OKF v0.2 & Knowledge Catalog](okf-and-catalog.md) for bundle serialization and Dataplex sync, and [Agent Protocols Usage Guide](../usage/agent-protocols.md) for walkthroughs.
 
-| Section | Core Classes | Responsibility |
-| --- | --- | --- |
-| **Agent Plugin & Harness Runtime** | `AgentPlugin`, `AgentPluginConfig`, `AgentRuntime`, `ConfirmationGate`, `Tool`, `ToolSpec`, `ToolAnnotations` | Mount MCP/A2A/chat endpoints on `App`, execute bounded LLM tool-calling loops, and gate destructive tools on single-use human approval |
-| **Model Context Protocol** | `MCPCore`, `MCPSessionStore`, `ToolRegistry`, `MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig`, `SkillCatalog`, `McpIcon`, `IapIdentitySource` | Negotiate `2026-07-28` and legacy MCP versions, stream `GET` SSE notifications, serve `SKILL.md` & SEP-1865 UI resources, verify IAP JWTs, and track async tool tasks |
-| **Agent-to-Agent Protocol & Bridges** | `AgentCard`, `A2AConfig`, `A2AService`, `McpToolBridge`, `A2aAgentBridge` | Serve JWS-signed `/.well-known/agent-card.json` descriptors, stream A2A task updates, and bridge MCP tools with A2A agents |
-| **SpecTree, Workflows & Session Stores** | `SpecTree`, `DynamicWorkflow`, `WorkflowEngine`, `MemorySessionStore`, `SQLSpecSessionStore`, `AlchemySessionStore`, `ObjectStoreSessionStore` | Decompose goals into dependency trees, execute parallel DAG steps with checkpointing, and persist multi-turn conversation state |
+| Section | Responsibility |
+| --- | --- |
+| **Agent Plugin & Harness Runtime** | Mount MCP, A2A, and chat routes on `App`, run bounded LLM tool-calling loops, and gate destructive tools behind single-use human approval. |
+| **Model Context Protocol** | Negotiate current and legacy MCP protocol versions, stream SSE notifications, serve `SKILL.md` and UI resources, verify IAP JWTs, and track async tool tasks. |
+| **Agent-to-Agent Protocol & Bridges** | Serve JWS-signed `/.well-known/agent-card.json` descriptors, stream A2A task updates, and bridge MCP tools with A2A agents. |
+| **PlanTree, Workflows & Session Stores** | Break goals into dependency trees, run parallel DAG waves with checkpointing, and store multi-turn conversation state. |
 
 ## Agent Plugin & Harness Runtime
 
-`AgentPlugin` mounts MCP, A2A, and SSE chat routes onto `App`, while `AgentRuntime` coordinates multi-turn LLM generation, `ConfirmationGate` approvals, and `Tool` execution.
+`AgentPlugin` mounts MCP, A2A, and SSE chat routes onto `App`. `AgentRuntime` coordinates multi-turn LLM generation, approval checks, and tool invocation.
 
 ::: vertebra.agent.plugin.AgentPluginConfig
     options:
@@ -40,11 +40,9 @@ Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPCore`, `MCPSessionSt
       members:
         - invoke
 
-## Provider Tools (`vertebra.agent.tools`)
+## Provider Tools
 
-`build_tools` adapts a `vertebra.typing.ToolProvider` into validated `Tool` objects.
-Native adapters own their operations and policies; construction resolves no connection.
-Operations use named parameters; positional-only and variadic signatures are rejected.
+`build_tools` adapts a `vertebra.typing.ToolProvider` into validated `Tool` objects. Adapters own their operations and policies, and constructing tools opens no database connection. Operations use named parameters; positional-only and variadic signatures are rejected.
 
 ```python
 from vertebra.agent import ConfirmationGate, build_tools
@@ -63,19 +61,13 @@ rows = await tools["bigquery_query"].invoke(
 )
 ```
 
-Spanner's adapter exports `SpannerToolProvider` with optional read-only snapshot staleness.
-Each provider accepts a native driver, config, or registry alias resolved at invocation.
-Mutations and ambiguous SQL, including `WITH`, require approval; approval does not expand
-native SQL support. Retry with the approved `confirmation_token` input. Tickets bind to
-the operation, validated arguments including defaults, and injected caller identity.
-BigQuery sends the minimum provider, per-call, and configured billing cap to native
-execution, including when its optional dry-run guard is disabled.
+Spanner's adapter exports `SpannerToolProvider` with optional read-only snapshot staleness. Each provider accepts a driver, config, or registry alias resolved at invocation. Mutations and ambiguous SQL, including `WITH`, require approval; retry with the approved `confirmation_token` input. Approval tickets bind to the operation, validated arguments (including defaults), and caller identity. BigQuery enforces the lowest of the provider, per-call, and configured billing caps even when the dry-run guard is disabled.
 
 ::: vertebra.agent.tools.build_tools
     options:
       heading_level: 4
 
-## Model Context Protocol (`vertebra.agent.mcp`)
+## Model Context Protocol
 
 ::: vertebra.agent.mcp.service.MCPCore
     options:
@@ -112,7 +104,7 @@ execution, including when its optional dry-run guard is disabled.
       heading_level: 4
       members: false
 
-## Agent-to-Agent Protocol & Bridges (`vertebra.agent.a2a`, `vertebra.agent.bridges`)
+## Agent-to-Agent Protocol & Bridges
 
 ::: vertebra.agent.a2a.models.AgentCard
     options:
@@ -134,34 +126,35 @@ execution, including when its optional dry-run guard is disabled.
         - handle_message_stream
         - stream_message
 
-::: vertebra.agent.bridges.McpToolBridge
+::: vertebra.agent.bridges.MCPToolBridge
     options:
       heading_level: 4
       members:
         - from_a2a_service
         - from_agent_card
 
-::: vertebra.agent.bridges.A2aAgentBridge
+::: vertebra.agent.bridges.A2AAgentBridge
     options:
       heading_level: 4
       members:
         - from_mcp_service
 
-## SpecTree, Workflows & Session Stores
+## PlanTree, Workflows & Session Stores
 
-::: vertebra.agent.spec.SpecTree
+::: vertebra.agent.planning.PlanTree
     options:
       heading_level: 4
       members:
         - add_node
+        - add_step
         - ready_nodes
         - to_workflow
 
-::: vertebra.agent.workflow.DynamicWorkflow
+::: vertebra.agent.workflow.Workflow
     options:
       heading_level: 4
       members:
-        - add_node
+        - add
         - add_step
         - topological_waves
 

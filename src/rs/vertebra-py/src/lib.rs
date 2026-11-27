@@ -29,10 +29,10 @@ pub mod wsgi;
 
 pub use agent::{SchemaDigestCache, classify_jsonrpc_frame};
 pub use asgi::{
-    AsgiProtocol, AsgiScope, AsgiScopeIterator, PyEmptyAwaitable, PyValueAwaitable,
-    drive_asgi_batch, drive_native_batch,
+    AsgiProtocol, AsgiScope, AsgiScopeIterator, EmptyAwaitable, ValueAwaitable, drive_asgi_batch,
+    drive_native_batch,
 };
-pub use async_bridge::{RustDbTaskAwaitable, TaskPanicError};
+pub use async_bridge::{TaskAwaitable, TaskPanicError};
 pub use broker::{
     BrokerAttachClient, BrokerAttachServer, BrokerEngineRegistry, BrokerStats, LeaseBroker,
     LeaseGrant, PartitionStats, ReclaimedLease, ShmCache, ShmCacheStats, StatementCache,
@@ -59,7 +59,7 @@ pub use telemetry::{
 pub use webtransport::{WebTransportSession, WebTransportStream, register_webtransport_handler};
 pub use wsgi::{
     WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput, WsgiStartResponse,
-    drive_wsgi_batch, run_wsgi_callable,
+    drive_wsgi_batch, run_wsgi_callable, shutdown_wsgi_executor,
 };
 
 /// Whether this build targets free-threaded Python (3.14t+).
@@ -93,8 +93,8 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<asgi::AsgiScope>()?;
     m.add_class::<asgi::AsgiScopeIterator>()?;
     m.add_class::<asgi::AsgiProtocol>()?;
-    m.add_class::<asgi::PyEmptyAwaitable>()?;
-    m.add_class::<asgi::PyValueAwaitable>()?;
+    m.add_class::<asgi::EmptyAwaitable>()?;
+    m.add_class::<asgi::ValueAwaitable>()?;
     m.add_class::<wsgi::WsgiEnviron>()?;
     m.add_class::<wsgi::WsgiEnvironIterator>()?;
     m.add_class::<wsgi::WsgiInput>()?;
@@ -148,6 +148,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(file_io::stream_file_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(wsgi::run_wsgi_callable, m)?)?;
     m.add_function(wrap_pyfunction!(wsgi::drive_wsgi_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(wsgi::shutdown_wsgi_executor, m)?)?;
     m.add_function(wrap_pyfunction!(asgi::drive_asgi_batch, m)?)?;
     m.add_function(wrap_pyfunction!(asgi::drive_native_batch, m)?)?;
     m.add_function(wrap_pyfunction!(rsgi::drive_rsgi_batch, m)?)?;

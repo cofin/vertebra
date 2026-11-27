@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 import msgspec
 
-from vertebra.agent.core.jsonrpc import INVALID_PARAMS, JSONRPCError, JSONRPCErrorException
+from vertebra.agent.core.jsonrpc import INVALID_PARAMS, JSONRPCError, JSONRPCException
 
 
 class CursorPage[T](msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -33,33 +33,33 @@ def decode_cursor(cursor: str) -> int:
     """Decode an opaque cursor string into an integer offset.
 
     Raises:
-        JSONRPCErrorException: If the cursor is malformed, not valid Base64,
+        JSONRPCException: If the cursor is malformed, not valid Base64,
             or contains a negative offset.
     """
     if not cursor or not isinstance(cursor, str):
         error = JSONRPCError(code=INVALID_PARAMS, message="Invalid cursor: cursor must be non-empty")
-        raise JSONRPCErrorException(error)
+        raise JSONRPCException(error)
 
     padded = cursor + "=" * (-len(cursor) % 4)
     try:
         raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
     except Exception as exc:
         error = JSONRPCError(code=INVALID_PARAMS, message=f"Invalid cursor encoding: {exc}")
-        raise JSONRPCErrorException(error) from exc
+        raise JSONRPCException(error) from exc
 
     if not raw.startswith("offset:"):
         error = JSONRPCError(code=INVALID_PARAMS, message="Invalid cursor format")
-        raise JSONRPCErrorException(error)
+        raise JSONRPCException(error)
 
     try:
         offset = int(raw.split(":", 1)[1])
         if offset < 0:
             error = JSONRPCError(code=INVALID_PARAMS, message="Invalid cursor offset: cannot be negative")
-            raise JSONRPCErrorException(error)
+            raise JSONRPCException(error)
         return offset
     except (ValueError, IndexError) as exc:
         error = JSONRPCError(code=INVALID_PARAMS, message="Invalid cursor offset value")
-        raise JSONRPCErrorException(error) from exc
+        raise JSONRPCException(error) from exc
 
 
 def paginate_sequence[T](

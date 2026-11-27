@@ -12,8 +12,8 @@ from vertebra.agent.mcp.controllers import (
     mcp_tool,
 )
 from vertebra.agent.mcp.models import MCPConfig
-from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
-from vertebra.agent.mcp.routes import AsgiMcpApp, render_well_known_mcp_json
+from vertebra.agent.mcp.registry import ToolRegistry
+from vertebra.agent.mcp.routes import AsgiMCPApp, render_well_known_mcp_json
 from vertebra.agent.mcp.service import MCPCore
 from vertebra.agent.mcp.skills import MCPSkillsConfig, SkillCatalog
 from vertebra.agent.mcp.webmcp import (
@@ -32,10 +32,9 @@ if TYPE_CHECKING:
     _ = (_starlette_responses, _starlette_routing)
 
 __all__ = (
-    "AsgiMcpApp",
+    "AsgiMCPApp",
     "MCPConfig",
     "MCPCore",
-    "MCPRegistry",
     "PromptController",
     "SkillController",
     "ToolRegistry",
@@ -58,19 +57,19 @@ def mount_mcp_routes(
     config: MCPConfig | None = None,
     webmcp_config: WebMCPConfig | None = None,
     skills: MCPSkillsConfig | SkillCatalog | None = None,
-) -> MCPRegistry:
-    """Discover @mcp_tool/@mcp_resource/@mcp_prompt on ``app`` routes and mount shared AsgiMcpApp."""
+) -> ToolRegistry:
+    """Discover @mcp_tool/@mcp_resource/@mcp_prompt on ``app`` routes and mount shared AsgiMCPApp."""
     resolved_config = config or MCPConfig(webmcp=webmcp_config)
     resolved_webmcp = webmcp_config or (
         resolved_config.webmcp if isinstance(resolved_config.webmcp, WebMCPConfig) else None
     )
-    resolved_registry = registry if isinstance(registry, MCPRegistry) else MCPRegistry()
+    resolved_registry = registry if isinstance(registry, ToolRegistry) else ToolRegistry()
     resolved_registry.discover_app_routes(app)
 
     resolved_skills = SkillCatalog.coerce(skills)
     core = MCPCore(config=resolved_config, registry=resolved_registry, skill_catalog=resolved_skills)
     core.validate()
-    mcp_app = AsgiMcpApp(core)
+    mcp_app = AsgiMCPApp(core)
 
     state = getattr(app, "state", None)
     if state is not None:

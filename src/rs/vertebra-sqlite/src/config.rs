@@ -124,11 +124,6 @@ impl SqliteClientConfig {
 
     /// Validate the configuration parameters.
     pub fn validate(&self) -> Result<(), SqliteClientError> {
-        if self.max_readers == 0 {
-            return Err(SqliteClientError::InvalidInput(
-                "max_readers must be at least 1".to_string(),
-            ));
-        }
         if self.path.contains('\0') {
             return Err(SqliteClientError::InvalidInput(
                 "database path must not contain NUL bytes".to_string(),
@@ -258,11 +253,11 @@ mod tests {
         let valid = SqliteClientConfig::default();
         assert!(valid.validate().is_ok());
 
-        let invalid_readers = SqliteClientConfig {
+        let zero_readers = SqliteClientConfig {
             max_readers: 0,
             ..Default::default()
         };
-        assert!(invalid_readers.validate().is_err());
+        assert!(zero_readers.validate().is_ok());
 
         let invalid_path = SqliteClientConfig {
             path: "bad\0path".to_string(),

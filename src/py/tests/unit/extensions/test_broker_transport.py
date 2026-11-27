@@ -855,7 +855,7 @@ async def test_async_broker_stream_multi_frame_order_and_idempotent_aclose() -> 
     ],
 )
 async def test_broker_streams_raise_data_error_on_malformed_dbrpc_frames(corrupt_frame: bytes) -> None:
-    """Verify both BrokerStream and AsyncBrokerStream fail closed with DataError on malformed DBRPC frames."""
+    """Verify both SyncBrokerStream and AsyncBrokerStream fail closed with DataError on malformed DBRPC frames."""
     sync_transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
     sync_stream = sync_transport.stream_dbrpc(6, None, chunk_source=[corrupt_frame])
     try:

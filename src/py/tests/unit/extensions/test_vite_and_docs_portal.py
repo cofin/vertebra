@@ -10,8 +10,8 @@ from vertebra.agent.core.context import AgentContext
 from vertebra.agent.core.guards import GuardProtocol
 from vertebra.agent.core.schema import Tool, tool
 from vertebra.agent.mcp import (
-    MCPRegistry,
     SkillController,
+    ToolRegistry,
     WebMCPConfig,
     build_webmcp_manifest,
     mcp_prompt,
@@ -280,7 +280,7 @@ def test_configurable_docs_portal_and_route_annotated_webmcp() -> None:
     def create_ticket(title: str, priority: int = 1) -> dict[str, object]:
         return {"title": title, "priority": priority}
 
-    registry = MCPRegistry()
+    registry = ToolRegistry()
     registry.register_controller(WorkspaceSkillController())
     registry.discover_app_routes(app)
 
@@ -336,7 +336,7 @@ def test_webmcp_manifest_lists_only_tagged_tools() -> None:
     def bigquery_query(sql: str) -> dict[str, str]:
         return {"sql": sql}
 
-    registry = MCPRegistry()
+    registry = ToolRegistry()
     registry.register_route_handler(browser_search)
     registry.register_route_handler(server_only)
     registry.register_route_handler(

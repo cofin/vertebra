@@ -924,6 +924,39 @@ impl LeaseBroker {
         self.table.lookup_partition(pool_key_hash)
     }
 
+    pub fn partition_count(&self) -> u32 {
+        self.table.partition_count()
+    }
+
+    pub fn wake_seq(&self) -> u32 {
+        self.table.wake_seq()
+    }
+
+    pub fn record_timeout(&self) {
+        self.table.record_timeout();
+    }
+
+    #[pyo3(signature = (expected_seq, timeout_ms=25))]
+    pub fn wait_for_wake_async(
+        &self,
+        py: Python<'_>,
+        expected_seq: u32,
+        timeout_ms: u64,
+    ) -> PyResult<crate::async_bridge::TaskAwaitable> {
+        let table = Arc::clone(&self.table);
+        let timeout = Duration::from_millis(timeout_ms);
+        crate::async_bridge::spawn_rust_db_task(
+            py,
+            async move {
+                tokio::task::spawn_blocking(move || table.wait_for_wake(expected_seq, timeout))
+                    .await
+                    .map_err(|err| format!("broker wait_for_wake task failed: {err}"))
+            },
+            |py, seq| Ok(seq.into_pyobject(py)?.into_any().unbind()),
+            |_py, err| PyRuntimeError::new_err(err),
+        )
+    }
+
     pub fn partition_stats(&self, pool_key_hash: u64) -> Option<PartitionStats> {
         self.table
             .partition_stats(pool_key_hash)

@@ -1988,3 +1988,95 @@ def test_sqlite_driver_slots_drop_lastrowid(driver_cls: type[Any]) -> None:
             driver.close()
         else:
             asyncio.run(driver.close())
+
+
+@pytest.mark.anyio
+async def test_sync_and_async_cursor_lazy_begin_skips_read_only_select() -> None:
+    """Verify lazy_begin cursors leave in_transaction False on read-only SELECTs including audit columns."""
+    sync_driver = SyncSQLiteDriver()
+    try:
+        sync_driver.execute(
+            "CREATE TABLE audit_items (id INTEGER PRIMARY KEY, created_at TEXT, updated_at TEXT, deleted_at TEXT)"
+        )
+        sync_driver.execute("INSERT INTO audit_items VALUES (1, '2026-01-01', '2026-01-02', NULL)")
+        sync_cur = sync_driver.cursor(lazy_begin=True)
+        sync_cur.execute("SELECT id, created_at, updated_at, deleted_at FROM audit_items WHERE id = ?", (1,))
+        assert sync_cur.fetchall() == [(1, "2026-01-01", "2026-01-02", None)]
+        assert sync_driver.in_transaction is False
+        sync_cur.execute("/* trace */ SELECT id FROM audit_items WHERE id = ?", (1,))
+        assert sync_cur.fetchall() == [(1,)]
+        assert sync_driver.in_transaction is False
+        sync_driver.begin()
+        sync_cur.execute("SELECT id FROM audit_items WHERE id = ?", (1,))
+        assert sync_cur.fetchall() == [(1,)]
+        assert sync_driver.in_transaction is True
+        sync_driver.rollback()
+        assert sync_driver.in_transaction is False
+    finally:
+        sync_driver.close()
+
+    async_driver = AsyncSQLiteDriver()
+    try:
+        await async_driver.execute(
+            "CREATE TABLE audit_items (id INTEGER PRIMARY KEY, created_at TEXT, updated_at TEXT, deleted_at TEXT)"
+        )
+        await async_driver.execute("INSERT INTO audit_items VALUES (1, '2026-01-01', '2026-01-02', NULL)")
+        async_cur = async_driver.cursor(lazy_begin=True)
+        await async_cur.execute("SELECT id, created_at, updated_at, deleted_at FROM audit_items WHERE id = ?", (1,))
+        assert await async_cur.fetchall() == [(1, "2026-01-01", "2026-01-02", None)]
+        assert async_driver.in_transaction is False
+        await async_cur.execute("/* trace */ SELECT id FROM audit_items WHERE id = ?", (1,))
+        assert await async_cur.fetchall() == [(1,)]
+        assert async_driver.in_transaction is False
+    finally:
+        await async_driver.close()
+
+
+@pytest.mark.anyio
+async def test_lazy_begin_read_then_write_opens_rollbackable_tx() -> None:
+    """Verify SELECT followed by DML or WITH REPLACE on lazy_begin cursor opens a rollbackable transaction."""
+    driver = AsyncSQLiteDriver()
+    try:
+        await driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, val INTEGER)")
+        await driver.execute("INSERT INTO items VALUES (1, 10)")
+        cur = driver.cursor(lazy_begin=True)
+        await cur.execute("SELECT val FROM items WHERE id = ?", (1,))
+        assert await cur.fetchall() == [(10,)]
+        assert driver.in_transaction is False
+
+        await cur.execute("UPDATE items SET val = ? WHERE id = ?", (20, 1))
+        assert driver.in_transaction is True
+        await driver.rollback()
+        assert driver.in_transaction is False
+        assert await driver.execute_tuples("SELECT val FROM items WHERE id = ?", (1,)) == [(10,)]
+
+        await cur.execute("WITH src AS (SELECT 1 AS id, 30 AS val) REPLACE INTO items SELECT id, val FROM src")
+        assert driver.in_transaction is True
+        await driver.rollback()
+        assert driver.in_transaction is False
+        assert await driver.execute_tuples("SELECT val FROM items WHERE id = ?", (1,)) == [(10,)]
+    finally:
+        await driver.close()
+
+
+@pytest.mark.anyio
+async def test_lazy_begin_raw_sql_transaction_control_syncs_in_transaction() -> None:
+    """Verify raw BEGIN/COMMIT on lazy_begin cursors keeps driver.in_transaction synchronized."""
+    driver = AsyncSQLiteDriver()
+    try:
+        await driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, val INTEGER)")
+        cur = driver.cursor(lazy_begin=True)
+        await cur.execute("BEGIN")
+        assert driver.in_transaction is True
+        await cur.execute("INSERT INTO items VALUES (?, ?)", (1, 100))
+        assert driver.in_transaction is True
+        await cur.execute("COMMIT")
+        assert driver.in_transaction is False
+
+        await cur.execute("INSERT INTO items VALUES (?, ?)", (2, 200))
+        assert driver.in_transaction is True
+        await driver.rollback()
+        assert driver.in_transaction is False
+        assert await driver.execute_tuples("SELECT id, val FROM items ORDER BY id") == [(1, 100)]
+    finally:
+        await driver.close()

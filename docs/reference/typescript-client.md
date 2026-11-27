@@ -1,40 +1,40 @@
-# `@vertebra/client` — TypeScript Client SDK Reference
+# TypeScript Client SDK
 
-Full-stack TypeScript SDK (`src/ts/vertebra-client/`) providing typed HTTP requests, retries, SSE and WebSocket streaming, binary `LiveState` synchronization, Oracle APEX island bridges, Apache Arrow streaming, WebAssembly execution, MCP/A2A agent clients, and framework adapters.
+`@vertebra/client` (`src/ts/vertebra-client/`) provides typed HTTP requests, retries, SSE and WebSocket streams, binary `LiveState` sync, Oracle APEX island bridges, Apache Arrow streaming, WebAssembly loading, MCP and A2A clients, and framework adapters.
 
-## Distribution Model: Zero-NPM Wheel-Native Packaging
+## Distribution & Wheel Packaging
 
-`@vertebra/client` is packaged and distributed directly within the `vertebra-core` Python wheel (`src/py/vertebra/server/_js/bundle/`), eliminating the requirement to publish to or install from the external NPM registry:
+`@vertebra/client` ships inside the `vertebra-core` Python wheel (`src/py/vertebra/server/_js/bundle/`), so projects do not need npm to install or serve it:
 
-- **Native Runtime Serving**: When running Vertebra applications (`vtb run` or `App`), the runtime serves all ESM modules dynamically under `/__vertebra/client/*` (e.g. `/__vertebra/client/index.js`, `/__vertebra/client/react/index.js`, `/__vertebra/client/live/index.js`) with proper MIME types and cached HTTP headers.
-- **Type Linking (`vtb js`)**: `vtb js install` vendors and links the wheel's TypeScript declarations (`.d.ts`) into `.vertebra/client` and configures `.vertebra/importmap.json` for IDE autocomplete without Node or NPM.
-- **Vite & External Bundler Compatibility**: The package preserves full `package.json` subpath exports and ESM semantics for projects using external Vite, Webpack, or Node.js toolchains.
+- **Runtime Serving**: Vertebra serves ESM modules under `/__vertebra/client/*` (such as `/__vertebra/client/index.js` and `/__vertebra/client/react/index.js`) with cache headers and MIME types.
+- **Local Type Linking**: `vtb js install` links the bundled `.d.ts` files into `.vertebra/client` and writes `.vertebra/importmap.json` for editor autocomplete without Node or npm.
+- **External Bundlers**: The package keeps standard `package.json` subpath exports and ESM entry points for Vite, Webpack, or Node toolchains.
 
-## Package Subpath Exports (`package.json`)
+## Package Subpath Exports
 
 `@vertebra/client` exposes tree-shakeable ESM entry points:
 
 | Import Path | Description |
 | --- | --- |
-| `@vertebra/client` | Root barrel exporting core HTTP, SSE, WebSocket, LiveState, Apex, Arrow, Wasm, HMR, Store, Telemetry, Router, WebMCP, and Agent clients |
-| `@vertebra/client/vite` | Vite plugin (`vitePlugin`) for Vertebra asset bundling, SSR entrypoints, and typegen |
-| `@vertebra/client/react` | React context provider (`ClientProvider`) and typed HTTP query/mutation hooks (`useQuery`, `useMutation`) |
-| `@vertebra/client/vue` | Vue 3 provider (`provideClient`) and typed query/mutation composables (`useQuery`, `useMutation`) |
-| `@vertebra/client/svelte` | Svelte context helpers (`setClient`, `getClient`) and query/mutation stores (`createQuery`, `createMutation`) |
-| `@vertebra/client/angular` | Angular client service (`ClientService`) and query/mutation helpers (`injectQuery`, `injectMutation`) |
-| `@vertebra/client/htmx` | HTMX request header and JSON payload helper (`initHtmx`) |
-| `@vertebra/client/store` | Client-side reactive `SessionStore` and `store` singleton |
-| `@vertebra/client/hmr` | `HotReloadClient`, `initHotReload`, and `ServerMessage` HMR wire protocol |
-| `@vertebra/client/wasm` | `WASMClient`, `WASMClientOptions`, and `WASM_MAGIC_BYTES` loader |
-| `@vertebra/client/arrow` | `ArrowStreamClient`, `ArrowStreamOptions`, and Apache Arrow IPC stream constants |
-| `@vertebra/client/live` | `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue`, `StateOpcode`, and FNV-1a hashing |
-| `@vertebra/client/apex` | `ApexRegion`, `ApexOfflineOutbox`, and Oracle APEX island hydration descriptors |
-| `@vertebra/client/telemetry` | W3C `TraceContext` (`traceparent`) parser, generator, and header injector |
-| `@vertebra/client/router` | Type-safe URL and WebSocket route helpers (`routeUrl`, `wsUrl`, `interpolateRoutePath`, `RouteUrlOptions`) |
-| `@vertebra/client/agent` | `McpClient`, `A2aClient`, `AgentStreamClient`, and `WorkflowLiveSubscriber` |
-| `@vertebra/client/webmcp` | Browser WebMCP (`navigator.modelContext`) auto-registration (`registerWebMCPTools`, `WebMCPManifest`, `WebMCPToolDescriptor`) |
+| `@vertebra/client` | Root barrel re-exporting HTTP, SSE, WebSocket, live state, APEX, Arrow, Wasm, HMR, store, telemetry, router, WebMCP, and agent clients. |
+| `@vertebra/client/vite` | Vite plugin for asset bundling, SSR entrypoints, and typegen. |
+| `@vertebra/client/react` | React context provider and typed query and mutation hooks. |
+| `@vertebra/client/vue` | Vue 3 provider and reactive query and mutation composables. |
+| `@vertebra/client/svelte` | Svelte context helpers and reactive query and mutation stores. |
+| `@vertebra/client/angular` | Angular client service and query and mutation helpers. |
+| `@vertebra/client/htmx` | HTMX request header and JSON payload helper. |
+| `@vertebra/client/store` | Client-side reactive session store and default singleton. |
+| `@vertebra/client/hmr` | Development hot-reload client and HMR wire protocol types. |
+| `@vertebra/client/wasm` | Browser WebAssembly loader, options, and magic-byte constants. |
+| `@vertebra/client/arrow` | Apache Arrow IPC stream client, options, and wire constants. |
+| `@vertebra/client/live` | Binary live-state client, hybrid logical clock, offline delta queue, opcodes, and FNV-1a hashing. |
+| `@vertebra/client/apex` | Oracle APEX region bridge, offline outbox, and island descriptors. |
+| `@vertebra/client/telemetry` | W3C `traceparent` parser, generator, and header injector. |
+| `@vertebra/client/router` | Type-safe HTTP and WebSocket route URL interpolation helpers. |
+| `@vertebra/client/agent` | MCP, A2A, agent streaming, and workflow live-state clients. |
+| `@vertebra/client/webmcp` | Browser WebMCP auto-registration and tool manifest types. |
 
-## HTTP Client, Retries & Error Hierarchy
+## HTTP Client, Retries & Errors
 
 ```typescript
 import {
@@ -78,7 +78,7 @@ import {
 | `ValidationError` | Class | Raised on `422 Unprocessable Entity` responses with structured `fieldErrors`. |
 | `throwParsedError` | Function | Parses an error `Response` and throws the matching `ClientError` subclass. |
 
-## Real-Time Transports: SSE, WebSocket & HMR
+## Real-Time Transports
 
 ```typescript
 import {
@@ -108,7 +108,7 @@ import {
 | `initHotReload` | Function | Bootstraps a singleton `HotReloadClient` in browser development mode. |
 | `ServerMessage` | Type | Discriminated union of HMR build, reload, and error messages from the dev server. |
 
-## Reactive `LiveState` & Session Store
+## Live State & Session Store
 
 ```typescript
 import {
@@ -140,7 +140,7 @@ import {
 | `SessionStore` | Class | Reactive key-value store backed by `sessionStorage` / `localStorage` with cross-tab sync. |
 | `store` | Const | Default shared `SessionStore` instance. |
 
-## Agent Protocols: MCP, WebMCP & A2A (`@vertebra/client/agent`, `@vertebra/client/webmcp`)
+## Agent Protocols: MCP, WebMCP & A2A
 
 ```typescript
 import {
@@ -184,7 +184,7 @@ import {
 | `BrowserModelContext` | Type | W3C WebMCP `document.modelContext` / `navigator.modelContext` browser interface (`registerTool`, `unregisterTool`). |
 | `BrowserModelContextTool` | Type | Tool registration object passed to `modelContext.registerTool(tool, { signal })`. |
 
-## Oracle APEX Island Bridge (`@vertebra/client/apex`)
+## Oracle APEX Island Bridge
 
 ```typescript
 import {
@@ -210,7 +210,7 @@ import {
 | `ApexItemHandle` | Type | Typed wrapper around `apex.item(name)` get/set/change operations. |
 | `IslandDescriptor` | Type | Metadata describing a mounted component island inside an APEX page. |
 
-## Apache Arrow, WebAssembly & W3C Telemetry
+## Apache Arrow, WebAssembly & Telemetry
 
 ```typescript
 import {
@@ -238,7 +238,7 @@ import {
 | `WASM_MAGIC_BYTES` | Const | 4-byte `\0asm` binary magic header verified before compilation. |
 | `TraceContext` | Class | W3C Trace Context (`traceparent`) parser, generator, and header injector. |
 
-## Frontend Framework Adapters (`/vite`, `/react`, `/vue`, `/svelte`, `/angular`, `/htmx`)
+## Frontend Framework Adapters
 
 | Subpath | Exports | Description |
 | --- | --- | --- |

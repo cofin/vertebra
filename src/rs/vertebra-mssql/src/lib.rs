@@ -25,7 +25,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyCapsule, PyDict, PyList, PyString};
 use vertebra_core::notify::SyncCompletionQueue;
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, construct_py_arrow_cursor, db_runtime_handle, spawn_rust_db_task_with_attr,
+    TaskAwaitable, construct_py_arrow_cursor, db_runtime_handle, spawn_rust_db_task_with_attr,
 };
 use vertebra_db::{
     AuthType, CloudSqlInstanceUri, IpType, LeaseGuard, new_broker_engine_pycapsule,
@@ -881,7 +881,7 @@ impl PyAsyncMSSQLClient {
             .map_err(|e| mssql_error_to_py(py, e))
     }
 
-    fn connect(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    fn connect(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -892,7 +892,7 @@ impl PyAsyncMSSQLClient {
         )
     }
 
-    fn ping(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    fn ping(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -903,7 +903,7 @@ impl PyAsyncMSSQLClient {
         )
     }
 
-    fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    fn close(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let client = Arc::clone(&self.inner);
         let lease = Arc::clone(&self.lease);
         spawn_rust_db_task_with_attr(
@@ -954,7 +954,7 @@ impl PyAsyncMSSQLClient {
         cursor::PyAsyncMSSQLCursor::new(Arc::clone(&self.inner), lazy_begin)
     }
 
-    fn cancel(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    fn cancel(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -971,7 +971,7 @@ impl PyAsyncMSSQLClient {
         py: Python<'_>,
         sql: &str,
         parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let (rewritten, params) =
             prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
@@ -989,7 +989,7 @@ impl PyAsyncMSSQLClient {
         py: Python<'_>,
         sql: &str,
         parameter_sets: &Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let batches = prepare_many_sql_and_params(sql, parameter_sets)
             .map_err(|e| mssql_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
@@ -1003,11 +1003,7 @@ impl PyAsyncMSSQLClient {
     }
 
     #[pyo3(signature = (isolation_level=None))]
-    fn begin(
-        &self,
-        py: Python<'_>,
-        isolation_level: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    fn begin(&self, py: Python<'_>, isolation_level: Option<String>) -> PyResult<TaskAwaitable> {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -1018,7 +1014,7 @@ impl PyAsyncMSSQLClient {
         )
     }
 
-    fn commit(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    fn commit(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -1029,7 +1025,7 @@ impl PyAsyncMSSQLClient {
         )
     }
 
-    fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    fn rollback(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -1040,7 +1036,7 @@ impl PyAsyncMSSQLClient {
         )
     }
 
-    fn savepoint(&self, py: Python<'_>, name: String) -> PyResult<RustDbTaskAwaitable> {
+    fn savepoint(&self, py: Python<'_>, name: String) -> PyResult<TaskAwaitable> {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -1051,7 +1047,7 @@ impl PyAsyncMSSQLClient {
         )
     }
 
-    fn rollback_to_savepoint(&self, py: Python<'_>, name: String) -> PyResult<RustDbTaskAwaitable> {
+    fn rollback_to_savepoint(&self, py: Python<'_>, name: String) -> PyResult<TaskAwaitable> {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -1062,7 +1058,7 @@ impl PyAsyncMSSQLClient {
         )
     }
 
-    fn release_savepoint(&self, py: Python<'_>, name: String) -> PyResult<RustDbTaskAwaitable> {
+    fn release_savepoint(&self, py: Python<'_>, name: String) -> PyResult<TaskAwaitable> {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -1079,7 +1075,7 @@ impl PyAsyncMSSQLClient {
         py: Python<'_>,
         sql: &str,
         parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let (rewritten, params) =
             prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
@@ -1101,7 +1097,7 @@ impl PyAsyncMSSQLClient {
         sql: &str,
         parameters: Option<&Bound<'_, PyAny>>,
         batch_size: usize,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let (rewritten, params) =
             prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
@@ -1133,7 +1129,7 @@ impl PyAsyncMSSQLClient {
         table: String,
         source: &Bound<'_, PyAny>,
         columns: Option<Vec<String>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let ingest_source =
             extract_arrow_ingest_source(source).map_err(|e| mssql_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);

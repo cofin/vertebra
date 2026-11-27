@@ -1,10 +1,10 @@
 # Dependency Injection, Security & OpenAPI
 
-`vertebra.framework` provides scoped dependency injection (`Provide`, `Inject`, `Container`), declarative route guards and rate limiting (`SecurityConfig`, `Guard`), and automatic OpenAPI 3.1 / Scalar UI and AsyncAPI 3.0 schema builders. See [Queues, LiveState, Email & Telemetry](queues-and-realtime.md) for background tasks, real-time state, stores, and observability.
+Vertebra includes scoped dependency injection, declarative route guards, CSRF protection, rate limiting, and OpenAPI and AsyncAPI schema builders. See [Queues, LiveState, Email & Telemetry](queues-and-realtime.md) for background tasks, real-time state, stores, and observability.
 
-## Dependency Injection (`Provide`, `Inject` & `Container`)
+## Dependency Injection
 
-Register dependencies at any layer (`App`, `Router`, `Controller`, `Route`, or `Procedure`) using `Provide`, plain functions, classes, or generator functions (`yield`), and inject them by parameter name, type annotation, or `Inject`:
+Register dependencies on an app, router, controller, route, or procedure using `Provide`. Providers can be plain functions, classes, or generators. Inject them by parameter name, type annotation, or `Inject`:
 
 ```python
 from collections.abc import Iterator
@@ -38,11 +38,11 @@ def db_status(session: Annotated[DatabaseSession, Inject("db")]) -> dict[str, st
     return {"dsn": session.dsn}
 ```
 
-Dependencies support `singleton`, `request`, and `transient` scopes, automatic generator cleanup after each request (`RequestScope`), and hierarchical overrides from `App` -> `Router` -> `Controller` -> `Route`.
+Dependencies support `singleton`, `request`, and `transient` scopes. Generator providers clean up automatically after each request, and inner layers override outer ones from app down to individual routes.
 
 ## Security, Guards & Rate Limiting
 
-Protect routes at the `App`, `Router`, `Controller`, or `@route` level using `Guard` callables, `Principal` claims (`requires_role`, `requires_scope`, `requires_tenant`, `requires_capability`), `CsrfConfig` (`CsrfMiddleware`), and `RateLimitConfig` (`RateLimiter`):
+Attach route guards, CSRF protection, and rate limits at the app, router, controller, or route level:
 
 ```python
 from vertebra import App
@@ -71,11 +71,11 @@ def read_audit_log() -> dict[str, str]:
     return {"status": "authorized"}
 ```
 
-When a guard raises `PermissionDeniedError` or returns `False`, the dispatcher short-circuits the request with `403 Forbidden` before running the handler.
+If a guard raises `PermissionDeniedError` or returns `False`, the request fails with `403 Forbidden` before the handler runs.
 
-## OpenAPI 3.1, Scalar UI & AsyncAPI 3.0
+## OpenAPI, Scalar UI & AsyncAPI
 
-Enable automatic `/openapi.json` and interactive Scalar documentation on any `App` with `app.enable_docs()`, or build OpenAPI 3.1 and AsyncAPI 3.0 specs directly via `OpenAPIConfig`, `ScalarDocsConfig`, and `AsyncAPISpecBuilder`:
+Call `app.enable_docs()` to serve `/openapi.json` and an interactive Scalar UI, or build OpenAPI 3.1 and AsyncAPI 3.0 schemas directly:
 
 ```python
 from vertebra import App

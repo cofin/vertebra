@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pyo3::prelude::*;
-use vertebra_db::py_async::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
+use vertebra_db::py_async::{TaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
 
 use crate::async_client::{POSTGRES_COMPLETION_DRAINER_ATTR, PyAsyncPostgresClient};
 use crate::config::PostgresConfig;
@@ -733,7 +733,7 @@ impl PyAsyncPostgresPool {
     }
 
     /// Acquire a pooled physical session lease asynchronously, recovering the lease safely on cancelled `Future`s.
-    pub fn acquire(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn acquire(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let pool = Arc::clone(&self.pool);
         spawn_rust_db_task_with_attr(
             py,
@@ -863,7 +863,7 @@ impl PyAsyncPostgresPool {
     }
 
     /// Drain and close the connection pool asynchronously under configured `close_timeout`.
-    pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn close(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let pool = Arc::clone(&self.pool);
         let deadline = pool.options().close_timeout;
         spawn_rust_db_task_with_attr(

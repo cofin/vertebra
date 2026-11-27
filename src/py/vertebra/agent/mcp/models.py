@@ -32,10 +32,10 @@ __all__ = [
     "BlobContent",
     "ContentBlock",
     "MCPConfig",
-    "McpHttpRequest",
-    "McpHttpResponse",
-    "McpIcon",
-    "McpLogLevel",
+    "MCPHttpRequest",
+    "MCPHttpResponse",
+    "MCPIcon",
+    "MCPLogLevel",
     "NegotiatedProtocol",
     "PromptArgument",
     "PromptEntry",
@@ -68,7 +68,7 @@ SESSION_CAPACITY_EXHAUSTED: int = -32000
 HEADER_MISMATCH: int = -32020
 UNSUPPORTED_PROTOCOL_VERSION: int = -32022
 
-type McpLogLevel = Literal[
+type MCPLogLevel = Literal[
     "debug",
     "info",
     "notice",
@@ -78,7 +78,7 @@ type McpLogLevel = Literal[
     "alert",
     "emergency",
 ]
-MCP_LOG_LEVELS: tuple[McpLogLevel, ...] = (
+MCP_LOG_LEVELS: tuple[MCPLogLevel, ...] = (
     "debug",
     "info",
     "notice",
@@ -141,7 +141,7 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
     """Maximum number of concurrent legacy MCP sessions retained in memory."""
     logging: bool = True
     """Advertise and serve MCP logging capabilities and `logging/setLevel`."""
-    default_log_level: McpLogLevel = "info"
+    default_log_level: MCPLogLevel = "info"
     """Default minimum log severity assigned to newly created MCP sessions."""
     enable_get_sse: bool = True
     """Allow legacy `GET /mcp` Server-Sent Events notification streams."""
@@ -196,7 +196,7 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
                 raise ValueError("MCPConfig.ui_mime_types entries must be non-empty strings")
 
 
-class McpHttpRequest(FrozenBaseStruct, frozen=True, kw_only=True):
+class MCPHttpRequest(FrozenBaseStruct, frozen=True, kw_only=True):
     """Transport-agnostic HTTP request envelope for MCPCore.handle."""
 
     method: str = "POST"
@@ -211,7 +211,7 @@ class McpHttpRequest(FrozenBaseStruct, frozen=True, kw_only=True):
     """Optional active `AgentContext` associated with the caller."""
 
 
-class McpHttpResponse(FrozenBaseStruct, frozen=True, kw_only=True):
+class MCPHttpResponse(FrozenBaseStruct, frozen=True, kw_only=True):
     """Transport-agnostic HTTP response envelope returned by MCPCore.handle."""
 
     status: int = 200
@@ -271,7 +271,7 @@ class ToolCallOutput(FrozenBaseStruct, frozen=True, kw_only=True):
     """Whether the tool execution resulted in an application-level error."""
 
 
-class McpIcon(FrozenBaseStruct, frozen=True, cache_hash=True):
+class MCPIcon(FrozenBaseStruct, frozen=True, cache_hash=True):
     """SEP-1865 / MCP icon metadata descriptor for resources, templates, and skills."""
 
     src: str
@@ -291,25 +291,25 @@ class McpIcon(FrozenBaseStruct, frozen=True, cache_hash=True):
         return out
 
 
-def coerce_mcp_icons(icons: Sequence[McpIcon | Mapping[str, Any]] | None) -> tuple[McpIcon, ...]:
-    """Normalize a sequence of ``McpIcon`` objects or mappings into a canonical tuple."""
+def coerce_mcp_icons(icons: Sequence[MCPIcon | Mapping[str, Any]] | None) -> tuple[MCPIcon, ...]:
+    """Normalize a sequence of ``MCPIcon`` objects or mappings into a canonical tuple."""
     if not icons:
         return ()
-    resolved: list[McpIcon] = []
+    resolved: list[MCPIcon] = []
     for item in icons:
-        if isinstance(item, McpIcon):
+        if isinstance(item, MCPIcon):
             resolved.append(item)
         elif isinstance(item, Mapping):
             src = item.get("src")
             if not isinstance(src, str) or not src:
-                raise ValueError("McpIcon mapping requires a non-empty 'src' string")
+                raise ValueError("MCPIcon mapping requires a non-empty 'src' string")
             raw_mime = item.get("mimeType")
             mime = str(raw_mime) if raw_mime is not None else None
             raw_sizes = item.get("sizes") or ()
             sizes = (raw_sizes,) if isinstance(raw_sizes, str) else tuple(str(sz) for sz in raw_sizes)
-            resolved.append(McpIcon(src=src, mimeType=mime, sizes=sizes))
+            resolved.append(MCPIcon(src=src, mimeType=mime, sizes=sizes))
         else:
-            raise TypeError(f"Expected McpIcon or Mapping, got {type(item).__name__}")
+            raise TypeError(f"Expected MCPIcon or Mapping, got {type(item).__name__}")
     return tuple(resolved)
 
 
@@ -326,7 +326,7 @@ class ResourceEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     """Summary describing the resource contents and usage."""
     mimeType: str = "text/plain"
     """IANA media type returned when reading the resource."""
-    icons: tuple[McpIcon, ...] = ()
+    icons: tuple[MCPIcon, ...] = ()
     """Optional icons advertised alongside this resource."""
     meta: dict[str, Any] | None = None
     """Optional ``_meta`` extension payload (for example SEP-1865 UI settings)."""
@@ -347,7 +347,7 @@ class ResourceTemplateEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     """Description of the parameterized resource family."""
     mimeType: str = "text/plain"
     """Default IANA media type of resolved resources."""
-    icons: tuple[McpIcon, ...] = ()
+    icons: tuple[MCPIcon, ...] = ()
     """Optional icons advertised alongside this resource template."""
     meta: dict[str, Any] | None = None
     """Optional ``_meta`` extension payload."""

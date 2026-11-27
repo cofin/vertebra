@@ -1,19 +1,19 @@
 # Model Context Protocol (MCP, Skills & Stdio)
 
-`vertebra.agent.mcp` exposes typed Python functions, prompt templates, resources, and `SKILL.md` bundles over **Model Context Protocol (`2026-07-28`)** and legacy **Streamable HTTP (`2025-11-25`, `2025-06-18`, `2025-03-26`)**. See [A2A, WebMCP & Workflows](a2a-and-workflows.md), [Vector Embeddings & Slabs](embeddings-and-vectors.md), and the [`vertebra.agent` API Reference](../reference/agent.md) for companion AI subsystems.
+Expose typed Python functions, prompt templates, resources, and `SKILL.md` bundles over the Model Context Protocol, covering both stateless HTTP and legacy Streamable HTTP sessions. See [A2A, WebMCP & Workflows](a2a-and-workflows.md), [Vector Embeddings & Slabs](embeddings-and-vectors.md), and the [Agent API Reference](../reference/agent.md) for companion AI subsystems.
 
-## Protocol & Runtime Selection Matrix
+## Subsystem Overview
 
-| Subsystem | Primary Entrypoints | When to Use |
-| --- | --- | --- |
-| **MCP Server (`vertebra.agent.mcp`)** | `MCPCore`, `ToolRegistry`, `MCPSessionStore`, `ToolSpec`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig` | Expose typed Python `@tool`, `ToolProvider`, `@prompt`, and `@resource` handlers with dual-mode version negotiation, SSE streams, subscriptions, `SKILL.md` bundles, and SEP-1865 UI links |
-| **[A2A & WebMCP](a2a-and-workflows.md)** | `A2AService`, `A2AConfig`, `AgentCard`, `@vertebra/client/webmcp` | Publish `/.well-known/agent-card.json` discovery cards, handle streaming A2A tasks, and expose browser `document.modelContext` tools |
-| **[Protocol Bridges & Workflows](a2a-and-workflows.md)** | `McpToolBridge`, `A2aAgentBridge`, `AgentRuntime`, `SpecTree`, `DynamicWorkflow` | Bridge MCP and A2A services or run multi-turn tool-calling loops with single-use approval gates and DAG workflows |
-| **[Vector Embeddings](embeddings-and-vectors.md)** | `Embedder`, `VertexEmbedder`, `GemmaEmbedder`, `VectorView`, `VectorBatchView` | Generate zero-copy shared-memory embeddings via Google gRPC, in-DB SQL pushdown, or `1x` RAM local models |
+| Subsystem | When to Use |
+| --- | --- |
+| **MCP Server** | Expose Python tools, prompts, resources, `SKILL.md` bundles, and UI links over HTTP or stdio |
+| **[A2A & WebMCP](a2a-and-workflows.md)** | Publish `/.well-known/agent-card.json` discovery cards, handle streaming A2A tasks, and expose browser tools |
+| **[Bridges & Workflows](a2a-and-workflows.md)** | Bridge MCP and A2A services or run multi-turn agent loops with approval gates and DAG workflows |
+| **[Vector Embeddings](embeddings-and-vectors.md)** | Generate embeddings via Google Cloud APIs, in-database SQL pushdown, or local models |
 
-## Registering Tools, Prompts & Resources (`vertebra.agent.mcp`)
+## Registering Tools, Prompts & Resources
 
-Register typed Python functions as MCP tools (`@tool` / `@mcp_tool`), prompt templates (`@prompt` / `@mcp_prompt`), and resources (`@resource` / `@mcp_resource`) on `ToolRegistry` (or `MCPRegistry`). Input and output JSON Schemas compile once into immutable `ToolSpec` descriptors via `msgspec.defstruct` and `msgspec.json.schema_components`:
+Decorate typed Python functions with `@tool`, `@prompt`, and `@resource` and register them on a `ToolRegistry`. Input and output JSON Schemas compile once at registration time:
 
 ```python
 from vertebra.agent.core import tool
@@ -42,13 +42,13 @@ registry.register_prompt(restock_prompt)
 registry.register_resource(list_warehouses)
 ```
 
-## Dual-Mode MCP Transport, Extensions & `vtb ai mcp` CLI
+## Transport, Extensions & CLI
 
-- **Transport-Agnostic `MCPCore` (`McpHttpRequest` -> `McpHttpResponse`)**: Negotiates `SUPPORTED_PROTOCOL_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")` (returning `-32022` with `data.supported` on mismatch). Stateless `2026-07-28` serves `server/discover`, `subscriptions/listen` SSE, `Mcp-Method`/`Mcp-Name`/`Mcp-Param-*` (`-32020`) header checks, default `Origin` checks, and `ETag` `304 Not Modified`; legacy sessions issue owner-scoped `MCPSessionStore` IDs on `initialize`, stream notifications via `GET /mcp` SSE (`Last-Event-ID`, heartbeats, `Mcp-Session-Id`), terminate via `DELETE /mcp`, support `resources/subscribe` (`notify_resource_updated`), and accept `2025-03-26` JSON-RPC batches.
-- **Shared ASGI/WSGI Adapters & `litestar-mcp` Delegation**: Starlette and FastAPI share `AsgiMcpApp`, Flask and Django share `WsgiMcpApp` over `PortalProvider.default()`, Litestar delegates `/mcp` to `litestar-mcp>=0.20.0`, and all frameworks serve one canonical `/.well-known/mcp.json` schema and validate `ui://` resource links on startup via `MCPCore.validate()`.
-- **Skills (`SKILLS_EXTENSION`) & MCP Apps UI (`UI_EXTENSION`)**: Advertises `SkillCatalog` metadata under `capabilities.extensions['io.modelcontextprotocol/skills']` alongside `capabilities.extensions['io.modelcontextprotocol/ui']` (`McpIcon`, tool/resource `_meta["ui"]`, `visibility`, and app-only tool filtering for non-UI clients).
-- **Async Tasks & Guards**: Promotes slow tool calls into owner-scoped `MCPTaskStore` records with isolated cancellation tokens. `Tool.authorize` evaluates guards once (`-32004` permission denied, `-32005` rate/budget limit) before `Tool.call`.
-- **Incremental Stdio & OIDC Bridge (`vtb ai mcp serve|bridge`)**: Discover and serve an application's MCP surface over incremental/cancellable stdio, or bridge desktop stdio hosts to remote HTTPS/IAP/Cloud Run MCP servers using `OidcTokenSource` (`AsyncGcpIdTokenCache`, automatic `401` refresh retry) and dual-mode `GET` SSE relay:
+- **Dual-mode HTTP transport**: Negotiates stateless MCP and legacy session-based Streamable HTTP automatically. Supports server discovery, SSE streams and resource subscriptions, `Origin` validation, `ETag` caching (`304 Not Modified`), and session lifecycle endpoints (`GET /mcp`, `DELETE /mcp`).
+- **Framework adapters**: Works across Vertebra, Starlette, FastAPI, Flask, Django, and Litestar (which delegates `/mcp` to `litestar-mcp`). All frameworks serve a single `/.well-known/mcp.json` descriptor and validate `ui://` resource links on startup.
+- **Skills and UI extensions**: Advertises `SKILL.md` catalogs and MCP Apps UI metadata, filtering app-only tools for non-UI clients.
+- **Async tasks and guards**: Promotes slow tool calls into background task records with per-owner cancellation tokens. Guards check permissions and rate or budget limits before running the handler.
+- **Stdio and OIDC bridge**: Serve an app's MCP surface over stdio, or bridge a local stdio host to a remote HTTPS, IAP, or Cloud Run MCP server with automatic token refresh on `401`:
 
 ```bash
 vtb ai mcp serve --app app:app
@@ -59,7 +59,7 @@ vtb ai mcp bridge \
 
 ## Caller Identity, IAP Verification & Cancellation
 
-MCP tools receive an `AgentContext` via `AgentContext.current()`. ASGI auth state and WSGI `REMOTE_USER` establish application caller identity; proxy identity headers require both `MCPConfig(trust_proxy_identity=True)` and an explicit `IdentitySource`:
+Read caller context inside tools via `AgentContext.current()`. ASGI auth state and WSGI `REMOTE_USER` establish caller identity automatically. Accepting proxy identity headers requires `MCPConfig(trust_proxy_identity=True)` paired with an explicit identity source:
 
 ```python
 from vertebra.agent.core.identity import IapIdentitySource, MtlsIdentitySource
@@ -77,6 +77,6 @@ mtls_config = MCPConfig(
 )
 ```
 
-- **`IapIdentitySource` (`vertebra-core[iap]`)**: Verifies ES256 `x-goog-iap-jwt-assertion` headers against Google IAP JWKs (`aud`, `iss == 'https://cloud.google.com/iap'`, `exp`), failing closed (`None`) on invalid/expired assertions and never trusting plain `x-goog-authenticated-user-email` headers.
-- **`MtlsIdentitySource` & `CallableIdentitySource`**: Accept `x-vertebra-mtls-subject` only from configured proxy CIDRs (returning `None` on header-only routes without peer addresses) or delegate to custom application policies.
-- **Cancellation**: `notifications/cancelled` aborts in-flight stdio dispatches, while `tasks/cancel` signals promoted task tokens for matching owners.
+- **Google IAP (`vertebra-core[iap]`)**: `IapIdentitySource` verifies `x-goog-iap-jwt-assertion` JWTs against Google IAP JWKs and fails closed on invalid or expired tokens. Plain `x-goog-authenticated-user-email` headers are never trusted.
+- **mTLS and custom policies**: `MtlsIdentitySource` accepts `x-vertebra-mtls-subject` only from configured proxy CIDRs. Use `CallableIdentitySource` for custom policies.
+- **Cancellation**: Stdio cancellation notifications abort in-flight dispatches, and `tasks/cancel` cancels promoted background tasks for matching owners.

@@ -42,7 +42,7 @@ use crate::health::HealthEndpoint;
 use crate::hmr::HmrState;
 use crate::profile::ProfileEndpoint;
 use crate::pubsub::PubSubBroker;
-use crate::response::handle_with_peer;
+use crate::response::handle_with_peer_shard;
 use crate::routing::Router;
 use crate::sse::SseHub;
 use crate::ws_mount::{WsConfig, WsConnectionRegistry};
@@ -362,6 +362,27 @@ impl ServerState {
             .pubsub_publish(topic, payload, idempotency_key)
     }
 
+    /// Select a collector shard index once per accepted connection.
+    #[inline]
+    pub fn next_collector_shard(&self) -> usize {
+        let len = self.collector_shards.len();
+        if len <= 1 {
+            0
+        } else {
+            self.next_shard.fetch_add(1, Ordering::Relaxed) % len
+        }
+    }
+
+    /// Return the collector shard sender for a preselected shard index.
+    #[inline]
+    pub fn collector_for_shard(
+        &self,
+        shard_idx: usize,
+    ) -> &tokio::sync::mpsc::Sender<PendingRequest> {
+        let len = self.collector_shards.len();
+        &self.collector_shards[shard_idx % len]
+    }
+
     /// Get a collector shard sender (round-robin).
     #[inline]
     pub fn get_collector(&self) -> &tokio::sync::mpsc::Sender<PendingRequest> {
@@ -665,6 +686,7 @@ struct IdleTimeoutStream<S> {
     inner: S,
     timeout: Duration,
     deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+    activity: bool,
 }
 
 impl<S> IdleTimeoutStream<S> {
@@ -674,14 +696,7 @@ impl<S> IdleTimeoutStream<S> {
             inner,
             timeout,
             deadline,
-        }
-    }
-
-    fn reset_deadline(&mut self) {
-        if let Some(ref mut sleep) = self.deadline {
-            sleep
-                .as_mut()
-                .reset(tokio::time::Instant::now() + self.timeout);
+            activity: false,
         }
     }
 }
@@ -696,19 +711,33 @@ impl<S: AsyncRead + Unpin> AsyncRead for IdleTimeoutStream<S> {
         match Pin::new(&mut self.inner).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
                 if buf.filled().len() > before {
-                    self.reset_deadline();
+                    self.activity = true;
                 }
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Pending => {
-                if let Some(ref mut sleep) = self.deadline
+                let this = &mut *self;
+                if let Some(ref mut sleep) = this.deadline
                     && sleep.as_mut().poll(cx).is_ready()
                 {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "HTTP/1 connection idle timeout",
-                    )));
+                    if this.activity {
+                        this.activity = false;
+                        sleep
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + this.timeout);
+                        if sleep.as_mut().poll(cx).is_ready() {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "HTTP/1 connection idle timeout",
+                            )));
+                        }
+                    } else {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "HTTP/1 connection idle timeout",
+                        )));
+                    }
                 }
                 Poll::Pending
             }
@@ -725,7 +754,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for IdleTimeoutStream<S> {
         match Pin::new(&mut self.inner).poll_write(cx, buf) {
             Poll::Ready(Ok(n)) => {
                 if n > 0 {
-                    self.reset_deadline();
+                    self.activity = true;
                 }
                 Poll::Ready(Ok(n))
             }
@@ -803,6 +832,7 @@ async fn serve_plain(
     h1_drain_rx: watch::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!(peer = %peer, "plain TCP connection");
+    let collector_shard = state.next_collector_shard();
 
     if !state.config.enable_h2c_prior_knowledge {
         let io = TokioIo::new(IdleTimeoutStream::new(
@@ -819,7 +849,7 @@ async fn serve_plain(
                 io,
                 service_fn(move |req: Request<Incoming>| {
                     let state = Arc::clone(&state);
-                    async move { handle_with_peer(req, peer, state).await }
+                    async move { handle_with_peer_shard(req, peer, collector_shard, state).await }
                 }),
             )
             .with_upgrades();
@@ -842,7 +872,7 @@ async fn serve_plain(
                 io,
                 service_fn(move |req: Request<Incoming>| {
                     let state = Arc::clone(&state);
-                    async move { handle_with_peer(req, peer, state).await }
+                    async move { handle_with_peer_shard(req, peer, collector_shard, state).await }
                 }),
             );
             watcher.watch(conn.into_owned()).await?;
@@ -857,7 +887,7 @@ async fn serve_plain(
                 io,
                 service_fn(move |req: Request<Incoming>| {
                     let state = Arc::clone(&state);
-                    async move { handle_with_peer(req, peer, state).await }
+                    async move { handle_with_peer_shard(req, peer, collector_shard, state).await }
                 }),
             );
             watcher.watch(conn.into_owned()).await?;
@@ -875,6 +905,7 @@ async fn serve_tls(
     watcher: Watcher,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!(peer = %peer, "TLS connection");
+    let collector_shard = state.next_collector_shard();
     let tls_stream = acceptor.accept(stream).await?;
     let io = TokioIo::new(tls_stream);
 
@@ -883,9 +914,108 @@ async fn serve_tls(
         io,
         service_fn(move |req: Request<Incoming>| {
             let state = Arc::clone(&state);
-            async move { handle_with_peer(req, peer, state).await }
+            async move { handle_with_peer_shard(req, peer, collector_shard, state).await }
         }),
     );
     watcher.watch(conn.into_owned()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::mpsc;
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_stream_extends_on_activity_and_times_out_when_idle() {
+        let (mut client, server) = tokio::io::duplex(64);
+        let mut wrapped = IdleTimeoutStream::new(server, Duration::from_secs(5));
+
+        client.write_all(b"ping").await.expect("write ping");
+        let mut buf = [0u8; 4];
+        wrapped.read_exact(&mut buf).await.expect("read ping");
+        assert_eq!(&buf, b"ping");
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let read_fut = wrapped.read(&mut buf);
+        tokio::pin!(read_fut);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut read_fut)
+                .await
+                .is_err(),
+            "first timer tick after activity must reset instead of timing out"
+        );
+
+        let err = read_fut
+            .await
+            .expect_err("second idle period with no activity must time out");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_stream_extends_on_write_activity() {
+        let (mut client, server) = tokio::io::duplex(64);
+        let mut wrapped = IdleTimeoutStream::new(server, Duration::from_secs(5));
+
+        wrapped.write_all(b"pong").await.expect("write pong");
+        let mut client_buf = [0u8; 4];
+        client
+            .read_exact(&mut client_buf)
+            .await
+            .expect("client read pong");
+        assert_eq!(&client_buf, b"pong");
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let mut server_buf = [0u8; 4];
+        let read_fut = wrapped.read(&mut server_buf);
+        tokio::pin!(read_fut);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut read_fut)
+                .await
+                .is_err(),
+            "write activity must extend the idle deadline"
+        );
+        let err = read_fut
+            .await
+            .expect_err("subsequent idle window with no activity must time out");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_stream_zero_timeout_never_times_out() {
+        let (_client, server) = tokio::io::duplex(64);
+        let mut wrapped = IdleTimeoutStream::new(server, Duration::ZERO);
+        let mut buf = [0u8; 4];
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), wrapped.read(&mut buf))
+                .await
+                .is_err(),
+            "zero idle timeout must disable idle deadline"
+        );
+    }
+
+    #[test]
+    fn collector_shard_selection_pins_and_round_robins() {
+        let (tx0, _rx0) = mpsc::channel(4);
+        let (tx1, _rx1) = mpsc::channel(4);
+        let (tx2, _rx2) = mpsc::channel(4);
+        let state = ServerState::new(
+            Arc::new(Router::from_entries(Vec::new()).unwrap()),
+            Arc::new(Dispatcher::new_direct(4).0),
+            Arc::new(ServerConfig::default()),
+            vec![tx0, tx1, tx2],
+        );
+
+        let s0 = state.next_collector_shard();
+        let s1 = state.next_collector_shard();
+        let s2 = state.next_collector_shard();
+        let s3 = state.next_collector_shard();
+        assert_eq!([s0, s1, s2, s3], [0, 1, 2, 0]);
+        assert!(
+            state
+                .collector_for_shard(1)
+                .same_channel(state.collector_for_shard(4))
+        );
+    }
 }

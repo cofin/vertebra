@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-27T21:12:00Z"
+    commit: 4f64c6e5
   - by: agent:bb-executor
     at: "2026-11-21T21:30:00Z"
     commit: 06e99fbf
@@ -77,6 +80,12 @@ sources:
   - id: src-tools-benchmarks-data-backend-py
     resource: tools/benchmarks/apps/_data_backend.py
     title: "Shared full-stack benchmark data backend, pool budget, and MinIO ban enforcement"
+  - id: src-tools-benchmarks-db-drivers-py
+    resource: tools/benchmarks/apps/_db_drivers.py
+    title: "Pluggable SQLite and PostgreSQL native and stdlib WorldDriver implementations"
+  - id: src-tools-benchmarks-db-orm-drivers-py
+    resource: tools/benchmarks/apps/_db_orm_drivers.py
+    title: "SQLSpec and Advanced Alchemy WorldDriver implementations for SQLite and PostgreSQL"
   - id: src-tools-pgo-init-py
     resource: tools/pgo/__init__.py
     title: "Repository tooling module (tools/pgo/__init__.py)"
@@ -114,8 +123,9 @@ sources:
 <!-- truth: start -->
 - Third-party `duckdb>=1.0; python_version < '3.14'` lives in `[dependency-groups].duckdb` and `bench` solely for `tools.benchmarks.store`, third-party comparative SQL/cache/storage/framework drivers live in `[dependency-groups].bench-comparators` (and `psycopg[binary]`/`asyncpg` in `postgres-bench`), and `uvicorn`/`granian`/`spikard` live in `bench`; `make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group duckdb` or `bench-comparators`.
 - `tools.benchmarks` stores 8 matrix columns (`adapter`, `protocol`, `transport`, `broker_mode`, `load_mode`, `target_rps`, `pool_size`, `gil_enabled`) in DuckDB with idempotent legacy migration, dispatches closed-loop and open-loop load via `oha`, `h2load`, `ghz`, and `k6` (failing loud with install hints when absent), supervises SHM `BrokerHostHook` lifecycles, and forbids MinIO in favor of `rustfs`, `floci_*`, `azurite`, `local`, and `memory`.
+- `DataBackend` supports `memory`, `sqlite`, and `postgres` (`VTB_BENCH_DB_BACKEND`) across `native`, `sqlspec`, `advanced_alchemy`, and `stdlib` (`VTB_BENCH_DB_ADAPTER`, `VTB_BENCH_DB_ADAPTER_FLAVOR=vertebra|upstream`) backed by `_db_drivers.py` (with single-checkout/single-lease and sorted `row_id` update parity across `NativePostgresWorldDriver` and `StdlibPostgresWorldDriver`) and `_db_orm_drivers.py`, plus 11 SQLSpec, Advanced Alchemy, and stdlib HTTP data targets on ports `8160`–`8170` (including `granian-rsgi-data-stdlib` on `8170`).
 - Run `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, `make bench-check`, and `make postgres-bench` against release/PGO builds; run `make postgres-bench-check` and `src/py/tests/unit/tools/test_e2e_benchmarks.py` offline for Criterion test execution, lint/type validation, standalone SQLite/Memory comparators, and full matrix contract checks.
-- `python -m tools.benchmarks.adapters.sql check` pairs Vertebra cases against comparators through `COMPARATOR_PAIRS`, defaults to `--max-median-ratio 1.0`, prints `[ALLOW]` for `COMPARATOR_ALLOW_LIST` drivers and `[SKIP]` for `COMPARATORLESS_CASES`, and exits non-zero on any slower unlisted case or missing comparator unless `--allow-missing` is set.
+- `python -m tools.benchmarks.adapters.sql check` pairs Vertebra cases (including `advanced_alchemy` SQLite and PostgreSQL sync/async via `capture_advanced_alchemy_report`) against comparators through `COMPARATOR_PAIRS`, defaults to `--max-median-ratio 1.0`, prints `[ALLOW]` for `COMPARATOR_ALLOW_LIST` drivers and `[SKIP]` for `COMPARATORLESS_CASES`, and exits non-zero on any slower unlisted case or missing comparator unless `--allow-missing` is set.
 <!-- truth: end -->
 
 Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `src/rs/vertebra-http/benches/`, `src/rs/vertebra-postgres/benches/`), standalone adapter comparators in [`tools/benchmarks/adapters/`](../../../../tools/benchmarks/adapters/base.py)[^src-tools-benchmarks-adapters-base-py] and [`tools/benchmarks/postgres.py`](../../../../tools/benchmarks/postgres.py)[^src-tools-benchmarks-postgres-py], and a full-stack HTTP/1.1, HTTP/2, HTTP/3, and gRPC harness in [`tools/benchmarks/`](../../../../tools/benchmarks/cli.py)[^src-tools-benchmarks-cli-py]. No throughput figures are recorded in the repository outside `tools/benchmarks/results/`.
@@ -141,14 +151,14 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
 - [`drivers.py`](../../../../tools/benchmarks/drivers.py)[^src-tools-benchmarks-drivers-py]: Unified `LoadDriver` protocol and `LoadConfig` implemented by `OhaDriver` (`oha -q` for open-loop HTTP/1.1), `H2LoadDriver` (`h2load` for HTTP/2 and HTTP/3), `GhzDriver` (`ghz` for gRPC), and `K6Driver` (`k6` scripted workloads), plus `build_docker_driver_command` fallback helpers. Missing binaries raise `DriverBinaryNotFoundError` (`FileNotFoundError`) with actionable install hints.
 - [`runner.py`](../../../../tools/benchmarks/runner.py)[^src-tools-benchmarks-runner-py]: `ServerRunner` executes `ServerLifecycleHook` implementations (`BrokerHostHook` with `BrokerHookConfig`) in order on `pre_start()` before spawning the server and tears them down in reverse order on `post_stop()`, including on startup failure.
 - [`scenarios.py`](../../../../tools/benchmarks/scenarios.py)[^src-tools-benchmarks-scenarios-py]: `SCENARIOS` covers static/echo/I/O, TechEmpower-style database/cache workloads (`db`, `queries_1..20`, `updates_5..20`, `cached_queries_10..100`), object storage (`object_put_4k`, `object_get_4k`, `object_get_64k`), and gRPC (`grpc_db`, `grpc_queries_10`, `grpc_native_db`, `grpc_native_queries_10`).
-- [`targets.py`](../../../../tools/benchmarks/targets.py)[^src-tools-benchmarks-targets-py]: `Target` carries `protocol`, `transport`, `adapter`, `broker_mode`, `pool_size`, and `workers` across `VERTEBRA_TARGETS`, `BASELINE_TARGETS`, `FREETHREADED_TARGETS`, `DATA_TARGETS`, `DATA_BASELINE_TARGETS`, `DATA_FREETHREADED_TARGETS`, `FRAMEWORK_TARGETS`, and `GRPC_TARGETS`. `tools/benchmarks/apps/` hosts the native, ASGI, RSGI, WSGI, gRPC (`data_grpc.py`), and framework (`data_frameworks.py`) apps backed by [`_data_backend.py`](../../../../tools/benchmarks/apps/_data_backend.py)[^src-tools-benchmarks-data-backend-py].
+- [`targets.py`](../../../../tools/benchmarks/targets.py)[^src-tools-benchmarks-targets-py]: `Target` carries `protocol`, `transport`, `adapter`, `broker_mode`, `pool_size`, and `workers` across `VERTEBRA_TARGETS`, `BASELINE_TARGETS`, `FREETHREADED_TARGETS`, `DATA_TARGETS`, `DATA_BASELINE_TARGETS`, `DATA_FREETHREADED_TARGETS`, `FRAMEWORK_TARGETS`, and `GRPC_TARGETS`—including 11 SQLSpec, Advanced Alchemy, and stdlib HTTP data targets on ports `8160`–`8170` (`vtb-data-sqlspec-native-4w`, `vtb-data-sqlspec-shm-4w-broker`, `vtb-data-aa-native-4w`, `vtb-data-aa-shm-4w-broker`, `granian-rsgi-data-stdlib`, `granian-asgi-data-{stdlib,sqlspec,aa}`, and `uvicorn-httptools-data-{stdlib,sqlspec,aa}`, with `--loop uvloop` on non-WSGI Granian data targets for `asyncpg` TLS compatibility). `tools/benchmarks/apps/` hosts the native, ASGI, RSGI, WSGI, gRPC (`data_grpc.py`), and framework (`data_frameworks.py`) apps backed by [`_data_backend.py`](../../../../tools/benchmarks/apps/_data_backend.py)[^src-tools-benchmarks-data-backend-py], [`_db_drivers.py`](../../../../tools/benchmarks/apps/_db_drivers.py)[^src-tools-benchmarks-db-drivers-py] (`native` and `stdlib` SQLite/PostgreSQL `WorldDriver`s with idempotent 10,000-row `world` seeding, single-checkout/single-lease multi-query parity, sorted `row_id` update locking, and `ensure_task_context`), and [`_db_orm_drivers.py`](../../../../tools/benchmarks/apps/_db_orm_drivers.py)[^src-tools-benchmarks-db-orm-drivers-py] (`sqlspec` and `advanced_alchemy` `WorldDriver`s with `VTB_BENCH_DB_ADAPTER` and `VTB_BENCH_DB_ADAPTER_FLAVOR=vertebra|upstream` selection).
 - [`store.py`](../../../../tools/benchmarks/store.py)[^src-tools-benchmarks-store-py] and `sql/`: JSONL results (`tools/benchmarks/results/benchmarks.jsonl`) ingest into DuckDB (`tools/benchmarks/results/benchmarks.duckdb`). `_migrate_result_columns()` idempotently upgrades legacy 2-table schemas with `topology` and the 8 matrix columns (`adapter`, `protocol`, `transport`, `broker_mode`, `load_mode`, `target_rps`, `pool_size`, `gil_enabled`); `get_run_results()` filters by matrix dimensions and `reports.py` renders matrix summaries.
 - [`src/py/tests/unit/test_bench_infrastructure.py`](../../../../src/py/tests/unit/test_bench_infrastructure.py) and [`src/py/tests/unit/tools/test_e2e_benchmarks.py`](../../../../src/py/tests/unit/tools/test_e2e_benchmarks.py)[^src-tests-unit-tools-test-e2e-benchmarks-py] verify the full suite offline without Docker or external load-driver binaries.
 
 ## 3. Standalone Adapter Comparators & Container Fixtures
 
 - [`adapters/base.py`](../../../../tools/benchmarks/adapters/base.py)[^src-tools-benchmarks-adapters-base-py]: Defines `AdapterBenchmarkCase`, `AdapterBenchmarkReport` (`ADAPTER_SCHEMA_VERSION = 1`), `from_postgres_report()` for backward-compatible `postgres.py` conversion, `detect_gil_enabled()`, and `compare_adapter_reports()` with `driver_mode` (`async_native` vs `sync_blocking`) stratification so sync and async drivers are never compared across modes by accident.
-- [`adapters/sql.py`](../../../../tools/benchmarks/adapters/sql.py)[^src-tools-benchmarks-adapters-sql-py]: Measures Vertebra SQL drivers against external comparators (`psycopg`, `asyncpg`, `sqlite3`/`aiosqlite`, `duckdb`, `pymysql`/`aiomysql`, `oracledb`, `pymssql`, SQLAlchemy, and upstream SQLSpec); SQLite (`:memory:`) runs completely offline.
+- [`adapters/sql.py`](../../../../tools/benchmarks/adapters/sql.py)[^src-tools-benchmarks-adapters-sql-py]: Measures Vertebra SQL and ORM drivers against external comparators (`psycopg`, `asyncpg`, `sqlite3`/`aiosqlite`, `duckdb`, `pymysql`/`aiomysql`, `oracledb`, `pymssql`, SQLAlchemy, upstream SQLSpec, and Advanced Alchemy via `capture_advanced_alchemy_report` and `--engine advanced_alchemy --aa-engine sqlite|postgres`, registering `vertebra-aa-{sqlite,postgres}-{sync,async}` in `COMPARATOR_PAIRS`); SQLite (`:memory:` and file-backed) runs completely offline.
   - The `check` subcommand reads one or more captured reports and pairs each Vertebra driver with its comparators through `COMPARATOR_PAIRS`. It exits non-zero when a Vertebra median exceeds a comparator median outside `COMPARATOR_ALLOW_LIST`.
   - Flags: `--max-median-ratio` sets the allowed ratio ceiling (default `1.0`), `--allow-missing` suppresses failure on missing comparators, and `capture --oracle-reset-relay {on,off}` controls the Oracle TNS reset relay during capture.
   - `COMPARATOR_ALLOW_LIST` holds seven user-approved drivers that are still measured and print `[ALLOW]` when slower or `[PASS]` when at or ahead:
@@ -163,7 +173,22 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
   - The SQLite capture includes `cursor_point_select_1`, where `vertebra-sqlite-sync` and `sqlite3` each run `execute` plus `fetchone` on one reused cursor. That case compares native statement cost like for like, whereas `point_select_1` includes each driver's convenience layer.
 
 ```bash
-uv run python -m tools.benchmarks.adapters.sql check --report sqlite.json --report oracle.json
+# HTTP/1.1 apples-to-apples vs Granian (Embedded + SHM + WSGI)
+uv run --no-sync --group bench python -m tools.benchmarks run \
+  -t granian-asgi,granian-rsgi,vtb-embedded-asgi,vtb-embedded-rsgi,vtb-embedded-native,vtb-embedded-wsgi,vtb-shm-asgi-1w,vtb-shm-native-1w,vtb-shm-wsgi-4w,vtb-embedded-native-4w,vtb-shm-native-4w \
+  -s default
+
+# Full-stack SQLite (native, SQLSpec, Advanced Alchemy, and Granian baselines)
+VTB_BENCH_DB_BACKEND=sqlite VTB_BENCH_DB_DSN=/tmp/vtb-bench.db \
+  uv run --no-sync --group bench python -m tools.benchmarks run \
+  -t vtb-data-shm-native-4w,vtb-data-sqlspec-native-4w,vtb-data-aa-native-4w,granian-asgi-data-stdlib,granian-asgi-data-sqlspec,granian-asgi-data-aa \
+  -s db,queries_20,updates_5
+
+# Standalone SQLite + SQLSpec + Advanced Alchemy comparator gate
+uv run --no-sync python -m tools.benchmarks.adapters.sql capture --engine sqlite --dsn :memory: --output /tmp/sqlite.json
+uv run --no-sync python -m tools.benchmarks.adapters.sql capture --engine sqlspec --sqlspec-engine sqlite --dsn /tmp/vtb-bench.db --output /tmp/sqlspec-sqlite.json
+uv run --no-sync python -m tools.benchmarks.adapters.sql capture --engine advanced_alchemy --aa-engine sqlite --dsn /tmp/vtb-bench.db --output /tmp/aa-sqlite.json
+uv run --no-sync python -m tools.benchmarks.adapters.sql check --report /tmp/sqlite.json --report /tmp/sqlspec-sqlite.json --report /tmp/aa-sqlite.json
 ```
 - [`adapters/cache.py`](../../../../tools/benchmarks/adapters/cache.py)[^src-tools-benchmarks-adapters-cache-py]: Measures Vertebra Redis/Valkey sync and async drivers (point ops, pipelines, PubSub) against `redis-py` / `hiredis`.
 - [`adapters/storage.py`](../../../../tools/benchmarks/adapters/storage.py)[^src-tools-benchmarks-adapters-storage-py]: Measures `SyncObjectStore` and `AsyncObjectStore` PUT/GET/range reads against `obstore`, `boto3`, `aiobotocore`, and `azure-storage-blob`; `memory` and `local` backends run completely offline.
@@ -227,6 +252,8 @@ Provenance sources: [^src-makefile], [^src-pyproject-toml], [^src-tools-benchmar
 [^src-tools-benchmarks-adapters-cache-py]: `tools/benchmarks/adapters/cache.py` — Standalone Redis and Valkey cache comparators.
 [^src-tools-benchmarks-adapters-storage-py]: `tools/benchmarks/adapters/storage.py` — Standalone ObjectStore storage comparators across Memory, Local, RustFS, Floci, and Azurite.
 [^src-tools-benchmarks-data-backend-py]: `tools/benchmarks/apps/_data_backend.py` — Shared full-stack benchmark data backend, pool budget, and MinIO ban enforcement.
+[^src-tools-benchmarks-db-drivers-py]: `tools/benchmarks/apps/_db_drivers.py` — Pluggable SQLite and PostgreSQL native and stdlib WorldDriver implementations.
+[^src-tools-benchmarks-db-orm-drivers-py]: `tools/benchmarks/apps/_db_orm_drivers.py` — SQLSpec and Advanced Alchemy WorldDriver implementations for SQLite and PostgreSQL.
 [^src-tools-pgo-init-py]: `tools/pgo/__init__.py` — Repository tooling module (tools/pgo/__init__.py).
 [^src-tools-pgo-rust-pgo-py]: `tools/pgo/rust_pgo.py` — Repository tooling module (tools/pgo/rust_pgo.py).
 [^src-tools-pgo-python-pgo-py]: `tools/pgo/python_pgo.py` — Repository tooling module (tools/pgo/python_pgo.py).

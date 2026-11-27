@@ -16,7 +16,7 @@ from advanced_alchemy.types.file_object import FileObject
 
 import vertebra
 import vertebra.framework as vertebra_framework
-from vertebra._vertebra import Request, init_transport
+from vertebra._vertebra import AsgiScope, Request, init_transport
 from vertebra.build import BuildOrchestrator
 from vertebra.build.codegen import (
     CodegenConfig,
@@ -38,6 +38,7 @@ from vertebra.extensions.litestar import (
 )
 from vertebra.server._asgi._queues import AsgiSend
 from vertebra.server._asgi._runner import AsgiRunner
+from vertebra.server._dispatch import compile_handler_spec, compile_handler_table
 from vertebra.server._fastpath import (
     PayloadTooLargeError,
     extract_scope_body_fast,
@@ -47,7 +48,7 @@ from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server._loops import EventLoopPool
 from vertebra.server._rsgi._adapter import RsgiAdapter
 from vertebra.server.platform import SHMAllocationPolicy
-from vertebra.server.worker import _AsgiMountRunner, _instantiate_mount_runners
+from vertebra.server.worker import Worker, _AsgiMountRunner, _instantiate_mount_runners
 from vertebra.storage import AsyncObjectStore
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.portal import PortalProvider
@@ -381,3 +382,324 @@ async def test_wrap_asgi_fastpath_invokes_prebuffered_body_supplier_once() -> No
     assert scope["_vertebra_body_bytes"] == b'{"hello":"world"}'
     assert send.response.status == 200
     assert send.response.body == b'{"hello":"world"}'
+
+
+def test_request_body_and_asgi_scope_bitmask_slot_lifecycle() -> None:
+    """Verify Request.body reads directly from BatchSnapshot and AsgiScope bitmask overwrite/delete/drop is safe."""
+    empty_req = Request.from_parts("GET", "/empty", b"", request_id=1)
+    assert empty_req.body is None
+
+    payload_req = Request.from_parts("POST", "/echo", b"hello-world", request_id=2)
+    assert payload_req.body == b"hello-world"
+    assert payload_req.body == b"hello-world"
+
+    scope = AsgiScope.from_parts(method="POST", path="/items", root_path="/api")
+    assert scope["method"] == "POST"
+    assert scope["path"] == "/items"
+    assert scope["root_path"] == "/api"
+    scope["app"] = {"first": 1}
+    assert scope["app"] == {"first": 1}
+    scope["app"] = {"second": 2}
+    assert scope["app"] == {"second": 2}
+    del scope["app"]
+    assert "app" not in scope
+    scope["app"] = {"third": 3}
+    assert scope["app"] == {"third": 3}
+    scope["custom_extra"] = "extra-val"
+    assert scope["custom_extra"] == "extra-val"
+    del scope
+
+
+def test_compile_handler_spec_specializes_simple_extractors() -> None:
+    """Verify 1-arg and multi-arg simple extractors avoid dict/generator overhead while preserving semantics."""
+
+    def body_handler(body: bytes) -> bytes:
+        return body
+
+    def method_handler(method: str) -> str:
+        return method
+
+    def path_handler(path: str) -> str:
+        return path
+
+    def headers_handler(headers: Any) -> Any:
+        return headers
+
+    def query_handler(query: Any) -> Any:
+        return query
+
+    def multi_handler(method: str, path: str, body: bytes) -> tuple[str, str, bytes]:
+        return method, path, body
+
+    req = Request.from_parts("POST", "/echo", b"abc", headers=[("x-id", "7")])
+    empty_req = Request.from_parts("GET", "/empty", b"")
+
+    body_spec = compile_handler_spec(body_handler)
+    assert body_spec.invoker(req) == b"abc"
+    assert body_spec.invoker(empty_req) == b""
+    assert body_spec.arg_resolver is not None
+    assert body_spec.arg_resolver(req) == (b"abc",)
+
+    assert compile_handler_spec(method_handler).invoker(req) == "POST"
+    assert compile_handler_spec(path_handler).invoker(req) == "/echo"
+    assert compile_handler_spec(headers_handler).invoker(req).get("x-id") == "7"
+    assert compile_handler_spec(query_handler).invoker(req) is None
+
+    multi_spec = compile_handler_spec(multi_handler)
+    assert multi_spec.invoker(req) == ("POST", "/echo", b"abc")
+    assert multi_spec.arg_resolver is not None
+    assert multi_spec.arg_resolver(req) == ("POST", "/echo", b"abc")
+
+
+def test_worker_native_only_mixed_sync_async_bypasses_partition_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify Worker._process_batch native_only executes mixed sync and async routes without partition_batch."""
+    import vertebra.server.worker as worker_mod
+
+    def sync_ok() -> bytes:
+        return b"sync-ok"
+
+    async def async_ok() -> bytes:
+        return b"async-ok"
+
+    compiled = compile_handler_table({1: sync_ok, 2: async_ok})
+    submitted_raw: list[Any] = []
+    driven_async: list[tuple[int, int]] = []
+
+    def fail_partition(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("partition_batch must not be called on native_only batches")
+
+    def fake_submit_batch_raw(items: list[Any]) -> None:
+        submitted_raw.extend(items)
+
+    def fake_drive_native_batch(items: list[tuple[int, Any, int]], *, loop_obj: Any = None) -> int:
+        del loop_obj
+        for req_id, coro, status in items:
+            driven_async.append((req_id, status))
+            coro.close()
+        return len(items)
+
+    monkeypatch.setattr(worker_mod, "partition_batch", fail_partition)
+    monkeypatch.setattr(worker_mod, "submit_batch_raw", fake_submit_batch_raw)
+    monkeypatch.setattr(worker_mod, "drive_native_batch", fake_drive_native_batch)
+
+    worker = Worker({1: sync_ok, 2: async_ok}, max_batches=1)
+    loop_pool = EventLoopPool(size=1, inline_single_loop=True)
+    try:
+        batch = [
+            Request.from_parts("GET", "/sync", b"", request_id=101, handler_id=1),
+            Request.from_parts("GET", "/async", b"", request_id=102, handler_id=2),
+            Request.from_parts("GET", "/missing", b"", request_id=103, handler_id=99),
+        ]
+        worker._process_batch(
+            batch,
+            compiled_handlers=compiled,
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=False,
+            native_only=True,
+            loop_pool=loop_pool,
+        )
+    finally:
+        loop_pool.stop()
+
+    assert submitted_raw == [(101, 200, b"sync-ok"), (103, 404, b"not found")]
+    assert driven_async == [(102, 200)]
+
+
+def test_inline_event_loop_splits_notify_clear_and_grace_yield(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _run_inline_event_loop skips clear_request_notification on call_soon turns and sleeps after grace yield."""
+    import vertebra.server.worker as worker_mod
+
+    clear_calls = 0
+    prepare_calls = 0
+    cancel_calls = 0
+    processed_batches: list[int] = []
+    batches: list[Any] = [
+        [Request.from_parts("GET", "/one", b"", request_id=1, handler_id=1)],
+        None,
+        None,
+    ]
+    poll_idx = 0
+
+    def fake_try_get_batch() -> Any:
+        nonlocal poll_idx
+        if poll_idx < len(batches):
+            item = batches[poll_idx]
+            poll_idx += 1
+            return item
+        return None
+
+    def fake_clear() -> None:
+        nonlocal clear_calls
+        clear_calls += 1
+
+    def fake_cancel() -> None:
+        nonlocal cancel_calls
+        cancel_calls += 1
+
+    def fake_prepare() -> bool:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        worker._max_batches = 1
+        return True
+
+    def fake_process_batch(self: Worker, batch: Any, **_kwargs: Any) -> None:
+        del self
+        processed_batches.append(len(batch))
+
+    monkeypatch.setattr(worker_mod, "try_get_batch", fake_try_get_batch)
+    monkeypatch.setattr(worker_mod, "clear_request_notification", fake_clear)
+    monkeypatch.setattr(worker_mod, "cancel_request_sleep", fake_cancel)
+    monkeypatch.setattr(worker_mod, "prepare_request_sleep", fake_prepare)
+    monkeypatch.setattr(Worker, "_process_batch", fake_process_batch)
+
+    r_fd, w_fd = os.pipe()
+    worker = Worker({1: lambda: b"ok"}, max_batches=10)
+    loop_pool = EventLoopPool(size=1, inline_single_loop=True)
+    try:
+        worker._run_inline_event_loop(
+            notify_fd=r_fd,
+            timeout_sec=0.05,
+            compiled_handlers=compile_handler_table({1: lambda: b"ok"}),
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=True,
+            native_only=True,
+            single_root_asgi=None,
+            single_root_rsgi=None,
+            loop_pool=loop_pool,
+            executor=None,
+        )
+    finally:
+        loop_pool.stop()
+        os.close(r_fd)
+        os.close(w_fd)
+
+    assert processed_batches == [1]
+    assert clear_calls == 0
+    assert prepare_calls == 1
+    assert cancel_calls >= 1
+
+
+def test_worker_native_only_async_error_passes_request_to_custom_error_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native_only passes the real Request to custom error_handler when an async route raises."""
+    import vertebra.server.worker as worker_mod
+    from vertebra._vertebra import Response
+
+    seen_paths: list[str] = []
+    submitted: list[Any] = []
+
+    async def boom() -> bytes:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    def custom_error_handler(request: Any, exc: Exception) -> Any:
+        del exc
+        seen_paths.append(request.path)
+        return Response(status=418, body=b"handled", request_id=request.request_id)
+
+    monkeypatch.setattr(worker_mod, "submit_response", submitted.append)
+    compiled = compile_handler_table({1: boom})
+    worker = Worker({1: boom}, error_handler=custom_error_handler, max_batches=1)
+    loop_pool = EventLoopPool(size=1, inline_single_loop=True)
+    try:
+        worker._process_batch(
+            [Request.from_parts("GET", "/failing-async", b"", request_id=77, handler_id=1)],
+            compiled_handlers=compiled,
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=False,
+            native_only=True,
+            loop_pool=loop_pool,
+        )
+    finally:
+        loop_pool.stop()
+
+    assert seen_paths == ["/failing-async"]
+    assert len(submitted) == 1
+    assert submitted[0].status == 418
+    assert submitted[0].body == b"handled"
+
+
+def test_inline_event_loop_on_notify_readable_clears_eventfd_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _on_notify_readable invokes clear_request_notification on real reader wakeups."""
+    import vertebra.server.worker as worker_mod
+
+    clear_calls = 0
+    processed_batches: list[int] = []
+    r_fd, w_fd = os.pipe()
+    os.set_blocking(r_fd, False)
+    woke = False
+
+    def fake_try_get_batch() -> Any:
+        if woke:
+            return [Request.from_parts("GET", "/woke", b"", request_id=2, handler_id=1)]
+        return None
+
+    def fake_clear() -> None:
+        nonlocal clear_calls
+        clear_calls += 1
+        os.read(r_fd, 64)
+
+    def fake_prepare() -> bool:
+        nonlocal woke
+        if not woke:
+            woke = True
+            os.write(w_fd, b"x")
+        return True
+
+    def fake_process_batch(self: Worker, batch: Any, **_kwargs: Any) -> None:
+        del self
+        processed_batches.append(len(batch))
+
+    monkeypatch.setattr(worker_mod, "try_get_batch", fake_try_get_batch)
+    monkeypatch.setattr(worker_mod, "clear_request_notification", fake_clear)
+    monkeypatch.setattr(worker_mod, "cancel_request_sleep", lambda: None)
+    monkeypatch.setattr(worker_mod, "prepare_request_sleep", fake_prepare)
+    monkeypatch.setattr(Worker, "_process_batch", fake_process_batch)
+
+    worker = Worker({1: lambda: b"ok"}, max_batches=1)
+    loop_pool = EventLoopPool(size=1, inline_single_loop=True)
+    try:
+        worker._run_inline_event_loop(
+            notify_fd=r_fd,
+            timeout_sec=0.05,
+            compiled_handlers=compile_handler_table({1: lambda: b"ok"}),
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=True,
+            native_only=True,
+            single_root_asgi=None,
+            single_root_rsgi=None,
+            loop_pool=loop_pool,
+            executor=None,
+        )
+    finally:
+        loop_pool.stop()
+        os.close(r_fd)
+        os.close(w_fd)
+
+    assert clear_calls == 1
+    assert processed_batches == [1]
+
+
+def test_asgi_scope_setdefault_pop_and_async_one_arg_extractor() -> None:
+    """Verify AsgiScope setdefault/pop slot updates and async 1-arg body coercion."""
+    scope = AsgiScope.from_parts(method="GET", path="/items")
+    state = scope.setdefault("state", {"ready": True})
+    assert state == {"ready": True}
+    assert scope.pop("state") == {"ready": True}
+    assert "state" not in scope
+    assert scope.setdefault("extensions", {"custom": {}}) == {"custom": {}}
+
+    async def echo_body(body: bytes) -> bytes:
+        return body
+
+    class BytearrayReq:
+        body = bytearray(b"mut-bytes")
+
+    spec = compile_handler_spec(echo_body)
+    assert spec.is_async is True
+    assert asyncio.run(spec.invoker(BytearrayReq())) == b"mut-bytes"

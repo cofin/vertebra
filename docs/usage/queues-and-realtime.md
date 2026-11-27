@@ -1,79 +1,34 @@
 # Queues, LiveState, Email & Telemetry
 
-`vertebra.framework` includes distributed background task queues (`QueueService`, `QueueBackendSettings`, `CronScheduler`), WebSocket delta state synchronization and cross-node pub/sub (`LiveState`, `ChannelsBackend`, `ChannelBus`), RESP3 key-value stores (`ValkeyStore`, `RedisStore`, `MemoryStore`, `KeyValueStore`), transactional email (`EmailService`), and OpenTelemetry instrumentation (`vertebra.telemetry`).
+Vertebra includes distributed task queues, cron scheduling, WebSocket delta state sync, pub/sub channels, key-value stores, transactional email, and OpenTelemetry instrumentation.
 
-## Background Task Queues, Backends & Cron (`vertebra.framework.queues`)
+## Background Task Queues & Cron
 
-`QueueService` provides background task execution, per-attempt scoped DI (`Container.scope()`), lease heartbeats, retry policies (`TaskRetryPolicy` with exponential backoff and dead-letter queues), delayed scheduling (`enqueue_delayed`), synchronous producer enqueueing (`enqueue_sync`), and cron jobs (`CronScheduler` with slot-keyed distributed leader leases):
+`QueueService` runs background tasks with per-attempt dependency injection, lease heartbeats, exponential-backoff retries, dead-letter queues, delayed jobs, and sync or async producers. Pair it with `CronScheduler` for distributed cron schedules backed by leader leases.
 
-```mermaid
-flowchart LR
-    P["Producers (enqueue / enqueue_sync / CronScheduler)"]
-    Q["QueueService & QueueBackendSettings"]
-    S["SyncQueueStore / AsyncQueueStore & Stream Backends"]
-    W["WorkerRunner Lanes (io / cpu / agent)"]
-    D["Container.scope() DI & Lease Heartbeats"]
-    P --> Q
-    Q --> S
-    S --> W
-    W --> D
-```
-
-| Backend | Scheme / Class | Backing Mechanism | Requires |
+| Backend | URL Scheme | Backing Mechanism | Optional Extra |
 | --- | --- | --- | --- |
-| **Memory** | `memory://` (`MemoryQueueBackend`) | In-process queue for local dev and unit tests | Nothing |
-| **PostgreSQL** | `postgresql://`, `postgres://` (`PostgreSQLQueueBackend`) | `SyncPostgresQueueStore` / `AsyncPostgresQueueStore` (`FOR UPDATE OF q SKIP LOCKED` + `LISTEN/NOTIFY` wakeups) | `vertebra-core[postgres]` (or custom `store=` / `executor=`) |
-| **Oracle** | `oracle://` (`OracleQueueBackend`) | `SyncOracleQueueStore` / `AsyncOracleQueueStore` (`FOR UPDATE SKIP LOCKED` + TxEventQ / `DBMS_AQ` wakeups) | `vertebra-core[oracle]` (or custom `store=` / `executor=`) |
-| **Redis** | `redis://`, `rediss://`, `unix://` (`RedisQueueBackend`) | Redis Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling + Pub/Sub wakeups | `vertebra-core[redis]`, or `client=` (`RedisStreamClient`) |
-| **Valkey** | `valkey://`, `valkeys://`, `unix://` (`ValkeyQueueBackend`) | Valkey Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling + Pub/Sub wakeups | `vertebra-core[valkey]`, or `client=` (`ValkeyStreamClient`) |
-| **Spanner** | `spanner://`, `spangres://` (`SpannerQueueBackend`) | `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` (hash-sharded keys + interactive `ReadWrite` `FOR UPDATE` claims + dead-letter table) | `vertebra-core[spanner]` (or custom `store=` / `executor=`) |
+| **Memory** | `memory://` | In-process queue for local dev and unit tests | None |
+| **PostgreSQL** | `postgresql://`, `postgres://` | Row locking (`SKIP LOCKED`) with `LISTEN/NOTIFY` wakeups | `vertebra-core[postgres]` |
+| **Oracle** | `oracle://` | Row locking (`SKIP LOCKED`) with TxEventQ / AQ wakeups | `vertebra-core[oracle]` |
+| **Redis** | `redis://`, `rediss://`, `unix://` | Redis Streams consumer groups, sorted-set delays, Pub/Sub wakeups | `vertebra-core[redis]` |
+| **Valkey** | `valkey://`, `valkeys://`, `unix://` | Valkey Streams consumer groups, sorted-set delays, Pub/Sub wakeups | `vertebra-core[valkey]` |
+| **Spanner** | `spanner://`, `spangres://` | Hash-sharded tables, read-write claims, and dead-letter table | `vertebra-core[spanner]` |
 
-`PostgreSQLQueueBackend`, `OracleQueueBackend`, and `SpannerQueueBackend` automatically construct `SyncPostgresQueueStore` / `AsyncPostgresQueueStore`, `SyncOracleQueueStore` / `AsyncOracleQueueStore`, and `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` from configured drivers or DSNs (`QueueBackendSettings`), raising `MissingDependencyError` when `vertebra-core[postgres]`, `vertebra-core[oracle]`, or `vertebra-core[spanner]` is not installed. `RedisQueueBackend` and `ValkeyQueueBackend` run directly on `vertebra-core[redis]` and `vertebra-core[valkey]` across both async (`enqueue`) and sync (`enqueue_sync`) producers.
+Database backends build their queue store automatically from the configured driver or URL, raising `MissingDependencyError` when the matching extra is not installed. Redis and Valkey backends support both async and sync producers.
 
-!!! note "Spanner Wakeup & TTL Compaction Notes"
-    Spanner has no low-latency `LISTEN/NOTIFY` push channel, so `SpannerQueueBackend` wakes idle workers via bounded adaptive polling (`poll_interval_seconds`, shortened automatically by `next_due_delay` when delayed jobs are pending). `ROW DELETION POLICY` (GoogleSQL) and `TTL INTERVAL` (Spangres) reclaim expired rows asynchronously via background Spanner storage compaction rather than synchronously at expiration time; `cleanup_on_ack=True` deletes acknowledged rows immediately.
+!!! note "Spanner wakeups and TTL cleanup"
+    Spanner lacks a push notification channel, so workers wake via adaptive polling (`poll_interval_seconds`), which shortens automatically when delayed jobs are due soon. Expired rows are reclaimed asynchronously by Spanner's background TTL compaction; set `cleanup_on_ack=True` to delete acknowledged rows right away.
 
-Install the optional wheel for your selected queue backend:
+Install the extra for your chosen backend:
 
-=== "uv"
-
-    ```bash
-    uv add "vertebra-core[postgres]"
-    uv add "vertebra-core[oracle]"
-    uv add "vertebra-core[redis]"
-    uv add "vertebra-core[valkey]"
-    uv add "vertebra-core[spanner]"
-    ```
-
-=== "pip"
-
-    ```bash
-    pip install "vertebra-core[postgres]"
-    pip install "vertebra-core[oracle]"
-    pip install "vertebra-core[redis]"
-    pip install "vertebra-core[valkey]"
-    pip install "vertebra-core[spanner]"
-    ```
-
-=== "pdm"
-
-    ```bash
-    pdm add "vertebra-core[postgres]"
-    pdm add "vertebra-core[oracle]"
-    pdm add "vertebra-core[redis]"
-    pdm add "vertebra-core[valkey]"
-    pdm add "vertebra-core[spanner]"
-    ```
-
-=== "poetry"
-
-    ```bash
-    poetry add "vertebra-core[postgres]"
-    poetry add "vertebra-core[oracle]"
-    poetry add "vertebra-core[redis]"
-    poetry add "vertebra-core[valkey]"
-    poetry add "vertebra-core[spanner]"
-    ```
+```bash
+uv add "vertebra-core[postgres]"
+uv add "vertebra-core[oracle]"
+uv add "vertebra-core[redis]"
+uv add "vertebra-core[valkey]"
+uv add "vertebra-core[spanner]"
+```
 
 ```python
 from vertebra.framework.queues import (
@@ -102,11 +57,11 @@ queue.register(send_welcome_email)
 scheduler = CronScheduler(queue)
 ```
 
-Run background workers standalone (`vtb workers run app:app`) or co-located with HTTP workers (`vtb run app:app --with-workers --queues default,io`).
+Run workers standalone with `vtb workers run app:app`, or alongside HTTP workers with `vtb run app:app --with-workers --queues default,io`.
 
-## Real-Time `LiveState` & Distributed Pub/Sub Channels
+## LiveState & Pub/Sub Channels
 
-Synchronize server state with browser clients over WebSocket binary delta frames using `LiveState` and `@live_action` (`vertebra.framework.live`), or broadcast topic events across nodes with `ChannelsBackend` (`create_channels_backend`) and `ChannelBus` (`vertebra.framework.channels`) backed by `SyncNotificationSource` and `AsyncNotificationSource` across Memory, Valkey, Redis, PostgreSQL, and Oracle:
+Sync server state to browser clients over binary WebSocket deltas with `LiveState` and `@live_action`. Broadcast topic events across nodes with `create_channels_backend` using Memory, Valkey, Redis, PostgreSQL, or Oracle:
 
 ```python
 from vertebra.framework.channels import create_channels_backend
@@ -125,11 +80,11 @@ room = LiveStateRoom("room:lobby", CounterState())
 bus = create_channels_backend(backend="valkey", url="valkey://localhost:6379/0")
 ```
 
-## Key-Value Stores (`ValkeyStore`, `RedisStore`, `KeyValueStore`) & Transactional Email
+## Key-Value Stores & Email
 
-Store cached responses or key-value state in `ValkeyStore` (`vertebra._valkey`), `RedisStore` (`vertebra._redis`), `MemoryStore`, or `KeyValueStore` (`NamespacedStore`), and send transactional emails through `EmailService` across 6 transports (`MemoryEmailTransport`, `SmtpEmailTransport`, `ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`, `SesEmailTransport`):
+Store cached responses or application state in memory, Redis, or Valkey, and send transactional email through `EmailService` over memory, SMTP, Resend, SendGrid, Mailgun, or SES transports.
 
-`ValkeyStore` and `RedisStore` enable RESP3 `CLIENT TRACKING` local L1 invalidation by default, prefix every key with `key_prefix` (default `"vertebra"`), and remove only keys under that prefix via `SCAN` + `UNLINK` during `delete_all()`. Expiries are sent in milliseconds, and `expires_in()` returns `None` for keys without an expiry.
+`ValkeyStore` and `RedisStore` enable client-side L1 cache invalidation by default and prefix keys with `key_prefix` (default `"vertebra"`). Calling `delete_all()` scans and unlinks only keys under that prefix. Expiries use millisecond precision, and `expires_in()` returns `None` for keys without an expiry.
 
 ```python
 from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
@@ -152,9 +107,9 @@ await email_service.send(
 )
 ```
 
-## Telemetry & Structured Logging (`vertebra.telemetry`)
+## Telemetry & Structured Logging
 
-Configure structured JSON logging (`LoggingConfig`), W3C trace propagation (`TraceContext`, `SpanExporter`), GenAI token/cost metrics (`GenAiRecorder`), and database pool metrics (`DbPoolRecorder`, `SqlTracePropagator`):
+Configure JSON logging, W3C trace propagation, GenAI token and cost metrics, and database pool telemetry:
 
 ```python
 from vertebra.telemetry import (

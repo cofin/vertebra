@@ -1,9 +1,9 @@
-"""Unit and integration tests for AgentRuntime, SpecTree, DynamicWorkflow, and AgentPlugin.
+"""Unit and integration tests for AgentRuntime, PlanTree, Workflow, and AgentPlugin.
 
 Tests cover:
 - Multi-turn tool loops, specialist AgentGroup transfers, and ConfirmationGate pausing.
-- SpecTree hierarchical task planning, checkpoint serialization, and workflow compilation.
-- DynamicWorkflow DAG execution waves, cycle detection, conditional skips, and LiveState HLC deltas.
+- PlanTree hierarchical task planning, checkpoint serialization, and workflow compilation.
+- Workflow DAG execution waves, cycle detection, conditional skips, and LiveState HLC deltas.
 - All 5 AgentSessionStore persistence backends (Memory, Cache, SQLSpec, Alchemy, ObjectStore).
 - AgentChatController SSE streaming, synchronous turns, queued replay, and owner isolation.
 - Dual-host mounting of AgentPlugin on native vertebra App and Litestar.
@@ -38,20 +38,21 @@ from vertebra.agent import (
     ChatRequest,
     ConfirmationDecisionRequest,
     ConfirmationGate,
-    DynamicWorkflow,
     MemorySessionStore,
     ModelDelta,
     ObjectStoreSessionStore,
     PermissionDeniedError,
+    PlanNode,
+    PlanTree,
     SessionNotFoundError,
-    SpecNode,
-    SpecTree,
     SQLSpecSessionStore,
     Tool,
     TurnRequest,
+    Workflow,
     WorkflowContext,
     WorkflowEngine,
     WorkflowLiveState,
+    WorkflowStep,
     build_tools,
 )
 from vertebra.agent.mcp import MCPConfig
@@ -374,15 +375,15 @@ async def test_confirmation_gate_pause_and_approval() -> None:
 
 
 @pytest.mark.anyio
-async def test_spectree_decomposition_and_checkpoint() -> None:
+async def test_plantree_decomposition_and_checkpoint() -> None:
     """Verify hierarchical task decomposition, readiness, and checkpoint round-trip."""
-    tree = SpecTree(root_id="goal_project")
-    root = SpecNode(id="goal_project", title="Build Web Application", description="Root goal")
+    tree = PlanTree(root_id="goal_project")
+    root = PlanNode(id="goal_project", title="Build Web Application", description="Root goal")
     tree.add_node(root)
 
-    subtask_db = SpecNode(id="task_db", title="Setup Database Schema")
-    subtask_api = SpecNode(id="task_api", title="Implement REST Endpoints", depends_on=("task_db",))
-    subtask_ui = SpecNode(id="task_ui", title="Implement Frontend Views", depends_on=("task_api",))
+    subtask_db = PlanNode(id="task_db", title="Setup Database Schema")
+    subtask_api = PlanNode(id="task_api", title="Implement REST Endpoints", depends_on=("task_db",))
+    subtask_ui = PlanNode(id="task_ui", title="Implement Frontend Views", depends_on=("task_api",))
 
     tree.expand_subtasks("goal_project", (subtask_db, subtask_api, subtask_ui))
 
@@ -398,7 +399,7 @@ async def test_spectree_decomposition_and_checkpoint() -> None:
     assert ready2[0].id == "task_api"
 
     checkpoint_bytes = tree.to_checkpoint_bytes()
-    restored_tree = SpecTree.from_checkpoint_bytes(checkpoint_bytes)
+    restored_tree = PlanTree.from_checkpoint_bytes(checkpoint_bytes)
     assert restored_tree.root_id == "goal_project"
     restored_node = restored_tree.get_node("task_db")
     assert restored_node is not None
@@ -406,26 +407,58 @@ async def test_spectree_decomposition_and_checkpoint() -> None:
     assert restored_node.output == {"tables": ["users", "orders"]}
 
     wf = tree.to_workflow()
-    assert len(wf.nodes) >= 3
+    assert len(wf.steps) >= 3
+
+    ergonomic = PlanTree(root_goal="Fulfill enterprise order")
+    validate = ergonomic.add_step("validate-inventory", description="Verify warehouse stock")
+    ship = ergonomic.add_step("create-shipment", description="Book carrier label", depends_on=(validate.id,))
+    assert validate.parent_id == "root"
+    assert ship.depends_on == ("validate-inventory",)
+    assert [node.id for node in ergonomic.ready_nodes()] == ["validate-inventory"]
+
+    ergonomic.mark_completed("validate-inventory", output={"ok": True})
+    assert [node.id for node in ergonomic.ready_nodes()] == ["create-shipment"]
+
+    ergonomic.mark_completed("create-shipment", output={"shipped": True})
+    root_after = ergonomic.get_node("root")
+    assert root_after is not None and root_after.status == "completed"
+    assert ergonomic.ready_nodes() == []
+
+    ergonomic_wf = ergonomic.to_workflow()
+    assert set(ergonomic_wf.steps) == {"validate-inventory", "create-shipment"}
+
+    declarative = Workflow(
+        name="order-fulfillment",
+        steps=[
+            WorkflowStep(name="validate", fn=lambda ctx: {"ok": True}),
+            WorkflowStep(
+                name="ship",
+                depends_on=("validate",),
+                fn=lambda ctx: {"shipped": ctx.get_output("validate")["ok"]},
+            ),
+        ],
+    )
+    dec_ctx = await WorkflowEngine().run(declarative)
+    assert dec_ctx.get_output("ship") == {"shipped": True}
 
 
 @pytest.mark.anyio
 async def test_dynamic_workflow_waves_and_cycle_refusal() -> None:
-    """Verify DynamicWorkflow topological wave execution and cycle refusal."""
-    cyclic_wf = DynamicWorkflow(name="bad_cycle")
+    """Verify Workflow topological wave execution and cycle refusal."""
+    cyclic_wf = Workflow(name="bad_cycle")
     cyclic_wf.add_step("stepA", lambda ctx: "A", depends_on=("stepB",))
     cyclic_wf.add_step("stepB", lambda ctx: "B", depends_on=("stepA",))
 
     with pytest.raises(RuntimeError, match="Cycle detected"):
         cyclic_wf.topological_waves()
 
-    missing_wf = DynamicWorkflow(name="missing_dep")
+    missing_wf = Workflow(name="missing_dep")
     missing_wf.add_step("stepX", lambda ctx: "X", depends_on=("nonexistent",))
 
     with pytest.raises(ValueError, match="Unknown dependency"):
         missing_wf.topological_waves()
 
-    valid_wf = DynamicWorkflow(name="data_pipeline")
+    valid_wf = Workflow(name="data_pipeline")
     execution_order: list[str] = []
 
     async def step_fetch(ctx: WorkflowContext) -> int:
@@ -472,7 +505,7 @@ async def test_workflow_live_state_delta_broadcasting() -> None:
     room = LiveStateRoom(channel="workflow:stream", state=live_state)
     engine = WorkflowEngine(live_room=room)
 
-    wf = DynamicWorkflow(name="monitored_workflow")
+    wf = Workflow(name="monitored_workflow")
 
     async def fast_step(ctx: WorkflowContext) -> str:
         return "done_fast"

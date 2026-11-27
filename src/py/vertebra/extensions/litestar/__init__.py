@@ -8,6 +8,16 @@ from vertebra.utils.module_loader import lazy_exports
 
 if TYPE_CHECKING:
     from vertebra.db.registry import provide_driver
+    from vertebra.extensions.litestar import (
+        asyncapi,
+        autowire,
+        email,
+        htmx,
+        mcp,
+        queues,
+        security,
+        vite,
+    )
     from vertebra.extensions.litestar.asyncapi import create_asyncapi_plugin
     from vertebra.extensions.litestar.autowire import (
         AutowireBridgeIntegration,

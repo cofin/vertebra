@@ -54,7 +54,7 @@ from vertebra.db.driver.capabilities import (
     QueueReservation,
     SyncQueueStore,
 )
-from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope, TenantPredicate, TenantScopeConfig
+from vertebra.db.rls import AsyncTenantConnectionScope, SyncTenantConnectionScope, TenantPredicate, TenantScopeConfig
 from vertebra.extensions.sqlspec.adapters.oracle import OracleAsyncDriver, OracleSyncDriver
 from vertebra.framework.queues.oracle import OracleQueueBackend
 
@@ -130,16 +130,16 @@ def test_oracle_core_rejects_malicious_context_package_proc(bad_proc: str) -> No
 
 @pytest.mark.anyio
 async def test_tenant_connection_scope_resets_on_rollback_and_evicts_on_reset_error() -> None:
-    """Verify TenantConnectionScope and AsyncTenantConnectionScope reset on rollback and evict on reset failure."""
+    """Verify SyncTenantConnectionScope and AsyncTenantConnectionScope reset on rollback and evict on reset failure."""
     sync_ok = _SyncDriverDouble(fail_reset=False)
-    with pytest.raises(RuntimeError, match="rolled back body"), TenantConnectionScope(sync_ok, "tenant-a"):
+    with pytest.raises(RuntimeError, match="rolled back body"), SyncTenantConnectionScope(sync_ok, "tenant-a"):
         raise RuntimeError("rolled back body")
     assert sync_ok.evicted is False
     assert [e[0] for e in sync_ok.events] == ["enter", "exit"]
     assert sync_ok.events[1][1] == ("BEGIN DBMS_SESSION.CLEAR_IDENTIFIER; END;", {})
 
     sync_bad = _SyncDriverDouble(fail_reset=True)
-    with pytest.raises(OperationalError, match="ORA-03113"), TenantConnectionScope(sync_bad, "tenant-a"):
+    with pytest.raises(OperationalError, match="ORA-03113"), SyncTenantConnectionScope(sync_bad, "tenant-a"):
         pass
     assert sync_bad.evicted is True
     assert [e[0] for e in sync_bad.events] == ["enter", "exit", "evict"]
@@ -225,7 +225,7 @@ async def test_sqlspec_oracle_apply_tenant_predicate_and_driver_scope_dispatches
         assert default_execs[0]["sql"] == "BEGIN DBMS_SESSION.SET_IDENTIFIER(:value); END;"
         assert default_execs[0]["params"] == {"value": "t-99"}
 
-        with TenantConnectionScope(sync_default, "scoped-sync"):
+        with SyncTenantConnectionScope(sync_default, "scoped-sync"):
             assert sync_default._session_context[("USERENV", "tenant_id")] == "scoped-sync"
         assert ("USERENV", "tenant_id") not in sync_default._session_context
         default_execs = [payload for kind, payload in sync_stub.calls if kind == "execute"]
@@ -245,7 +245,7 @@ async def test_sqlspec_oracle_apply_tenant_predicate_and_driver_scope_dispatches
         )
         trusted_execs = [payload for kind, payload in trusted_sync_stub.calls if kind == "execute"]
         assert trusted_execs[0]["sql"] == "BEGIN SEC_PKG.SET_CTX(:namespace, :attribute, :value); END;"
-        with TenantConnectionScope(sync_trusted, "scoped-trusted"):
+        with SyncTenantConnectionScope(sync_trusted, "scoped-trusted"):
             assert sync_trusted._session_context[("APP_CTX", "tenant_id")] == "scoped-trusted"
         trusted_execs = [payload for kind, payload in trusted_sync_stub.calls if kind == "execute"]
         assert trusted_execs[2]["sql"] == "BEGIN SEC_PKG.CLEAR_CTX(:namespace, :attribute); END;"

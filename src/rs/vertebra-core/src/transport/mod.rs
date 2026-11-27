@@ -709,7 +709,16 @@ impl std::fmt::Debug for BufferPool {
     }
 }
 
-/// Zero-copy in-process request payload backed directly by [`bytes::Bytes`].
+#[derive(Debug, Clone)]
+enum InProcessPathQuery {
+    Uri(http::uri::PathAndQuery),
+    Bytes {
+        path: bytes::Bytes,
+        query: bytes::Bytes,
+    },
+}
+
+/// Zero-copy in-process request payload backed directly by [`http::uri::PathAndQuery`] or [`bytes::Bytes`].
 ///
 /// Used by embedded topologies to pass HTTP request components from Hyper into
 /// Python workers without copying through a fixed [`DataSlab`] or acquiring a
@@ -717,15 +726,53 @@ impl std::fmt::Debug for BufferPool {
 #[derive(Debug, Clone)]
 pub struct InProcessRequest {
     pub node: TransportNode,
-    pub path: bytes::Bytes,
-    pub query: bytes::Bytes,
+    path_query: InProcessPathQuery,
     pub headers_raw: bytes::Bytes,
     pub body: bytes::Bytes,
     pub path_params_raw: bytes::Bytes,
 }
 
 impl InProcessRequest {
-    /// Construct a zero-copy in-process request entry.
+    /// Construct a zero-copy in-process request directly from Hyper's `PathAndQuery`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_path_and_query(
+        method_tag: u8,
+        http_version_tag: u8,
+        handler_id: u64,
+        correlation_id: u64,
+        path_and_query: http::uri::PathAndQuery,
+        headers_raw: bytes::Bytes,
+        body: bytes::Bytes,
+        path_params_raw: bytes::Bytes,
+    ) -> Self {
+        let path_len = path_and_query.path().len().min(u32::MAX as usize) as u32;
+        let query_len = path_and_query
+            .query()
+            .map_or(0, |q| q.len().min(u32::MAX as usize) as u32);
+        Self {
+            node: TransportNode {
+                method_tag,
+                http_version_tag,
+                _pad: [0; 2],
+                handler_id,
+                correlation_id,
+                path_offset: 0,
+                path_len,
+                query_offset: 0,
+                query_len,
+                headers_offset: 0,
+                headers_len: headers_raw.len().min(u32::MAX as usize) as u32,
+                body_offset: 0,
+                body_len: body.len().min(u32::MAX as usize) as u32,
+            },
+            path_query: InProcessPathQuery::Uri(path_and_query),
+            headers_raw,
+            body,
+            path_params_raw,
+        }
+    }
+
+    /// Construct a zero-copy in-process request entry from owned `Bytes` buffers.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         method_tag: u8,
@@ -754,11 +801,58 @@ impl InProcessRequest {
                 body_offset: 0,
                 body_len: body.len().min(u32::MAX as usize) as u32,
             },
-            path,
-            query,
+            path_query: InProcessPathQuery::Bytes { path, query },
             headers_raw,
             body,
             path_params_raw,
+        }
+    }
+
+    /// Borrow request path bytes without copying.
+    #[inline]
+    pub fn path_bytes(&self) -> &[u8] {
+        match &self.path_query {
+            InProcessPathQuery::Uri(pq) => pq.path().as_bytes(),
+            InProcessPathQuery::Bytes { path, .. } => path.as_ref(),
+        }
+    }
+
+    /// Borrow request path as `&str` (zero UTF-8 validation on `PathAndQuery`).
+    #[inline]
+    pub fn path_str(&self) -> &str {
+        match &self.path_query {
+            InProcessPathQuery::Uri(pq) => pq.path(),
+            InProcessPathQuery::Bytes { path, .. } => std::str::from_utf8(path).unwrap_or(""),
+        }
+    }
+
+    /// Borrow non-empty request query bytes without copying.
+    #[inline]
+    pub fn query_bytes(&self) -> Option<&[u8]> {
+        match &self.path_query {
+            InProcessPathQuery::Uri(pq) => pq.query().filter(|q| !q.is_empty()).map(str::as_bytes),
+            InProcessPathQuery::Bytes { query, .. } => {
+                if query.is_empty() {
+                    None
+                } else {
+                    Some(query.as_ref())
+                }
+            }
+        }
+    }
+
+    /// Borrow non-empty request query as `&str` (zero UTF-8 validation on `PathAndQuery`).
+    #[inline]
+    pub fn query_str(&self) -> Option<&str> {
+        match &self.path_query {
+            InProcessPathQuery::Uri(pq) => pq.query().filter(|q| !q.is_empty()),
+            InProcessPathQuery::Bytes { query, .. } => {
+                if query.is_empty() {
+                    None
+                } else {
+                    Some(std::str::from_utf8(query).unwrap_or(""))
+                }
+            }
         }
     }
 }
@@ -1243,7 +1337,7 @@ impl BatchSnapshot {
                 let s = slab;
                 Self::slice_range(s, n.path_offset, n.path_len).unwrap_or(b"")
             }
-            SnapshotBacking::InProcess { requests } => &requests[index].path,
+            SnapshotBacking::InProcess { requests } => requests[index].path_bytes(),
             SnapshotBacking::ShmSlot {
                 slot,
                 node_count,
@@ -1259,7 +1353,12 @@ impl BatchSnapshot {
 
     /// Read path as a UTF-8 string.
     pub fn path(&self, index: usize) -> &str {
-        std::str::from_utf8(self.path_bytes(index)).unwrap_or("")
+        match &self.backing {
+            SnapshotBacking::InProcess { requests } => requests[index].path_str(),
+            SnapshotBacking::Slab { .. } | SnapshotBacking::ShmSlot { .. } => {
+                std::str::from_utf8(self.path_bytes(index)).unwrap_or("")
+            }
+        }
     }
 
     /// Read query bytes (None if no query string).
@@ -1279,10 +1378,7 @@ impl BatchSnapshot {
                 let s = slab;
                 Self::slice_range(s, n.query_offset, n.query_len)
             }
-            SnapshotBacking::InProcess { requests } => {
-                let q = &requests[index].query;
-                if q.is_empty() { None } else { Some(q) }
-            }
+            SnapshotBacking::InProcess { requests } => requests[index].query_bytes(),
             SnapshotBacking::ShmSlot {
                 slot,
                 node_count,
@@ -1298,8 +1394,12 @@ impl BatchSnapshot {
 
     /// Read query as a UTF-8 string.
     pub fn query(&self, index: usize) -> Option<&str> {
-        self.query_bytes(index)
-            .map(|b| std::str::from_utf8(b).unwrap_or(""))
+        match &self.backing {
+            SnapshotBacking::InProcess { requests } => requests[index].query_str(),
+            SnapshotBacking::Slab { .. } | SnapshotBacking::ShmSlot { .. } => self
+                .query_bytes(index)
+                .map(|b| std::str::from_utf8(b).unwrap_or("")),
+        }
     }
 
     /// Read raw encoded header bytes.
@@ -1395,7 +1495,12 @@ impl BatchSnapshot {
                 let node_bytes = requests.len() * core::mem::size_of::<TransportNode>();
                 let slab_len: usize = requests
                     .iter()
-                    .map(|r| r.path.len() + r.query.len() + r.headers_raw.len() + r.body.len())
+                    .map(|r| {
+                        r.path_bytes().len()
+                            + r.query_bytes().map_or(0, <[u8]>::len)
+                            + r.headers_raw.len()
+                            + r.body.len()
+                    })
                     .sum();
                 BATCH_HEADER_SIZE + node_bytes + slab_len
             }
@@ -1457,15 +1562,17 @@ impl BatchSnapshot {
                 writer.nodes.reserve(requests.len());
                 writer.components.reserve(requests.len() * 4);
                 for req in requests {
+                    let path = req.path_bytes();
+                    let query = req.query_bytes();
                     let mut node = req.node;
-                    node.path_len = req.path.len() as u32;
-                    node.query_len = req.query.len() as u32;
+                    node.path_len = path.len() as u32;
+                    node.query_len = query.map_or(0, <[u8]>::len) as u32;
                     node.headers_len = req.headers_raw.len() as u32;
                     node.body_len = req.body.len() as u32;
                     writer.nodes.push(node);
-                    writer.components.push(&req.path);
-                    if !req.query.is_empty() {
-                        writer.components.push(&req.query);
+                    writer.components.push(path);
+                    if let Some(q) = query {
+                        writer.components.push(q);
                     }
                     writer.components.push(&req.headers_raw);
                     writer.components.push(&req.body);
@@ -1584,11 +1691,11 @@ impl<'a> ShmBatchWriter<'a> {
 
     pub fn serialized_size(&self) -> usize {
         let slab_len: usize = self.components.iter().map(|c| c.len()).sum();
-        const BATCH_HEADER_SIZE: usize = 16;
         BATCH_HEADER_SIZE + self.nodes.len() * std::mem::size_of::<TransportNode>() + slab_len
     }
 
-    pub fn serialize_into(mut self, out: &mut [u8]) -> usize {
+    /// Serialize this batch into `out` while retaining `nodes` and `components` heap allocations.
+    pub fn serialize_into(&mut self, out: &mut [u8]) -> usize {
         let node_count = self.nodes.len() as u32;
         let slab_len: usize = self.components.iter().map(|c| c.len()).sum();
 
@@ -1627,16 +1734,16 @@ impl<'a> ShmBatchWriter<'a> {
         out[offset..offset + nodes_bytes.len()].copy_from_slice(nodes_bytes);
         offset += nodes_bytes.len();
 
-        for comp in self.components {
+        for comp in &self.components {
             out[offset..offset + comp.len()].copy_from_slice(comp);
             offset += comp.len();
         }
         offset
     }
 
-    /// Write an oversized batch into a named overflow SHM region and return `(region_name, envelope)`.
+    /// Write an oversized batch into a named overflow SHM region while retaining scratch allocations.
     #[cfg(unix)]
-    pub fn write_overflow_envelope(self) -> Result<(String, Vec<u8>), crate::shm::ShmError> {
+    pub fn write_overflow_envelope(&mut self) -> Result<(String, Vec<u8>), crate::shm::ShmError> {
         let total_len = self.serialized_size();
         let (name, mut region) = crate::shm::ShmRegion::create_overflow_region("rq", total_len)?;
         // SAFETY: `region` was freshly created exclusively with at least `total_len` bytes.
@@ -2389,5 +2496,69 @@ mod tests {
             assert_eq!(deserialized.node(0).correlation_id, i + 1_000_000);
             assert_eq!(deserialized.path(0), format!("/path/{i}"));
         }
+    }
+
+    #[test]
+    fn inprocess_request_from_path_and_query_zero_copy_and_roundtrip() {
+        let pq_full: http::uri::PathAndQuery = "/api/items?page=2&limit=10".parse().unwrap();
+        let pq_empty_query: http::uri::PathAndQuery = "/?".parse().unwrap();
+        let req_uri = InProcessRequest::from_path_and_query(
+            0,
+            1,
+            7,
+            101,
+            pq_full,
+            bytes::Bytes::new(),
+            bytes::Bytes::from_static(b"hello"),
+            bytes::Bytes::new(),
+        );
+        let req_empty_q = InProcessRequest::from_path_and_query(
+            0,
+            1,
+            8,
+            102,
+            pq_empty_query,
+            bytes::Bytes::new(),
+            bytes::Bytes::new(),
+            bytes::Bytes::new(),
+        );
+        let req_bytes = InProcessRequest::new(
+            1,
+            1,
+            9,
+            103,
+            bytes::Bytes::from_static(b"/legacy"),
+            bytes::Bytes::from_static(b"k=v"),
+            bytes::Bytes::new(),
+            bytes::Bytes::from_static(b"payload"),
+            bytes::Bytes::new(),
+        );
+
+        let snap = BatchSnapshot::from_inprocess(vec![req_uri, req_empty_q, req_bytes]);
+        assert_eq!(snap.path(0), "/api/items");
+        assert_eq!(snap.path_bytes(0), b"/api/items");
+        assert_eq!(snap.query(0), Some("page=2&limit=10"));
+        assert_eq!(snap.query_bytes(0), Some(&b"page=2&limit=10"[..]));
+
+        assert_eq!(snap.path(1), "/");
+        assert_eq!(snap.query(1), None);
+        assert_eq!(snap.query_bytes(1), None);
+
+        assert_eq!(snap.path(2), "/legacy");
+        assert_eq!(snap.query(2), Some("k=v"));
+
+        let mut wire = vec![0u8; snap.serialized_size()];
+        let written = snap.serialize_into(&mut wire);
+        assert_eq!(written, wire.len());
+        let decoded = BatchSnapshot::deserialize_from(&wire).expect("deserialize roundtrip");
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded.path(0), "/api/items");
+        assert_eq!(decoded.query(0), Some("page=2&limit=10"));
+        assert_eq!(decoded.body(0), b"hello");
+        assert_eq!(decoded.path(1), "/");
+        assert_eq!(decoded.query(1), None);
+        assert_eq!(decoded.path(2), "/legacy");
+        assert_eq!(decoded.query(2), Some("k=v"));
+        assert_eq!(decoded.body(2), b"payload");
     }
 }

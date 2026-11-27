@@ -15,7 +15,7 @@ from vertebra.agent.a2a.service import A2AConfig, A2AService
 from vertebra.agent.controller import AgentChatController
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.mcp.controllers import PromptController, SkillController
-from vertebra.agent.mcp.models import MCPConfig, McpHttpRequest
+from vertebra.agent.mcp.models import MCPConfig, MCPHttpRequest
 from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.agent.mcp.routes import build_well_known_mcp_document
 from vertebra.agent.mcp.service import MCPCore
@@ -125,7 +125,7 @@ class AgentPlugin:
                 ) -> tuple[int, dict[str, str], bytes | AsyncIterable[bytes]]:
                     header_map = self._header_dict(headers)
                     mcp_resp = await srv.handle(
-                        McpHttpRequest(
+                        MCPHttpRequest(
                             method=http_method,
                             path=srv.config.path,
                             headers=header_map,
@@ -320,7 +320,7 @@ class AgentPlugin:
                     request: "LitestarRequest[Any, Any, Any]",
                 ) -> "LitestarResponse[bytes] | Any":
                     mcp_resp = await srv.handle(
-                        McpHttpRequest(
+                        MCPHttpRequest(
                             method=request.method,
                             path=srv.config.path,
                             headers=dict(request.headers),

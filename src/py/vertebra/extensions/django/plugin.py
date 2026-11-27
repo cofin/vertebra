@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 from vertebra._vertebra import Request, Response, WsgiEnviron, run_wsgi_callable
 from vertebra.extensions.django.config import VertebraConfig
 from vertebra.extensions.django.fastpath import FastPath, dispatch_django_direct
-from vertebra.extensions.django.mcp import MCPRegistry, WsgiMcpApp, attach_mcp_routes, dispatch_mcp_request
+from vertebra.extensions.django.mcp import ToolRegistry, WsgiMCPApp, attach_mcp_routes, dispatch_mcp_request
 from vertebra.extensions.django.offload import offload_middlewares
 from vertebra.extensions.django.openapi import attach_openapi_docs, extract_openapi_schema
 from vertebra.extensions.django.router import RouteCompiler
@@ -58,8 +58,8 @@ class VertebraPlugin:
         self._fastpath: FastPath | None = None
         self._offload_bundle: OffloadPlan | None = None
         self._openapi_schema: dict[str, Any] | None = None
-        self._mcp_registry: MCPRegistry | None = None
-        self._mcp_app: WsgiMcpApp | None = None
+        self._mcp_registry: ToolRegistry | None = None
+        self._mcp_app: WsgiMCPApp | None = None
         self._vite_bridge: ViteBridge | None = None
         self._static_responses: dict[str, Response] = {}
         if urlpatterns is not None or settings is not None:
@@ -101,8 +101,8 @@ class VertebraPlugin:
         return self._openapi_schema
 
     @property
-    def mcp_registry(self) -> MCPRegistry | None:
-        """Return the ``MCPRegistry`` if MCP is configured."""
+    def mcp_registry(self) -> ToolRegistry | None:
+        """Return the ``ToolRegistry`` if MCP is configured."""
         return self._mcp_registry
 
     @property

@@ -36,7 +36,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.testclient import TestClient
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request
-from vertebra.agent.mcp.routes import AsgiMcpApp
+from vertebra.agent.mcp.routes import AsgiMCPApp
 from vertebra.extensions.alchemy import (
     create_async_alchemy_config,
     create_fastapi_alchemy,
@@ -559,12 +559,12 @@ async def test_multi_framework_stacked_app_mount_auto_attaches_fastpath() -> Non
 
 @pytest.mark.anyio
 async def test_fastapi_mount_mcp_routes_uses_shared_asgi_mcp_app() -> None:
-    """FastAPI mount_mcp_routes shares AsgiMcpApp over MCPCore with 2026-07-28 HTTP semantics."""
+    """FastAPI mount_mcp_routes shares AsgiMCPApp over MCPCore with 2026-07-28 HTTP semantics."""
     app, _ = _make_mock_fastapi_app()
     reg = mount_mcp_routes(app)
     assert reg.get_spec("create_order") is not None
     mcp_app = getattr(app.state, "mcp_app", None)
-    assert isinstance(mcp_app, AsgiMcpApp)
+    assert isinstance(mcp_app, AsgiMCPApp)
 
     proto_list = AsgiProtocol(b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
     scope_list = AsgiScope.from_parts(

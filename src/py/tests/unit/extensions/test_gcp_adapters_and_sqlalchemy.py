@@ -37,7 +37,7 @@ from tests.unit.db.test_spanner import FakeAsyncReadWriteTransaction, FakeAsyncS
 from vertebra._vertebra import ArrowCursor as RustArrowCursor
 from vertebra._vertebra import Request, Response
 from vertebra.agent.core import PermissionDeniedError, Tool
-from vertebra.agent.mcp.registry import MCPRegistry
+from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.agent.tools import build_tools
 from vertebra.db import (
@@ -106,7 +106,7 @@ from vertebra.extensions.sqlalchemy import (
     Vector,
 )
 from vertebra.extensions.sqlalchemy import dialects as sqlalchemy_dialects_mod
-from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool
+from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, SyncBrokerPool
 from vertebra.extensions.starlette import (
     provide_driver as starlette_provide_driver,
 )
@@ -1624,7 +1624,7 @@ async def test_spanner_schema_inspect_spangres_dialect_uses_positional_binds(asy
 @pytest.mark.anyio
 async def test_agent_tools_register_single_engine_without_default_config() -> None:
     """Single-engine tools register on a real MCP registry without resolving the other driver."""
-    registry = MCPRegistry()
+    registry = ToolRegistry()
     driver = SyncBigQueryDriver(BigQueryConfig(project_id="analytics-proj"), client=_BigQueryToolClient())
     tools = build_tools(BigQueryToolProvider(driver, registry=DatabaseRegistry()))
     dry_run_tool, query_tool, inspect_tool = tools.values()
@@ -1824,7 +1824,7 @@ async def test_native_provider_preserves_driver_exception_identity(
 @pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.anyio
 async def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module() -> None:
-    """Verify BigQuery/Spanner configs wire BrokerPool/AsyncBrokerPool and dialects expose PEP 249 interfaces."""
+    """Verify BigQuery/Spanner configs wire SyncBrokerPool/AsyncBrokerPool and dialects expose PEP 249 interfaces."""
     assert not hasattr(sqlalchemy_dialects_mod, "SyncDBAPIConnection")
     assert not hasattr(sqlalchemy_dialects_mod, "AsyncDBAPIConnection")
     assert SyncBigQueryDialect.import_dbapi().paramstyle == "named"
@@ -1838,7 +1838,7 @@ async def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module(
         bq_cfg = create_sync_alchemy_config("bigquery://analytics-proj/ds", broker=sync_broker)
         sp_cfg = create_async_alchemy_config("spanner://core-proj/prod-inst/orders", broker=async_broker)
         assert isinstance(bq_cfg.engine_config.poolclass, type)
-        assert issubclass(bq_cfg.engine_config.poolclass, BrokerPool)
+        assert issubclass(bq_cfg.engine_config.poolclass, SyncBrokerPool)
         assert isinstance(sp_cfg.engine_config.poolclass, type)
         assert issubclass(sp_cfg.engine_config.poolclass, AsyncBrokerPool)
         assert isinstance(bq_cfg.engine_config.connect_args, dict)
@@ -1847,7 +1847,7 @@ async def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module(
         assert sp_cfg.engine_config.connect_args["broker"] is async_broker
         bq_engine = bq_cfg.get_engine()
         sp_engine = sp_cfg.get_engine()
-        assert isinstance(bq_engine.pool, BrokerPool)
+        assert isinstance(bq_engine.pool, SyncBrokerPool)
         assert isinstance(sp_engine.pool, AsyncBrokerPool)
         assert SyncBigQueryDialect().create_connect_args(bq_engine.url) == (
             [],
@@ -2149,11 +2149,11 @@ async def test_bigquery_sqlalchemy21_compilation_and_execution(asynchronous: boo
 @pytest.mark.parametrize(
     ("scheme", "dialect_cls", "expected_broker_base"),
     [
-        ("bigquery+vtb", SyncBigQueryDialect, BrokerPool),
+        ("bigquery+vtb", SyncBigQueryDialect, SyncBrokerPool),
         ("bigquery+vtb_async", AsyncBigQueryDialect, AsyncBrokerPool),
-        ("spanner+vtb", SyncSpannerDialect, BrokerPool),
+        ("spanner+vtb", SyncSpannerDialect, SyncBrokerPool),
         ("spanner+vtb_async", AsyncSpannerDialect, AsyncBrokerPool),
-        ("spangres+vtb", SyncSpangresDialect, BrokerPool),
+        ("spangres+vtb", SyncSpangresDialect, SyncBrokerPool),
         ("spangres+vtb_async", AsyncSpangresDialect, AsyncBrokerPool),
     ],
 )
@@ -2161,9 +2161,9 @@ def test_bigquery_broker_query_selects_broker_pool_or_null_pool(
     monkeypatch: pytest.MonkeyPatch,
     scheme: str,
     dialect_cls: type[Any],
-    expected_broker_base: type[BrokerPool],
+    expected_broker_base: type[SyncBrokerPool],
 ) -> None:
-    """Verify GCP dialects default to NullPool and select BrokerPool/AsyncBrokerPool on ?broker=true."""
+    """Verify GCP dialects default to NullPool and select SyncBrokerPool/AsyncBrokerPool on ?broker=true."""
     base_url = f"{scheme}://analytics-proj/warehouse"
     assert dialect_cls.get_pool_class(make_url(base_url)) is NullPool
     assert dialect_cls.get_pool_class(make_url(f"{base_url}?shm_broker=true")) is NullPool

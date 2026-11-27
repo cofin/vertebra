@@ -1,32 +1,34 @@
 # Bundler, Inertia v3, QuickJS SSR & HTMX
 
-Vertebra includes a built-in Rust JavaScript bundler (`vertebra-bundler`), an in-process QuickJS server-side rendering pool (`SyncEmbeddedSSRClient` / `AsyncEmbeddedSSRClient`), and Inertia v3 and HTMX server helpers. See [TypeScript SDK & Framework Adapters](typescript-sdk.md) for `@vertebra/client` usage.
+Vertebra includes a built-in Rust JavaScript bundler, an embedded QuickJS server-side rendering pool, and server helpers for Inertia v3 and HTMX. See [TypeScript SDK & Framework Adapters](typescript-sdk.md) for `@vertebra/client` usage.
 
-## Embedded JavaScript Bundler (`vertebra._bundler`)
+## Embedded JavaScript Bundler
 
-Compile TypeScript, JSX/TSX, and CSS assets directly from Python without running a separate Node.js build server:
+Bundle TypeScript, JSX/TSX, and CSS assets directly from Python without running a Node.js build server:
 
 ```python
-from vertebra._bundler import BundleConfig, Bundler
+from vertebra.build import BundleConfig, Bundler
 
-config = BundleConfig(
-    entry="frontend/src/main.tsx",
-    outdir="static/dist",
-    minify=True,
-    sourcemap=True,
+bundler = Bundler(
+    BundleConfig(
+        entry="frontend/src/main.tsx",
+        outdir="static/dist",
+        minify=True,
+        sourcemap=True,
+    )
 )
-result = Bundler().build(config)
+result = bundler.build()
 ```
 
-Or run from the CLI:
+Or run it from the CLI:
 
 ```bash
 vtb js build
 ```
 
-## Inertia v3 Protocol & Prop Types (`vertebra.framework.inertia`)
+## Inertia v3
 
-Build single-page React, Vue, or Svelte applications driven by Python handlers with `@inertia("Component")`, partial reloads, deferred props (`DeferredProp`), shallow and deep merge props (`MergeProp`, `DeepMergeProp`), once-evaluated props (`OnceProp`), scroll pagination props (`ScrollProp`), and on-demand props (`OptionalProp`):
+Drive React, Vue, or Svelte single-page apps from Python handlers with `@inertia`. Vertebra supports partial reloads, deferred props, shallow and deep merge props, once-evaluated props, scroll pagination, and optional props:
 
 ```python
 from vertebra import App
@@ -68,9 +70,9 @@ page = InertiaResponse(
 )
 ```
 
-## QuickJS Server-Side Rendering & Prerendering (`vertebra.framework.ssr`)
+## QuickJS Server-Side Rendering
 
-Render JavaScript and TypeScript page components on the server using the embedded QuickJS worker pool (`SyncEmbeddedSSRClient.from_config` / `AsyncEmbeddedSSRClient.from_config`) or an external HTTP runtime (`SyncSidecarSSRClient` / `AsyncSidecarSSRClient`):
+Render JavaScript and TypeScript page components on the server using the embedded QuickJS worker pool, or point `SSRConfig` at an external HTTP rendering service:
 
 ```python
 from vertebra.framework.ssr import SSRConfig, SyncEmbeddedSSRClient
@@ -88,9 +90,9 @@ rendered = ssr.render(
 )
 ```
 
-## HTMX Request & Response Helpers (`vertebra.framework.htmx`)
+## HTMX Helpers
 
-Inspect incoming `HX-*` headers with `HTMXRequest` (`is_htmx`, `boosted`, `target`, `trigger`) and construct partial HTML responses with `HTMXResponse` (`trigger`, `retarget`, `reswap`, `push_url`):
+Inspect incoming `HX-*` headers with `HTMXRequest` and build partial HTML responses with `HTMXResponse`:
 
 ```python
 from vertebra.framework.htmx import HTMXRequest, HTMXResponse

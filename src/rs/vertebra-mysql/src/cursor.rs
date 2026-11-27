@@ -13,7 +13,7 @@ use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyType,
 };
 use vertebra_db::py_async::{
-    ReadyAwaitable, RustDbTaskAwaitable, block_on_db, ready_ok, spawn_rust_db_task_with_attr,
+    ReadyAwaitable, TaskAwaitable, block_on_db, ready_ok, spawn_rust_db_task_with_attr,
 };
 use vertebra_db::py_cursor::{
     BufferedCursorState, DEFAULT_PLAN_CACHE_CAPACITY, PlanLruCache, build_description_7tuple,
@@ -857,7 +857,7 @@ impl AsyncMySQLCursor {
         slf: &Bound<'_, Self>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let py = slf.py();
         let this = slf.get();
         this.ensure_open(py)?;
@@ -904,7 +904,7 @@ impl AsyncMySQLCursor {
         slf: &Bound<'_, Self>,
         sql: &str,
         seq_of_params: &Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let py = slf.py();
         let this = slf.get();
         this.ensure_open(py)?;

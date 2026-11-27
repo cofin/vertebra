@@ -1,18 +1,18 @@
 # Packaging & Deployment
 
-Deploy Vertebra applications as standard Python wheels (`vtb run ...`), containers with automatic CPU and shared-memory sizing, or self-contained standalone and single-file binaries (`StandaloneBuilder`, `OnefileBuilder`).
+Deploy Vertebra applications as standard Python packages (`vtb run`), containers with automatic cgroup sizing, or self-contained standalone and single-file binaries.
 
-## Standalone & Single-File Binaries (`vtb build`)
+## Standalone & Single-File Binaries
 
-`vertebra.build.packaging` bundles your Python application, compiled Rust extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`), Python Build Standalone runtime, and frontend assets into a relocatable directory (`StandaloneBuilder`) or a self-extracting single-file binary with SHA-256 verification (`OnefileBuilder`):
+Build a relocatable directory or a SHA-256 verified single-file executable containing your Python application, compiled extensions, Python runtime, and frontend assets:
 
 ```bash
 vtb build --standalone --onefile
 ```
 
-To stage `.agents/skills` for application repositories inside a standalone or onefile bundle, opt in with `--include-agent-skills` (`AGENTS.md` and `CLAUDE.md` are excluded, and `VERTEBRA_APP_ROOT` is exported at launch).
+Pass `--include-agent-skills` to bundle `.agents/skills` inside the output (`AGENTS.md` and `CLAUDE.md` are excluded, and `VERTEBRA_APP_ROOT` is set at launch).
 
-Programmatic configuration via `BuildConfig`, `BuildTarget`, `StandaloneBuilder`, and `OnefileBuilder`:
+You can also drive builds from Python:
 
 ```python
 from pathlib import Path
@@ -30,30 +30,30 @@ dist_dir = standalone.build(Path("dist/standalone"))
 onefile = OnefileBuilder(dist_dir=dist_dir, target=target)
 ```
 
-## TypeScript, Zod, OpenAPI & Protobuf Codegen (`vertebra.build.codegen`)
+## TypeScript, Zod, OpenAPI & Protobuf Codegen
 
-Generate TypeScript route types (`TypeScriptGenerator`), Zod or Valibot validation schemas (`ZodGenerator`, `ValibotGenerator`), RPC procedure clients (`ProcedureClientGenerator`), OpenAPI 3.1 specs (`OpenAPIGenerator`), and `.proto` definitions (`ProtobufGenerator`) from your Python routes and `msgspec.Struct` models:
+Generate TypeScript route types, Zod or Valibot validation schemas, RPC clients, OpenAPI 3.1 specs, and `.proto` definitions from your Python routes and `msgspec.Struct` models:
 
 ```bash
 vtb js generate-types
 ```
 
-## Production Performance & Compiler Optimization
+## Release Wheels & Shared Python
 
-Vertebra official release distribution wheels (`vertebra-core` across `linux-x86_64`, `linux-aarch64`, and macOS `arm64`/`x86_64`) ship the pre-compiled relocatable `vertebra/bin/vertebra-server` release binary using `$ORIGIN`/`@loader_path` relative rpaths. At runtime, `EmbeddedPythonRuntime.require_shared_library` verifies a shared `libpython` installation (`ENABLE_SHARED=1`, such as `uv python install`) unless `VERTEBRA_SERVER_BINARY` overrides the binary path.
+Release wheels for `vertebra-core` on Linux (`x86_64`, `aarch64`) and macOS (`arm64`, `x86_64`) include the pre-compiled `vertebra-server` binary. Running it requires a Python installation built with a shared `libpython` (such as `uv python install`), unless you override the binary path with `VERTEBRA_SERVER_BINARY`.
 
 ## Container Deployment & Process Supervision
 
 When running inside Docker, Kubernetes, or Cloud Run:
 
-1. **Automatic CPU & Memory Detection**: `CgroupQuota.effective_cpu_count()` reads `/sys/fs/cgroup/cpu.max` so `VERTEBRA_THREADS` matches the container's CPU limit automatically.
-2. **Shared-Memory Allocation (`SHMAllocationPolicy`)**: Uses anonymous `memfd_create` descriptors passed over `SCM_RIGHTS` UNIX sockets (or `/dev/shm` when available) so `--topology shm` works cleanly even on read-only container root filesystems.
-3. **Process Supervision (`vertebra.supervisor`)**: In multi-worker deployments (`--workers > 1`), `run_supervisor` monitors worker processes, coordinates graceful `SIGTERM` drains, and restarts crashed workers.
-4. **TLS Trust Store for Google Cloud Clients**: The Spanner Data and BigQuery Storage gRPC clients trust the operating system certificate store plus bundled Mozilla roots (`webpki-roots`). Spanner Database Admin DDL (`update_database_ddl`) runs over REST and uses the operating system trust store (`rustls-native-certs`), so minimal container images that execute Spanner DDL must include a system CA bundle (such as `ca-certificates`). Standard proxy environment variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`) apply to REST calls.
+1. **CPU limits**: Reads container cgroup quotas automatically so `VERTEBRA_THREADS` matches the container's CPU limit.
+2. **Shared memory**: Uses anonymous memory descriptors (or `/dev/shm` when available), so `--topology shm` works on read-only container filesystems.
+3. **Process supervision**: With `--workers > 1`, the supervisor monitors worker processes, coordinates graceful `SIGTERM` drains, and restarts crashed workers.
+4. **Google Cloud TLS certificates**: Spanner Data and BigQuery Storage gRPC clients trust both system roots and bundled roots. Spanner admin DDL runs over REST using the OS certificate store, so minimal container images running Spanner DDL must include a CA bundle such as `ca-certificates`. Standard proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`) apply to REST calls.
 
-## WebAssembly Plugin Sandboxes (`vertebra.wasm`)
+## WebAssembly Plugin Sandboxes
 
-Run untrusted plugins or custom data transforms inside memory-, fuel-, and timeout-bounded WASI WebAssembly sandboxes using `WASMSandboxPolicy`, `WASMModuleConfig`, and `WASMPluginHost`:
+Run untrusted plugins or custom data transforms inside WASI WebAssembly sandboxes bounded by memory, fuel, and timeout limits:
 
 ```python
 from vertebra.wasm import WASMModuleConfig, WASMPluginHost, WASMSandboxPolicy

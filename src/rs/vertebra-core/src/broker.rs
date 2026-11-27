@@ -73,6 +73,14 @@ pub const CHAN_MAX_NAME_BYTES: usize = 64;
 pub const CHAN_MAX_LEASE_ID_BYTES: usize = 32;
 pub const CHAN_MAX_PAYLOAD_BYTES: usize = 256;
 
+struct WaitGuard<'a>(&'a AtomicU32);
+
+impl Drop for WaitGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReleaseKind {
     Release,
@@ -1035,7 +1043,7 @@ impl ShmLeaseTable {
             entry.total_quarantined.store(0, Ordering::Relaxed);
             entry.total_disposed.store(0, Ordering::Relaxed);
             entry.state.store(PARTITION_READY, Ordering::Release);
-            hdr.partition_count.0.fetch_add(1, Ordering::Relaxed);
+            hdr.partition_count.0.fetch_add(1, Ordering::Release);
             return Ok(idx as u16);
         }
     }
@@ -1293,13 +1301,6 @@ impl ShmLeaseTable {
         let hdr = self.header();
         let deadline = Instant::now() + timeout;
 
-        struct WaitGuard<'a>(&'a AtomicU32);
-        impl Drop for WaitGuard<'_> {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::SeqCst);
-            }
-        }
-
         hdr.waiters.0.fetch_add(1, Ordering::SeqCst);
         let _guard = WaitGuard(&hdr.waiters.0);
 
@@ -1343,6 +1344,41 @@ impl ShmLeaseTable {
         bind_key_hash: u64,
     ) -> Result<LeaseGrant, BrokerError> {
         self.acquire_internal(Some(partition), worker_pid, ttl_ns, timeout, bind_key_hash)
+    }
+
+    #[inline]
+    pub fn wake_seq(&self) -> u32 {
+        self.header().wake_seq.0.load_seqcst()
+    }
+
+    #[inline]
+    pub fn partition_count(&self) -> u32 {
+        self.header().partition_count.0.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn record_timeout(&self) {
+        self.header().total_timeouts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Block until `wake_seq` differs from `expected_seq` or `timeout` elapses, returning the latest `wake_seq`.
+    pub fn wait_for_wake(&self, expected_seq: u32, timeout: Duration) -> u32 {
+        let hdr = self.header();
+        if timeout.is_zero() {
+            return hdr.wake_seq.0.load_seqcst();
+        }
+        let current = hdr.wake_seq.0.load_seqcst();
+        if current != expected_seq {
+            return current;
+        }
+        hdr.waiters.0.fetch_add(1, Ordering::SeqCst);
+        let _guard = WaitGuard(&hdr.waiters.0);
+        let after_reg = hdr.wake_seq.0.load_seqcst();
+        if after_reg != expected_seq {
+            return after_reg;
+        }
+        let _ = hdr.wake_seq.0.wait_timeout(expected_seq, timeout);
+        hdr.wake_seq.0.load_seqcst()
     }
 
     /// Refresh `last_heartbeat_ns` for an active lease matching `(slot_index, generation)`.
@@ -1407,6 +1443,18 @@ impl ShmLeaseTable {
         hdr.wake_seq.0.fetch_add_seqcst(1);
         if hdr.waiters.0.load(Ordering::SeqCst) > 0 {
             let _ = hdr.wake_seq.0.wake_all();
+        }
+    }
+
+    fn wake_one_waiter_seqcst(&self) {
+        let hdr = self.header();
+        hdr.wake_seq.0.fetch_add_seqcst(1);
+        if hdr.waiters.0.load(Ordering::SeqCst) > 0 {
+            if hdr.partition_count.0.load(Ordering::Acquire) <= 1 {
+                let _ = hdr.wake_seq.0.wake_one();
+            } else {
+                let _ = hdr.wake_seq.0.wake_all();
+            }
         }
     }
 
@@ -1552,7 +1600,7 @@ impl ShmLeaseTable {
                 ReleaseKind::Release,
             ) {
                 Ok(true) => {
-                    self.wake_waiters_seqcst();
+                    self.wake_one_waiter_seqcst();
                     return Ok(());
                 }
                 Ok(false) => {
@@ -1731,7 +1779,7 @@ impl ShmLeaseTable {
                 ReleaseKind::DisposeQuarantined,
             ) {
                 Ok(true) => {
-                    self.wake_waiters_seqcst();
+                    self.wake_one_waiter_seqcst();
                     return Ok(());
                 }
                 Ok(false) => {
@@ -4841,5 +4889,96 @@ mod tests {
             (&mut *table.header).channel_offset = orig_channel_offset;
         }
         assert!(table.channel_header_and_slots().is_some());
+    }
+
+    #[test]
+    fn test_wait_for_wake_immediate_timeout_and_release_modes() {
+        let req = ShmLeaseTable::required_size(2, 0);
+        let region = ShmRegion::create(req).unwrap();
+        let table = Arc::new(ShmLeaseTable::init_in_region(region, 2, 0).unwrap());
+        assert_eq!(table.partition_count(), 0);
+
+        let initial_seq = table.wake_seq();
+        assert_eq!(
+            table.wait_for_wake(initial_seq, Duration::ZERO),
+            initial_seq
+        );
+        assert_eq!(table.stats().waiting_threads, 0);
+
+        let grant = table.try_acquire(1, 0, 0).unwrap();
+        table.release(grant.slot_index, grant.generation).unwrap();
+        let bumped_seq = table.wake_seq();
+        assert_ne!(bumped_seq, initial_seq);
+        assert_eq!(
+            table.wait_for_wake(initial_seq, Duration::from_secs(1)),
+            bumped_seq
+        );
+        assert_eq!(table.stats().waiting_threads, 0);
+
+        let timed_out_seq = table.wait_for_wake(bumped_seq, Duration::from_millis(5));
+        assert_eq!(timed_out_seq, bumped_seq);
+        assert_eq!(table.stats().waiting_threads, 0);
+
+        let held = table.try_acquire(1, 0, 0).unwrap();
+        let wait_seq = table.wake_seq();
+        let waiter_table = Arc::clone(&table);
+        let waiter = std::thread::spawn(move || {
+            waiter_table.wait_for_wake(wait_seq, Duration::from_secs(2))
+        });
+        while table.stats().waiting_threads == 0 {
+            std::thread::yield_now();
+        }
+        table.release(held.slot_index, held.generation).unwrap();
+        let woken_seq = waiter.join().unwrap();
+        assert_ne!(woken_seq, wait_seq);
+        assert_eq!(table.stats().waiting_threads, 0);
+
+        let p0 = table
+            .register_partition(PoolPartitionSpec {
+                pool_key_hash: 101,
+                pool_size: 1,
+                max_overflow: 0,
+            })
+            .unwrap();
+        assert_eq!(table.partition_count(), 1);
+        let held_p0 = table.try_acquire_in(p0, 1, 0, 101).unwrap().unwrap();
+        let p0_seq = table.wake_seq();
+        let p0_table = Arc::clone(&table);
+        let p0_waiter =
+            std::thread::spawn(move || p0_table.wait_for_wake(p0_seq, Duration::from_secs(2)));
+        while table.stats().waiting_threads == 0 {
+            std::thread::yield_now();
+        }
+        table
+            .release(held_p0.slot_index, held_p0.generation)
+            .unwrap();
+        assert_ne!(p0_waiter.join().unwrap(), p0_seq);
+        assert_eq!(table.stats().waiting_threads, 0);
+
+        let p1 = table
+            .register_partition(PoolPartitionSpec {
+                pool_key_hash: 202,
+                pool_size: 1,
+                max_overflow: 0,
+            })
+            .unwrap();
+        assert_eq!(table.partition_count(), 2);
+        let held_p1 = table.try_acquire_in(p1, 1, 0, 202).unwrap().unwrap();
+        let multi_seq = table.wake_seq();
+        let w1_table = Arc::clone(&table);
+        let w2_table = Arc::clone(&table);
+        let w1 =
+            std::thread::spawn(move || w1_table.wait_for_wake(multi_seq, Duration::from_secs(2)));
+        let w2 =
+            std::thread::spawn(move || w2_table.wait_for_wake(multi_seq, Duration::from_secs(2)));
+        while table.stats().waiting_threads < 2 {
+            std::thread::yield_now();
+        }
+        table
+            .release(held_p1.slot_index, held_p1.generation)
+            .unwrap();
+        assert_ne!(w1.join().unwrap(), multi_seq);
+        assert_ne!(w2.join().unwrap(), multi_seq);
+        assert_eq!(table.stats().waiting_threads, 0);
     }
 }

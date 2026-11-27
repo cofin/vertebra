@@ -56,7 +56,8 @@ sources:
 
 <!-- truth: start -->
 - `--topology auto` selects `Embedded` for single-worker or free-threaded (`3.14t`/`3.15t`) runtimes and `Shm` when `workers > 1` on POSIX GIL Python.
-- Explicit `--topology embedded` with `workers > 1` on Unix supervises symmetric `SO_REUSEPORT` embedded worker processes sharing pre-initialized SHM broker descriptors.
+- Single-worker GIL `Embedded` defaults to `available_cpus.clamp(1, 2)` Tokio worker threads (overridable via `VERTEBRA_TOKIO_THREADS`), while `EmbeddedSupervisor` computes cgroup `cpu.max`-aware budgets with `1` Tokio thread per `SO_REUSEPORT` child process.
+- `RequestBatcher::spawn_pool` sizes shards to consumer parallelism (`workers.count.clamp(1, 8)` in `Shm`, `py_threads.clamp(1, 8)` in `Embedded`, yielding `1` shard on 1-worker GIL Embedded).
 <!-- truth: end -->
 
 The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/src/main.rs)[^src-vertebra-http-src-main-rs]) builds an explicit Tokio runtime (`Builder::new_current_thread` when `worker_threads <= 1`, `Builder::new_multi_thread` clamped to `available_parallelism()` when `> 1`) and hosts Python in one of three configured [`Topology`](../../../../../src/rs/vertebra-http/src/config.rs)[^src-vertebra-http-src-config-rs] modes (`Topology::from_str` accepts `"auto"`, `"embedded"`, and `"shm"`): `Embedded`, `Shm`, or `Auto` (which automatically resolves to `Shm` on POSIX non-free-threaded Python when `workers > 1`, and `Embedded` for single-worker or free-threaded `3.14t`/`3.15t` runtimes).
@@ -64,7 +65,7 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 ```mermaid
 flowchart TD
     Ingress["Tokio ingress (server::run_with_collector)"]
-    Ingress -->|"Topology::Embedded (single-worker, 3.14t/3.15t, or explicit)"| Bridge["BatchBridge (InProcessRequest + ResponseSink)"]
+    Ingress -->|"Topology::Embedded (single-worker, 3.14t/3.15t, or explicit)"| Bridge["BatchBridge (InProcessRequest + BatchResponseSink)"]
     Ingress -->|"Topology::Shm (auto when workers > 1 on GIL Unix, or explicit)"| Shm["RingPair per worker (memfd / shm_open)"]
     Bridge --> PyThread["Embedded Python worker(s) (worker.run_worker)"]
     Shm --> PySub["Python subprocesses (python -m vertebra.supervisor._worker)"]
@@ -73,7 +74,8 @@ flowchart TD
 ## Topology Selection
 
 - `vtb run` ([`run.py`](../../../../../src/py/vertebra/cli/run.py)[^src-cli-run-py]) and `ServerLaunchEnv.to_environ()` ([`_launch.py`](../../../../../src/py/vertebra/cli/_launch.py)[^src-cli-launch-py]) preserve inherited `VERTEBRA_TOPOLOGY`, `VERTEBRA_WORKERS`, `VERTEBRA_THREADS`, and `VERTEBRA_JIT` environment variables whenever the corresponding CLI options (`--topology auto|embedded|shm`, `--workers`, `--threads`, `--jit/--no-jit`) are omitted, automatically resolving `auto`/omitted topology to `"shm"` when `workers > 1` on POSIX standard GIL builds (`not is_free_threaded_runtime()`) and `"embedded"` otherwise before launching the binary through `run_supervisor` (see [Platform & Lifecycle](platform-and-lifecycle.md)).
-- When `Topology::Embedded` runs with `config.workers.count > 1` (either on free-threaded Python or via explicit `--topology embedded`) and `VERTEBRA_EMBEDDED_WORKER != "1"`, `EmbeddedSupervisor` pre-initializes shared SHM broker FDs (`ShmLeaseTable` / `ShmStatementCache`) and spawns `W` child `vertebra-server` worker processes (`VERTEBRA_EMBEDDED_WORKER=1`) binding the same port via `SO_REUSEPORT`, computing per-worker `(tokio_threads, py_threads)` against `std::thread::available_parallelism()` to prevent core oversubscription.
+- In single-worker GIL `Topology::Embedded`, `ServerConfig::apply_runtime_thread_env` ([`config.rs`](../../../../../src/rs/vertebra-http/src/config.rs)[^src-vertebra-http-src-config-rs]) defaults `worker_threads` to `available_cpus.clamp(1, 2)` when `VERTEBRA_TOKIO_THREADS` is unset, keeping Tokio I/O responsive without starving the single Python worker thread.
+- When `Topology::Embedded` runs with `config.workers.count > 1` (either on free-threaded Python or via explicit `--topology embedded`) and `VERTEBRA_EMBEDDED_WORKER != "1"`, `EmbeddedSupervisor` pre-initializes shared SHM broker FDs (`ShmLeaseTable` / `ShmStatementCache`) and spawns `W` child `vertebra-server` worker processes (`VERTEBRA_EMBEDDED_WORKER=1`) binding the same port via `SO_REUSEPORT`, computing per-worker `(tokio_threads, py_threads)` against cgroup v2 `cpu.max` / cgroup v1 CFS quota and `std::thread::available_parallelism()` (`1` Tokio thread per child process) to prevent core oversubscription.
 - `Topology::Shm` (`VERTEBRA_TOPOLOGY=shm`, selected automatically for `workers > 1` on standard GIL Unix or explicitly via `--topology shm`) runs one central Rust HTTP ingress process dispatching across shared-memory `RingPair`s to `W` Python worker subprocesses, sizing `config.worker_threads` (`available_cpus.saturating_sub(W).clamp(1, 4)`) when `VERTEBRA_TOKIO_THREADS` is unset so the central ingress and `W` Python workers share the CPU budget without oversubscription. On non-Unix targets `Shm` falls back to the in-process bridge dispatcher.
 
 ## Startup Sequence (`main.rs`)
@@ -85,7 +87,7 @@ flowchart TD
 5. `Python::attach` populates `sys.path` via `ensure_embedded_python_path` (including `.venv`/`VIRTUAL_ENV` `site-packages`), imports `VERTEBRA_APP` (default `app:app`), invokes `extract_offload_json_from_app` (calling `VertebraPlugin.ensure_finalized(app)` and reading `app.state["vertebra_offload_config_json"]` when `VERTEBRA_OFFLOAD_CONFIG` is unset), and `build_route_table_from_app` reads `handler_index` and registers each mount prefix across `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, and `HEAD` encoded with `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`).
 6. `Router::from_entries` builds the router.
 7. Dispatcher selection (next sections).
-8. `RequestBatcher::spawn_pool(dispatcher, BatchLimit::default(), shard_count, 16384)` starts the double-buffered collector tasks (`config.workers.count.clamp(1, 8)` in `Topology::Shm` for 1:1 batcher-to-worker affinity, and `config.worker_threads.clamp(1, 8)` in `Topology::Embedded`).
+8. `RequestBatcher::spawn_pool(dispatcher, BatchLimit::default(), shard_count, 16384)` starts the double-buffered collector tasks aligned to consumer parallelism (`config.workers.count.clamp(1, 8)` in `Topology::Shm` for 1:1 batcher-to-worker affinity, and `py_threads.clamp(1, 8)` in `Topology::Embedded`, yielding `1` shard on 1-worker GIL Embedded).
 9. `server::run_with_collector` serves until `ctrl_c` (`SIGINT`) or `CancellationToken` drain resolves.
 10. In `Shm`, `RingFactory::shutdown_workers(children, 5 s)` stops the subprocesses; in `Embedded`, Python worker `JoinHandle`s are joined cleanly.
 
@@ -94,7 +96,7 @@ flowchart TD
 Each `vertebra-server` worker process hosts its own Tokio ingress and embedded Python interpreter.
 
 - **Single `_vertebra` copy**: `vertebra-server` links `vertebra-py` directly. `spawn_python_workers` imports the inittab module `_vertebra` and sets `sys.modules["vertebra._vertebra"]` to it, so Python never `dlopen`s the wheel's `_vertebra.cpython-*.so` with a second `static BRIDGE: OnceLock<BatchBridge>`.
-- **Dispatcher**: `Dispatcher::new()` (`DispatchBackend::Bridge(Arc<BridgeCorrelation>)`) uses an 8-shard `InFlightRequests` correlation slab, submits zero-copy `Vec<InProcessRequest>` batches via `BatchBridge::submit_inprocess_batch`, and registers a direct `ResponseSink` callback on `BatchBridge` that completes Hyper `oneshot::Sender`s directly on submission without a `DashMap` or intermediate `spawn_response_reader` task, alongside a periodic `sweep_expired` background timer.
+- **Dispatcher**: `Dispatcher::new()` (`DispatchBackend::Bridge(Arc<BridgeCorrelation>)`) uses an 8-shard `InFlightRequests` correlation slab, submits zero-copy `Vec<InProcessRequest>` batches via `BatchBridge::submit_inprocess_batch`, and registers direct `BatchResponseSink` and `ResponseSink` callbacks on `BatchBridge` that complete Hyper `oneshot::Sender`s directly on submission without a `DashMap` or intermediate `spawn_response_reader` task, alongside a periodic `sweep_expired` background timer.
 - **Python worker thread(s)**: `spawn_python_workers` ([`main.rs`](../../../../../src/rs/vertebra-http/src/main.rs)) checks `_vertebra.FREE_THREADED`, sets `BatchBridge::set_consumer_count(worker_threads)`, calls `init_transport()`, and invokes `run_worker` in [`worker.py`](../../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py]. If an embedded worker thread errors or exits unexpectedly before server shutdown, it cancels `server_shutdown_token` and causes `run_server` to exit non-zero. When `consumer_count == 1` and async/ASGI/RSGI handlers are mounted, the worker runs inline on a single `uvloop` thread via `loop.add_reader(request_notify_fd, ...)` with Dekker `prepare_request_sleep` / `cancel_request_sleep`; pure-sync native embedded workers poll `get_batch` directly with `py.detach`.
 
 ## Shared-Memory Mode (`Topology::Shm`, Unix)
@@ -111,7 +113,7 @@ Each `vertebra-server` worker process hosts its own Tokio ingress and embedded P
 
 ## Free-Threaded Python (`3.14t` & `3.15t`)
 
-- All ten PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, and `_spanner`) declare `#[pymodule(gil_used = false)]` ([`vertebra-py/src/lib.rs`](../../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs], `vertebra-*/src/lib.rs`), omit PyO3 global-mutex `freelist`s under `#[cfg(Py_GIL_DISABLED)]`, and set `immutable_type` on non-subclassed `#[pyclass]` types.
+- All 13 PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_redis`, `_spanner`, `_sqlite`, and `_valkey`) declare `#[pymodule(gil_used = false)]` ([`vertebra-py/src/lib.rs`](../../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs], `vertebra-*/src/lib.rs`), omit PyO3 global-mutex `freelist`s under `#[cfg(Py_GIL_DISABLED)]`, and set `immutable_type` on non-subclassed `#[pyclass]` types.
 - `spawn_python_workers` in `vertebra-http` queries `_vertebra.FREE_THREADED` and spawns `N` symmetric embedded Python worker threads sharing `BatchBridge`'s lock-free `crossbeam` receiver when `py_threads > 1`, keeping object creation, execution, and `Drop` on the owning thread (`ob_tid` biased refcount locality).
 - The `vertebra-server` binary installs `mimalloc::MiMalloc` as `#[global_allocator]` behind the default `mimalloc` feature (`default-features = false`, without `override`, coexisting cleanly with `libpython3.14t`/`libpython3.15t`'s internal `mimalloc`). PyO3 extension wheels use the host allocator.
 - Loop sharding, GIL auditing, and CPU affinity are described in [Platform & Lifecycle](platform-and-lifecycle.md).

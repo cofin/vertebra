@@ -20,8 +20,11 @@ use crate::transport::{
     TransportError, TransportNode, iter_raw_headers,
 };
 
-/// Direct response completion callback registered by the embedded HTTP dispatcher.
+/// Direct single-response completion callback registered by the embedded HTTP dispatcher.
 pub type ResponseSink = Arc<dyn Fn(BridgeResponse) + Send + Sync>;
+
+/// Direct batch-response completion callback registered by the embedded HTTP dispatcher.
+pub type BatchResponseSink = Arc<dyn Fn(Vec<BridgeResponse>) + Send + Sync>;
 
 /// Ordered response frame sent through the dedicated streaming sink.
 #[derive(Debug, Clone)]
@@ -230,6 +233,9 @@ pub struct BatchBridge {
     fast_sink: OnceLock<ResponseSink>,
     has_override_sink: AtomicBool,
     override_sink: RwLock<Option<ResponseSink>>,
+    fast_batch_sink: OnceLock<BatchResponseSink>,
+    has_override_batch_sink: AtomicBool,
+    override_batch_sink: RwLock<Option<BatchResponseSink>>,
     stream_sink: RwLock<Option<StreamSink>>,
     pubsub_sink: RwLock<Option<PubSubSink>>,
     webtransport_sink: RwLock<Option<WebTransportSink>>,
@@ -287,6 +293,9 @@ impl BatchBridge {
                 fast_sink: OnceLock::new(),
                 has_override_sink: AtomicBool::new(false),
                 override_sink: RwLock::new(None),
+                fast_batch_sink: OnceLock::new(),
+                has_override_batch_sink: AtomicBool::new(false),
+                override_batch_sink: RwLock::new(None),
                 stream_sink: RwLock::new(None),
                 pubsub_sink: RwLock::new(None),
                 webtransport_sink: RwLock::new(None),
@@ -383,6 +392,23 @@ impl BatchBridge {
     pub fn clear_response_sink(&self) {
         *self.override_sink.write().unwrap() = None;
         self.has_override_sink.store(true, Ordering::Release);
+    }
+
+    /// Register a direct batch response completion callback invoked once per `submit_responses` call.
+    pub fn set_batch_response_sink(&self, sink: BatchResponseSink) {
+        if !self.has_override_batch_sink.load(Ordering::Acquire)
+            && self.fast_batch_sink.set(sink.clone()).is_ok()
+        {
+            return;
+        }
+        *self.override_batch_sink.write().unwrap() = Some(sink);
+        self.has_override_batch_sink.store(true, Ordering::Release);
+    }
+
+    /// Clear any registered batch response completion callback, falling back to `ResponseSink` or `resp_tx`.
+    pub fn clear_batch_response_sink(&self) {
+        *self.override_batch_sink.write().unwrap() = None;
+        self.has_override_batch_sink.store(true, Ordering::Release);
     }
 
     /// Replace the registered stream callback.
@@ -603,7 +629,8 @@ impl BatchBridge {
             }
             return Err(response);
         }
-        if let Some(sink) = self.override_sink.read().unwrap().as_ref() {
+        let sink = self.override_sink.read().unwrap().as_ref().cloned();
+        if let Some(sink) = sink {
             sink(response);
             return Ok(());
         }
@@ -615,6 +642,19 @@ impl BatchBridge {
         &self,
         responses: Vec<BridgeResponse>,
     ) -> Result<(), Vec<BridgeResponse>> {
+        if !self.has_override_batch_sink.load(Ordering::Acquire) {
+            if let Some(sink) = self.fast_batch_sink.get() {
+                sink(responses);
+                return Ok(());
+            }
+        } else {
+            let sink = self.override_batch_sink.read().unwrap().as_ref().cloned();
+            if let Some(sink) = sink {
+                sink(responses);
+                return Ok(());
+            }
+        }
+
         if !self.has_override_sink.load(Ordering::Acquire) {
             if let Some(sink) = self.fast_sink.get() {
                 for resp in responses {
@@ -624,7 +664,8 @@ impl BatchBridge {
             }
             return Err(responses);
         }
-        if let Some(sink) = self.override_sink.read().unwrap().as_ref() {
+        let sink = self.override_sink.read().unwrap().as_ref().cloned();
+        if let Some(sink) = sink {
             for resp in responses {
                 sink(resp);
             }
@@ -725,6 +766,9 @@ mod tests {
             fast_sink: OnceLock::new(),
             has_override_sink: AtomicBool::new(false),
             override_sink: RwLock::new(None),
+            fast_batch_sink: OnceLock::new(),
+            has_override_batch_sink: AtomicBool::new(false),
+            override_batch_sink: RwLock::new(None),
             stream_sink: RwLock::new(None),
             pubsub_sink: RwLock::new(None),
             webtransport_sink: RwLock::new(None),
@@ -1285,6 +1329,9 @@ mod tests {
             fast_sink: OnceLock::new(),
             has_override_sink: AtomicBool::new(false),
             override_sink: RwLock::new(None),
+            fast_batch_sink: OnceLock::new(),
+            has_override_batch_sink: AtomicBool::new(false),
+            override_batch_sink: RwLock::new(None),
             stream_sink: RwLock::new(None),
             pubsub_sink: RwLock::new(None),
             webtransport_sink: RwLock::new(None),
@@ -1646,5 +1693,68 @@ mod tests {
 
         let recorded = captured.lock().unwrap();
         assert_eq!(recorded.as_slice(), &[(12, "/chat?room=2".to_string())]);
+    }
+
+    #[test]
+    fn batch_response_sink_fast_path_reentrant_override_and_clear_fallback() {
+        let bridge = Arc::new(make_bridge());
+        let single_calls = Arc::new(AtomicUsize::new(0));
+        let batch_calls = Arc::new(AtomicUsize::new(0));
+        let batch_ids = Arc::new(Mutex::new(Vec::<u64>::new()));
+
+        let sc = Arc::clone(&single_calls);
+        bridge.set_response_sink(Arc::new(move |_| {
+            sc.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        let bc = Arc::clone(&batch_calls);
+        let bi = Arc::clone(&batch_ids);
+        bridge.set_batch_response_sink(Arc::new(move |resps| {
+            bc.fetch_add(1, Ordering::Relaxed);
+            bi.lock()
+                .unwrap()
+                .extend(resps.into_iter().map(|r| r.request_id));
+        }));
+
+        let make_resp = |id: u64| BridgeResponse {
+            request_id: id,
+            status: 200,
+            headers_raw: bytes::Bytes::new(),
+            body: bytes::Bytes::from_static(b"ok"),
+        };
+
+        bridge
+            .submit_responses(vec![make_resp(1), make_resp(2), make_resp(3), make_resp(4)])
+            .unwrap();
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(single_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(*batch_ids.lock().unwrap(), vec![1, 2, 3, 4]);
+
+        bridge.submit_response(make_resp(5)).unwrap();
+        assert_eq!(single_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
+
+        let override_hits = Arc::new(AtomicUsize::new(0));
+        let bridge_for_cb = Arc::clone(&bridge);
+        let oh = Arc::clone(&override_hits);
+        bridge.set_batch_response_sink(Arc::new(move |resps| {
+            oh.fetch_add(resps.len(), Ordering::Relaxed);
+            bridge_for_cb.clear_batch_response_sink();
+        }));
+        bridge
+            .submit_responses(vec![make_resp(6), make_resp(7)])
+            .unwrap();
+        assert_eq!(override_hits.load(Ordering::Relaxed), 2);
+
+        bridge
+            .submit_responses(vec![make_resp(8), make_resp(9)])
+            .unwrap();
+        assert_eq!(single_calls.load(Ordering::Relaxed), 3);
+
+        bridge.clear_response_sink();
+        bridge.submit_responses(vec![make_resp(10)]).unwrap();
+        let queued = bridge.try_recv_responses().expect("fallback channel");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].request_id, 10);
     }
 }

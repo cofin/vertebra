@@ -209,9 +209,10 @@ class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
         if lease is None or broker is None:
             return
         plan = self._lease_plan()
-        if plan.lease_releases_itself(lease):
+        release_method = plan.lease_release_method(lease)
+        if release_method is not None:
             with contextlib.suppress(Exception):
-                lease.release()
+                getattr(lease, release_method)()
             return
         if plan.has_sync_release:
             with contextlib.suppress(Exception):
@@ -259,7 +260,7 @@ class _BrokerLeasePlan:
                 self.accepts_bind_key_hash = has_var_kw or "bind_key_hash" in params
         release_fn = getattr(broker, "release", None)
         self.has_sync_release: bool = callable(release_fn) and not inspect.iscoroutinefunction(release_fn)
-        self._self_releasing_lease_types: dict[type, bool] = {}
+        self._self_releasing_lease_types: dict[type, str | None] = {}
         self.default_acquire_kwargs: dict[str, Any] = self.acquire_kwargs(5000, 0)
 
     def acquire_kwargs(self, timeout_ms: int, bind_key_hash: int) -> dict[str, Any]:
@@ -271,24 +272,35 @@ class _BrokerLeasePlan:
             kwargs["bind_key_hash"] = bind_key_hash
         return kwargs
 
-    def lease_releases_itself(self, lease: Any) -> bool:
-        """Return whether `lease` exposes a synchronous `release()` method, cached per lease type."""
+    def lease_release_method(self, lease: Any) -> str | None:
+        """Return the synchronous self-release method name on ``lease`` if available."""
         lease_type = type(lease)
-        known = self._self_releasing_lease_types.get(lease_type)
-        if known is None:
-            release_fn = getattr(lease, "release", None)
-            known = callable(release_fn) and not inspect.iscoroutinefunction(release_fn)
-            self._self_releasing_lease_types[lease_type] = known
-        return known
+        if lease_type in self._self_releasing_lease_types:
+            return self._self_releasing_lease_types[lease_type]
+        release_fn = getattr(lease, "release", None)
+        method_name: str | None = None
+        if callable(release_fn) and not inspect.iscoroutinefunction(release_fn):
+            method_name = "release"
+        else:
+            release_sync_fn = getattr(lease, "release_sync", None)
+            if callable(release_sync_fn) and not inspect.iscoroutinefunction(release_sync_fn):
+                method_name = "release_sync"
+        self._self_releasing_lease_types[lease_type] = method_name
+        return method_name
+
+    def lease_releases_itself(self, lease: Any) -> bool:
+        """Return whether `lease` exposes a synchronous self-release method, cached per lease type."""
+        return self.lease_release_method(lease) is not None
 
 
 def _release_lease(broker: Any, plan: _BrokerLeasePlan, lease: Any) -> None:
     """Return a lease to its broker using the release shape the plan recorded."""
     if broker is None or lease is None:
         return
-    if plan.lease_releases_itself(lease):
+    release_method = plan.lease_release_method(lease)
+    if release_method is not None:
         with contextlib.suppress(RuntimeError):
-            lease.release()
+            getattr(lease, release_method)()
         return
     if not (hasattr(lease, "slot_index") and hasattr(lease, "generation")):
         return

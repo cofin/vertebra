@@ -21,7 +21,7 @@ else:
     _StoreBase = _base_store_mod.Store if _base_store_mod is not None else object
 
 __all__ = (
-    "BaseNativeKVStore",
+    "BaseKeyValueStore",
     "KeyValueStore",
     "MemoryStore",
     "NamespacedStore",
@@ -30,7 +30,7 @@ __all__ = (
 )
 
 
-class BaseNativeKVStore(_StoreBase):
+class BaseKeyValueStore(_StoreBase):
     """Lock-free monotonic TTL store foundation with driver backing and RESP3 invalidation."""
 
     __slots__ = ("_client_tracking", "_driver", "_key_prefix", "_l1_cache", "_max_l1_entries")
@@ -283,7 +283,7 @@ class BaseNativeKVStore(_StoreBase):
             self._l1_cache.pop(str_key, None)
 
 
-class ValkeyStore(BaseNativeKVStore):
+class ValkeyStore(BaseKeyValueStore):
     """Litestar-compatible Store backed by native vertebra._valkey with RESP3 client-side caching."""
 
     __slots__ = ()
@@ -329,7 +329,7 @@ class ValkeyStore(BaseNativeKVStore):
         )
 
 
-class RedisStore(BaseNativeKVStore):
+class RedisStore(BaseKeyValueStore):
     """Litestar-compatible Store backed by native vertebra._redis with RESP3 client-side caching."""
 
     __slots__ = ()
@@ -375,7 +375,7 @@ class RedisStore(BaseNativeKVStore):
         )
 
 
-class MemoryStore(BaseNativeKVStore):
+class MemoryStore(BaseKeyValueStore):
     """In-memory monotonic TTL store conforming to Litestar Store protocol."""
 
     __slots__ = ()
@@ -396,7 +396,7 @@ class MemoryStore(BaseNativeKVStore):
         )
 
 
-class KeyValueStore(BaseNativeKVStore):
+class KeyValueStore(BaseKeyValueStore):
     """Lock-free monotonic TTL store with optional Valkey/Redis backing and RESP3 invalidation."""
 
     __slots__ = ()
@@ -418,11 +418,11 @@ class KeyValueStore(BaseNativeKVStore):
 
 
 class NamespacedStore:
-    """Prefix-isolated view over a BaseNativeKVStore."""
+    """Prefix-isolated view over a BaseKeyValueStore."""
 
     __slots__ = ("_namespace", "_store")
 
-    def __init__(self, store: BaseNativeKVStore, namespace: str) -> None:
+    def __init__(self, store: BaseKeyValueStore, namespace: str) -> None:
         self._store = store
         self._namespace = namespace.strip(":")
 
@@ -450,7 +450,7 @@ def _register_stores() -> None:
     if base_mod is not None:
         register_fn = getattr(base_mod.Store, "register", None)
         if callable(register_fn):
-            register_fn(BaseNativeKVStore)
+            register_fn(BaseKeyValueStore)
             register_fn(MemoryStore)
             register_fn(ValkeyStore)
             register_fn(RedisStore)

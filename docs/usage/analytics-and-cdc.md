@@ -1,14 +1,10 @@
 # Row-Level Security, CDC & Arrow Analytics
 
-Vertebra provides dialect-agnostic tenant predicates, engine-neutral change feeds,
-and shared-memory Apache Arrow / DuckDB / DataFusion analytics.
+Vertebra includes dialect-agnostic tenant predicates, change-data-capture feeds, and shared-memory Apache Arrow analytics with DuckDB and DataFusion.
 
 ## Tenant Predicates and Session Settings
 
-`TenantScopeConfig` names the tenant column, the adapter's session setting, and an
-optional type cast. `TenantPredicate` renders an ANSI filter with a caller-selected
-placeholder. The cast applies to the parameter so the column remains indexable.
-Tenant values must be supplied separately as query parameters.
+`TenantScopeConfig` names the tenant column, the database session setting, and an optional parameter type cast. `TenantPredicate` builds a SQL filter where the cast wraps the placeholder so the tenant column remains indexable. Always pass the tenant value as a query parameter.
 
 ```python
 from vertebra.db.rls import TenantPredicate, TenantScopeConfig
@@ -26,10 +22,9 @@ predicate = TenantPredicate(
 where_clause = predicate.to_sql_fragment(":tenant_id")
 ```
 
-The fragment is `o.tenant_id = CAST(:tenant_id AS UUID)`. Without `parameter_cast`,
-it is `o.tenant_id = :tenant_id`; the default placeholder is `?`.
+With a UUID cast, the fragment is `o.tenant_id = CAST(:tenant_id AS UUID)`. Without a cast, it is `o.tenant_id = :tenant_id`. The default placeholder is `?`.
 
-PostgreSQL session SQL belongs to `PostgreSQLCore`:
+For PostgreSQL session settings and positional filters, use `PostgreSQLCore`:
 
 ```python
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
@@ -40,27 +35,18 @@ setting_sql, setting_params = PostgreSQLCore.build_session_guc_sql(
 postgres_filter = PostgreSQLCore.build_tenant_predicate_sql(predicate)
 ```
 
-The SQLSpec PostgreSQL adapters' `apply_tenant_predicate()` prepares the session
-statement for native PostgreSQL `$1` binds (`ParameterStyle.NUMERIC`) and returns the
-PostgreSQL filter.
-Setter failures propagate unchanged. Other base SQLSpec adapters raise
-`NotSupportedError`. BigQuery and Spanner configs and drivers reject a configured
-`tenant_predicate` before initialization; ordinary unconfigured sessions retain
-their existing query, script, Arrow, batch, and snapshot behavior.
+Adapter behavior by engine:
 
-`OracleCore.build_session_context_sql()` validates the namespace and final segment
-of `setting_name`, then returns named binds: the default `USERENV` namespace runs
-`DBMS_SESSION.SET_IDENTIFIER`, a custom namespace runs `DBMS_SESSION.SET_CONTEXT`,
-and `context_package_proc` routes through a trusted package. Oracle drivers clear
-the context before pool release and evict the session if the reset fails. Live
-`DBMS_SESSION.SET_CONTEXT` requires a trusted package associated with
-`CREATE CONTEXT`. See the
-[Oracle DBMS_SESSION documentation](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html).
-Vertebra does not provision database RLS or VPD policies.
+- **PostgreSQL**: SQLSpec PostgreSQL adapters expose `apply_tenant_predicate()`, which prepares the session setting with native positional binds and returns the filter. Errors from the setter propagate unchanged.
+- **Oracle**: Session context helpers validate the namespace and setting name, emitting `DBMS_SESSION.SET_IDENTIFIER` for USERENV, `DBMS_SESSION.SET_CONTEXT` for custom namespaces, or a call to your trusted package procedure. Oracle drivers clear the context before returning a connection to the pool and evict the session if reset fails. Custom namespaces require a trusted package bound via CREATE CONTEXT; see the [Oracle DBMS_SESSION documentation](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html).
+- **BigQuery and Spanner**: Reject configured tenant predicates on initialization; ordinary sessions without tenant predicates behave normally.
+- **Other SQLSpec adapters**: Raise `NotSupportedError` for tenant predicates.
 
-## Change Data Capture (`vertebra.db.cdc`)
+Vertebra sets session context and builds filters, but does not create database RLS or VPD policies for you.
 
-`ChangeFeed` (`CDCConfig`, `ChangeEvent`) and the `SyncChangeSource` / `AsyncChangeSource` capability protocols (`vertebra.db.driver`) provide event envelopes and change-stream capabilities with replay cursors (`replay_since()`) and Parquet archival (`flush_to_parquet()`):
+## Change Data Capture
+
+`ChangeFeed` wraps change events in a consistent envelope with replay cursors and Parquet archival:
 
 ```python
 from vertebra.db.adapters.postgres import PostgresNotifyConfig
@@ -80,29 +66,16 @@ notify_config = PostgresNotifyConfig(
 )
 ```
 
-`AsyncPostgresNotificationSource(driver, notify_config, change_feed=feed)` and
-`SyncPostgresNotificationSource(sync_driver, notify_config, change_feed=feed)` publish
-parameterized PostgreSQL notifications using the feed's spill envelopes. Their
-`build_emit_message_sql()` helper builds logical replication message SQL. Live
-`LISTEN` streaming uses `async for event in source.listen():` or synchronous
-`for event in sync_source.listen():` for CLI/worker loops.
-For durable logical replication streaming over `pgoutput`, pass a replication
-driver and `PostgresChangeConfig(slot=..., publication=...)` to
-`PostgresChangeSource`, which commits checkpoint progress before sending wire
-`StandbyStatusUpdate` acknowledgments (`save-before-ack`).
-In-memory spills use a bounded LRU cache; hydrating an evicted spill raises
-`KeyError`. Attach a `SyncObjectStore` for persistent spill hydration; storage
-errors propagate to the caller.
+How streaming and spills work:
 
-Spanner readers live in `vertebra.db.adapters.spanner.change_stream` as
-`SyncSpannerChangeStreamSource` and `AsyncSpannerChangeStreamSource`. Bind stream
-defaults such as `start_timestamp` in the constructor; the resulting `stream()`
-method accepts no required arguments and satisfies `SyncChangeSource` or
-`AsyncChangeSource`. They are not exported from `vertebra.db.cdc`.
+- **PostgreSQL notifications**: Pass the feed to a sync or async PostgreSQL notification source to publish parameterized notifications with automatic spill envelopes. Stream live events with `source.listen()`, or build logical message SQL with `build_emit_message_sql()`.
+- **PostgreSQL logical replication**: For durable pgoutput streaming, pass a replication driver and slot/publication config to `PostgresChangeSource`. Checkpoints are saved before acknowledgments are sent back to PostgreSQL.
+- **Payload spills**: Oversized payloads spill to a bounded in-memory LRU cache by default; hydrating an evicted entry raises `KeyError`. Attach an object store for durable spill storage.
+- **Spanner change streams**: Import sync or async Spanner change-stream sources from `vertebra.db.adapters.spanner.change_stream`. Set defaults such as start timestamp in the constructor so `stream()` takes no required arguments.
 
-## Zero-Copy Arrow SHM (`ArrowCursor`), DuckDB & DataFusion
+## Arrow Analytics, DuckDB, and DataFusion
 
-Result sets exceeding `ARROW_SHM_THRESHOLD_ROWS` (`256` rows or `64 KiB`) bypass per-row Python tuple allocation and stream directly as Apache Arrow IPC buffers inside POSIX shared memory (`ArrowCursor`) via `driver.select_to_arrow(...)`. DuckDB execution requires `vertebra-core[duckdb]` (`vertebra._duckdb`) and raises `MissingDependencyError` without it:
+Query results exceeding 256 rows or 64 KiB stream directly into POSIX shared memory as an `ArrowCursor` via `select_to_arrow()`, avoiding per-row Python tuple allocation. DuckDB queries require the `duckdb` extra and raise `MissingDependencyError` without it.
 
 ```python
 from vertebra.db.adapters.datafusion import DataFusionConfig, DataFusionEngine
@@ -140,6 +113,8 @@ arrow_cursor = pg_driver.select_to_arrow("SELECT * FROM orders")
 engine.register_arrow_table("orders", arrow_cursor)
 ```
 
-- **`ArrowCursor`**: Exposes a zero-copy `memoryview` (`buffer_view()`) over the shared-memory `ShmRegion`, plus `__arrow_c_schema__()`, a lazy `__arrow_c_stream__()`, `columns`, and `to_pylist()` without any Python Arrow dependency. Polars, DuckDB, and DataFusion read the cursor directly through the Arrow PyCapsule interface, and `ArrowCursor.from_ipc_bytes(payload)` wraps an existing Arrow IPC stream. `to_polars()` needs `[polars]`; `to_arrow_table()` and `to_pyarrow()` need `[arrow]`. The cursor unlinks the `ShmRegion` on context-manager exit, and calls after `release()` raise.
-- **Cloud-Agnostic DuckDB Secrets (`DuckDBSecretConfig`)**: Supports static `value` dictionaries and dynamic `value_provider` callables (such as `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage`) across any DuckDB secret type (`s3`, `gcs`, `r2`, `azure`, `http`, `bearer`, `iceberg`). Dynamic `value_provider` secrets require `persistent=False` and a positive finite `refresh_interval_seconds`, refreshing `CREATE OR REPLACE SECRET` when `refresh_interval_seconds` elapses or `.generation` advances and invalidating the provider generation on `(HTTP 401)` / `(HTTP 403)` `httpfs` errors (re-raising without implicit query retry).
-- **Vector Columns to Arrow SHM**: Convert `VectorBatchView` embeddings directly into an `ArrowCursor` (`FixedSizeListArray(Float32, dims)`) via `batch.to_arrow_shm()` or `await embedder.embed_arrow(cursor, text_column="body")`.
+Key capabilities:
+
+- **Arrow cursors**: Expose a memoryview, column names, Python row lists, and the Arrow PyCapsule interface so Polars, DuckDB, and DataFusion read data directly with zero extra Arrow dependencies. Wrap existing IPC bytes with `ArrowCursor.from_ipc_bytes()`. Converting to Polars requires the polars extra, and PyArrow table conversion requires the arrow extra. Exiting the cursor context manager releases shared memory, and calls after release raise an error.
+- **DuckDB secrets**: `DuckDBSecretConfig` accepts static dictionaries or dynamic provider callables (including GCS bearer token providers) for S3, GCS, R2, Azure, HTTP, bearer, and Iceberg secrets. Dynamic providers require `persistent=False` and a positive `refresh_interval_seconds`. When httpfs returns HTTP 401 or 403, the driver invalidates the provider and re-raises without retrying the failed statement so the next query rotates the secret automatically.
+- **Vector columns**: Convert vector batches into an Arrow cursor with `batch.to_arrow_shm()` or embed a text column directly with `embedder.embed_arrow()`.

@@ -97,7 +97,7 @@ sources:
     title: MCP notifications, resource subscriptions, skills, UI extensions, and WebMCP suite
   - id: src-agent-mcp-registry-py
     resource: src/py/vertebra/agent/mcp/registry.py
-    title: Unified ToolRegistry and MCPRegistry implementation
+    title: Unified ToolRegistry implementation
   - id: src-sqlalchemy-dialect-tests
     resource: src/py/tests/unit/extensions/test_sqlalchemy_vtb_dialects_and_dbapi.py
     title: SQLAlchemy 2.1 +vtb dialects, types, Alembic, and PEP 249 DBAPI tests
@@ -106,7 +106,7 @@ sources:
     title: SQLSpec StatementStack execution and PostgreSQL/Oracle adapter stack tests
   - id: src-broker-proxy-tests
     resource: src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_broker_proxy.py
-    title: BrokerPool, SQLSpec provider, and Proxy*Driver isolation and cancellation tests
+    title: SyncBrokerPool, SQLSpec provider, and Proxy*Driver isolation and cancellation tests
   - id: src-ext-cache-adk-tests
     resource: src/py/tests/unit/extensions/test_extensions_cache_adk_and_events.py
     title: Alchemy cache regions, SQLSpec ADK stores, CDC/Events backends, and reconcile tests
@@ -229,7 +229,7 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
   - Database suites cover drivers, channels, dialers, unified SQL contracts, and capability purity checks[^src-db-channels-dialers-tests][^src-db-unified-contracts-tests][^src-db-capabilities-purity-tests].
   - Engine suites cover Oracle adapters, context, notify, and queues[^src-oracle-adapter-tests][^src-oracle-context-notify-tests], SQLite `RETURNING`[^src-sqlite-returning-tests], DuckDB cursor retention[^src-storage-cursor-view-tests], and loopback `resp3_server` Redis/Valkey tests[^src-tests-unit-conftest-py].
   - PostgreSQL suites cover transactions, COPY, Arrow streams, listeners, notify sources, RLS/CDC, and benchmarks[^src-postgres-transaction-tests][^src-postgres-copy-tests][^src-postgres-copy-cancel-tests][^src-postgres-arrow-streams-tests][^src-postgres-listener-tests][^src-postgres-notify-source-tests][^src-pg-dataplane-tests][^src-postgres-bench-tests].
-  - Framework and extension suites cover queue workers, backends, SQLAlchemy `+vtb`, SQLSpec stacks, `BrokerPool` proxies, cache/ADK/events, and BigQuery/Spanner stacks[^src-queue-worker-scheduler-tests][^src-queue-backends-channels-tests][^src-sqlalchemy-dialect-tests][^src-sqlspec-stack-tests][^src-broker-proxy-tests][^src-ext-cache-adk-tests][^src-bigquery-stack-regressions][^src-spanner-stack-regressions].
+  - Framework and extension suites cover queue workers, backends, SQLAlchemy `+vtb`, SQLSpec stacks, `SyncBrokerPool` proxies, cache/ADK/events, and BigQuery/Spanner stacks[^src-queue-worker-scheduler-tests][^src-queue-backends-channels-tests][^src-sqlalchemy-dialect-tests][^src-sqlspec-stack-tests][^src-broker-proxy-tests][^src-ext-cache-adk-tests][^src-bigquery-stack-regressions][^src-spanner-stack-regressions].
   - Agent and MCP suites cover core dispatch, protocol sessions, SSE, skills, UI extensions, registry, and provider regressions[^src-tests-unit-agent-mcp-core-py][^src-tests-unit-agent-mcp-sessions-py][^src-tests-unit-agent-mcp-skills-py][^src-agent-mcp-registry-py][^src-provider-regressions][^src-provider-schema-regressions][^src-provider-snapshot-regressions].
 - **Rust & TypeScript**: Integration harnesses in `vertebra-core`, `vertebra-http`, `vertebra-storage`[^src-storage-native-tests], and `vertebra-db`[^src-storage-shm-tests]; Vitest suites in [`tests/agent.test.ts`](../../../../src/ts/vertebra-client/tests/agent.test.ts)[^src-ts-tests-agent-test-ts], [`tests/unit/react_vue_svelte.test.ts`](../../../../src/ts/vertebra-client/tests/unit/react_vue_svelte.test.ts)[^src-ts-tests-react-vue-svelte-ts], [`tests/unit/angular_htmx_vite.test.ts`](../../../../src/ts/vertebra-client/tests/unit/angular_htmx_vite.test.ts)[^src-ts-tests-angular-htmx-vite-ts], and sibling client modules; and zero-skip cross-engine SQL/Arrow conformance in [`test_driver_conformance.py`](../../../../src/py/tests/integration/db/test_driver_conformance.py)[^src-db-conformance].
 - **SHM Hygiene**: [`conftest.py`](../../../../src/py/tests/conftest.py)[^src-tests-conftest-py] pins AnyIO to `asyncio` and generates `test-<uuid8>` SHM names. An xdist worker (`PYTEST_XDIST_WORKER` set) removes only the names `shm_name` handed out in that test. A single-process run sweeps `/dev/shm/{test-*,vtb-*,*vertebra*}` after each test, and the controller sweeps once at session end. Use targeted `cargo test -p <crate>` during parallel runs to avoid `make rs-test` SHM sweeps. Limitation: two separate `pytest` commands running at the same time each act as a controller and can remove each other's segments, so run them one after the other or use one command with `-n`.
@@ -257,10 +257,10 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 [^src-tests-unit-agent-mcp-core-py]: `src/py/tests/unit/agent/test_mcp_core_and_plugin.py` — MCP core dispatch, ToolRegistry provider, confirmations, and plugin routing conformance suite.
 [^src-tests-unit-agent-mcp-sessions-py]: `src/py/tests/unit/agent/test_mcp_protocol_sessions_and_sse.py` — MCP protocol negotiation, session store, batching, and SSE conformance suite.
 [^src-tests-unit-agent-mcp-skills-py]: `src/py/tests/unit/agent/test_mcp_skills_and_ui_extensions.py` — MCP notifications, resource subscriptions, skills, UI extensions, and WebMCP suite.
-[^src-agent-mcp-registry-py]: `src/py/vertebra/agent/mcp/registry.py` — Unified ToolRegistry and MCPRegistry implementation.
+[^src-agent-mcp-registry-py]: `src/py/vertebra/agent/mcp/registry.py` — Unified ToolRegistry implementation.
 [^src-sqlalchemy-dialect-tests]: `src/py/tests/unit/extensions/test_sqlalchemy_vtb_dialects_and_dbapi.py` — SQLAlchemy 2.1 +vtb dialects, types, Alembic, and PEP 249 DBAPI tests.
 [^src-sqlspec-stack-tests]: `src/py/tests/unit/extensions/test_sqlspec_vtb_stacks.py` — SQLSpec StatementStack execution and PostgreSQL/Oracle adapter stack tests.
-[^src-broker-proxy-tests]: `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_broker_proxy.py` — BrokerPool, SQLSpec provider, and Proxy*Driver isolation and cancellation tests.
+[^src-broker-proxy-tests]: `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_broker_proxy.py` — SyncBrokerPool, SQLSpec provider, and Proxy*Driver isolation and cancellation tests.
 [^src-ext-cache-adk-tests]: `src/py/tests/unit/extensions/test_extensions_cache_adk_and_events.py` — Alchemy cache regions, SQLSpec ADK stores, CDC/Events backends, and reconcile tests.
 [^src-bigquery-stack-regressions]: `src/py/tests/unit/extensions/test_sqlspec_bigquery.py` — Actual BigQuery driver stack execution over loopback REST.
 [^src-spanner-stack-regressions]: `src/py/tests/unit/extensions/test_sqlspec_spanner.py` — Actual Spanner driver stack execution over external client ports.

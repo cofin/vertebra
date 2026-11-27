@@ -1,6 +1,6 @@
 """Streamable HTTP, ASGI, and WSGI route handlers for Model Context Protocol (MCP) 2026-07-28.
 
-This module provides MCPHttpHandler, AsgiMcpApp, and WsgiMcpApp delegating HTTP
+This module provides MCPHttpHandler, AsgiMCPApp, and WsgiMCPApp delegating HTTP
 request validation, Origin checking, ETag 304 Not Modified caching, and JSON-RPC
 dispatch to MCPCore.
 """
@@ -16,7 +16,7 @@ import anyio
 from vertebra._vertebra import Request, Response, WsgiEnviron
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.mcp.client import MCP_NAME_FIELDS, decode_mcp_header_value
-from vertebra.agent.mcp.models import MCP_PROTOCOL_VERSION, MCPConfig, McpHttpRequest, McpHttpResponse
+from vertebra.agent.mcp.models import MCP_PROTOCOL_VERSION, MCPConfig, MCPHttpRequest, MCPHttpResponse
 from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.agent.mcp.service import CACHEABLE_METHODS, MCPCore
 from vertebra.utils.module_loader import MissingDependencyError, import_optional
@@ -26,9 +26,9 @@ from vertebra.utils.serializers import encode_json_bytes
 __all__ = [
     "CACHEABLE_METHODS",
     "MCP_NAME_FIELDS",
-    "AsgiMcpApp",
+    "AsgiMCPApp",
     "MCPHttpHandler",
-    "WsgiMcpApp",
+    "WsgiMCPApp",
     "build_well_known_mcp_document",
     "decode_mcp_header_value",
     "render_well_known_mcp_json",
@@ -99,7 +99,7 @@ class MCPHttpHandler:
     ) -> tuple[int, dict[str, str], bytes | AsyncIterable[bytes]]:
         """Process an incoming HTTP request through MCPCore.handle."""
         response = await self.service.handle(
-            McpHttpRequest(
+            MCPHttpRequest(
                 method=method,
                 path=path,
                 headers=headers,
@@ -111,7 +111,7 @@ class MCPHttpHandler:
         return response.status, response.headers, payload
 
 
-class AsgiMcpApp:
+class AsgiMCPApp:
     """Shared ASGI 3.0 application and Starlette/FastAPI endpoint wrapper over MCPCore."""
 
     def __init__(self, core: MCPCore) -> None:
@@ -130,7 +130,7 @@ class AsgiMcpApp:
         headers = self._extract_scope_headers(scope)
         body = await self._read_scope_body(scope, receive)
         resp = await self.core.handle(
-            McpHttpRequest(
+            MCPHttpRequest(
                 method=method,
                 path=path,
                 headers=headers,
@@ -185,7 +185,7 @@ class AsgiMcpApp:
             raw_body = b""
 
         resp = await self.core.handle(
-            McpHttpRequest(
+            MCPHttpRequest(
                 method=method,
                 path=path,
                 headers=headers,
@@ -276,7 +276,7 @@ class AsgiMcpApp:
     @staticmethod
     def _scope_client_host(scope: Any) -> str | None:
         """Read the immediate peer address supplied by the ASGI server."""
-        client = AsgiMcpApp._scope_value(scope, "client")
+        client = AsgiMCPApp._scope_value(scope, "client")
         return str(client[0]) if client else None
 
     @staticmethod
@@ -310,7 +310,7 @@ class AsgiMcpApp:
         return b"".join(chunks)
 
 
-class WsgiMcpApp:
+class WsgiMCPApp:
     """Shared PEP 3333 WSGI application and synchronous Request adapter over MCPCore.
 
     All synchronous calls reuse a persistent background event loop via ``PortalProvider.default()``
@@ -334,12 +334,12 @@ class WsgiMcpApp:
         headers: Mapping[str, str],
         body: bytes,
         context: AgentContext | None = None,
-    ) -> McpHttpResponse:
+    ) -> MCPHttpResponse:
         """Execute ``MCPCore.handle`` synchronously on the persistent ``Portal``."""
         portal = self._portal if self._portal is not None else PortalProvider.default()
         return portal.call(
             self.core.handle,
-            McpHttpRequest(
+            MCPHttpRequest(
                 method=method,
                 path=path,
                 headers=headers,
@@ -442,7 +442,7 @@ class WsgiMcpApp:
         *,
         default_method: str = "POST",
         default_path: str | None = None,
-    ) -> tuple[McpHttpResponse, int]:
+    ) -> tuple[MCPHttpResponse, int]:
         resolved_path = default_path or self.config.path
         if isinstance(request, Request):
             method = request.method.upper()

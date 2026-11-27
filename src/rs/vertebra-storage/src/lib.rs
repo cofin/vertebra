@@ -24,7 +24,7 @@ use pyo3::types::{PyBytes, PyCapsule, PyType};
 use vertebra_core::gcp_auth::{
     GCP_TOKEN_CACHE_CAPSULE_NAME, GcpTokenCacheCapsule, SharedGcpTokenCacheHandle,
 };
-pub use vertebra_core::py_async::RustTaskAwaitable;
+pub use vertebra_core::py_async::TaskAwaitable;
 use vertebra_core::py_async::spawn_rust_task_with_attr;
 
 use crate::oci::{
@@ -292,7 +292,7 @@ impl StorageBuffer {
 
 const STORAGE_COMPLETION_DRAINER_ATTR: &str = "_vertebra_storage_drainer";
 
-fn spawn_rust_task<F, T, M>(py: Python<'_>, fut: F, map_fn: M) -> PyResult<RustTaskAwaitable>
+fn spawn_rust_task<F, T, M>(py: Python<'_>, fut: F, map_fn: M) -> PyResult<TaskAwaitable>
 where
     F: Future<Output = Result<T, StorageError>> + Send + 'static,
     T: Send + 'static,
@@ -498,7 +498,7 @@ impl PyAsyncStreamReader {
         slf
     }
 
-    fn __anext__(&self, py: Python<'_>) -> PyResult<RustTaskAwaitable> {
+    fn __anext__(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let state = Arc::clone(&self.state);
         spawn_rust_task(
             py,
@@ -513,7 +513,7 @@ impl PyAsyncStreamReader {
         )
     }
 
-    fn next_chunk(&self, py: Python<'_>) -> PyResult<RustTaskAwaitable> {
+    fn next_chunk(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let state = Arc::clone(&self.state);
         spawn_rust_task(
             py,
@@ -528,7 +528,7 @@ impl PyAsyncStreamReader {
         )
     }
 
-    fn aclose(&self, py: Python<'_>) -> PyResult<RustTaskAwaitable> {
+    fn aclose(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let state = Arc::clone(&self.state);
         spawn_rust_task(
             py,
@@ -611,7 +611,7 @@ pub struct PyAsyncMultipartUpload {
 
 #[pymethods]
 impl PyAsyncMultipartUpload {
-    fn write_part(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<RustTaskAwaitable> {
+    fn write_part(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<TaskAwaitable> {
         let chunk = extract_buffer_bytes(py, data)?;
         let session = Arc::clone(&self.session);
         spawn_rust_task(
@@ -624,7 +624,7 @@ impl PyAsyncMultipartUpload {
         )
     }
 
-    fn complete(&self, py: Python<'_>) -> PyResult<RustTaskAwaitable> {
+    fn complete(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let session = Arc::clone(&self.session);
         spawn_rust_task(
             py,
@@ -636,7 +636,7 @@ impl PyAsyncMultipartUpload {
         )
     }
 
-    fn abort(&self, py: Python<'_>) -> PyResult<RustTaskAwaitable> {
+    fn abort(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let session = Arc::clone(&self.session);
         spawn_rust_task(
             py,
@@ -1125,7 +1125,7 @@ impl PyAsyncObjectStore {
         expected_sha256: Option<String>,
         expected_crc32c: Option<String>,
         expected_md5: Option<String>,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let payload = extract_buffer_bytes(py, data)?;
         let opts = make_put_opts(
             content_type,
@@ -1157,7 +1157,7 @@ impl PyAsyncObjectStore {
         expected_sha256: Option<String>,
         expected_crc32c: Option<String>,
         expected_md5: Option<String>,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let opts = make_put_opts(
             None,
             None,
@@ -1184,7 +1184,7 @@ impl PyAsyncObjectStore {
         path: String,
         file_path: String,
         expected_sha256: Option<String>,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -1204,7 +1204,7 @@ impl PyAsyncObjectStore {
         py: Python<'_>,
         pairs: Vec<(String, String)>,
         concurrency: i64,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let concurrency = validate_concurrency(concurrency)?;
         let engine = self.engine.clone();
         spawn_rust_task(
@@ -1220,7 +1220,7 @@ impl PyAsyncObjectStore {
         py: Python<'_>,
         pairs: Vec<(String, String)>,
         concurrency: i64,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let concurrency = validate_concurrency(concurrency)?;
         let engine = self.engine.clone();
         spawn_rust_task(
@@ -1237,7 +1237,7 @@ impl PyAsyncObjectStore {
         sources: Vec<String>,
         dst: String,
         content_type: Option<String>,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -1261,7 +1261,7 @@ impl PyAsyncObjectStore {
         expected_sha256: Option<String>,
         expected_crc32c: Option<String>,
         expected_md5: Option<String>,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let opts = make_put_opts(
             content_type,
             attributes,
@@ -1294,7 +1294,7 @@ impl PyAsyncObjectStore {
         py: Python<'_>,
         path: String,
         parts: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let chunks = parts
             .iter()
             .map(|p| extract_buffer_bytes(py, p))
@@ -1313,7 +1313,7 @@ impl PyAsyncObjectStore {
         py: Python<'_>,
         path: String,
         expected_sha256: Option<String>,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -1327,7 +1327,7 @@ impl PyAsyncObjectStore {
         )
     }
 
-    fn get_buffer(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
+    fn get_buffer(&self, py: Python<'_>, path: String) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(py, async move { engine.get(&path).await }, |py, data| {
             Ok(Py::new(py, StorageBuffer { data })?.into_any())
@@ -1364,7 +1364,7 @@ impl PyAsyncObjectStore {
         path: String,
         offset: u64,
         length: u64,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -1373,12 +1373,12 @@ impl PyAsyncObjectStore {
         )
     }
 
-    fn head(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
+    fn head(&self, py: Python<'_>, path: String) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(py, async move { engine.head(&path).await }, meta_to_py)
     }
 
-    fn exists(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
+    fn exists(&self, py: Python<'_>, path: String) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -1387,7 +1387,7 @@ impl PyAsyncObjectStore {
         )
     }
 
-    fn delete(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
+    fn delete(&self, py: Python<'_>, path: String) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(py, async move { engine.delete(&path).await }, |py, ()| {
             Ok(py.None())
@@ -1401,7 +1401,7 @@ impl PyAsyncObjectStore {
         src: String,
         dst: String,
         if_not_exists: bool,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -1418,7 +1418,7 @@ impl PyAsyncObjectStore {
         dst: String,
         if_not_exists: bool,
         atomic_only: bool,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -1432,7 +1432,7 @@ impl PyAsyncObjectStore {
     }
 
     #[pyo3(signature = (prefix=None))]
-    fn list(&self, py: Python<'_>, prefix: Option<String>) -> PyResult<RustTaskAwaitable> {
+    fn list(&self, py: Python<'_>, prefix: Option<String>) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -1448,7 +1448,7 @@ impl PyAsyncObjectStore {
         prefix: Option<String>,
         offset: Option<String>,
         limit: usize,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         if limit == 0 {
             return Err(PyValueError::new_err("limit must be >= 1"));
         }
@@ -1473,7 +1473,7 @@ impl PyAsyncObjectStore {
         &self,
         py: Python<'_>,
         prefix: Option<String>,
-    ) -> PyResult<RustTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -1838,7 +1838,7 @@ fn py_sign_gcs_v4_iam_url_async(
     private_key_pem: Option<String>,
     endpoint: Option<String>,
     token_cache_capsule: Option<&Bound<'_, PyAny>>,
-) -> PyResult<RustTaskAwaitable> {
+) -> PyResult<TaskAwaitable> {
     let token_cache = token_cache_capsule
         .map(extract_token_cache_capsule)
         .transpose()?;
@@ -1968,7 +1968,7 @@ pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAsyncStreamReader>()?;
     m.add_class::<PySyncMultipartUpload>()?;
     m.add_class::<PyAsyncMultipartUpload>()?;
-    m.add_class::<RustTaskAwaitable>()?;
+    m.add_class::<TaskAwaitable>()?;
     m.add_class::<StorageBuffer>()?;
     m.add_function(wrap_pyfunction!(py_sign_hmac_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_verify_hmac_url, m)?)?;

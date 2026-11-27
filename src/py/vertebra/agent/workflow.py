@@ -1,6 +1,6 @@
-"""DynamicWorkflow DAG execution engine with LiveState delta broadcasting.
+"""Workflow DAG execution engine with LiveState delta broadcasting.
 
-This module provides declarative DAG workflow specification and execution with Kahn's
+Provides declarative DAG workflow specification and execution with Kahn's
 topological wave parallelism, conditional edge branching, timeout enforcement,
 resumable checkpoints, OpenTelemetry span instrumentation, and real-time
 Hybrid Logical Clock (HLC) StateDeltaFrame broadcasting over vertebra.framework.live.
@@ -18,12 +18,22 @@ from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.framework.live import LiveState, LiveStateRoom
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
+__all__ = (
+    "Workflow",
+    "WorkflowCheckpoint",
+    "WorkflowContext",
+    "WorkflowEngine",
+    "WorkflowLiveState",
+    "WorkflowStep",
+    "WorkflowStepResult",
+)
 
-class StepResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Result of an individual workflow node execution step."""
 
-    node_name: str
-    """Identifier of the executed `WorkflowNode`."""
+class WorkflowStepResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Result of an individual workflow step execution."""
+
+    step_name: str
+    """Identifier of the executed `WorkflowStep`."""
     output: Any = None
     """Value returned by the step callable."""
     status: Literal["completed", "failed", "skipped"] = "completed"
@@ -40,17 +50,17 @@ class WorkflowCheckpoint(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     run_id: str
     """Unique identifier of the workflow execution run."""
     workflow_name: str
-    """Name of the `DynamicWorkflow` definition."""
+    """Name of the `Workflow` definition."""
     status: str = "running"
     """Overall run status at the time the checkpoint was captured."""
     completed_nodes: tuple[str, ...] = ()
-    """Sorted tuple of node names that have completed."""
+    """Sorted tuple of step names that have completed."""
     failed_nodes: tuple[str, ...] = ()
-    """Sorted tuple of node names that raised an exception."""
+    """Sorted tuple of step names that raised an exception."""
     skipped_nodes: tuple[str, ...] = ()
-    """Sorted tuple of node names skipped due to unmet conditions or upstream failures."""
+    """Sorted tuple of step names skipped due to unmet conditions or upstream failures."""
     node_outputs: dict[str, Any] = msgspec.field(default_factory=dict)
-    """Mapping of completed node names to their returned outputs."""
+    """Mapping of completed step names to their returned outputs."""
     context_state: dict[str, Any] = msgspec.field(default_factory=dict)
     """Shared key-value dictionary mutated via `WorkflowContext.set`."""
 
@@ -66,7 +76,7 @@ class WorkflowCheckpoint(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
 
 class WorkflowContext:
-    """Execution context passed through nodes in a dynamic workflow DAG."""
+    """Execution context passed through steps in a workflow DAG."""
 
     def __init__(
         self,
@@ -87,9 +97,9 @@ class WorkflowContext:
         self.failed_nodes: set[str] = set(failed_nodes or ())
         self.skipped_nodes: set[str] = set(skipped_nodes or ())
 
-    def get_output(self, node_name: str) -> Any:
-        """Return the output produced by a prior completed node."""
-        return self.node_outputs.get(node_name)
+    def get_output(self, step_name: str) -> Any:
+        """Return the output produced by a prior completed step."""
+        return self.node_outputs.get(step_name)
 
     def set(self, key: str, value: Any) -> None:
         """Store a value in workflow context state."""
@@ -100,15 +110,15 @@ class WorkflowContext:
         return self.state.get(key, default)
 
 
-class WorkflowNode(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Declarative node within a dynamic workflow DAG."""
+class WorkflowStep(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Declarative step within a workflow DAG."""
 
     name: str
-    """Unique step identifier within the `DynamicWorkflow`."""
+    """Unique step identifier within the `Workflow`."""
     fn: Callable[[WorkflowContext], Any]
     """Sync or async callable receiving `WorkflowContext` and returning the step output."""
     depends_on: tuple[str, ...] = ()
-    """Upstream node names that must complete before this step is scheduled."""
+    """Upstream step names that must complete before this step is scheduled."""
     description: str = ""
     """Human-readable description of the workflow step."""
     timeout_seconds: float | None = None
@@ -149,16 +159,19 @@ class WorkflowLiveState(LiveState):
         )
 
 
-class DynamicWorkflow:
-    """Dynamic directed acyclic graph (DAG) workflow specification."""
+class Workflow:
+    """Directed acyclic graph (DAG) workflow specification."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, steps: Sequence[WorkflowStep] = ()) -> None:
         self.name = name
-        self.nodes: dict[str, WorkflowNode] = {}
+        self.steps: dict[str, WorkflowStep] = {}
+        for step in steps:
+            self.add(step)
 
-    def add_node(self, node: WorkflowNode) -> None:
-        """Register a pre-constructed WorkflowNode."""
-        self.nodes[node.name] = node
+    def add(self, step: WorkflowStep) -> WorkflowStep:
+        """Register a pre-constructed WorkflowStep."""
+        self.steps[step.name] = step
+        return step
 
     def add_step(
         self,
@@ -169,9 +182,9 @@ class DynamicWorkflow:
         description: str = "",
         timeout_seconds: float | None = None,
         condition: Callable[[WorkflowContext], bool] | None = None,
-    ) -> WorkflowNode:
-        """Add a step function to the workflow."""
-        node = WorkflowNode(
+    ) -> WorkflowStep:
+        """Add a step callable to the workflow."""
+        step = WorkflowStep(
             name=name,
             fn=fn,
             depends_on=tuple(depends_on),
@@ -179,29 +192,28 @@ class DynamicWorkflow:
             timeout_seconds=timeout_seconds,
             condition=condition,
         )
-        self.add_node(node)
-        return node
+        return self.add(step)
 
-    def topological_waves(self) -> list[list[WorkflowNode]]:
+    def topological_waves(self) -> list[list[WorkflowStep]]:
         """Compute execution waves via Kahn's topological sort algorithm."""
-        for name, node in self.nodes.items():
-            for dep in node.depends_on:
-                if dep not in self.nodes:
-                    raise ValueError(f"Unknown dependency '{dep}' for node '{name}'")
+        for name, step in self.steps.items():
+            for dep in step.depends_on:
+                if dep not in self.steps:
+                    raise ValueError(f"Unknown dependency '{dep}' for step '{name}'")
 
-        in_degree: dict[str, int] = {name: len(node.depends_on) for name, node in self.nodes.items()}
-        dependents: dict[str, list[str]] = {name: [] for name in self.nodes}
-        for name, node in self.nodes.items():
-            for dep in node.depends_on:
+        in_degree: dict[str, int] = {name: len(step.depends_on) for name, step in self.steps.items()}
+        dependents: dict[str, list[str]] = {name: [] for name in self.steps}
+        for name, step in self.steps.items():
+            for dep in step.depends_on:
                 dependents[dep].append(name)
 
-        waves: list[list[WorkflowNode]] = []
+        waves: list[list[WorkflowStep]] = []
         current_wave = [name for name, deg in in_degree.items() if deg == 0]
         visited_count = 0
 
         while current_wave:
             current_wave.sort()
-            waves.append([self.nodes[name] for name in current_wave])
+            waves.append([self.steps[name] for name in current_wave])
             visited_count += len(current_wave)
             next_wave: list[str] = []
             for name in current_wave:
@@ -211,21 +223,21 @@ class DynamicWorkflow:
                         next_wave.append(dep_of)
             current_wave = next_wave
 
-        if visited_count != len(self.nodes):
+        if visited_count != len(self.steps):
             raise RuntimeError(f"Cycle detected in workflow DAG '{self.name}'")
         return waves
 
     def _validate_dependencies(self) -> None:
         """Validate that all referenced dependencies exist and the graph is acyclic."""
-        for name, node in self.nodes.items():
-            for dep in node.depends_on:
-                if dep not in self.nodes:
-                    raise ValueError(f"Unknown dependency '{dep}' for node '{name}'")
+        for name, step in self.steps.items():
+            for dep in step.depends_on:
+                if dep not in self.steps:
+                    raise ValueError(f"Unknown dependency '{dep}' for step '{name}'")
         self.topological_waves()
 
 
 class WorkflowEngine:
-    """Executes DynamicWorkflow DAGs with parallel waves, telemetry, and live HLC broadcasting."""
+    """Executes Workflow DAGs with parallel waves, telemetry, and live HLC broadcasting."""
 
     def __init__(
         self,
@@ -251,10 +263,10 @@ class WorkflowEngine:
 
     async def run(
         self,
-        workflow: DynamicWorkflow,
+        workflow: Workflow,
         initial_state: Mapping[str, Any] | None = None,
     ) -> WorkflowContext:
-        """Execute all nodes in the workflow respecting dependencies and conditions."""
+        """Execute all steps in the workflow respecting dependencies and conditions."""
         waves = workflow.topological_waves()
         run_id = f"run_{uuid.uuid4().hex[:12]}"
         ctx = WorkflowContext(
@@ -266,7 +278,7 @@ class WorkflowEngine:
 
     async def resume_run(
         self,
-        workflow: DynamicWorkflow,
+        workflow: Workflow,
         checkpoint: WorkflowCheckpoint,
     ) -> WorkflowContext:
         """Resume execution of a workflow from a previously saved checkpoint."""
@@ -284,8 +296,8 @@ class WorkflowEngine:
 
     async def _execute_waves(
         self,
-        workflow: DynamicWorkflow,
-        waves: list[list[WorkflowNode]],
+        workflow: Workflow,
+        waves: list[list[WorkflowStep]],
         ctx: WorkflowContext,
     ) -> WorkflowContext:
         """Execute topological waves with parallel task groups and live delta broadcasts."""
@@ -313,27 +325,27 @@ class WorkflowEngine:
 
         try:
             for wave in waves:
-                nodes_to_run: list[WorkflowNode] = []
-                for node in wave:
-                    if node.name in ctx.completed_nodes or node.name in ctx.skipped_nodes:
+                steps_to_run: list[WorkflowStep] = []
+                for step in wave:
+                    if step.name in ctx.completed_nodes or step.name in ctx.skipped_nodes:
                         continue
 
-                    if any(dep in ctx.failed_nodes for dep in node.depends_on):
-                        ctx.skipped_nodes.add(node.name)
+                    if any(dep in ctx.failed_nodes for dep in step.depends_on):
+                        ctx.skipped_nodes.add(step.name)
                         continue
 
-                    if node.condition is not None and not node.condition(ctx):
-                        ctx.skipped_nodes.add(node.name)
+                    if step.condition is not None and not step.condition(ctx):
+                        ctx.skipped_nodes.add(step.name)
                         continue
 
-                    nodes_to_run.append(node)
+                    steps_to_run.append(step)
 
-                if not nodes_to_run:
+                if not steps_to_run:
                     continue
 
-                async def _run_single_node(target_node: WorkflowNode) -> None:
+                async def _run_single_step(target_step: WorkflowStep) -> None:
                     async with broadcast_lock:
-                        active_nodes.add(target_node.name)
+                        active_nodes.add(target_step.name)
                         live_state.active_nodes = sorted(active_nodes)
                     await _sync_and_broadcast()
 
@@ -343,58 +355,58 @@ class WorkflowEngine:
                             with self.telemetry.span_workflow_step(
                                 workflow.name,
                                 ctx.run_id,
-                                target_node.name,
+                                target_step.name,
                             ):
-                                if target_node.timeout_seconds is not None:
-                                    with anyio.fail_after(target_node.timeout_seconds):
-                                        res = target_node.fn(ctx)
+                                if target_step.timeout_seconds is not None:
+                                    with anyio.fail_after(target_step.timeout_seconds):
+                                        res = target_step.fn(ctx)
                                         if inspect.isawaitable(res):
                                             outcome = await res
                                         else:
                                             outcome = res
                                 else:
-                                    res = target_node.fn(ctx)
+                                    res = target_step.fn(ctx)
                                     if inspect.isawaitable(res):
                                         outcome = await res
                                     else:
                                         outcome = res
                         else:
-                            if target_node.timeout_seconds is not None:
-                                with anyio.fail_after(target_node.timeout_seconds):
-                                    res = target_node.fn(ctx)
+                            if target_step.timeout_seconds is not None:
+                                with anyio.fail_after(target_step.timeout_seconds):
+                                    res = target_step.fn(ctx)
                                     if inspect.isawaitable(res):
                                         outcome = await res
                                     else:
                                         outcome = res
                             else:
-                                res = target_node.fn(ctx)
+                                res = target_step.fn(ctx)
                                 if inspect.isawaitable(res):
                                     outcome = await res
                                 else:
                                     outcome = res
 
-                        ctx.node_outputs[target_node.name] = outcome
-                        ctx.completed_nodes.add(target_node.name)
+                        ctx.node_outputs[target_step.name] = outcome
+                        ctx.completed_nodes.add(target_step.name)
 
                         async with broadcast_lock:
-                            active_nodes.discard(target_node.name)
+                            active_nodes.discard(target_step.name)
                             live_state.active_nodes = sorted(active_nodes)
                             live_state.completed_nodes = sorted(ctx.completed_nodes)
                             live_state.node_outputs = dict(ctx.node_outputs)
                         await _sync_and_broadcast()
 
                     except BaseException as exc:
-                        ctx.failed_nodes.add(target_node.name)
+                        ctx.failed_nodes.add(target_step.name)
                         async with broadcast_lock:
-                            active_nodes.discard(target_node.name)
+                            active_nodes.discard(target_step.name)
                             live_state.active_nodes = sorted(active_nodes)
                             live_state.status = "failed"
                         await _sync_and_broadcast()
                         raise exc
 
                 async with anyio.create_task_group() as tg:
-                    for node in nodes_to_run:
-                        tg.start_soon(_run_single_node, node)
+                    for step in steps_to_run:
+                        tg.start_soon(_run_single_step, step)
 
             live_state.status = "completed"
             live_state.active_nodes = []
@@ -406,14 +418,3 @@ class WorkflowEngine:
             live_state.active_nodes = []
             await _sync_and_broadcast()
             raise exc
-
-
-__all__ = [
-    "DynamicWorkflow",
-    "StepResult",
-    "WorkflowCheckpoint",
-    "WorkflowContext",
-    "WorkflowEngine",
-    "WorkflowLiveState",
-    "WorkflowNode",
-]

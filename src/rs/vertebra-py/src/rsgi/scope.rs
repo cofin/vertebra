@@ -14,7 +14,7 @@ use crate::request::{intern_http_method, intern_http_version};
 use crate::synthetic::SyntheticRequest;
 
 #[derive(Clone)]
-enum ProtoKind {
+pub(crate) enum ProtoKind {
     Http,
     Ws,
     Custom(Box<str>),
@@ -22,7 +22,7 @@ enum ProtoKind {
 
 impl ProtoKind {
     #[inline]
-    fn from_str_tag(proto: &str) -> Self {
+    pub(crate) fn from_str_tag(proto: &str) -> Self {
         match proto {
             "http" => Self::Http,
             "ws" => Self::Ws,
@@ -31,7 +31,7 @@ impl ProtoKind {
     }
 
     #[inline]
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         match self {
             Self::Http => "http",
             Self::Ws => "ws",
@@ -41,7 +41,7 @@ impl ProtoKind {
 }
 
 #[derive(Clone)]
-enum SchemeKind {
+pub(crate) enum SchemeKind {
     Http,
     Https,
     Ws,
@@ -51,13 +51,49 @@ enum SchemeKind {
 
 impl SchemeKind {
     #[inline]
-    fn from_str_tag(scheme: &str) -> Self {
+    pub(crate) fn from_str_tag(scheme: &str) -> Self {
         match scheme {
             "http" => Self::Http,
             "https" => Self::Https,
             "ws" => Self::Ws,
             "wss" => Self::Wss,
             other => Self::Custom(other.into()),
+        }
+    }
+}
+
+/// Batch-shared RSGI server metadata allocated once per batch instead of per request.
+pub(crate) struct RsgiServerMeta {
+    pub(crate) proto_kind: ProtoKind,
+    pub(crate) scheme_kind: SchemeKind,
+    pub(crate) root_path: Box<str>,
+    pub(crate) server_override: Option<Box<str>>,
+    pub(crate) client_override: Option<Box<str>>,
+}
+
+impl RsgiServerMeta {
+    pub(crate) fn new(
+        proto: &str,
+        scheme: &str,
+        server: &str,
+        client: &str,
+        root_path: &str,
+    ) -> Self {
+        let trimmed_root = root_path.trim_end_matches('/');
+        Self {
+            proto_kind: ProtoKind::from_str_tag(proto),
+            scheme_kind: SchemeKind::from_str_tag(scheme),
+            root_path: trimmed_root.into(),
+            server_override: if server == "127.0.0.1:8000" {
+                None
+            } else {
+                Some(server.into())
+            },
+            client_override: if client == "127.0.0.1:0" {
+                None
+            } else {
+                Some(client.into())
+            },
         }
     }
 }
@@ -71,16 +107,28 @@ impl SchemeKind {
 pub struct RsgiScope {
     batch: Arc<BatchSnapshot>,
     index: usize,
-    root_path: String,
-    proto_kind: ProtoKind,
-    scheme_kind: SchemeKind,
-    server_override: Option<Box<str>>,
-    client_override: Option<Box<str>>,
+    meta: Arc<RsgiServerMeta>,
     authority_cache: OnceLock<Option<String>>,
     headers_cache: PyOnceLock<Py<Headers>>,
 }
 
 impl RsgiScope {
+    /// Construct an `RsgiScope` sharing batch-invariant server metadata via `Arc<RsgiServerMeta>`.
+    #[inline]
+    pub(crate) fn from_batch_with_meta(
+        batch: &Arc<BatchSnapshot>,
+        index: usize,
+        meta: Arc<RsgiServerMeta>,
+    ) -> Self {
+        Self {
+            batch: Arc::clone(batch),
+            index,
+            meta,
+            authority_cache: OnceLock::new(),
+            headers_cache: PyOnceLock::new(),
+        }
+    }
+
     /// Construct an `RsgiScope` directly from a `BatchSnapshot` slot with zero eager string copies.
     #[inline]
     pub fn from_batch(
@@ -92,43 +140,21 @@ impl RsgiScope {
         client: &str,
         root_path: &str,
     ) -> Self {
-        let trimmed_root = root_path.trim_end_matches('/');
-        let root_owned = if trimmed_root.is_empty() {
-            String::new()
-        } else {
-            trimmed_root.to_string()
-        };
-        let effective_scheme = if scheme == "http" && (batch.flags() & 1) != 0 {
-            SchemeKind::Https
-        } else {
-            SchemeKind::from_str_tag(scheme)
-        };
-        Self {
-            batch: Arc::clone(batch),
+        Self::from_batch_with_meta(
+            batch,
             index,
-            root_path: root_owned,
-            proto_kind: ProtoKind::from_str_tag(proto),
-            scheme_kind: effective_scheme,
-            server_override: if server == "127.0.0.1:8000" {
-                None
-            } else {
-                Some(server.into())
-            },
-            client_override: if client == "127.0.0.1:0" {
-                None
-            } else {
-                Some(client.into())
-            },
-            authority_cache: OnceLock::new(),
-            headers_cache: PyOnceLock::new(),
-        }
+            Arc::new(RsgiServerMeta::new(
+                proto, scheme, server, client, root_path,
+            )),
+        )
     }
 
     #[inline]
     fn stripped_path(&self) -> &str {
         let full_path = self.batch.path(self.index);
-        if !self.root_path.is_empty() && full_path.starts_with(&self.root_path) {
-            let rem = &full_path[self.root_path.len()..];
+        let root_path: &str = &self.meta.root_path;
+        if !root_path.is_empty() && full_path.starts_with(root_path) {
+            let rem = &full_path[root_path.len()..];
             if rem.is_empty() {
                 return "/";
             }
@@ -202,7 +228,7 @@ impl RsgiScope {
 
     #[getter]
     pub fn proto<'py>(&self, py: Python<'py>) -> Bound<'py, PyString> {
-        match &self.proto_kind {
+        match &self.meta.proto_kind {
             ProtoKind::Http => pyo3::intern!(py, "http").clone(),
             ProtoKind::Ws => pyo3::intern!(py, "ws").clone(),
             ProtoKind::Custom(s) => PyString::new(py, s),
@@ -221,7 +247,7 @@ impl RsgiScope {
 
     #[getter]
     pub fn server<'py>(&self, py: Python<'py>) -> Bound<'py, PyString> {
-        match &self.server_override {
+        match &self.meta.server_override {
             None => pyo3::intern!(py, "127.0.0.1:8000").clone(),
             Some(s) => PyString::new(py, s),
         }
@@ -229,7 +255,7 @@ impl RsgiScope {
 
     #[getter]
     pub fn client<'py>(&self, py: Python<'py>) -> Bound<'py, PyString> {
-        match &self.client_override {
+        match &self.meta.client_override {
             None => pyo3::intern!(py, "127.0.0.1:0").clone(),
             Some(s) => PyString::new(py, s),
         }
@@ -237,7 +263,8 @@ impl RsgiScope {
 
     #[getter]
     pub fn scheme<'py>(&self, py: Python<'py>) -> Bound<'py, PyString> {
-        match &self.scheme_kind {
+        match &self.meta.scheme_kind {
+            SchemeKind::Http if (self.batch.flags() & 1) != 0 => pyo3::intern!(py, "https").clone(),
             SchemeKind::Http => pyo3::intern!(py, "http").clone(),
             SchemeKind::Https => pyo3::intern!(py, "https").clone(),
             SchemeKind::Ws => pyo3::intern!(py, "ws").clone(),
@@ -263,10 +290,10 @@ impl RsgiScope {
 
     #[getter]
     pub fn root_path<'py>(&self, py: Python<'py>) -> Bound<'py, PyString> {
-        if self.root_path.is_empty() {
+        if self.meta.root_path.is_empty() {
             pyo3::intern!(py, "").clone()
         } else {
-            PyString::new(py, &self.root_path)
+            PyString::new(py, &self.meta.root_path)
         }
     }
 
@@ -306,7 +333,7 @@ impl RsgiScope {
     fn __repr__(&self) -> String {
         format!(
             "RsgiScope(proto={:?}, method={:?}, path={:?})",
-            self.proto_kind.as_str(),
+            self.meta.proto_kind.as_str(),
             self.batch.node(self.index).method_name(),
             self.stripped_path(),
         )

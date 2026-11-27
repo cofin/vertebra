@@ -1,6 +1,6 @@
 # vertebra-mysql
 
-Native Rust MySQL 8.4/9 and MariaDB client extension for [Vertebra](https://cofin.github.io/vertebra/).
+MySQL 8.4/9 and MariaDB client extension for [Vertebra](https://cofin.github.io/vertebra/).
 
 This package contains the compiled `vertebra._mysql` module that Vertebra's MySQL drivers run on. You don't import it directly. Install it through the `vertebra-core` extra so both packages stay on the same version:
 
@@ -13,8 +13,8 @@ Without it, the MySQL drivers raise `MissingDependencyError`.
 
 ## Features
 
-- Pure Rust binary protocol with server-side prepared statements. No `libmysqlclient` required.
-- Pipelines (`SyncMySQLPipeline`, `AsyncMySQLPipeline`) and Arrow result streaming.
+- Rust binary protocol with server-side prepared statements. No `libmysqlclient` required.
+- Query pipelines and Arrow result streaming.
 - Out-of-band `KILL QUERY` cancellation.
 - Cloud SQL IAM token auth on `:3306` or the `:3307` mTLS dialer.
 
@@ -28,7 +28,7 @@ Without it, the MySQL drivers raise `MissingDependencyError`.
 
 ## Compatibility
 
-- Python 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
+- Python 3.12 to 3.15, including free-threaded builds.
 - Prebuilt wheels for Linux (x86_64, aarch64; glibc 2.28+), macOS (x86_64, arm64), and Windows (x64).
 
 ## Links

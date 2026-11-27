@@ -1890,7 +1890,7 @@ impl PySyncPostgresClient {
         channels: &Bound<'py, PyAny>,
         #[pyo3(from_py_with = extract_queue_capacity)] queue_capacity: usize,
         #[pyo3(from_py_with = extract_strict_bool)] reconnect: bool,
-    ) -> PyResult<Bound<'py, vertebra_db::py_async::RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, vertebra_db::py_async::TaskAwaitable>> {
         crate::async_client::spawn_open_listener(
             py,
             &self.session,

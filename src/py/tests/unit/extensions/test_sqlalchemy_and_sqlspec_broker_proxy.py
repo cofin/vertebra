@@ -1,4 +1,4 @@
-"""Unit tests for BrokerPool, SQLSpec providers, Proxy*Driver isolation, contention, and cancellation."""
+"""Unit tests for SyncBrokerPool, SQLSpec providers, Proxy*Driver isolation, contention, and cancellation."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ from vertebra.extensions.sqlalchemy.async_adapter import (
 from vertebra.extensions.sqlalchemy.dialects import (
     AsyncPostgreSQLDialect,
 )
-from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool, broker_creator
+from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, SyncBrokerPool, broker_creator
 from vertebra.extensions.sqlspec.plugin import ProxyAsyncConfig, ProxySyncConfig
 from vertebra.extensions.sqlspec.provider import (
     AsyncBrokerLeaseSource,
@@ -368,24 +368,24 @@ def test_proxy_drivers_subclass_sqlspec_bases_and_preserve_statement_config(
 @pytest.mark.parametrize(
     "factory",
     [
-        lambda: BrokerPool(),
+        lambda: SyncBrokerPool(),
         lambda: AsyncBrokerPool(),
-        lambda: BrokerPool(broker=SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))),
+        lambda: SyncBrokerPool(broker=SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))),
         lambda: broker_creator("sqlite+vtb:///:memory:", broker=None),
         lambda: broker_creator("", broker=SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))),
     ],
 )
 def test_broker_pool_and_creator_reject_unconfigured_inputs(factory: Any) -> None:
-    """Verify BrokerPool, AsyncBrokerPool, and broker_creator raise ImproperConfigurationError when unconfigured."""
+    """Verify SyncBrokerPool, AsyncBrokerPool, and broker_creator raise ImproperConfigurationError when unconfigured."""
     with pytest.raises(ImproperConfigurationError):
         factory()
 
 
 def test_sync_broker_pool_checkout_rollback_quarantine_and_recreate(tmp_path: Path) -> None:
-    """Verify BrokerPool acquires partition leases, releases healthy checkins, and quarantines rollback errors."""
+    """Verify SyncBrokerPool acquires partition leases, releases healthy checkins, and quarantines rollback errors."""
     url = f"sqlite+vtb:///{tmp_path / 'broker_pool.db'}"
     transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
-    pool = BrokerPool(broker=transport, url=url)
+    pool = SyncBrokerPool(broker=transport, url=url)
     pool_key_tuple = DatabaseRegistry.parse_url(url, broker=transport).pool_key()
     assert pool_key_tuple is not None
     expected_partition = "|".join(str(part) for part in pool_key_tuple)
@@ -404,7 +404,7 @@ def test_sync_broker_pool_checkout_rollback_quarantine_and_recreate(tmp_path: Pa
 
             recreated = pool.recreate()
             try:
-                assert isinstance(recreated, BrokerPool)
+                assert isinstance(recreated, SyncBrokerPool)
                 assert recreated.partition_key == expected_partition
             finally:
                 recreated.dispose()
@@ -414,7 +414,7 @@ def test_sync_broker_pool_checkout_rollback_quarantine_and_recreate(tmp_path: Pa
         def _boom_rollback(_conn: Any) -> None:
             raise RuntimeError("dirty connection reset error")
 
-        fail_pool = BrokerPool(broker=transport, url=url, on_rollback=_boom_rollback)
+        fail_pool = SyncBrokerPool(broker=transport, url=url, on_rollback=_boom_rollback)
         fail_engine = create_engine(url, pool=fail_pool)
         try:
             with fail_engine.connect() as conn:
@@ -475,7 +475,7 @@ async def test_async_broker_pool_checkout_rollback_and_quarantine() -> None:
 
 @pytest.mark.parametrize("is_async", [False, True])
 def test_alchemy_plugin_wires_broker_pool_classes(is_async: bool) -> None:
-    """Verify create_sync_alchemy_config and create_async_alchemy_config wire BrokerPool/AsyncBrokerPool."""
+    """Verify create_sync_alchemy_config and create_async_alchemy_config wire SyncBrokerPool/AsyncBrokerPool."""
     broker = (
         AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
         if is_async
@@ -489,7 +489,7 @@ def test_alchemy_plugin_wires_broker_pool_classes(is_async: bool) -> None:
         else:
             sync_cfg = create_sync_alchemy_config("sqlite+vtb:///:memory:", broker=broker)
             assert isinstance(sync_cfg.engine_config.poolclass, type)
-            assert issubclass(sync_cfg.engine_config.poolclass, BrokerPool)
+            assert issubclass(sync_cfg.engine_config.poolclass, SyncBrokerPool)
     finally:
         if isinstance(broker, AsyncSHMBrokerTransport):
             asyncio.run(broker.close())
@@ -665,9 +665,9 @@ async def test_broker_pool_partitions_timeouts_real_rollback_invalidate_and_alch
     db1 = tmp_path / "one.db"
     db2 = tmp_path / "two.db"
     sync_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
-    p1 = BrokerPool(broker=sync_t, url=f"sqlite+vtb:///{db1}", pool_size=1, max_overflow=0, acquire_timeout_ms=50)
-    p2 = BrokerPool(broker=sync_t, url=f"sqlite+vtb:///{db2}", pool_size=1, max_overflow=0, acquire_timeout_ms=50)
-    mem_pool = BrokerPool(broker=sync_t, url="sqlite+vtb:///:memory:", pool_size=1, max_overflow=0)
+    p1 = SyncBrokerPool(broker=sync_t, url=f"sqlite+vtb:///{db1}", pool_size=1, max_overflow=0, acquire_timeout_ms=50)
+    p2 = SyncBrokerPool(broker=sync_t, url=f"sqlite+vtb:///{db2}", pool_size=1, max_overflow=0, acquire_timeout_ms=50)
+    mem_pool = SyncBrokerPool(broker=sync_t, url="sqlite+vtb:///:memory:", pool_size=1, max_overflow=0)
     try:
         try:
             assert p1.partition_key != p2.partition_key
@@ -690,7 +690,7 @@ async def test_broker_pool_partitions_timeouts_real_rollback_invalidate_and_alch
 
             recreated = p1.recreate()
             try:
-                assert isinstance(recreated, BrokerPool)
+                assert isinstance(recreated, SyncBrokerPool)
                 inv_conn = recreated.connect()
                 inv_conn.invalidate()
                 assert sync_t.metrics().active_leases == 0
@@ -720,7 +720,7 @@ async def test_broker_pool_partitions_timeouts_real_rollback_invalidate_and_alch
                 raise RuntimeError("real rollback failed")
             super().rollback()
 
-    rollback_pool = BrokerPool(
+    rollback_pool = SyncBrokerPool(
         creator=lambda: FailingRollbackConnection(driver=SyncSQLiteDriver(), broker=rollback_t, lease_managed=True),
         broker=rollback_t,
         pool_key=f"sqlite://{rollback_db}",
@@ -832,11 +832,11 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
     transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
     e1 = create_engine(
         shared_url,
-        pool=BrokerPool(broker=transport, url=shared_url, pool_size=1, max_overflow=0, acquire_timeout_ms=50),
+        pool=SyncBrokerPool(broker=transport, url=shared_url, pool_size=1, max_overflow=0, acquire_timeout_ms=50),
     )
     e2 = create_engine(
         shared_url,
-        pool=BrokerPool(broker=transport, url=shared_url, pool_size=1, max_overflow=0, acquire_timeout_ms=50),
+        pool=SyncBrokerPool(broker=transport, url=shared_url, pool_size=1, max_overflow=0, acquire_timeout_ms=50),
     )
     try:
         try:
@@ -861,7 +861,7 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         transport.close()
 
     dispose_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
-    dispose_pool = BrokerPool(
+    dispose_pool = SyncBrokerPool(
         broker=dispose_t,
         url=f"sqlite+vtb:///{tmp_path / 'dispose.db'}",
         pool_size=2,
@@ -890,7 +890,7 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         raise RuntimeError("creator boom")
 
     fail_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
-    fail_pool = BrokerPool(
+    fail_pool = SyncBrokerPool(
         creator=_failing_creator,
         broker=fail_t,
         pool_key="failing-creator",
@@ -923,7 +923,7 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         fail_t.close()
 
     with pytest.raises(ImproperConfigurationError):
-        BrokerPool.bind_class(broker=None)
+        SyncBrokerPool.bind_class(broker=None)
 
     async def _sample_coro() -> int:
         return 1
@@ -932,7 +932,7 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         warnings.simplefilter("always", RuntimeWarning)
         coro = _sample_coro()
         with pytest.raises(ImproperConfigurationError):
-            BrokerPool._await_if_needed(coro)
+            SyncBrokerPool._await_if_needed(coro)
     assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
 
 
@@ -1502,8 +1502,8 @@ def test_sync_shm_broker_across_pool_proxy_and_async_transport_rejects_sync() ->
     """Verify SyncSHMBrokerTransport across pool/proxy/driver and InterfaceError on sync AsyncSHMBrokerTransport use."""
     sync_transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=100))
     async_transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=100))
-    pool: BrokerPool | None = None
-    async_pool: BrokerPool | None = None
+    pool: SyncBrokerPool | None = None
+    async_pool: SyncBrokerPool | None = None
     sqlite_driver = SyncSQLiteDriver(broker=sync_transport)
     sync_provider: SQLSpecSyncProvider | None = None
     proxy_sync: ProxySyncDriver | None = None
@@ -1516,7 +1516,7 @@ def test_sync_shm_broker_across_pool_proxy_and_async_transport_rejects_sync() ->
             lease.release()
         assert sync_transport.metrics().active_leases == 0
 
-        pool = BrokerPool(broker=sync_transport, url="sqlite+vtb:///%3Amemory%3A", pool_size=1, max_overflow=0)
+        pool = SyncBrokerPool(broker=sync_transport, url="sqlite+vtb:///%3Amemory%3A", pool_size=1, max_overflow=0)
         assert pool.partition_key is not None
         assert pool.partition_key.endswith(f"#pool-{id(pool)}")
         conn = pool.connect()
@@ -1535,7 +1535,9 @@ def test_sync_shm_broker_across_pool_proxy_and_async_transport_rejects_sync() ->
         assert proxy_sync.select_value("SELECT 55") == 55
         assert sync_transport.metrics().active_leases == 0
 
-        async_pool = BrokerPool(broker=async_transport, url="sqlite+vtb:///%3Amemory%3A", pool_size=1, max_overflow=0)
+        async_pool = SyncBrokerPool(
+            broker=async_transport, url="sqlite+vtb:///%3Amemory%3A", pool_size=1, max_overflow=0
+        )
         with pytest.raises(DriverInterfaceError):
             async_pool.connect()
         async_sqlite = SyncSQLiteDriver(broker=async_transport)
@@ -1690,7 +1692,7 @@ async def test_sqlspec_provider_idle_commit_cancelled_quarantine_and_stack_cance
 @pytest.mark.parametrize(
     ("is_async", "expected_default_pool", "expected_broker_base"),
     [
-        (False, QueuePool, BrokerPool),
+        (False, QueuePool, SyncBrokerPool),
         (True, AsyncAdaptedQueuePool, AsyncBrokerPool),
     ],
 )
@@ -1698,7 +1700,7 @@ def test_get_pool_class_broker_query_param(
     monkeypatch: pytest.MonkeyPatch,
     is_async: bool,
     expected_default_pool: type[Any],
-    expected_broker_base: type[BrokerPool],
+    expected_broker_base: type[SyncBrokerPool],
 ) -> None:
     """Verify ?broker=true resolves DatabaseRegistry.default_broker() or raises ImproperConfigurationError."""
     dialect_cls: Any = AsyncPostgreSQLDialect if is_async else SyncPostgreSQLDialect
@@ -1721,7 +1723,7 @@ def test_get_pool_class_broker_query_param(
 
 
 def test_broker_pool_reuses_connections_across_checkins(tmp_path: Path) -> None:
-    """Verify BrokerPool keeps checked-in DBAPI connections open and reuses them across checkouts."""
+    """Verify SyncBrokerPool keeps checked-in DBAPI connections open and reuses them across checkouts."""
     transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=4, max_overflow=0, acquire_timeout_ms=50))
     db_path = tmp_path / "reuse.db"
     url = f"sqlite+vtb:///{db_path}"
@@ -1732,7 +1734,7 @@ def test_broker_pool_reuses_connections_across_checkins(tmp_path: Path) -> None:
         created_conns.append(conn)
         return conn
 
-    pool = BrokerPool(creator=_creator, broker=transport, url=url, pool_size=2, max_overflow=0)
+    pool = SyncBrokerPool(creator=_creator, broker=transport, url=url, pool_size=2, max_overflow=0)
     try:
         for idx in range(4):
             conn = pool.connect()
@@ -1747,21 +1749,21 @@ def test_broker_pool_reuses_connections_across_checkins(tmp_path: Path) -> None:
 
         engine = create_engine(
             url,
-            poolclass=BrokerPool.bind_class(broker=transport, url=url),
+            poolclass=SyncBrokerPool.bind_class(broker=transport, url=url),
             pool_size=2,
             max_overflow=0,
         )
         try:
-            assert isinstance(engine.pool, BrokerPool)
+            assert isinstance(engine.pool, SyncBrokerPool)
             assert engine.pool._pool_size == 2
             assert engine.pool._max_overflow == 0
         finally:
             engine.dispose()
 
         with pytest.raises(ImproperConfigurationError):
-            BrokerPool(broker=transport, url=url, pool_size=-1)
+            SyncBrokerPool(broker=transport, url=url, pool_size=-1)
         with pytest.raises(ImproperConfigurationError):
-            BrokerPool(broker=transport, url=url, max_overflow=-2)
+            SyncBrokerPool(broker=transport, url=url, max_overflow=-2)
     finally:
         pool.dispose()
         transport.close()
@@ -1788,7 +1790,7 @@ def test_broker_pool_single_reset_on_return_and_quarantine(tmp_path: Path) -> No
         created.append(conn)
         return conn
 
-    pool = BrokerPool(
+    pool = SyncBrokerPool(
         creator=_creator,
         broker=transport,
         url=url,
@@ -1826,7 +1828,7 @@ def test_broker_pool_dispose_keeps_checked_out_and_closes_idle(tmp_path: Path) -
     """Verify pool.dispose() closes idle connections immediately while checked-out connections finish cleanly."""
     transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=4, max_overflow=0, acquire_timeout_ms=50))
     url = f"sqlite+vtb:///{tmp_path / 'dispose_idle.db'}"
-    pool = BrokerPool(broker=transport, url=url, pool_size=2, max_overflow=0)
+    pool = SyncBrokerPool(broker=transport, url=url, pool_size=2, max_overflow=0)
     try:
         conn_a = pool.connect()
         conn_b = pool.connect()
