@@ -12,8 +12,8 @@ chapters:
   - ch01-sqlite-sqlalchemy-fastpath
   - ch02-async-shm-broker-contention
   - ch03-asyncpg-parity-and-verification
-current_chapter: ch02-async-shm-broker-contention
-current_task: t04
+current_chapter: ch03-asyncpg-parity-and-verification
+current_task: t07
 parent_flow: null
 chapter_id: null
 planning_status: complete
@@ -21,9 +21,9 @@ depends_on_chapters: []
 replan_trigger: null
 plan_revision: 2
 plan_commit: "16ccb56e"
-last_verified_checkpoint: "b14aa2c3"
-last_reviewed_chapter: ch01-sqlite-sqlalchemy-fastpath
-last_reviewed_commit: "b14aa2c3"
+last_verified_checkpoint: "f1496e28"
+last_reviewed_chapter: ch02-async-shm-broker-contention
+last_reviewed_commit: "f1496e28"
 generated:
   by: flow/0.26.0
   at: "2026-11-27T18:30:00Z"
@@ -148,6 +148,7 @@ impl ShmLeaseTable {
 impl LeaseBroker {
     pub fn wake_seq(&self) -> u32;
     pub fn partition_count(&self) -> u32;
+    pub fn record_timeout(&self);
 
     #[pyo3(signature = (expected_seq, timeout_ms=25))]
     pub fn wait_for_wake_async(
@@ -155,7 +156,7 @@ impl LeaseBroker {
         py: Python<'_>,
         expected_seq: u32,
         timeout_ms: u64,
-    ) -> PyResult<crate::async_bridge::RustDbTaskAwaitable>;
+    ) -> PyResult<crate::async_bridge::TaskAwaitable>;
 }
 ```
 
@@ -223,8 +224,8 @@ class _SQLiteDialectMixin:
 ## 5. Implementation Plan
 
 - [x] [b14aa2c3] ch01-sqlite-sqlalchemy-fastpath — Skip `BEGIN IMMEDIATE` on read-only SQLite `lazy_begin`, default SQLAlchemy SQLite `max_readers=0`, and remove dead `mpsc::channel()` allocations in `SqlitePool` (chapters/ch01-sqlite-sqlalchemy-fastpath/spec.md)
-- [~] ch02-async-shm-broker-contention — Single-waiter SHM futex wake, `LeaseBroker.wait_for_wake_async`, and per-loop local handoff + single-leader watcher in `AsyncSHMBrokerTransport` (chapters/ch02-async-shm-broker-contention/spec.md)
-- [ ] ch03-asyncpg-parity-and-verification — `NativePostgresWorldDriver` checkout parity, `granian-rsgi-data-stdlib` target, live `--group postgres-bench` Suite B/C verification, and OKF doc sync (chapters/ch03-asyncpg-parity-and-verification/spec.md)
+- [x] [f1496e28] ch02-async-shm-broker-contention — Single-waiter SHM futex wake, `LeaseBroker.wait_for_wake_async`, and per-loop local handoff + single-leader watcher in `AsyncSHMBrokerTransport` (chapters/ch02-async-shm-broker-contention/spec.md)
+- [~] ch03-asyncpg-parity-and-verification — `NativePostgresWorldDriver` checkout parity, `granian-rsgi-data-stdlib` target, live `--group postgres-bench` Suite B/C verification, and OKF doc sync (chapters/ch03-asyncpg-parity-and-verification/spec.md)
 
 ### Chapter / Phase Recovery Checkpoint
 
@@ -232,8 +233,8 @@ Each chapter runs a `< 60s` targeted Rust + Python lint and unit test gate (`mak
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Flow State**: `active` (`ch01-sqlite-sqlalchemy-fastpath` completed and approved at `b14aa2c3`; executing `ch02-async-shm-broker-contention`).
-- **Remaining Chapters**: `ch02-async-shm-broker-contention`, `ch03-asyncpg-parity-and-verification`.
+- **Flow State**: `active` (`ch01` and `ch02` completed and approved through `f1496e28`; executing `ch03-asyncpg-parity-and-verification`).
+- **Remaining Chapters**: `ch03-asyncpg-parity-and-verification`.
 
 [^src-sqlite-py-client]: `src/rs/vertebra-sqlite/src/py_client.rs::AsyncSQLiteCursor` — Native SQLite sync and async cursor lazy_begin transaction handling.
 [^src-sqlite-worker]: `src/rs/vertebra-sqlite/src/worker.rs::SqlitePool` — SQLite WAL connection pool and WorkerSlot execution.

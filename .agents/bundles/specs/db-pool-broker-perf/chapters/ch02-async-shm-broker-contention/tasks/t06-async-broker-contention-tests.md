@@ -5,7 +5,7 @@ chapter_id: ch02-async-shm-broker-contention
 title: Add async SHM broker contention, cancellation, and cross-process wake tests
 description: Add unit and multiprocessing tests proving zero SyncPool submissions under c=128 contention, leader cancellation handoff, release_sync local wakeup, cross-process wait_for_wake_async wakeup, and partitioned fairness.
 status: stable
-state: pending
+state: completed
 priority: high
 verification_strategy: regression_tdd
 worksheet_format: compact
@@ -22,7 +22,7 @@ tests:
 estimated_loc: 150
 plan_revision: 2
 plan_commit: "16ccb56e"
-commit: null
+commit: "f1496e28"
 sources:
   - id: src-broker-tests
     resource: src/py/tests/unit/extensions/test_shm_lease_broker.py

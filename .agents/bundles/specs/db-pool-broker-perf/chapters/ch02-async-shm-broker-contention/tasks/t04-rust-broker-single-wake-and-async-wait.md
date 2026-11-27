@@ -5,7 +5,7 @@ chapter_id: ch02-async-shm-broker-contention
 title: Add single-waiter SHM futex wake and LeaseBroker.wait_for_wake_async
 description: Replace wake_all thundering herds on single-slot SHM release/dispose with wake_one_waiter_seqcst, expose ShmLeaseTable::{wake_seq,partition_count,wait_for_wake}, and bridge LeaseBroker::{wake_seq,partition_count,wait_for_wake_async} with stub updates.
 status: stable
-state: pending
+state: completed
 priority: high
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -25,7 +25,7 @@ tests:
 estimated_loc: 140
 plan_revision: 2
 plan_commit: "16ccb56e"
-commit: null
+commit: "857fc9fb"
 sources:
   - id: src-core-broker
     resource: src/rs/vertebra-core/src/broker.rs::ShmLeaseTable
@@ -55,7 +55,7 @@ In scope:
   - Call `wake_one_waiter_seqcst()` in `ShmLeaseTable::release()` and `ShmLeaseTable::dispose_quarantined()`; keep `wake_waiters_seqcst()` (`wake_all()`) for `reap_expired()` and `reclaim_worker()`.
   - Add `pub fn wake_seq(&self) -> u32`, `pub fn partition_count(&self) -> u32`, and `pub fn wait_for_wake(&self, expected_seq: u32, timeout: Duration) -> u32` using `WaitGuard` on `hdr.waiters.0`, checking `hdr.wake_seq.0.load_seqcst() != expected_seq` after registering waiter, sleeping via `hdr.wake_seq.0.wait_timeout(expected_seq, timeout)`, and returning the current `wake_seq`.
 - `src/rs/vertebra-py/src/broker.rs`:
-  - Add `pub fn wake_seq(&self) -> u32`, `pub fn partition_count(&self) -> u32`, and `pub fn wait_for_wake_async(&self, py: Python<'_>, expected_seq: u32, timeout_ms: u64) -> PyResult<crate::async_bridge::RustDbTaskAwaitable>` using `spawn_rust_db_task` + `tokio::task::spawn_blocking`.
+  - Add `pub fn wake_seq(&self) -> u32`, `pub fn partition_count(&self) -> u32`, `pub fn record_timeout(&self)`, and `pub fn wait_for_wake_async(&self, py: Python<'_>, expected_seq: u32, timeout_ms: u64) -> PyResult<crate::async_bridge::TaskAwaitable>` using `spawn_rust_db_task` + `tokio::task::spawn_blocking`.
 - `src/py/vertebra/_vertebra.pyi`: add `wake_seq(self) -> int`, `partition_count(self) -> int`, and `wait_for_wake_async(self, expected_seq: int, timeout_ms: int = 25) -> Awaitable[int]` on `LeaseBroker`.
 
 ## Bounded Read Manifest

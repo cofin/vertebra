@@ -5,7 +5,7 @@ chapter_id: ch03-asyncpg-parity-and-verification
 title: Local asyncpg Parity, Full SQLite/PostgreSQL Verification, and OKF Sync
 description: Align NativePostgresWorldDriver multi-query checkout parity with asyncpg, add granian-rsgi-data-stdlib, execute live SQLite and Docker PostgreSQL 17 benchmarks with --group postgres-bench, and sync OKF knowledge chapters.
 status: stable
-state: planned
+state: active
 planning_quality: standard
 planning_degraded_reason: null
 planning_status: complete
@@ -15,7 +15,7 @@ depends_on_chapters:
 replan_trigger: null
 plan_revision: 2
 plan_commit: "16ccb56e"
-current_task: null
+current_task: t07
 last_verified_checkpoint: null
 last_reviewed_commit: null
 generated:
@@ -164,8 +164,8 @@ uv run --no-sync pytest src/py/tests/unit/tools/test_e2e_benchmarks.py src/py/te
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Chapter State**: `planned` (`0/3` tasks complete).
-- **Next Task**: `t07` (blocked until `ch01` and `ch02` complete).
+- **Chapter State**: `active` (`0/3` tasks complete).
+- **Next Task**: `t07`.
 
 [^src-bench-drivers]: `tools/benchmarks/apps/_db_drivers.py::NativePostgresWorldDriver` — Native and stdlib PostgreSQL WorldDriver implementations.
 [^src-bench-targets]: `tools/benchmarks/targets.py::ALL_TARGETS` — Benchmark data and baseline target catalog.

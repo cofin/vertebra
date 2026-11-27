@@ -5,7 +5,7 @@ chapter_id: ch02-async-shm-broker-contention
 title: Lock-Free Async SHM Broker Waiter Queue and Single-Waiter Futex Wake
 description: Replace wake_all thundering herds with single-waiter futex wakeups, expose LeaseBroker.wait_for_wake_async over Tokio, and replace SyncPool contention in AsyncSHMBrokerTransport with per-loop local handoff and a single leader watcher.
 status: stable
-state: active
+state: completed
 planning_quality: standard
 planning_degraded_reason: null
 planning_status: complete
@@ -13,9 +13,9 @@ depends_on_chapters: []
 replan_trigger: null
 plan_revision: 2
 plan_commit: "16ccb56e"
-current_task: t04
-last_verified_checkpoint: null
-last_reviewed_commit: null
+current_task: null
+last_verified_checkpoint: "f1496e28"
+last_reviewed_commit: "f1496e28"
 generated:
   by: flow/0.26.0
   at: "2026-11-27T18:30:00Z"
@@ -145,9 +145,9 @@ class _PartitionWaitQueue:
 
 ## 5. Implementation Plan
 
-- [ ] t04 — Add `wake_one_waiter_seqcst`, `wake_seq`, and `wait_for_wake` in Rust + `LeaseBroker.wait_for_wake_async` & `.pyi` stub (`tasks/t04-rust-broker-single-wake-and-async-wait.md`)
-- [ ] t05 — Implement per-loop local handoff, single-leader watcher, and hot-path caching in `AsyncSHMBrokerTransport` (`tasks/t05-async-broker-local-handoff-and-leader.md`)
-- [ ] t06 — Add concurrency, cancellation, cross-process wake, and stubtest regression tests (`tasks/t06-async-broker-contention-tests.md`)
+- [x] [857fc9fb] t04 — Add `wake_one_waiter_seqcst`, `wake_seq`, and `wait_for_wake` in Rust + `LeaseBroker.wait_for_wake_async` & `.pyi` stub (`tasks/t04-rust-broker-single-wake-and-async-wait.md`)
+- [x] [f1496e28] t05 — Implement per-loop local handoff, single-leader watcher, and hot-path caching in `AsyncSHMBrokerTransport` (`tasks/t05-async-broker-local-handoff-and-leader.md`)
+- [x] [f1496e28] t06 — Add concurrency, cancellation, cross-process wake, and stubtest regression tests (`tasks/t06-async-broker-contention-tests.md`)
 
 ### Chapter / Phase Recovery Checkpoint
 
@@ -157,8 +157,8 @@ make dev-ext EXT=core && cargo test -p vertebra-core broker && cargo test -p ver
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Chapter State**: `active` (`0/3` tasks complete).
-- **Next Task**: `t04`.
+- **Chapter State**: `completed` (`3/3` tasks complete, reviewed `APPROVE` at `f1496e28`).
+- **Next Task**: None.
 
 [^src-core-broker]: `src/rs/vertebra-core/src/broker.rs::ShmLeaseTable` — ShmLeaseTable CAS acquire, release, and futex wake logic.
 [^src-py-broker]: `src/rs/vertebra-py/src/broker.rs::LeaseBroker` — PyO3 LeaseBroker methods.

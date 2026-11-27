@@ -5,7 +5,7 @@ chapter_id: ch02-async-shm-broker-contention
 title: Replace SyncPool broker waiting with per-loop local handoff and single-leader watcher
 description: Add per-event-loop waiter deques, direct local release handoff, single-leader wait_for_wake_async watching, and hot-path bind-hash and partition-check fastpaths in AsyncSHMBrokerTransport.
 status: stable
-state: pending
+state: completed
 priority: high
 verification_strategy: behavior_tdd
 worksheet_format: full
@@ -21,7 +21,7 @@ tests:
 estimated_loc: 210
 plan_revision: 2
 plan_commit: "16ccb56e"
-commit: null
+commit: "f1496e28"
 sources:
   - id: src-py-broker-transport
     resource: src/py/vertebra/extensions/broker/transport.py::AsyncSHMBrokerTransport
