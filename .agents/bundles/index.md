@@ -52,5 +52,5 @@ Root index for **Vertebra** — a Rust-backed Python and TypeScript web runtime 
 ## 3. Specifications, Research & Activity Log
 
 - **`specs/`** — Lazy specifications directory (materialized only when active specs exist); completed specs are archived into the knowledge chapters above.
-- **[`research/`](research/index.md)** — Promoted technical research briefs: [`upstream-sqlspec-direct-arrow-write.md`](research/upstream-sqlspec-direct-arrow-write.md), [`audit-findings_20261103.md`](research/audit-findings_20261103.md), [`google-cloud-rust_20261103.md`](research/google-cloud-rust_20261103.md), [`full-stack-review_20261116.md`](research/full-stack-review_20261116.md), [`open-issues-backlog_20261118.md`](research/open-issues-backlog_20261118.md), [`integrated-benchmarks_20261119.md`](research/integrated-benchmarks_20261119.md), [`native-cursor-hot-paths_20261121.md`](research/native-cursor-hot-paths_20261121.md).
+- **[`research/`](research/index.md)** — Open technical research briefs: [`upstream-sqlspec-direct-arrow-write.md`](research/upstream-sqlspec-direct-arrow-write.md).
 - **[Bundle Activity Log](log.md)** — Chronological log of bundle initialization, syntheses, and archived flows.

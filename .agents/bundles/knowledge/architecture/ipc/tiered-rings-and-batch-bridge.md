@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
   - by: agent:flow-executor
     at: "2026-11-13T06:06:00Z"
     commit: 05d88d00
@@ -96,7 +99,7 @@ Initialized once via `BatchBridge::init` strictly in `Topology::Embedded`:
 | `xlarge` | 2 MiB | 8 |
 
 - **Tier Routing & `VROV` Overflow**: `select_ring` chooses the smallest fitting tier. Unary responses between 2 MiB and 64 MiB (`MAX_OVERFLOW_RESPONSE_SIZE`) spill to a one-shot named segment (`/vtb-rs-...`) with a `VROV` envelope in `small` (unlinked on drain); `> 64 MiB` returns `ResponseTooLarge`. Non-small sends set bits 1..3 in the small ring's `ShmHeader.active_flags` so readers probe larger tiers only when active.
-- **`VRES` Unary Frames**: 20-byte header (`"VRES"`, `correlation_id`, `status`, `headers_len`, `body_len`) followed by compact headers and body, parsed zero-copy in `drain_responses_with`.
+- **`VRES` Unary Frames**: 20-byte header (`"VRES"`, `correlation_id`, `status`, `headers_len`, `body_len`) followed by compact headers and body, parsed zero-copy in `drain_with` / `drain_frames_with`.
 
 ## Native `VRSF` Stream Frames & Bounded Delivery
 

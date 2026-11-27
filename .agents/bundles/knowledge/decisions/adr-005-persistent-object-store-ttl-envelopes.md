@@ -9,6 +9,9 @@ tags:
 - storage
 - litestar
 - ttl
+generated:
+  by: flow/0.30.1
+  at: '2026-11-08T18:27:30Z'
 sources:
 - id: litestar-store
   resource: src/py/vertebra/extensions/litestar/store.py::ObjectStoreLitestarStore
@@ -20,6 +23,9 @@ sources:
   resource: src/py/tests/unit/extensions/test_litestar_plugin.py
   title: Native Local reconstruction, namespace, and corruption consumers
 verified:
+- by: agent:flow-setup
+  at: '2026-11-27T22:10:00Z'
+  commit: f3b624a2
 - by: agent:codex
   at: '2026-11-08T18:27:30.456016Z'
   commit: 067fa901

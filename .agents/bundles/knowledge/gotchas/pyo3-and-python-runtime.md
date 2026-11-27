@@ -15,14 +15,17 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
+  - by: agent:flow-executor
+    at: "2026-11-17T04:20:00Z"
+    commit: 5a833832
+  - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
   - by: agent:codex
     at: "2026-11-05T06:09:26Z"
     commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
-  - by: agent:flow-executor
-    at: "2026-11-17T04:20:00Z"
-    commit: 5a833832
 sources:
   - id: src-vertebra-http-src-main-rs
     resource: src/rs/vertebra-http/src/main.rs
@@ -35,7 +38,7 @@ sources:
     title: "Zero-copy Request buffer protocol and PyBuffer_FillInfo refcounting"
   - id: src-vertebra-py-src-transport-rs
     resource: src/rs/vertebra-py/src/transport.rs
-    title: "Writable and non-contiguous PyBuffer copying before py.detach"
+    title: "Writable and non-contiguous PyBuffer copying before py.detach and ShmResponseLock"
   - id: src-vertebra-py-src-asgi-rs
     resource: src/rs/vertebra-py/src/asgi.rs
     title: "SteppedCoroutine cyclic GC slots without freelist"
@@ -48,6 +51,9 @@ sources:
   - id: src-vertebra-py-src-wsgi-runner-rs
     resource: src/rs/vertebra-py/src/wsgi/runner.rs
     title: "PEP 3333 _WsgiStartResponse called vs headers_sent state machine"
+  - id: src-vertebra-py-src-wsgi-pool-rs
+    resource: src/rs/vertebra-py/src/wsgi/pool.rs
+    title: "WsgiExecutor GilSafePyObject drop safety and GIL-detached shutdown"
   - id: src-server-gil-audit-py
     resource: src/py/vertebra/server/_gil_audit.py
     title: "Free-threaded extension GIL audit enforcement"
@@ -59,7 +65,7 @@ sources:
     title: "Worker-scoped ThreadPoolExecutor lifecycle and shutdown"
   - id: src-server-worker-py
     resource: src/py/vertebra/server/worker.py
-    title: "Single-root ASGI and WSGI batch routing and executor teardown in Worker"
+    title: "Single-root ASGI, RSGI, and WSGI batch routing and executor teardown in Worker"
   - id: src-vertebra-pyi
     resource: src/py/vertebra/_vertebra.pyi
     title: "Native _vertebra type stub rules for Buffer and non-instantiable classes"
@@ -129,7 +135,7 @@ sources:
 
 <!-- truth: start -->
 - Declare `#[pymodule(gil_used = false)]` on all 13 PyO3 extensions (`vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-duckdb`, `vertebra-mssql`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-redis`, `vertebra-sqlite`, `vertebra-spanner`, `vertebra-valkey`), omit `#[pyclass(freelist = N)]` under `Py_GIL_DISABLED` (`3.14t`/`3.15t`) and on cyclic-GC (`PyGC_Head`) classes (`_SteppedCoroutine`, `CachedCallableBox`) that implement `__traverse__`/`__clear__`, and register embedded `_vertebra` via `append_to_inittab!` plus `sys.modules` aliasing.
-- Pass borrowed `slf.as_ptr()` (never `into_ptr()`) to `PyBuffer_FillInfo`, copy writable (`!readonly()`) or non-contiguous `PyBuffer<u8>` views via `to_vec(py)` before `py.detach`, run `ArrowCursor::read_ipc_from_shm` inside `py.detach`, reuse and shut down the worker-scoped `ThreadPoolExecutor` (`_dispatch.py` / `worker.py`), keep `_vertebra.pyi` constructors/`Buffer` types synchronized (`stubtest` + `pyright`), run `maturin develop` for `vertebra-py` from repository root without `-m`, and keep `tools/docs/generate_cli_docs.py` `fallback_none_attrs` synchronized with `--only-group doc` builds.
+- Pass borrowed `slf.as_ptr()` (never `into_ptr()`) to `PyBuffer_FillInfo`, copy writable (`!readonly()`) or non-contiguous `PyBuffer<u8>` views via `to_vec(py)` before `py.detach`, run `ArrowCursor::read_ipc_from_shm` inside `py.detach`, serialize multi-thread SHM response writes via `ShmResponseLock`, wrap background-thread `Py<PyAny>` handles in `GilSafePyObject`, shut down the worker-scoped `ThreadPoolExecutor` and Rust `WsgiExecutor` (detaching the GIL across joins) on worker exit, keep `_vertebra.pyi` constructors/`Buffer` types synchronized (`stubtest` + `pyright`), run `maturin develop` for `vertebra-py` from repository root without `-m`, and keep `tools/docs/generate_cli_docs.py` `fallback_none_attrs` synchronized with `--only-group doc` builds.
 - Transfer cross-extension Arrow buffers through unregistered `ShmRegion` writers, `vertebra.ShmCapsule` single-claim adoption, and per-extension `vertebra-core::py_async` drainer attributes; gate ordered stream commits with `spawn_rust_db_task_with_attr_and_future` (`ReplicationInFlightGuard` / `ReplicationEventDelivery`) and listener delivery with `spawn_rust_db_task_with_attr_and_cancel` (`PendingDeliveryGuard`) so cancelled futures retire without advancing stream state.
 <!-- truth: end -->
 
@@ -141,12 +147,12 @@ sources:
 
 ## 2. Coroutine Stepping, PEP 3333 State, Buffer Refcounts, Executor Lifecycle & Stubs
 
-- **Task-Free `drive_asgi_batch` vs `asyncio.current_task()`**: `drive_asgi_batch` steps each coroutine's synchronous prefix via `PyIter_Send` before allocating an `asyncio.Task` ([`_asgi/_runner.py`](../../../../src/py/vertebra/server/_asgi/_runner.py)[^src-server-asgi-runner-py]), so middleware observes `asyncio.current_task() is None` until the first suspension point. [`Worker._process_batch`](../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py] must route single-root `"/"` ASGI and WSGI mounts directly through `drive_asgi_batch` and `single_root_wsgi.spawn_batch(batch)` rather than `partition_batch`.
-- **Worker-Scoped `ThreadPoolExecutor` Lifecycle**: Never allocate a fresh `ThreadPoolExecutor` per batch; [`_dispatch.py`](../../../../src/py/vertebra/server/_dispatch.py)[^src-server-dispatch-py] caches one lazily initialized worker-scoped pool (`get_worker_executor(min_workers=32)`, `"vertebra-worker"` threads) under `_EXECUTOR_LOCK`, and [`Worker`](../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py] calls `shutdown_worker_executor(wait=True)` on worker exit before `loop_pool.stop()` so thread pools never leak or outlive the event loop.
+- **Task-Free `drive_asgi_batch` vs `asyncio.current_task()`**: `drive_asgi_batch` steps each coroutine's synchronous prefix via `PyIter_Send` before allocating an `asyncio.Task` ([`_asgi/_runner.py`](../../../../src/py/vertebra/server/_asgi/_runner.py)[^src-server-asgi-runner-py]), so middleware observes `asyncio.current_task() is None` until the first suspension point. [`Worker._process_batch`](../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py] routes single-root `"/"` ASGI, RSGI, and WSGI mounts directly through `drive_asgi_batch`, `drive_rsgi_batch`, and `drive_wsgi_batch(single_root_wsgi.app, batch, root_path="")` rather than `partition_batch`.
+- **Worker-Scoped `ThreadPoolExecutor` & Rust `WsgiExecutor` Lifecycle**: Never allocate a fresh `ThreadPoolExecutor` per batch; [`_dispatch.py`](../../../../src/py/vertebra/server/_dispatch.py)[^src-server-dispatch-py] caches one lazily initialized worker-scoped pool (`get_worker_executor(min_workers=32)`, `"vertebra-worker"` threads) under `_EXECUTOR_LOCK`. On worker exit, [`Worker.run()`](../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py] shuts down any per-worker sync `executor`, calls `shutdown_worker_executor(wait=True)`, and calls `shutdown_wsgi_executor()` before `loop_pool.stop()`. In [`wsgi/pool.rs`](../../../../src/rs/vertebra-py/src/wsgi/pool.rs)[^src-vertebra-py-src-wsgi-pool-rs], `shutdown_wsgi_executor()` detaches the GIL (`py.detach(|| exec.shutdown())`) before joining watchdog/worker threads to avoid GIL deadlock, `GilSafePyObject` ensures background threads never decref `Py<PyAny>` without `Python::attach`, and `ShmResponseLock` in [`transport.rs`](../../../../src/rs/vertebra-py/src/transport.rs)[^src-vertebra-py-src-transport-rs] serializes concurrent SHM response ring writes (detaching the GIL on lock contention).
 - **PEP 3333 `_WsgiStartResponse` `called` vs `headers_sent`**: [`_WsgiStartResponse`](../../../../src/rs/vertebra-py/src/wsgi/runner.rs)[^src-vertebra-py-src-wsgi-runner-rs] tracks `called` and `headers_sent` separately (setting `headers_sent = true` only on non-empty `write()` or body yield) so error middleware can replace headers before body output and re-raise `exc_info[1]` once `headers_sent` is `true`.
 - **`PyBuffer_FillInfo` Ownership & Writable `PyBuffer` Detach Hazard**: In [`Request::__getbuffer__`](../../../../src/rs/vertebra-py/src/request.rs)[^src-vertebra-py-src-request-rs], pass borrowed `slf.as_ptr()` to `PyBuffer_FillInfo` — never `slf.into_ptr()` — because `PyBuffer_FillInfo` calls `Py_XNewRef` internally. `Request.body_view` delegates to `PyMemoryView_FromObject(slf)` to keep `Arc<BatchSnapshot>` anchored, paired with PEP 688 `__buffer__` in [`_vertebra.pyi`](../../../../src/py/vertebra/_vertebra.pyi)[^src-vertebra-pyi]. Never hold a borrowed slice into a writable (`!py_buf.readonly()`) or non-contiguous `PyBuffer<u8>` (`bytearray`, strided `memoryview`) across `py.detach`: [`transport.rs`](../../../../src/rs/vertebra-py/src/transport.rs)[^src-vertebra-py-src-transport-rs] (`with_buffer_slice`, `submit_raw_response`) and `webtransport.rs` (`extract_buffer_bytes`) copy non-readonly or non-contiguous buffers via `py_buf.to_vec(py)?` and drop `PyBuffer` before releasing the GIL.
 - **Non-Instantiable `.pyi` Constructors & `Buffer` Typing**: Classes with no native Python constructor (`Request`, `Headers`, `HeadersIterator`, `RequestBatch`, `RequestBatchIterator`, `AsgiScopeIterator`, `WsgiEnviron`, `WsgiEnvironIterator`, `_WsgiStartResponse`, `RsgiTransport`) must omit `__new__` in [`_vertebra.pyi`](../../../../src/py/vertebra/_vertebra.pyi)[^src-vertebra-pyi], and buffer-protocol parameters (such as `RsgiHttpProtocol.response_bytes`) must be typed as `collections.abc.Buffer` without `Any` leakage so `mypy.stubtest vertebra._vertebra` and `pyright` pass.
-- **`PYO3_PYTHON`, Root `maturin develop` & Binary Freshness**: Build `vertebra-http` with `PYO3_PYTHON="$(CURDIR)/.venv/bin/python"` while `prepare_embedded_python_env` and `ensure_embedded_python_path` in [`main.rs`](../../../../src/rs/vertebra-http/src/main.rs) anchor `.venv` resolution. Crate-local `pyproject.toml` files in `vertebra-{bundler,storage,bigquery,duckdb,mssql,mysql,oracle,postgres,redis,sqlite,spanner,valkey}` require `-m <Cargo.toml>`, whereas `vertebra-py` uses root [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml] and must run `maturin develop` from repository root without `-m`. [`find_server_binary()`](../../../../src/py/vertebra/supervisor/_supervisor.py)[^src-supervisor-supervisor-py] selects the newest binary by `st_mtime_ns` across target directories; keep `duckdb`, `spikard`, and `granian` isolated in `[dependency-groups].bench`.
+- **`PYO3_PYTHON`, Root `maturin develop` & Binary Freshness**: Build `vertebra-http` with `PYO3_PYTHON="$(CURDIR)/.venv/bin/python"` while `prepare_embedded_python_env` and `ensure_embedded_python_path` in [`main.rs`](../../../../src/rs/vertebra-http/src/main.rs) anchor `.venv` resolution. Crate-local `pyproject.toml` files in `vertebra-{bundler,storage,bigquery,duckdb,mssql,mysql,oracle,postgres,redis,sqlite,spanner,valkey}` require `-m <Cargo.toml>`, whereas `vertebra-py` uses root [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml] and must run `maturin develop` from repository root without `-m`. [`find_server_binary()`](../../../../src/py/vertebra/supervisor/_supervisor.py)[^src-supervisor-supervisor-py] checks `VERTEBRA_SERVER_BINARY`, `CARGO_TARGET_DIR`, packaged `vertebra/bin`, and then workspace target directories (`release` before `debug`, newest by `st_mtime_ns`); keep `duckdb`, `spikard`, and `granian` isolated in `[dependency-groups].bench`.
 
 ## 3. Litestar v2/v3 Offload, Batched Audit Logs & Driver Teardown
 
@@ -156,7 +162,7 @@ sources:
 ## 4. `make docs` Stubs, Direct `_vertebra` Primitives, Thin `utils` & CI Guards
 
 - **Direct `vertebra._vertebra` Primitives vs `--only-group doc` Stubs**: `src/py/vertebra/utils/{text,humanize,uuids}.py` ([`text.py`](../../../../src/py/vertebra/utils/text.py)[^src-utils-text-py]) import native primitives (`camelize`, `snake_case`, `slugify`, `validate_identifier`, `humanize`, `uuid4_u128`, `uuid7_u128`, `nanoid_generate`) directly from `vertebra._vertebra` with zero pure-Python `_py_*` fallbacks, and [`embeddings/_google.py`](../../../../src/py/vertebra/embeddings/_google.py)[^src-embeddings-google-py] imports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `gcp_http2_post_async` directly from `vertebra._vertebra`. For CI's `uv sync --no-install-project --only-group doc` (`make docs`), `ensure_native_stub_module` in [`generate_cli_docs.py`](../../../../tools/docs/generate_cli_docs.py)[^src-tools-docs-generate-cli-docs-py] stubs `vertebra._vertebra` and `vertebra._bundler` while `_make_stub_getattr` sets `fallback_none_attrs` strictly to `{"AsyncObjectStore", "SchemaDigestCache", "SyncObjectStore", "field_id", "handler_id", "state_id"}` (returning `_StubNativeBase` subclasses for other attributes); `vertebra._storage` is left unstubbed so `vertebra.storage` uses its Python fallbacks, and optional web frameworks resolve via `import_optional(...)`.
-- **Thin `vertebra.utils`, Coverage `ignore_errors`, TS Fallback, `msgspec.Struct` & `GuardProtocol`**: [`utils/__init__.py`](../../../../src/py/vertebra/utils/__init__.py)[^src-utils-init-py] must contain only its module docstring with zero attributes (`test_utils_package_is_thin`). Keep `[tool.coverage.report] ignore_errors = true` in [`pyproject.toml`](../../../../pyproject.toml) (`-i` on `coverage xml`/`html`) for Litestar's synthetic `dto_transfer_function_*` frames. Fall back from `.gitignore`d `server/_js/bundle/` to `src/ts/vertebra-client/{dist,src}/` when `make py-test` runs without `make ts-build`. Document `msgspec.Struct` fields with per-field docstrings (never class `Attributes:` blocks), and check `getattr(guard, "check", None)` before `guard(ctx)` on `GuardProtocol` subclasses.
+- **Thin `vertebra.utils`, Coverage Omit, TS Fallback, `msgspec.Struct` & `GuardProtocol`**: [`utils/__init__.py`](../../../../src/py/vertebra/utils/__init__.py)[^src-utils-init-py] must contain only its module docstring with zero attributes (`test_utils_package_is_thin`). Keep `[tool.coverage.report]` omitting `server/_js/**` and `tests/**` in [`pyproject.toml`](../../../../pyproject.toml) (and pass `-i` on `coverage xml`/`html` for Litestar's synthetic `dto_transfer_function_*` frames). Fall back from `.gitignore`d `server/_js/bundle/` to `src/ts/vertebra-client/{dist,src}/` when `make py-test` runs without `make ts-build`. Document `msgspec.Struct` fields with per-field docstrings (never class `Attributes:` blocks), and check `getattr(guard, "check", None)` before `guard(ctx)` on `GuardProtocol` subclasses.
 
 ## 5. SQLSpec Binds, Owned Tool Snapshots & Channel Feed Identity
 
@@ -173,15 +179,16 @@ sources:
 [^src-vertebra-http-src-main-rs]: `src/rs/vertebra-http/src/main.rs` — Embedded interpreter init and inittab registration.
 [^src-vertebra-py-src-lib-rs]: `src/rs/vertebra-py/src/lib.rs` — Core PyO3 extension module exports and gil_used = false.
 [^src-vertebra-py-src-request-rs]: `src/rs/vertebra-py/src/request.rs` — Zero-copy Request buffer protocol and PyBuffer_FillInfo refcounting.
-[^src-vertebra-py-src-transport-rs]: `src/rs/vertebra-py/src/transport.rs` — Writable and non-contiguous PyBuffer copying before py.detach.
+[^src-vertebra-py-src-transport-rs]: `src/rs/vertebra-py/src/transport.rs` — Writable and non-contiguous PyBuffer copying before py.detach and ShmResponseLock.
 [^src-vertebra-py-src-asgi-rs]: `src/rs/vertebra-py/src/asgi.rs` — SteppedCoroutine cyclic GC slots without freelist.
 [^src-vertebra-py-src-msgspec-bridge-rs]: `src/rs/vertebra-py/src/msgspec_bridge.rs` — Weakref-keyed decoder caches and CachedCallableBox GC traversal.
 [^src-vertebra-py-src-rsgi-http-rs]: `src/rs/vertebra-py/src/rsgi/http.rs` — Frozen RsgiReadyAwaitable singleton and PyIter_Send stepping.
 [^src-vertebra-py-src-wsgi-runner-rs]: `src/rs/vertebra-py/src/wsgi/runner.rs` — PEP 3333 _WsgiStartResponse called vs headers_sent state machine.
+[^src-vertebra-py-src-wsgi-pool-rs]: `src/rs/vertebra-py/src/wsgi/pool.rs` — WsgiExecutor GilSafePyObject drop safety and GIL-detached shutdown.
 [^src-server-gil-audit-py]: `src/py/vertebra/server/_gil_audit.py` — Free-threaded extension GIL audit enforcement.
 [^src-server-asgi-runner-py]: `src/py/vertebra/server/_asgi/_runner.py` — Task-free ASGI batch stepping and task promotion.
 [^src-server-dispatch-py]: `src/py/vertebra/server/_dispatch.py` — Worker-scoped ThreadPoolExecutor lifecycle and shutdown.
-[^src-server-worker-py]: `src/py/vertebra/server/worker.py` — Single-root ASGI and WSGI batch routing and executor teardown in Worker.
+[^src-server-worker-py]: `src/py/vertebra/server/worker.py` — Single-root ASGI, RSGI, and WSGI batch routing and executor teardown in Worker.
 [^src-vertebra-pyi]: `src/py/vertebra/_vertebra.pyi` — Native _vertebra type stub rules for Buffer and non-instantiable classes.
 [^src-supervisor-supervisor-py]: `src/py/vertebra/supervisor/_supervisor.py` — Server binary mtime resolution across target directories.
 [^src-extensions-litestar-plugin-py]: `src/py/vertebra/extensions/litestar/plugin.py` — Guarded Litestar compression offload activation.

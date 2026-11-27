@@ -14,6 +14,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
+  - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
   - by: agent:flow-setup
@@ -66,7 +69,7 @@ sources:
 2. **Unix fallback** (macOS, or Linux when memfd fails): `shm_open` with a generated name `/vtb-{pid:x}-{seq:x}-{attempt:x}` from a process-wide `AtomicU64` counter.
 3. **Windows**: a pagefile-backed section.
 
-`ShmRegion::map(handle, size)` attaches to an inherited FD. `create_named` / `open_named` exist for explicit POSIX names; `create_named` unlinks a stale name first.
+`ShmRegion::map(handle, size)` and `from_fd(handle, size)` attach to an inherited FD. `create_named`, `open_named`, and `open_or_create_named` (backed by a trailer `ShmOwnerHeader` for owner-PID liveness and `NamedAttach::{Created, Attached}` handoff) manage explicit POSIX names, while `ShmCapsule` transfers `Arc<ShmRegion>` ownership across C-ABI extension boundaries.
 
 ## `ShmHeader` Layout (`buffer.rs`)
 
@@ -74,12 +77,12 @@ sources:
 
 | Group | Fields |
 |---|---|
-| Metadata | `magic: u64` (`MAGIC = u64::from_le_bytes(*b"VERTEBRA")`), `abi_version: u32` (`ABI_VERSION = 3`), `flags`, `total_size`, `ring_offset`, `ring_size`, `generation: AtomicU32`, `state: AtomicU32` (`RegionState::{Uninitialized, Ready, Stale}`), `creator_pid`, `creator_epoch: u64`, reserved bytes |
+| Metadata | `magic: u64` (`MAGIC = u64::from_le_bytes(*b"VERTEBRA")`), `abi_version: u32` (`ABI_VERSION = 3`), `flags`, `total_size`, `ring_offset`, `ring_size`, `generation: AtomicU32`, `state: AtomicU32` (`RegionState::Ready = 1`), `creator_pid`, `creator_epoch: u64`, reserved bytes |
 | Cursors | `read_head: CacheLine<AtomicU64>`, `write_head: CacheLine<AtomicU64>` |
 | Wait words | `wait_read`, `wait_write`, `send_waiters`, `recv_waiters` (each `CacheLine<AtomicU32>`) |
 | Dekker & tier state | `consumer_sleeping: CacheLine<AtomicU32>`, `active_flags: CacheLine<AtomicU32>` |
 
-`RingLayout::new(slot_size, slots, ChannelMode)` uses `checked_mul` and `checked_add` (`Option<Self>`) to compute `seq_offset()` (header end), `ring_offset()` (after the cache-line-padded MPMC sequence array), and `total_size`. `ShmHeader` enforces compile-time size (`1152` bytes on 128-byte-cacheline targets such as aarch64 macOS, `640` bytes elsewhere) and alignment (`align_of::<ShmHeader>() == align_of::<CacheLine<AtomicU64>>()`) assertions. `initialize` writes the header and sets `state = Ready`; `attach` rejects a region whose `magic`, `abi_version` (`3`), or `state` do not match. `ShmHeader` provides `prepare_sleep` (`consumer_sleeping.store(1, SeqCst)`), `cancel_sleep` (`store(0, Release)`), and `should_notify_and_clear` (`SeqCst` fence + `swap(0, AcqRel) == 1`) so producers skip `eventfd`/`pipe` `write()` syscalls whenever the consumer is actively polling, while `active_flags` records non-empty response tiers. Each slot starts with an 8-byte `SlotHeader { len: u32, flags: u32 }`, so `payload_capacity()` is `slot_size - 8`.
+`RingLayout::try_new(slot_size, slots, ChannelMode)` uses `checked_mul` and `checked_add` (`Option<Self>`, unwrapped by `RingLayout::new`) to compute `seq_offset()` (header end), `ring_offset()` (after the cache-line-padded MPMC sequence array), and `total_size`. `ShmHeader` enforces compile-time size (`1152` bytes on 128-byte-cacheline targets such as aarch64 macOS, `640` bytes elsewhere) and alignment (`align_of::<ShmHeader>() == align_of::<CacheLine<AtomicU64>>()`) assertions. `initialize` writes the header and sets `state = RegionState::Ready`; `attach` rejects a region whose `magic`, `abi_version` (`3`), or `state` do not match. `SpscRing`, `MpmcRing`, and `TieredRingSet` expose `prepare_sleep` (`consumer_sleeping.store(1, SeqCst)`), `cancel_sleep` (`store(0, Release)`), and `should_notify_and_clear` (`SeqCst` fence + `swap(0, AcqRel) == 1`) over `ShmHeader::consumer_sleeping` so producers skip `eventfd`/`pipe` `write()` syscalls whenever the consumer is actively polling, while `active_flags` records non-empty response tiers. Each slot starts with an 8-byte `SlotHeader { len: u32, flags: u32 }`, so `payload_capacity()` is `slot_size - 8`.
 
 ## `SpscRing` & `SlotView` (`channel.rs`)
 
@@ -88,7 +91,6 @@ sources:
 - **Send** (`try_send`, `try_send_with(len, flags, writer)`): rejects `len > payload_capacity()` with `PayloadTooLarge`; checks cached `read_head` before reloading `header.read_head` (`Acquire`); returns `Full` when `(write_head + 1) & mask == read_head`. `try_send_with` lets the closure write directly into the slot, stores `write_head` (`Release`), and only executes the `wait_write` `SeqCst` `fetch_add` + futex wake when `recv_waiters > 0`. Blocking `send_with` spins up to 32 `Backoff` steps before entering `park_send`.
 - **Zero-copy receive** (`try_recv_view`, `recv_view`, `recv_view_timeout`, `drain_with`): `try_recv_view` checks `head == tail` **before** attempting `slot_borrowed.compare_exchange`, avoiding RMW cache-line dirties on empty tiers, validates `header.len <= payload_capacity()` (returning `ChannelError::CorruptedSlot`), and returns a `SlotView` holding `Arc<SpscRing>`, the slot index, and a bounds-clamped slice. `SlotView::release()` (also run on `Drop`) advances `read_head` (`Release`), clears the borrow flag, and wakes a parked sender when `send_waiters > 0`. `drain_with(max_items, f)` visits up to `max_items` slots zero-copy and advances `read_head` once per drained batch.
 - **Copying receive** (`read_slot_to_vec`, `try_recv`, `recv`, `recv_timeout`, `try_recv_batch`): `read_slot_to_vec` returns `Result<(Vec<u8>, u32), ChannelError>` and rejects `header.len > payload_capacity()` with `ChannelError::CorruptedSlot` without advancing `read_head` (`try_recv_batch` propagates the error); `try_recv` copies into a caller buffer and returns `BufferTooSmall` if it does not fit or `CorruptedSlot` on invalid lengths.
-- `split()` yields `SpscSender` / `SpscReceiver` handles.
 
 ## `MpmcRing` & `MpmcSlotView` (`channel.rs`)
 
@@ -111,11 +113,11 @@ sources:
 | macOS ([`macos.rs`](../../../../../src/rs/vertebra-core/src/platform/macos.rs)[^src-vertebra-core-src-platform-macos-rs]) | unconditional `__ulock_wait` / `__ulock_wake` using `UL_COMPARE_AND_WAIT | ULF_NO_ERRNO` (plus `ULF_WAKE_ALL` for `wake_all`) |
 | Windows ([`windows.rs`](../../../../../src/rs/vertebra-core/src/platform/windows.rs)[^src-vertebra-core-src-platform-windows-rs]) | `WaitOnAddress`, `WakeByAddressSingle`, `WakeByAddressAll` |
 
-`sync.rs` also defines `WaitWord`, `SharedMutex<T>`, `SharedRwLock<T>`, and `SharedCondvar` for cross-process locking. No production code uses them.
+`sync.rs` also defines `WaitWord` (`#[repr(transparent)]` over `AtomicU32`) and falls back to bounded thread sleeps when platform wait syscalls return `Unsupported` / `ENOSYS`.
 
 ## Cross-Process Wakeup FDs (`notify.rs`)
 
-[`Notifier`](../../../../../src/rs/vertebra-core/src/notify.rs)[^src-vertebra-core-src-notify-rs] is the FD that asyncio watches with `add_reader`. On Linux it is `eventfd(0, EFD_NONBLOCK)`; elsewhere a non-blocking `pipe(2)`. Neither sets `CLOEXEC`, so children inherit them. API: `new`, `notify`, `clear`, `as_raw_fd`, `from_raw_fd` (Linux), `from_raw_fds(read, write)` and `write_fd` (non-Linux).
+[`Notifier`](../../../../../src/rs/vertebra-core/src/notify.rs)[^src-vertebra-core-src-notify-rs] is the wakeup primitive that asyncio watches with `add_reader` on Unix. On Linux it is `eventfd(0, EFD_NONBLOCK)`, on non-Linux Unix a non-blocking `pipe(2)`, and on Windows an `AtomicU32` using `WaitOnAddress` / `WakeByAddressAll`. Unix descriptors omit `CLOEXEC` so children inherit them. API: `new`, `notify`, `clear`, `wait`, `as_raw_fd`, `from_raw_fd` (Linux), `from_raw_fds(read, write)` and `write_fd` (Unix). `notify.rs` also provides `AsyncCompletionQueue` and `SyncCompletionQueue` for coalesced completion wakeups.
 
 Batch-level LZ4/Zstd compression is applied by `BatchBridge`, not by the rings; see [Tiered Rings & Batch Bridge](tiered-rings-and-batch-bridge.md).
 

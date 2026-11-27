@@ -3,6 +3,8 @@ type: Research
 title: Upstream SQLSpec Direct Arrow Write Dispatch
 description: Shipped SQLSpec >= 0.72.2 DirectStreamWriteProtocol pipeline dispatch and Vertebra streaming Parquet, Arrow IPC, CSV, overwrite=False, and microbenchmark support.
 status: stable
+state: open
+promoted_to: null
 tags:
   - storage
   - arrow

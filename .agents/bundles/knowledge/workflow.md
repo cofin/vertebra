@@ -13,6 +13,9 @@ generated:
   by: flow/0.30.1
   at: "2026-11-06T18:28:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
   - by: agent:flow-executor
     at: "2026-11-17T08:15:00Z"
     commit: 5a833832
@@ -60,6 +63,7 @@ sources:
 make setup-env                                                        # Configure public registries where needed; no-op elsewhere
 make install                                                          # destroy + clean + setup-env, pin Python 3.12, uv sync --all-extras --dev --group doc, ts-install/build, dev
 make dev                                                              # cargo build non-extension crates + maturin develop across all 13 PyO3 extensions
+make dev-ext EXT=postgres                                             # Rebuild one native extension in debug mode (core|bundler|storage|mysql|bigquery|mssql|spanner|duckdb|oracle|postgres|sqlite|redis|valkey)
 make upgrade                                                          # uv lock --upgrade + uv sync, cargo update, bun update, pre-commit autoupdate
 make clean                                                            # Remove Python/Rust/TS build artifacts and caches (keeps .venv)
 make release bump=patch                                               # Non-main branch only: check metadata, bump version, relock uv/cargo, build docs
@@ -67,8 +71,10 @@ make release                                                          # Finalize
 make pre-release version=0.4.0-alpha.1                                # Start or advance a pre-release
 
 # 2. Fast Chapter Gate (< 60s — run once per chapter batch) & Focused Suites
-make lint-all                                                         # Read-only CI lint: Biome, tsc, Ruff, Mypy, Pyright, check_extras, check_package_metadata, 13-ext stubtest, rustfmt, Clippy, review-check
-make lint                                                             # Auto-fix Biome, Ruff, rustfmt + Clippy, then run type/metadata/stubtest/review checks
+make lint-all                                                         # Read-only CI lint: Biome, tsc, Ruff, Mypy, Pyright, check_extras, check_package_metadata, 13-ext stubtest, rustfmt, Clippy
+make lint                                                             # Auto-fix Biome, Ruff, rustfmt + Clippy, then run tsc, Mypy, Pyright, check_extras, check_package_metadata, and 13-ext stubtest
+make lint-ts                                                          # Read-only TypeScript Biome + tsc check (also make lint-py, make lint-rs)
+make stubtest                                                         # Run 13-extension fail-loud mypy.stubtest against already-built extensions
 make review-check                                                     # Validate review capability manifests, skills, agents, OKF bundles, and privacy constraints
 make review-route                                                     # Route changed files to owning review areas and shards (BASE=origin/main)
 uv run --no-sync pytest src/py/tests/unit/server/test_runner.py -q    # Targeted Python unit test file
@@ -87,7 +93,7 @@ make valkey-test     # vertebra-valkey Rust tests, stubtest, and Python Valkey/q
 make core-wheel-check # Build relocatable vertebra-server + vertebra-core wheel and smoke test vtb run (plus {storage,bigquery,spanner,bundler}-wheel-check)
 make db-conformance  # Live database conformance suite (ENGINE=<duckdb|mysql|mariadb|mssql|oracle|redis|sqlite|valkey> [VERSION=<v>])
 make postgres-bench-check # Criterion postgres_native test mode + Ruff/Mypy + comparator tests (make postgres-bench for live run)
-make docs            # Scan public docstrings, check CLI docs, build Zensical site, run postbuild, and verify artifacts
+make docs            # Scan public docstrings, check diagrams and CLI docs, build Zensical site, run postbuild, and verify artifacts
 make docs-check      # make docs + live zensical serve HTTP 200 check (make docs-serve, make docs-clean, make docs-rust)
 
 # 4. Full Release Gate (run once at /flow:finish or CI, never per-step) & Benchmarks
@@ -97,7 +103,8 @@ make test                                                             # rs-test 
 make coverage                                                         # pytest --cov -> coverage.xml + htmlcov/
 make check                                                            # lint + test + coverage
 make build                                                            # ts-build, release cargo build, maturin develop -r across extensions, uv build (make build-pgo for PGO)
-make bench                                                            # make build + tools.benchmarks (bench-all, bench-ft, rs-bench, bench-micro, bench-baseline, bench-check, bench-report)
+make bench-tools                                                      # Check and install missing benchmark load drivers (oha, h2load, ghz, k6)
+make bench                                                            # make build + bench-run (also bench-run, bench-all, bench-all-run, bench-ft, rs-bench, bench-micro, bench-baseline, bench-check, bench-report)
 ```
 
 ## Polyglot Rebuild & Hygiene Rules

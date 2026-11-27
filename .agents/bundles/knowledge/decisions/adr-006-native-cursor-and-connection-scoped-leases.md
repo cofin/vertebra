@@ -9,6 +9,9 @@ tags:
 - database
 - dbapi
 - leases
+generated:
+  by: flow/0.30.1
+  at: '2026-11-21T01:16:00Z'
 sources:
 - id: sqlite-cursor
   resource: src/rs/vertebra-sqlite/src/py_client.rs::SyncSQLiteCursor

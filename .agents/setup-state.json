@@ -4,13 +4,13 @@
   "root_directory": ".agents",
   "bundle_root": ".agents/bundles",
   "okf_version": "0.2",
-  "stop_gate": "enforce",
+  "stop_check": "enforce",
   "workflow_preferences": {
     "ignore_policy": "shared",
     "model_routing": "auto",
     "sha_tracking": "strict",
     "chapter_gate": "targeted",
-    "stop_gate": "enforce"
+    "stop_check": "enforce"
   },
   "schema_version": "0.2"
 }

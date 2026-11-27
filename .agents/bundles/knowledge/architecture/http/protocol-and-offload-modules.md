@@ -12,6 +12,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
   - by: agent:flow-archive
     at: "2026-11-14T22:49:00Z"
     commit: ff9f78cb
@@ -100,16 +103,19 @@ sources:
   - id: src-vertebra-core-src-logger-rs
     resource: src/rs/vertebra-core/src/logger.rs
     title: "Rust implementation module (src/rs/vertebra-core/src/logger.rs)"
+  - id: src-vertebra-http-src-zpages-rs
+    resource: src/rs/vertebra-http/src/zpages.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/zpages.rs)"
 ---
 
 # Protocol and Offload Modules in vertebra-http
 
 <!-- truth: start -->
 - `vertebra-http` executes health checks, CORS preflight/response headers, `zstd`/`brotli`/`gzip` compression, static mounts, OpenAPI caching, HMR WebSockets, and `.well-known` endpoints directly in Rust without waking Python workers.
-- Realtime, body-streaming, and framing modules (`body.rs`, `grpc.rs`, `sse.rs`, `ws_mount.rs`, `pubsub.rs`, `multipart.rs`, `mcp_bridge.rs`, `http3.rs`) expose Rust protocol primitives wired into `ServerState`, `server::run_with_listener`, `response::handle`, and `response::handle_buffered` (alongside standalone library helpers).
+- Realtime, diagnostic, body-streaming, and framing modules (`body.rs`, `grpc.rs`, `sse.rs`, `ws_mount.rs`, `pubsub.rs`, `multipart.rs`, `mcp_bridge.rs`, `http3.rs`, `zpages.rs`) expose Rust protocol primitives wired into `ServerState`, `server::run_with_listener`, `response::handle`, and `response::handle_buffered` (alongside standalone library helpers).
 <!-- truth: end -->
 
-[`lib.rs`](../../../../../src/rs/vertebra-http/src/lib.rs)[^src-vertebra-http-src-lib-rs] exports every top-level module as `pub mod` (whereas `dispatcher::direct` in [`dispatcher/mod.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs) is a private `mod direct;`). The modules in the first table below are wired directly into `main.rs`, `server.rs`, and [`response::handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs]. The remaining modules are standalone library components exercised by `src/rs/vertebra-http/tests/`, unit tests, and `benches/server_throughput.rs` (`vertebra-py` does not depend on `vertebra-http`).
+[`lib.rs`](../../../../../src/rs/vertebra-http/src/lib.rs)[^src-vertebra-http-src-lib-rs] exports every top-level module as `pub mod` (gating `webtransport` behind `#[cfg(feature = "http3")]`, whereas `dispatcher::direct` in [`dispatcher/mod.rs`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs) is a private `mod direct;`). The modules in the first table below are wired directly into `main.rs`, `server.rs`, and [`response::handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs]. The remaining modules are standalone library components exercised by `src/rs/vertebra-http/tests/`, unit tests, and `benches/server_throughput.rs` (`vertebra-py` does not depend on `vertebra-http`).
 
 ## Wired into the server
 
@@ -124,6 +130,7 @@ sources:
 | [`http3.rs`](../../../../../src/rs/vertebra-http/src/http3.rs)[^src-vertebra-http-src-http3-rs] & [`webtransport.rs`](../../../../../src/rs/vertebra-http/src/webtransport.rs)[^src-vertebra-http-src-webtransport-rs] | `Http3Config` (`enabled: false`, `alt_svc_max_age: 86_400`, `max_concurrent_bidi_streams: 256`, `keep_alive_interval_ms: 15_000`, `enable_webtransport: true`, `max_webtransport_sessions: 64`), `Http3Error`, `format_alt_svc_header`, `strip_hop_by_hop_headers`, `build_quic_server_config`, `serve_http3_with_bridge`, `handle_h3_request`, `inject_alt_svc_header`, `WebTransportSession`, `WebTransportStream`, `WebTransportRegistry`, `WebTransportError` | Feature `http3`; `server::run_with_listener` validates TLS + feature flags (`validate_http3`), binds the UDP `quinn::Endpoint` (`bind_udp_listener`), enforces `max_body_size` pre-buffering, strips RFC 9114 hop-by-hop response headers, dispatches HTTP/3 requests via `response::handle_buffered`, routes extended `CONNECT` WebTransport sessions through `BatchBridge::submit_webtransport_session` (`Topology::Embedded`) or returns `501 Not Implemented` (`Topology::Shm`), and gates `Alt-Svc` on `ServerState::http3_port` |
 | [`tls.rs`](../../../../../src/rs/vertebra-http/src/tls.rs)[^src-vertebra-http-src-tls-rs] | `TlsAcceptor` (`from_config`, `accept`, `rustls_config`, `peer_identity`), `MtlsConfig`, `ClientAuthMode` | Acceptor used by `serve_tls` (feature `tls`) |
 | [`profile.rs`](../../../../../src/rs/vertebra-http/src/profile.rs)[^src-vertebra-http-src-profile-rs] | `ProfileConfig`, `ProfileEndpoint` (`try_handle_async`, `try_handle`) | Cached on `ServerState::profile_endpoint` (`VERTEBRA_PPROF_ENABLED` / `VERTEBRA_PPROF_TOKEN`); `response.rs` calls `try_handle_async` to serve `/debug/pprof/profile` (`tokio::task::spawn_blocking` CPU sampling with `pprof` under feature `profiling`) and `/debug/pprof/heap` (`404`) with constant-time Bearer token validation |
+| [`zpages.rs`](../../../../../src/rs/vertebra-http/src/zpages.rs)[^src-vertebra-http-src-zpages-rs] | `ZPagesConfig`, `ZPagesEndpoint` (`preflight`, `is_authorized`), `ZPagesRequest`, `WorkerZPageOutcome`, `ZPAGES_PATHS`, `ZPAGES_REQUEST_TIMEOUT` (`2 s`), `merge_shm_zpages_responses` | Cached on `ServerState::zpages_endpoint` (`VERTEBRA_ZPAGES_ENABLED` / `VERTEBRA_ZPAGES_TOKEN`); intercepts `/taskz`, `/debug/zpages/tasks`, `/statusz`, `/varz`, `/rpcz`, `/brokerz`, and `/debug/zpages/broker` with Bearer/loopback auth and fans out via `ZPAGES_HANDLER_ID` (`BridgeCorrelation::dispatch_single` or `ShmDispatcher::dispatch_to_worker`) |
 | [`discovery.rs`](../../../../../src/rs/vertebra-http/src/discovery.rs)[^src-vertebra-http-src-discovery-rs] | `WellKnownDiscoveryCache`, `CachedDiscoveryDoc`, `DiscoveryResponse` | Cached on `ServerState::discovery_cache`; `serve` answers `/.well-known/agent-card.json` and `/.well-known/mcp.json` (`ETag`/`304 Not Modified`) before backpressure |
 | [`payload.rs`](../../../../../src/rs/vertebra-http/src/payload.rs)[^src-vertebra-http-src-payload-rs] | `PayloadLimits`, `PayloadError`, `collect_bounded_body`, `decode_buffered_body`, `decode_request_payload` | Configured via `ServerConfig::payload_limits`; enforces streaming (`handle`) and pre-buffered (`handle_buffered`) byte caps (`413 Payload Too Large`) plus bounded `Content-Encoding` decompression |
 | [`multipart.rs`](../../../../../src/rs/vertebra-http/src/multipart.rs)[^src-vertebra-http-src-multipart-rs] | `MultipartLimits`, `MultipartPart`, `ParsedMultipart`, `parse_multipart_body` | Configured via `ServerConfig::multipart_limits`; `response.rs` invokes `parse_multipart_body` (`multer`) on `multipart/form-data` requests, returning `413` / `400` on limit or boundary errors |
@@ -175,3 +182,4 @@ Additional domain-specific modules:
 [^src-vertebra-http-src-dispatcher-direct-rs]: `src/rs/vertebra-http/src/dispatcher/direct.rs` — Rust implementation module (src/rs/vertebra-http/src/dispatcher/direct.rs).
 [^src-vertebra-http-src-webtransport-rs]: `src/rs/vertebra-http/src/webtransport.rs` — Rust implementation module (src/rs/vertebra-http/src/webtransport.rs).
 [^src-vertebra-core-src-logger-rs]: `src/rs/vertebra-core/src/logger.rs` — Rust implementation module (src/rs/vertebra-core/src/logger.rs).
+[^src-vertebra-http-src-zpages-rs]: `src/rs/vertebra-http/src/zpages.rs` — Rust implementation module (src/rs/vertebra-http/src/zpages.rs).

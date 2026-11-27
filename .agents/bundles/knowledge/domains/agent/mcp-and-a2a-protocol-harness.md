@@ -15,6 +15,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
   - by: agent:flow-executor
     at: "2026-11-19T04:32:00Z"
     commit: 6f76f8a7
@@ -87,7 +90,13 @@ sources:
     title: A2A 1.0 AgentCard JWS signing, dynamic URLs, and task lifecycle
   - id: src-agent-workflow-py
     resource: src/py/vertebra/agent/workflow.py
-    title: Workflow, PlanTree, and AgentRuntime confirmation gates
+    title: Workflow, WorkflowStep, WorkflowEngine, and WorkflowLiveState DAG orchestration
+  - id: src-agent-planning-py
+    resource: src/py/vertebra/agent/planning.py
+    title: Hierarchical PlanTree, PlanNode, and PlanNodeStatus goal decomposition
+  - id: src-agent-agents-py
+    resource: src/py/vertebra/agent/agents.py
+    title: Agent, AgentGroup, and AgentMessage multi-agent transfer primitives
   - id: src-vertebra-py-src-agent-rs
     resource: src/rs/vertebra-py/src/agent.rs
     title: Rust JSON-RPC classification and SchemaDigestCache fastpaths
@@ -96,7 +105,10 @@ sources:
     title: Rust WellKnownDiscoveryCache ArcSwap discovery fastpath
   - id: src-src-agent-index-ts
     resource: src/ts/vertebra-client/src/agent/index.ts
-    title: TypeScript McpClient, A2aClient, and registerWebMCPTools
+    title: TypeScript McpClient, A2aClient, AgentStreamClient, and WorkflowLiveSubscriber
+  - id: src-ts-webmcp-ts
+    resource: src/ts/vertebra-client/src/webmcp.ts
+    title: TypeScript registerWebMCPTools browser ModelContext bridge
   - id: src-agent-okf-py
     resource: src/py/vertebra/agent/okf.py
     title: Pure-Python OKF v0.2 bundle parser, validator, digester, and ZIP serializer
@@ -139,12 +151,12 @@ Promoted tasks fork independent `CancellationToken` state in `MCPTaskStore` / `C
 
 ## 3. A2A 1.0, Workflows & Native FFI Acceleration
 
-- **A2A 1.0 & TS Client ([`a2a/service.py`](../../../../../src/py/vertebra/agent/a2a/service.py)[^src-agent-a2a-service-py], [`agent/index.ts`](../../../../../src/ts/vertebra-client/src/agent/index.ts)[^src-src-agent-index-ts])**: Dynamic request-origin `/.well-known/agent-card.json` discovery, RFC 7515 JWS (`HS256`) card signing, and owner-isolated A2A tasks (`A2ATaskStore` or `CacheA2ATaskStore` + `CacheSseStreamBroker` via `A2AConfig.cache_url`). Includes `stream_message` `finally` disconnect cleanup, DNS-pinned SSRF validation (`PushNotificationDispatcher.validate_webhook_url`), and stateless TS `McpClient`, `A2aClient`, and `registerWebMCPTools`.
-- **Workflows & Native Caches ([`workflow.py`](../../../../../src/py/vertebra/agent/workflow.py)[^src-agent-workflow-py], [`agent.rs`](../../../../../src/rs/vertebra-py/src/agent.rs)[^src-vertebra-py-src-agent-rs], [`discovery.rs`](../../../../../src/rs/vertebra-http/src/discovery.rs)[^src-vertebra-http-src-discovery-rs])**: `Workflow`, `WorkflowLiveState`, `PlanTree`, and `AgentRuntime` pair with PyO3 `classify_jsonrpc_frame`, `SchemaDigestCache`, and lock-free `WellKnownDiscoveryCache` `304` handling.
+- **A2A 1.0 & TS Client ([`a2a/service.py`](../../../../../src/py/vertebra/agent/a2a/service.py)[^src-agent-a2a-service-py], [`agent/index.ts`](../../../../../src/ts/vertebra-client/src/agent/index.ts)[^src-src-agent-index-ts], [`webmcp.ts`](../../../../../src/ts/vertebra-client/src/webmcp.ts)[^src-ts-webmcp-ts])**: Dynamic request-origin `/.well-known/agent-card.json` discovery, RFC 7515 JWS (`HS256`) card signing, and owner-isolated A2A tasks (`A2ATaskStore` or `CacheA2ATaskStore` + `CacheSseStreamBroker` via `A2AConfig.cache_url`). Includes `stream_message` `finally` disconnect cleanup, DNS-pinned SSRF validation (`PushNotificationDispatcher.validate_webhook_url`), stateless TS `McpClient`, `A2aClient`, `AgentStreamClient`, and `WorkflowLiveSubscriber` in `agent/index.ts`, and `registerWebMCPTools` in `webmcp.ts`.
+- **Workflows, Planning, Agents & Native Caches ([`workflow.py`](../../../../../src/py/vertebra/agent/workflow.py)[^src-agent-workflow-py], [`planning.py`](../../../../../src/py/vertebra/agent/planning.py)[^src-agent-planning-py], [`agents.py`](../../../../../src/py/vertebra/agent/agents.py)[^src-agent-agents-py], [`agent.rs`](../../../../../src/rs/vertebra-py/src/agent.rs)[^src-vertebra-py-src-agent-rs], [`discovery.rs`](../../../../../src/rs/vertebra-http/src/discovery.rs)[^src-vertebra-http-src-discovery-rs])**: `Workflow`, `WorkflowStep`, `WorkflowStepResult`, `WorkflowEngine`, and `WorkflowLiveState` (`workflow.py`), hierarchical `PlanTree`/`PlanNode` (`planning.py`), multi-agent `Agent`/`AgentGroup`/`AgentMessage` (`agents.py`), and `AgentRuntime` (`runtime.py`) pair with PyO3 `classify_jsonrpc_frame`, `SchemaDigestCache`, and lock-free `WellKnownDiscoveryCache` `304` handling.
 
 ## 4. OKF v0.2 Bundles & Knowledge Catalog
 
-- **OKF v0.2 Serializer ([`okf.py`](../../../../../src/py/vertebra/agent/okf.py)[^src-agent-okf-py])**: `OkfDocument` and `OkfBundle` parse canonical YAML frontmatter without `PyYAML` and scan fenced blocks safely. They enforce reserved-file rules (`index.md`, `log.md`), `120,832`-byte ceilings, symlink/traversal guards, canonical SHA-256 digests, and sorted POSIX ZIP export (`1980-01-01`).
+- **OKF v0.2 Serializer ([`okf.py`](../../../../../src/py/vertebra/agent/okf.py)[^src-agent-okf-py])**: `OkfDocument` and `OkfBundle` parse canonical YAML frontmatter without `PyYAML` (delegating YAML parsing/emission to `agent/_yaml.py`) and scan fenced blocks safely. They enforce reserved-file rules (`index.md`, `log.md`), `120,832`-byte ceilings, symlink/traversal guards, canonical SHA-256 digests, and sorted POSIX ZIP export (`1980-01-01`).
 - **Dataplex v1 Clients ([`knowledge_catalog.py`](../../../../../src/py/vertebra/agent/knowledge_catalog.py)[^src-agent-knowledge-catalog-py])**: `SyncKnowledgeCatalogClient` and `AsyncKnowledgeCatalogClient` wrap native `GcpTokenCache` and HTTP/2 transport (`gcp_http2_request_*`) with single `401` retry and `x-goog-user-project` forwarding. They support LRO `entryGroups` creation, `resolve_context_set` label matching, `view="ALL"` entry reads, `aspectKeys` updates, `<= 250`-entry `sync_bundle`, and `global:searchEntries`.
 
 [^agent-context]: `src/py/vertebra/agent/core/context.py::AgentContext` — Trusted constructors, independent forks, and binding restoration.
@@ -166,9 +178,12 @@ Promoted tasks fork independent `CancellationToken` state in `MCPTaskStore` / `C
 [^src-agent-mcp-bridge-py]: `src/py/vertebra/agent/mcp/bridge.py` — Dual-mode HTTP/SSE bridge and `OidcTokenSource`.
 [^src-agent-mcp-skills-py]: `src/py/vertebra/agent/mcp/skills.py` — `SkillCatalog` disclosure and `skill://` resolution.
 [^src-agent-a2a-service-py]: `src/py/vertebra/agent/a2a/service.py` — A2A 1.0 `AgentCard` signing and task execution.
-[^src-agent-workflow-py]: `src/py/vertebra/agent/workflow.py` — `Workflow`, `PlanTree`, and `AgentRuntime`.
+[^src-agent-workflow-py]: `src/py/vertebra/agent/workflow.py` — `Workflow`, `WorkflowStep`, `WorkflowEngine`, and `WorkflowLiveState`.
+[^src-agent-planning-py]: `src/py/vertebra/agent/planning.py` — `PlanTree`, `PlanNode`, and `PlanNodeStatus` hierarchical decomposition.
+[^src-agent-agents-py]: `src/py/vertebra/agent/agents.py` — `Agent`, `AgentGroup`, and `AgentMessage` transfer primitives.
 [^src-vertebra-py-src-agent-rs]: `src/rs/vertebra-py/src/agent.rs` — Rust JSON-RPC classifier and `SchemaDigestCache`.
 [^src-vertebra-http-src-discovery-rs]: `src/rs/vertebra-http/src/discovery.rs` — Rust `WellKnownDiscoveryCache` `ArcSwap` handler.
-[^src-src-agent-index-ts]: `src/ts/vertebra-client/src/agent/index.ts` — TypeScript `McpClient`, `A2aClient`, and `registerWebMCPTools`.
+[^src-src-agent-index-ts]: `src/ts/vertebra-client/src/agent/index.ts` — TypeScript `McpClient`, `A2aClient`, `AgentStreamClient`, and `WorkflowLiveSubscriber`.
+[^src-ts-webmcp-ts]: `src/ts/vertebra-client/src/webmcp.ts` — TypeScript `registerWebMCPTools` browser ModelContext bridge.
 [^src-agent-okf-py]: `src/py/vertebra/agent/okf.py` — Pure-Python OKF v0.2 parser, validator, digester, and ZIP archive serializer.
 [^src-agent-knowledge-catalog-py]: `src/py/vertebra/agent/knowledge_catalog.py` — `SyncKnowledgeCatalogClient` and `AsyncKnowledgeCatalogClient` over Dataplex v1.

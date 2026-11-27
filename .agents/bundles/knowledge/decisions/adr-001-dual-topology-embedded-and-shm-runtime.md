@@ -15,6 +15,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
+  - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
   - by: agent:flow-setup
@@ -41,7 +44,7 @@ sources:
 # ADR-001: Dual-Topology Embedded and Shared-Memory Runtime
 
 <!-- truth: start -->
-- **Decision**: Support two first-class execution topologies — `Topology::Embedded` (in-process `BatchBridge` with `SO_REUSEPORT` multi-process supervision) and `Topology::Shm` (central Rust ingress + lock-free `MpmcRing`/`TieredRingSet` worker processes) — with `Topology::Auto` selecting `Shm` when `workers > 1` on POSIX standard-GIL Python and `Embedded` for single-worker or free-threaded (`3.14t`/`3.15t`) runtimes.
+- **Decision**: Support two first-class execution topologies — `Topology::Embedded` (in-process `BatchBridge` with `SO_REUSEPORT` multi-process supervision) and `Topology::Shm` (central Rust ingress + lock-free `MpmcRing`/`TieredRingSet` worker processes) — with `auto` (`--topology auto` / `VERTEBRA_TOPOLOGY=auto`) selecting `Shm` when `workers > 1` on POSIX standard-GIL Python and `Embedded` for single-worker or free-threaded (`3.14t`/`3.15t`) runtimes.
 - **Status**: Accepted (`v0.2.0`).
 <!-- truth: end -->
 
@@ -63,7 +66,7 @@ Python web servers face distinct concurrency constraints across single-worker de
 ## Consequences
 
 - `vertebra-py` exposes identical `Request`, `Response`, `RequestBatch`, and `drive_{asgi,rsgi,wsgi}_batch` primitives regardless of whether batches arrive from `BatchBridge` (`Embedded`) or `RingPair` (`Shm`).
-- `ServerLaunchEnv.to_environ()` (`src/py/vertebra/cli/_launch.py`) and `ServerConfig::from_env()` (`src/rs/vertebra-http/src/config.rs`) resolve `Topology::Auto` deterministically and honor explicit `--topology embedded|shm` overrides.
+- `ServerLaunchEnv.to_environ()` (`src/py/vertebra/cli/_launch.py`) and `ServerConfig::from_env()` (`src/rs/vertebra-http/src/config.rs`) resolve `"auto"` deterministically into `Topology::Embedded` or `Topology::Shm` and honor explicit `--topology embedded|shm` overrides.
 
 Provenance sources: [^src-vertebra-http-src-main-rs], [^src-vertebra-http-src-config-rs], [^src-vertebra-core-src-bridge-rs], [^src-vertebra-core-src-transport-ring-pair-rs], [^src-cli-launch-py].
 

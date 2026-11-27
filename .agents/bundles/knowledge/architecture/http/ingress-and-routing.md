@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
   - by: agent:flow-archive
     at: "2026-11-14T22:49:00Z"
     commit: ff9f78cb
@@ -92,6 +95,9 @@ sources:
   - id: src-vertebra-http-src-webtransport-rs
     resource: src/rs/vertebra-http/src/webtransport.rs
     title: "Rust implementation module (src/rs/vertebra-http/src/webtransport.rs)"
+  - id: src-vertebra-http-src-zpages-rs
+    resource: src/rs/vertebra-http/src/zpages.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/zpages.rs)"
 ---
 
 # HTTP Ingress, Request Pipeline & Native Routing
@@ -118,7 +124,7 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 
 ## Accept Loop & Connection Lifecycle (`server.rs`)
 
-- **Listener & `ServerState`**: [`run_with_listener`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] validates HTTP/3, binds TCP (`SO_REUSEADDR`, Unix `SO_REUSEPORT`, `TCP_NODELAY`, backlog 2,048), and shares one `ServerState` holding the router, dispatcher, config, batcher shards, health/profile/discovery caches, SSE/WS/PubSub registries, compiled offloads, and optional `http3_port`.
+- **Listener & `ServerState`**: [`run_with_listener`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] / `run_with_listener_state` validates HTTP/3, binds TCP (`SO_REUSEADDR`, Unix `SO_REUSEPORT`, `TCP_NODELAY`, backlog 2,048), and shares one `ServerState` holding the router, dispatcher, config, batcher shards, health/profile/z-pages/discovery caches, SSE/WS/PubSub registries, compiled offloads, and optional `http3_port`.
 - **HTTP/1.1, h2c & TLS**: Cleartext defaults directly to Hyper `http1::Builder` (`max_buf_size(65_536)`, `pipeline_flush(false)`, `header_read_timeout` 10 s) without `MSG_PEEK`; enabling `VERTEBRA_H2C` peeks for `h2c` prior knowledge. TLS ([`tls.rs`](../../../../../src/rs/vertebra-http/src/tls.rs)[^src-vertebra-http-src-tls-rs]) uses `rustls` ring provider with ALPN `h2`/`http/1.1` and optional/required mTLS (`WebPkiClientVerifier`).
 - **HTTP/3 & WebTransport**: Under `--features http3` + TLS, binds UDP with `quinn::Endpoint`, records `state.http3_port`, and serves `http3::serve_http3_with_bridge` (body pre-buffering, RFC 9114 hop-by-hop header stripping, `response::handle_buffered`, and extended `CONNECT` WebTransport sessions via [`webtransport.rs`](../../../../../src/rs/vertebra-http/src/webtransport.rs)[^src-vertebra-http-src-webtransport-rs] in `Embedded` mode; `501` in `Shm`).
 - **Graceful Drain**: `GracefulShutdown` watches TLS/h2c/AutoBuilder tasks while `h1_drain_tx` drains upgradeable HTTP/1.1 connections up to `drain_timeout` (15 s), then closes SSE/WS registries, shuts down QUIC, and flushes `AccessLogger` (2 s).
@@ -130,15 +136,16 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 1. **Dev HMR**: `/__vertebra/hmr` and `/__vertebra/hmr/signal` when `VERTEBRA_DEV=1` ([`hmr.rs`](../../../../../src/rs/vertebra-http/src/hmr.rs)[^src-vertebra-http-src-hmr-rs]).
 2. **Health Probes**: `/healthz`, `/livez`, `/readyz`, and `/__vertebra/health` (with live `BackpressureMetricsSnapshot`).
 3. **CPU Profiling**: `/debug/pprof/profile` when `VERTEBRA_PPROF_ENABLED=1` and Bearer token matches (`spawn_blocking` under `--features profiling`; `404` otherwise).
-4. **Discovery Manifests**: `GET`/`HEAD` for `/.well-known/*` (`ETag`/`304`).
-5. **SSE & WebSocket Pub/Sub**: `/__vertebra/sse/{topic}` (`PubSubBroker`[^src-vertebra-http-src-pubsub-rs]) and `/__vertebra/ws/{topic}` or `ws_mounts` ([`ws_mount.rs`](../../../../../src/rs/vertebra-http/src/ws_mount.rs)[^src-vertebra-http-src-ws-mount-rs]; `426` without `Upgrade`).
-6. **CORS Preflight Offload**: Answers `OPTIONS` preflights with `Origin` + `Access-Control-Request-Method` without acquiring permits.
-7. **OpenAPI Cache Offload**: Serves pre-rendered OpenAPI JSON with `ETag`/`304`.
-8. **Static Asset Mounts**: Serves pre-compressed sidecars, `ETag`/`304`, `Range`/`206`, and SPA fallback via `AssetManager`.
-9. **Admission**: Acquires a `BackpressureController` permit (`503`/`429` with `retry-after: 1` on rejection).
-10. **Route Lookup**: `Router::lookup_method` returns `HandlerId`, `404`, or `405` with `allow`.
-11. **Body Validation & Batching**: Fast-paths empty bodies; collects bounded bodies and decompresses `gzip`/`deflate`/`br`/`zstd` (`413` on overflow), validates multipart limits (`413`/`400`) and `max_grpc_message_size`, compact-encodes headers, and enqueues on a `RequestBatcher` shard.
-12. **Response Offloads & Logging**: Applies CORS headers and response compression (with `Vary`), updates the circuit breaker, writes `AccessLogEntry` via `AsyncLogCore`, and attaches `Alt-Svc` only if `http3_port` is live.
+4. **Z-Pages Diagnostics**: `/taskz`, `/debug/zpages/tasks`, `/statusz`, `/varz`, `/rpcz`, `/brokerz`, and `/debug/zpages/broker` when `VERTEBRA_ZPAGES_ENABLED=1` ([`zpages.rs`](../../../../../src/rs/vertebra-http/src/zpages.rs)[^src-vertebra-http-src-zpages-rs]; authorized via constant-time `VERTEBRA_ZPAGES_TOKEN` Bearer secret or loopback bind, dispatched via `ZPAGES_HANDLER_ID` with a `2 s` timeout).
+5. **Discovery Manifests**: `GET`/`HEAD` for `/.well-known/*` (`ETag`/`304`).
+6. **SSE & WebSocket Pub/Sub**: `/__vertebra/sse/{topic}` (`PubSubBroker`[^src-vertebra-http-src-pubsub-rs]) and `/__vertebra/ws/{topic}` or `ws_mounts` ([`ws_mount.rs`](../../../../../src/rs/vertebra-http/src/ws_mount.rs)[^src-vertebra-http-src-ws-mount-rs]; `426` without `Upgrade`).
+7. **CORS Preflight Offload**: Answers `OPTIONS` preflights with `Origin` + `Access-Control-Request-Method` without acquiring permits.
+8. **OpenAPI Cache Offload**: Serves pre-rendered OpenAPI JSON with `ETag`/`304`.
+9. **Static Asset Mounts**: Serves pre-compressed sidecars, `ETag`/`304`, `Range`/`206`, and SPA fallback via `AssetManager`.
+10. **Admission**: Acquires a `BackpressureController` permit (`503`/`429` with `retry-after: 1` on rejection).
+11. **Route Lookup**: `Router::lookup_method` returns `HandlerId`, `404`, or `405` with `allow`.
+12. **Body Validation & Batching**: Fast-paths empty bodies; collects bounded bodies and decompresses `gzip`/`deflate`/`br`/`zstd` (`413` on overflow), validates multipart limits (`413`/`400`) and `max_grpc_message_size`, compact-encodes headers, and enqueues on a `RequestBatcher` shard.
+13. **Response Offloads & Logging**: Applies CORS headers and response compression (with `Vary`), updates the circuit breaker, writes `AccessLogEntry` via `AsyncLogCore`, and attaches `Alt-Svc` only if `http3_port` is live.
 
 ## Native Routing (`routing.rs`)
 
@@ -153,10 +160,11 @@ The `vertebra-server` binary ([`main.rs`](../../../../../src/rs/vertebra-http/sr
 | `VERTEBRA_HOST`, `VERTEBRA_PORT` | `bind` | `127.0.0.1:8000` |
 | `VERTEBRA_REUSE_PORT`, `VERTEBRA_DEV`, `VERTEBRA_H2C` | `reuse_port`, `dev_mode`, `enable_h2c_prior_knowledge` | `false` (`reuse_port` auto-enabled for multi-worker `Embedded`) |
 | `VERTEBRA_OFFLOAD_CONFIG` | CORS, compression, static, OpenAPI, discovery, limits, access log, profile JSON | auto-extracted from `app.state` |
-| `VERTEBRA_MAX_BODY_SIZE`, `VERTEBRA_MAX_DECOMPRESSED_SIZE`, `VERTEBRA_DECOMPRESSION` | `payload_limits` | `10 MiB`, `50 MiB`, `true` |
+| `VERTEBRA_MAX_BODY_SIZE`, `VERTEBRA_MAX_DECOMPRESSED_SIZE` | `payload_limits` | `10 MiB`, `32 MiB` |
 | `VERTEBRA_MULTIPART_MAX_{FIELDS,FILE_SIZE,TOTAL_SIZE}` | `multipart_limits` | `128`, `16 MiB`, `32 MiB` |
 | `VERTEBRA_GRPC_MAX_MESSAGE_SIZE` | `max_grpc_message_size` | `4 MiB` |
 | `VERTEBRA_PPROF_ENABLED`, `VERTEBRA_PPROF_TOKEN`, `VERTEBRA_ACCESS_LOG` | `profile`, `access_log` | `false`, `None`, `None` |
+| `VERTEBRA_ZPAGES_ENABLED`, `VERTEBRA_ZPAGES_TOKEN` | `zpages` | `false`, `None` (loopback-only when unset) |
 | `VERTEBRA_TLS_CERT`, `VERTEBRA_TLS_KEY` | `tls` | `None` |
 | `VERTEBRA_HTTP3*`, `VERTEBRA_WEBTRANSPORT*` | `http3` (`--features http3` + TLS) | `false`, `86400s`, `256` streams, WT enabled (`64` max) |
 | `VERTEBRA_H2_MAX_HEADER_LIST_SIZE`, `VERTEBRA_HEADER_READ_TIMEOUT_MS`, `VERTEBRA_DRAIN_TIMEOUT_MS`, `VERTEBRA_STREAM_QUEUE_DEPTH` | connection/stream bounds | `65536`, `10000 ms`, `15000 ms`, `64` |
@@ -189,3 +197,4 @@ Provenance sources: [^src-vertebra-http-src-cors-rs], [^src-vertebra-http-src-co
 [^src-vertebra-http-src-ws-mount-rs]: `src/rs/vertebra-http/src/ws_mount.rs` — Rust implementation module (src/rs/vertebra-http/src/ws_mount.rs).
 [^src-vertebra-http-src-pubsub-rs]: `src/rs/vertebra-http/src/pubsub.rs` — Rust implementation module (src/rs/vertebra-http/src/pubsub.rs).
 [^src-vertebra-http-src-webtransport-rs]: `src/rs/vertebra-http/src/webtransport.rs` — Rust implementation module (src/rs/vertebra-http/src/webtransport.rs).
+[^src-vertebra-http-src-zpages-rs]: `src/rs/vertebra-http/src/zpages.rs` — Rust implementation module (src/rs/vertebra-http/src/zpages.rs).

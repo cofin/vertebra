@@ -15,6 +15,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
+  - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
   - by: agent:flow-setup
@@ -30,6 +33,9 @@ sources:
   - id: src-tsup-config-ts
     resource: src/ts/vertebra-client/tsup.config.ts
     title: "TypeScript client module (src/ts/vertebra-client/tsup.config.ts)"
+  - id: src-sync-bundle-mjs
+    resource: src/ts/vertebra-client/scripts/sync-bundle.mjs
+    title: "Client bundle sync script (src/ts/vertebra-client/scripts/sync-bundle.mjs)"
   - id: src-build-import-map-py
     resource: src/py/vertebra/build/_import_map.py
     title: "Python implementation module (src/py/vertebra/build/_import_map.py)"
@@ -59,13 +65,14 @@ Full-stack Python + TypeScript applications frequently suffer from version skew 
 
 ## Consequences
 
-- `pyproject.toml` configures `[project] name = "vertebra-core"` and `[tool.maturin] python-packages = ["vertebra"]`, while `importlib.metadata.version("vertebra-core")` resolves the installed package version.
-- `tsup.config.ts` and `ImportMapGenerator.sync_wheel_client` copy all 17 `@vertebra/client` entrypoints and `.d.ts` declarations into `src/py/vertebra/server/_js/bundle/` prior to building wheels, and user documentation never instructs running `npm install @vertebra/client` or `bun add @vertebra/client`.
+- `pyproject.toml` configures `[project] name = "vertebra-core"` (`0.4.0`), `[tool.maturin] python-packages = ["vertebra"]`, and `[tool.maturin] include` for `src/py/vertebra/server/_js/bundle/**/*` (in both `sdist` and `wheel`), while `importlib.metadata.version("vertebra-core")` resolves the installed package version.
+- `src/ts/vertebra-client/package.json` (`0.4.0`, lockstep with `vertebra-core`) builds all 17 `@vertebra/client` ESM entrypoints and `.d.ts` declarations via `tsup` (`tsup.config.ts`) and syncs `dist/` into `src/py/vertebra/server/_js/bundle/` via `bun scripts/sync-bundle.mjs` prior to building wheels. At project setup/build time, `ImportMapGenerator.sync_wheel_client(output_dir)` copies the wheel-bundled `server/_js/bundle/` directory and emits a version-synchronized `package.json` (via `_resolve_client_version()`) into `<output_dir>/client/`, and user documentation never instructs running `npm install @vertebra/client` or `bun add @vertebra/client`.
 
-Provenance sources: [^src-pyproject-toml], [^src-package-json], [^src-tsup-config-ts], [^src-build-import-map-py], [^src-framework-dev-py].
+Provenance sources: [^src-pyproject-toml], [^src-package-json], [^src-tsup-config-ts], [^src-sync-bundle-mjs], [^src-build-import-map-py], [^src-framework-dev-py].
 
 [^src-pyproject-toml]: `pyproject.toml` — Python package metadata, dependencies, and tool configuration.
 [^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).
 [^src-tsup-config-ts]: `src/ts/vertebra-client/tsup.config.ts` — TypeScript client module (src/ts/vertebra-client/tsup.config.ts).
+[^src-sync-bundle-mjs]: `src/ts/vertebra-client/scripts/sync-bundle.mjs` — Client bundle sync script copying `dist/` into `src/py/vertebra/server/_js/bundle/`.
 [^src-build-import-map-py]: `src/py/vertebra/build/_import_map.py` — Python implementation module (src/py/vertebra/build/_import_map.py).
 [^src-framework-dev-py]: `src/py/vertebra/framework/dev.py` — Python implementation module (src/py/vertebra/framework/dev.py).

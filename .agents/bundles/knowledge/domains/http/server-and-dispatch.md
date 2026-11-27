@@ -12,6 +12,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
   - by: agent:flow-archive
     at: "2026-11-14T22:49:00Z"
     commit: ff9f78cb
@@ -82,6 +85,9 @@ sources:
   - id: src-vertebra-http-src-assets-rs
     resource: src/rs/vertebra-http/src/assets.rs
     title: "Rust implementation module (src/rs/vertebra-http/src/assets.rs)"
+  - id: src-vertebra-http-src-zpages-rs
+    resource: src/rs/vertebra-http/src/zpages.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/zpages.rs)"
 ---
 
 # Rust HTTP Ingress, Batching & Dispatch Domain
@@ -98,9 +104,10 @@ sources:
 
 | Symbol | Module | Responsibility |
 |---|---|---|
-| [`ServerConfig`](../../../../../src/rs/vertebra-http/src/config.rs)[^src-vertebra-http-src-config-rs] / `Topology` (`Embedded`, `Shm`) / `WorkerConfig` / `TlsConfig` / `StaticMountConfig` / `OpenApiCacheConfig` | `vertebra_http::config` | Environment-driven configuration (`ServerConfig::from_env`, `apply_offload_json`, `enable_http3`, `validate_http3`). |
-| [`ServerState`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] / `StaticAssetMount` / `CompiledOpenApiCache` / `bind_listener` / `run_with_listener` / `run_with_collector` | `vertebra_http::server` | `SO_REUSEADDR` / `SO_REUSEPORT` listener binding (`listen(2048)`), `TCP_NODELAY`, zero-peek tuned `http1::Builder` (or opt-in `VERTEBRA_H2C=1` `AutoBuilder`), optional TLS + UDP HTTP/3 (`http3_port`), cached offloads, and graceful drain. |
-| [`handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs] / `handle_buffered` / `ResponseBody` / `HttpResponse` / `FrameReceiver` / `full_body` / `stream_body` | `vertebra_http::response` (`vertebra_http::body`) | Shared TCP/QUIC ingress pipeline (`HMR` -> health -> profile -> discovery -> CORS preflight -> OpenAPI -> static mounts -> admission -> route lookup -> `collect_bounded_body` / `decode_request_payload` -> batcher -> offloads -> `Alt-Svc` -> circuit breaker -> access log). |
+| [`ServerConfig`](../../../../../src/rs/vertebra-http/src/config.rs)[^src-vertebra-http-src-config-rs] / `Topology` (`Embedded`, `Shm`) / `WorkerConfig` / `TlsConfig` / `StaticMountConfig` / `OpenApiCacheConfig` / `ZPagesConfig` | `vertebra_http::config` | Environment-driven configuration (`ServerConfig::from_env`, `apply_offload_json`, `enable_http3`, `validate_http3`, `compute_batcher_shard_count`). |
+| [`ServerState`](../../../../../src/rs/vertebra-http/src/server.rs)[^src-vertebra-http-src-server-rs] / `StaticAssetMount` / `CompiledOpenApiCache` / `bind_listener` / `run_with_listener` / `run_with_listener_state` / `run_with_collector` / `run_with_collector_state` | `vertebra_http::server` | `SO_REUSEADDR` / `SO_REUSEPORT` listener binding (`listen(2048)`), `TCP_NODELAY`, zero-peek tuned `http1::Builder` (or opt-in `VERTEBRA_H2C=1` `AutoBuilder`), optional TLS + UDP HTTP/3 (`http3_port`), cached offloads/z-pages, and graceful drain. |
+| [`handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs] / `handle_buffered` / `ResponseBody` / `HttpResponse` / `FrameReceiver` / `full_body` / `stream_body` | `vertebra_http::response` (`vertebra_http::body`) | Shared TCP/QUIC ingress pipeline (`HMR` -> health -> profile -> z-pages -> discovery -> SSE/WS -> CORS preflight -> OpenAPI -> static mounts -> admission -> route lookup -> `collect_bounded_body` / `decode_buffered_body` -> batcher -> offloads -> `Alt-Svc` -> circuit breaker -> access log). |
+| [`ZPagesEndpoint`](../../../../../src/rs/vertebra-http/src/zpages.rs)[^src-vertebra-http-src-zpages-rs] / `ZPagesConfig` / `ZPagesRequest` / `WorkerZPageOutcome` / `merge_shm_zpages_responses` | `vertebra_http::zpages` | Opt-in `/taskz`, `/debug/zpages/tasks`, `/statusz`, `/varz`, `/rpcz`, `/brokerz`, and `/debug/zpages/broker` preflight auth (Bearer token or loopback) and SHM worker fan-out merging. |
 | [`CorsOffloadConfig`](../../../../../src/rs/vertebra-http/src/cors.rs)[^src-vertebra-http-src-cors-rs] / `CompiledCorsOffload` / `append_vary_token` | `vertebra_http::cors` | Zero-GIL CORS preflight and response header injection with multi-token `Vary` preservation. |
 | [`CompressionOffloadConfig`](../../../../../src/rs/vertebra-http/src/compression.rs)[^src-vertebra-http-src-compression-rs] / `CompressionBackend` | `vertebra_http::compression` | Zero-GIL `Zstd`/`Brotli`/`Gzip` response compression skipping incompressible `Content-Type`s and preserving `Vary`. |
 | [`TlsAcceptor`](../../../../../src/rs/vertebra-http/src/tls.rs)[^src-vertebra-http-src-tls-rs] / `MtlsConfig` / `ClientAuthMode` / `ClientIdentity` | `vertebra_http::tls` (feature `tls`) | PEM loading, optional mTLS via `WebPkiClientVerifier`, ALPN `h2` and `http/1.1`, `peer_identity`, `rustls_config`. |
@@ -109,18 +116,18 @@ sources:
 
 | Symbol | Module | Responsibility |
 |---|---|---|
-| [`HandlerId`](../../../../../src/rs/vertebra-http/src/routing.rs)[^src-vertebra-http-src-routing-rs] (`u64`) / `MOUNT_HANDLER_BASE` / `handler_id` / `RouteEntry` / `RouteTable` | `vertebra_http::routing` | FNV-1a handler IDs shared with Python, `MOUNT_HANDLER_BASE \| mount_idx` across `GET`..`HEAD`/`OPTIONS`, and startup builder (`insert`, `insert_with_id`, `insert_mount_prefix_indexed`, `into_entries`). |
+| [`HandlerId`](../../../../../src/rs/vertebra-http/src/routing.rs)[^src-vertebra-http-src-routing-rs] (`u64`) / `MOUNT_HANDLER_BASE` / `ZPAGES_HANDLER_ID` / `handler_id` / `RouteEntry` / `RouteTable` | `vertebra_http::routing` | FNV-1a handler IDs shared with Python, `MOUNT_HANDLER_BASE \| mount_idx` across `GET`..`HEAD`/`OPTIONS`, reserved `ZPAGES_HANDLER_ID`, and startup builder (`insert`, `insert_with_id`, `insert_mount_prefix_indexed`, `into_entries`). |
 | [`Router`](../../../../../src/rs/vertebra-http/src/routing.rs) / `RouteMatch` / `RouterError` (`NotFound`, `MethodNotAllowed`) | `vertebra_http::routing` | One `matchit 0.9` tree per method via `vertebra_core::router::normalize_typed_path`; zero-alloc `lookup_method` and `allowed_methods`. |
 
 ## Batching, dispatch, and correlation
 
 | Symbol | Module | Responsibility |
 |---|---|---|
-| [`RequestBatcher`](../../../../../src/rs/vertebra-http/src/batcher.rs)[^src-vertebra-http-src-batcher-rs] / `BatchLimit` / `PendingRequest` / `PendingResponse` / `method_tag` / `http_version_tag` | `vertebra_http::batcher` | Double-buffered opportunistic batcher (`spawn_pool`, `with_shard`; `1..8` shards, capacity `16,384`, `BatchLimit::default()` = `64`) draining ready requests and gating `yield_now().await` on `dispatcher.in_flight() > 0 \|\| !rx.is_empty()` into `Dispatcher::dispatch_requests_from_shard`. |
-| [`Dispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs)[^src-vertebra-http-src-dispatcher-mod-rs] / `DispatchBackend` (`Direct`, `Bridge`, `Shm`) / `BridgeCorrelation` | `vertebra_http::dispatcher` | Routes batches by backend; `BridgeCorrelation` uses 8-shard `InFlightRequests`, zero-copy `BatchBridge::submit_inprocess_batch`, separate unary `ResponseSink` and bounded `StreamSink` completion, `register_pending` allocation with `503` overflow, and `spawn_bridge_sweeper`. |
-| [`ShmDispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs)[^src-vertebra-http-src-dispatcher-shm-rs] | `vertebra_http::dispatcher::shm` | Lock-free 1:1 shard-sticky worker routing (`home = shard_idx % worker_count`, MRU warm-worker affinity at `prev_active == 0`, least-loaded spillover when unhealthy/full/`in_flight >= 64`), per-worker `healthy` and `in_flight` state, direct `try_send_with` / `send_with` slot serialization (`VQOV` overflow spill for `> 64 KiB`), Dekker `notify_request_if_sleeping`, and 8 `Mutex<InFlightRequests>` shards. |
-| [`InFlightRequests`](../../../../../src/rs/vertebra-http/src/dispatcher/correlation.rs)[^src-vertebra-http-src-dispatcher-correlation-rs] / `CorrelationId` | `vertebra_http::dispatcher::correlation` | Generation-tagged slab: `allocate_batch`, `insert`, `complete`, `complete_many`, `sweep_expired`, `sweep_for_worker`. |
-| [`spawn_response_readers`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs)[^src-vertebra-http-src-dispatcher-shm-reader-rs] | `vertebra_http::dispatcher::shm_reader` | Per-worker `AsyncFd` reader using flag-aware `drain_frames_with`, owned stream frames before awaited delivery, unary completion batching, shutdown-aware backpressure, and Dekker sleep handshakes. |
+| [`RequestBatcher`](../../../../../src/rs/vertebra-http/src/batcher.rs)[^src-vertebra-http-src-batcher-rs] / `BatchLimit` / `PendingRequest` / `PendingResponse` / `method_tag` / `http_version_tag` | `vertebra_http::batcher` | Double-buffered opportunistic batcher (`spawn_pool`, `with_shard`; `1..8` shards, capacity `16,384`, `BatchLimit::default()` = `64`) draining ready requests and gating `yield_now().await` on `dispatcher.in_flight() > 0 \|\| !rx.is_empty()` into `Dispatcher::dispatch_requests_from_shard_with_scratch`. |
+| [`Dispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/mod.rs)[^src-vertebra-http-src-dispatcher-mod-rs] / `DispatchBackend` (`Direct`, `Bridge`, `Shm`) / `BridgeCorrelation` | `vertebra_http::dispatcher` | Routes batches by backend; `BridgeCorrelation` uses 8 `Mutex<InFlightRequests>` shards, zero-copy `BatchBridge::submit_inprocess_batch`, direct `BatchResponseSink`/`ResponseSink` (`complete_many` / `complete_bridge_batch`) and bounded `StreamSink` completion, `register_pending` / `dispatch_single`, and `spawn_bridge_sweeper`. |
+| [`ShmDispatcher`](../../../../../src/rs/vertebra-http/src/dispatcher/shm.rs)[^src-vertebra-http-src-dispatcher-shm-rs] / `ShmDispatchScratch` / `ShmTargetError` | `vertebra_http::dispatcher::shm` | Lock-free 1:1 shard-sticky worker routing (`home = shard_idx % worker_count`, MRU warm-worker affinity at `prev_active == 0`, least-loaded spillover when unhealthy/full/`in_flight > 64`), per-worker `healthy` and `in_flight` state, reusable `ShmDispatchScratch`, direct `try_send_with` slot serialization (`VQOV` overflow spill for `> 64 KiB`), targeted `dispatch_to_worker`, Dekker `notify_request_if_sleeping`, and 8 `Mutex<InFlightRequests>` shards. |
+| [`InFlightRequests`](../../../../../src/rs/vertebra-http/src/dispatcher/correlation.rs)[^src-vertebra-http-src-dispatcher-correlation-rs] / `CorrelationId` | `vertebra_http::dispatcher::correlation` | Generation-tagged slab (`(generation << 32) \| (slot << 8) \| shard`): `insert`, `insert_with_now`, `take_completed`, `take_completed_with_worker`, `complete`, `take_expired`, `take_expired_with_worker`, `sweep_expired`, `take_for_worker`, `sweep_for_worker`. |
+| [`ResponseReaderRegistry`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs)[^src-vertebra-http-src-dispatcher-shm-reader-rs] / `spawn_response_readers` | `vertebra_http::dispatcher::shm_reader` | Per-worker `AsyncFd` reader lifecycle (`spawn_all`, `stop_and_join_worker`, `stop_and_join_all`), flag-aware `drain_frames_with`, per-stream `StreamPumpTable` staging queues, unary completion batching, shutdown-aware backpressure, and Dekker sleep handshakes. |
 | [`dispatch_direct_vec`](../../../../../src/rs/vertebra-http/src/dispatcher/direct.rs)[^src-vertebra-http-src-dispatcher-direct-rs] | `vertebra_http::dispatcher::direct` | Pushes drained `Vec<PendingRequest>` batches through the Direct-mode `mpsc::Sender<Batch>`; benchmark worker helpers (`DirectWorkerPool`, `AdaptiveWorkerConfig`, `run_adaptive_worker`) live in `src/rs/vertebra-http/benches/support/mod.rs`. |
 
 ## Native response stream lifecycle
@@ -135,9 +142,9 @@ Python workers emit `ResponseStreamFrame` chunks through `submit_stream_frame` /
 
 | Symbol | Module | Responsibility |
 |---|---|---|
-| [`BackpressureController`](../../../../../src/rs/vertebra-http/src/backpressure.rs)[^src-vertebra-http-src-backpressure-rs] / `BackpressureConfig` / `CircuitBreakerConfig` / `RejectionReason` / `StreamGuard` / `BackpressureMetricsSnapshot` | `vertebra_http::backpressure` | Lock-free atomic admission permits with `SeqCst` wakeup barriers, priority-route bypass, and 16-bucket atomic sliding-window circuit breaker (`503` on saturation/timeout, `429` on open circuit). |
+| [`BackpressureController`](../../../../../src/rs/vertebra-http/src/backpressure.rs)[^src-vertebra-http-src-backpressure-rs] / `BackpressureConfig` / `CircuitBreakerConfig` / `AdmissionPermit` / `RejectionReason` / `StreamGuard` / `BackpressureMetricsSnapshot` | `vertebra_http::backpressure` | Lock-free zero-`Arc` atomic admission permits with `SeqCst` wakeup barriers, priority-route bypass, and 4×16 sharded atomic sliding-window circuit breaker (`503` on saturation/timeout, `429` on open circuit). |
 | [`EmbeddedSupervisor`](../../../../../src/rs/vertebra-http/src/workers/factory.rs)[^src-vertebra-http-src-workers-factory-rs] | `vertebra_http::workers::factory` | Multi-process `SO_REUSEPORT` supervisor for `Topology::Embedded` (`workers > 1`), pre-allocating shared SHM broker FDs, computing CPU-clamped per-worker `(tokio_threads, py_threads)`, forwarding signals, and respawning crashed children. |
-| [`RingFactory`](../../../../../src/rs/vertebra-http/src/workers/factory.rs) / `Supervisor` / `WorkerLifecycle` / `cleanup_stale_shm` / `install_panic_cleanup_hook` | `vertebra_http::workers::factory` | Per-worker `RingPair` factory, SHM worker spawner (`python -m vertebra.supervisor._worker`), crash-backoff supervisor, and `/dev/shm` cleanup helpers. |
+| [`RingFactory`](../../../../../src/rs/vertebra-http/src/workers/factory.rs) / `Supervisor` / `WorkerLifecycle` / `cleanup_stale_shm` / `install_panic_cleanup_hook` | `vertebra_http::workers` (`factory`, `supervisor`) | Per-worker `RingPair` factory, SHM worker spawner (`python -m vertebra.supervisor._worker`), crash-backoff supervisor (`EXIT_STARTUP_FAILURE = 78`), and dead-owner `/dev/shm` cleanup helpers. |
 | [`AssetManager`](../../../../../src/rs/vertebra-http/src/assets.rs)[^src-vertebra-http-src-assets-rs] / `StaticAssetServeConfig` / `ManifestEntry` | `vertebra_http::assets` | Static file serving (sidecar compression, `ETag`/`304`, `Range`/`206`, SPA fallback) and Vite manifest resolver. |
 
 Provenance sources: [^src-vertebra-http-src-dispatcher-bridge-rs].
@@ -160,5 +167,6 @@ Provenance sources: [^src-vertebra-http-src-dispatcher-bridge-rs].
 [^src-vertebra-http-src-backpressure-rs]: `src/rs/vertebra-http/src/backpressure.rs` — Rust implementation module (src/rs/vertebra-http/src/backpressure.rs).
 [^src-vertebra-http-src-workers-factory-rs]: `src/rs/vertebra-http/src/workers/factory.rs` — Rust implementation module (src/rs/vertebra-http/src/workers/factory.rs).
 [^src-vertebra-http-src-assets-rs]: `src/rs/vertebra-http/src/assets.rs` — Rust implementation module (src/rs/vertebra-http/src/assets.rs).
+[^src-vertebra-http-src-zpages-rs]: `src/rs/vertebra-http/src/zpages.rs` — Rust implementation module (src/rs/vertebra-http/src/zpages.rs).
 
 [^src-vertebra-http-src-dispatcher-streams-rs]: `src/rs/vertebra-http/src/dispatcher/streams.rs` — Bounded native response delivery and worker lifecycle cleanup.

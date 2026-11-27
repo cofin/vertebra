@@ -12,12 +12,15 @@ generated:
   by: flow/0.28.0
   at: "2026-11-12T01:15:00Z"
 verified:
-- by: agent:flow-executor
-  at: "2026-11-13T06:06:00Z"
-  commit: 05d88d00
+- by: agent:flow-setup
+  at: "2026-11-27T22:10:00Z"
+  commit: f3b624a2
 - by: agent:flow-executor
   at: "2026-11-17T04:20:00Z"
   commit: 5a833832
+- by: agent:flow-executor
+  at: "2026-11-13T06:06:00Z"
+  commit: 05d88d00
 sources:
 - id: asgi-protocol-rs
   resource: src/rs/vertebra-py/src/asgi.rs::AsgiProtocol
@@ -43,12 +46,18 @@ sources:
 - id: supervisor-py
   resource: src/py/vertebra/supervisor/_supervisor.py::EmbeddedPythonRuntime
   title: Shared libpython runtime verification for packaged vertebra-server
+- id: queue-base-py
+  resource: src/py/vertebra/framework/queues/base.py::QueueBackendSettings
+  title: Platform-aware queue backend default (memory on win32, shm on POSIX)
 - id: shm-queue-py
   resource: src/py/vertebra/framework/queues/backends.py::SHMQueueBackend
   title: Multi-process POSIX ShmQueueRing queue backend
 - id: queue-ring-rs
   resource: src/rs/vertebra-py/src/queue_ring.rs::ShmQueueRing
   title: Rust ShmQueueRing fixed-capacity POSIX SHM ring and CAS store
+- id: transport-py-rs
+  resource: src/rs/vertebra-py/src/transport.rs::init_transport
+  title: Unix-only SHM transport and Windows notify-FD fallback
 - id: channel-bus-py
   resource: src/py/vertebra/server/_channels.py::ChannelBus
   title: Bounded subscriber backpressure and notification bridge
@@ -89,7 +98,7 @@ sources:
 - `BatchBridge::submit_stream_frame` detects client closure via `StreamDelivery::Closed` (`ConnectionResetError` in Python), whereas SHM worker streams learn of closed receivers asynchronously when dispatcher sweeps fire `notify_disconnect` or reader shutdown cancels delivery [^streams-http-rs] [^shm-reader-rs].
 - ID generation in `vertebra-core` requires a functioning OS entropy source (`getrandom::fill`) and panics on failure rather than falling back to time-seeded PRNG state; Unix worker forks automatically advance `FORK_GENERATION` via `pthread_atfork` to reseed child entropy pools [^core-id-rs].
 - Packaged POSIX `vertebra-server` wheels use `$ORIGIN`/`@loader_path` relative rpaths and require a dynamically linked shared `libpython` runtime (`ENABLE_SHARED=1`, checked by `EmbeddedPythonRuntime.require_shared_library` unless `VERTEBRA_SERVER_BINARY` is set) [^supervisor-py].
-- `SHMQueueBackend` (`vertebra.framework.queues.backends` and `vertebra.extensions.litestar.queues.shm_backend`) persists tasks and CAS records across single-host Unix processes via Rust `ShmQueueRing` with futex and ulock wakeups. It remains bounded to one host with fixed ring capacity (`4096`), `slot_bytes` (`8192`), `256`-byte record keys, and 22-byte `/vtbq_<16-hex>` POSIX `shm_open` names. `ChannelBus` stays single-host in memory; cross-host queue wakeups and channels require Valkey, Redis, PostgreSQL (`NOTIFY` capped at `8,000` bytes with `ChangeFeed` spill envelopes), or Oracle (`TxEventQ` / `DBMS_AQ` with adaptive polling fallback) [^shm-queue-py] [^queue-ring-rs] [^channel-bus-py] [^pg-notify-py] [^ora-notify-py].
+- `SHMQueueBackend` (`vertebra.framework.queues.backends` and `vertebra.extensions.litestar.queues.shm_backend`) persists tasks and CAS records across single-host Unix processes via Rust `ShmQueueRing` with futex and ulock wakeups (fixed ring capacity `4096`, `slot_bytes` `8192`, `256`-byte record keys, 22-byte `/vtbq_<16-hex>` POSIX `shm_open` names). On Windows (`win32`), `ShmQueueRing` raises `NotImplementedError`, `QueueBackendSettings` defaults to `"memory"` (`_default_queue_backend_kind`), `init_transport(mode="shm")` raises `RuntimeError`, and `get_request_notify_fd()` returns `-1` (using `get_batch` polling). `ChannelBus` stays single-host in memory; cross-host queue wakeups and channels require Valkey, Redis, PostgreSQL (`NOTIFY` capped at `8,000` bytes with `ChangeFeed` spill envelopes), or Oracle (`TxEventQ` / `DBMS_AQ` with adaptive polling fallback) [^queue-base-py] [^shm-queue-py] [^queue-ring-rs] [^transport-py-rs] [^channel-bus-py] [^pg-notify-py] [^ora-notify-py].
 - HTTP/3 WebTransport (`WebTransportSession`, `WebTransportStream`, `register_webtransport_handler`) runs only in single-process `Topology::Embedded` over `BatchBridge`; `Topology::Shm` and unattached embedded endpoints log a warning and reject extended `CONNECT` with `501 Not Implemented`, and session dispatch forwards bidirectional streams and datagrams only (no unidirectional stream forwarding) [^wt-bridge-py].
 - SHM worker `pubsub_publish` frames `[topic_len][key_len][topic][key][payload]` into `ShmLeaseTable` channel `__vtb_pubsub__` and raises `ValueError` whenever the framed payload exceeds `CHAN_MAX_PAYLOAD_BYTES` (`256` bytes); payloads above `256` bytes are accepted only in `Topology::Embedded` via `BatchBridge::publish_pubsub` [^broker-py] [^core-bridge-rs].
 - `ProfileEndpoint` (`/debug/pprof/*`) returns `404 Not Found` (`{"error":"heap profiling not supported"}`) for `/debug/pprof/heap` even when enabled and bearer-authorized, returns `404 Not Found` (`{"error":"profiling feature disabled"}`) for `/debug/pprof/profile` unless built with `all(unix, feature = "profiling")`, and clamps CPU capture duration to `10 ms..5000 ms` (default `1000 ms`) [^http-profile-rs].
@@ -110,8 +119,10 @@ Current server architecture and streaming transport details live in [ASGI, RSGI 
 [^streams-http-rs]: `src/rs/vertebra-http/src/dispatcher/streams.rs::ResponseStreamRegistry` — `FrameReceiver` `Infallible` contract and `notify_disconnect`.
 [^core-id-rs]: `src/rs/vertebra-core/src/id.rs` — Fail-loud OS entropy pool and Unix `pthread_atfork` reseed hook.
 [^supervisor-py]: `src/py/vertebra/supervisor/_supervisor.py::EmbeddedPythonRuntime` — Shared `libpython` validation for packaged `vertebra-server`.
+[^queue-base-py]: `src/py/vertebra/framework/queues/base.py::QueueBackendSettings` — Platform-aware queue backend default (`memory` on `win32`, `shm` on POSIX).
 [^shm-queue-py]: `src/py/vertebra/framework/queues/backends.py::SHMQueueBackend` — Multi-process POSIX `ShmQueueRing` queue backend.
 [^queue-ring-rs]: `src/rs/vertebra-py/src/queue_ring.rs::ShmQueueRing` — Rust `ShmQueueRing` fixed-capacity POSIX SHM ring and CAS store.
+[^transport-py-rs]: `src/rs/vertebra-py/src/transport.rs::init_transport` — Unix-only SHM transport and Windows notify-FD fallback.
 [^channel-bus-py]: `src/py/vertebra/server/_channels.py::ChannelBus` — Bounded subscriber backpressure and notification bridge.
 [^pg-notify-py]: `src/py/vertebra/db/adapters/postgres/notify.py::AsyncPostgresNotificationSource` — PostgreSQL `NOTIFY` 8000-byte frame limit and spill envelopes.
 [^ora-notify-py]: `src/py/vertebra/db/adapters/oracle/notify.py::AsyncOracleNotificationSource` — Oracle `TxEventQ` and `DBMS_AQ` notification transport.
