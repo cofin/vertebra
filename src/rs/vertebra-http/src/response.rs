@@ -425,22 +425,11 @@ async fn dispatch_request_inner(
             if incoming.size_hint().exact() == Some(0) {
                 Ok((Bytes::new(), false))
             } else {
-                let content_length = parts
-                    .headers
-                    .get(header::CONTENT_LENGTH)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.trim().parse::<usize>().ok());
-                let active_encoding = is_active_content_encoding(
-                    parts
-                        .headers
-                        .get(header::CONTENT_ENCODING)
-                        .and_then(|v| v.to_str().ok()),
-                )
-                .map(str::to_owned);
+                let (content_length, active_encoding) = extract_body_headers(&parts.headers);
                 collect_bounded_body(
                     incoming,
                     content_length,
-                    active_encoding.as_deref(),
+                    active_encoding,
                     &state.config.payload_limits,
                 )
                 .await
@@ -448,22 +437,11 @@ async fn dispatch_request_inner(
             }
         }
         RequestBodySource::Buffered(raw_bytes) => {
-            let content_length = parts
-                .headers
-                .get(header::CONTENT_LENGTH)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.trim().parse::<usize>().ok());
-            let active_encoding = is_active_content_encoding(
-                parts
-                    .headers
-                    .get(header::CONTENT_ENCODING)
-                    .and_then(|v| v.to_str().ok()),
-            )
-            .map(str::to_owned);
+            let (content_length, active_encoding) = extract_body_headers(&parts.headers);
             decode_buffered_body(
                 raw_bytes,
                 content_length,
-                active_encoding.as_deref(),
+                active_encoding,
                 &state.config.payload_limits,
             )
         }
@@ -728,6 +706,20 @@ fn circuit_state_str(state: CircuitState) -> &'static str {
         CircuitState::Open => "open",
         CircuitState::HalfOpen => "half_open",
     }
+}
+
+#[inline]
+fn extract_body_headers(headers: &HeaderMap) -> (Option<usize>, Option<&str>) {
+    let content_length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok());
+    let active_encoding = is_active_content_encoding(
+        headers
+            .get(header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok()),
+    );
+    (content_length, active_encoding)
 }
 
 /// Encode an `http::HeaderMap` directly into compact binary `Bytes` in a single pass.
@@ -1822,5 +1814,68 @@ mod tests {
         assert!(decoded.contains(&(b"set-cookie".as_slice(), b"a=1".as_slice())));
         assert!(decoded.contains(&(b"set-cookie".as_slice(), b"b=2".as_slice())));
         assert!(decoded.contains(&(b"x-long-value".as_slice(), long_val.as_bytes())));
+    }
+
+    #[tokio::test]
+    async fn dispatch_request_pins_explicit_collector_shard_and_validates_buffered_encoding() {
+        let router = Router::from_entries(vec![RouteEntry {
+            method: "POST".to_string(),
+            path: "/echo".to_string(),
+            handler_id: handler_id("POST", "/echo"),
+        }])
+        .unwrap();
+        let (dispatcher, _batch_rx) = Dispatcher::new_direct(8);
+        let (tx0, mut rx0) = mpsc::channel(8);
+        let (tx1, mut rx1) = mpsc::channel(8);
+        let state = Arc::new(ServerState::new(
+            Arc::new(router),
+            Arc::new(dispatcher),
+            Arc::new(ServerConfig::default()),
+            vec![tx0, tx1],
+        ));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/echo")
+            .body(Bytes::from_static(b"hello"))
+            .unwrap();
+        let (parts, body) = req.into_parts();
+        let resp_task = tokio::spawn(dispatch_request(
+            parts,
+            RequestBodySource::Buffered(body),
+            None,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Some(1),
+            Arc::clone(&state),
+        ));
+        let pending = rx1
+            .recv()
+            .await
+            .expect("pinned shard 1 must receive request");
+        assert!(
+            rx0.try_recv().is_err(),
+            "shard 0 must not receive pinned request"
+        );
+        assert_eq!(pending.body.as_ref(), b"hello");
+        pending
+            .reply
+            .send(PendingResponse {
+                status: 200,
+                headers_mp: Bytes::new(),
+                body: Bytes::from_static(b"ok"),
+                stream_rx: None,
+            })
+            .unwrap();
+        let resp = resp_task.await.unwrap().unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bad_enc = Request::builder()
+            .method(Method::POST)
+            .uri("/echo")
+            .header(header::CONTENT_ENCODING, "bogus-codec")
+            .body(Bytes::from_static(b"data"))
+            .unwrap();
+        let resp_bad = handle_buffered(bad_enc, Arc::clone(&state)).await.unwrap();
+        assert_eq!(resp_bad.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 }

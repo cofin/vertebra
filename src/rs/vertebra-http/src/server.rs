@@ -726,7 +726,12 @@ impl<S: AsyncRead + Unpin> AsyncRead for IdleTimeoutStream<S> {
                         sleep
                             .as_mut()
                             .reset(tokio::time::Instant::now() + this.timeout);
-                        let _ = sleep.as_mut().poll(cx);
+                        if sleep.as_mut().poll(cx).is_ready() {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "HTTP/1 connection idle timeout",
+                            )));
+                        }
                     } else {
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::TimedOut,
@@ -945,6 +950,35 @@ mod tests {
         let err = read_fut
             .await
             .expect_err("second idle period with no activity must time out");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_stream_extends_on_write_activity() {
+        let (mut client, server) = tokio::io::duplex(64);
+        let mut wrapped = IdleTimeoutStream::new(server, Duration::from_secs(5));
+
+        wrapped.write_all(b"pong").await.expect("write pong");
+        let mut client_buf = [0u8; 4];
+        client
+            .read_exact(&mut client_buf)
+            .await
+            .expect("client read pong");
+        assert_eq!(&client_buf, b"pong");
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let mut server_buf = [0u8; 4];
+        let read_fut = wrapped.read(&mut server_buf);
+        tokio::pin!(read_fut);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut read_fut)
+                .await
+                .is_err(),
+            "write activity must extend the idle deadline"
+        );
+        let err = read_fut
+            .await
+            .expect_err("subsequent idle window with no activity must time out");
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     }
 

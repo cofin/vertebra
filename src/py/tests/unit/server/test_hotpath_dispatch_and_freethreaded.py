@@ -579,3 +579,126 @@ def test_inline_event_loop_splits_notify_clear_and_grace_yield(monkeypatch: pyte
     assert clear_calls == 0
     assert prepare_calls == 1
     assert cancel_calls >= 1
+
+
+def test_worker_native_only_async_error_passes_request_to_custom_error_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native_only passes the real Request to custom error_handler when an async route raises."""
+    import vertebra.server.worker as worker_mod
+
+    seen_paths: list[str] = []
+    submitted: list[Any] = []
+
+    async def boom() -> bytes:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    def custom_error_handler(request: Any, exc: Exception) -> Any:
+        del exc
+        seen_paths.append(request.path)
+        return worker_mod.Response(status=418, body=b"handled", request_id=request.request_id)
+
+    monkeypatch.setattr(worker_mod, "submit_response", submitted.append)
+    compiled = compile_handler_table({1: boom})
+    worker = Worker({1: boom}, error_handler=custom_error_handler, max_batches=1)
+    loop_pool = EventLoopPool(size=1, inline_single_loop=True)
+    try:
+        worker._process_batch(
+            [Request.from_parts("GET", "/failing-async", b"", request_id=77, handler_id=1)],
+            compiled_handlers=compiled,
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=False,
+            native_only=True,
+            loop_pool=loop_pool,
+        )
+    finally:
+        loop_pool.stop()
+
+    assert seen_paths == ["/failing-async"]
+    assert len(submitted) == 1
+    assert submitted[0].status == 418
+    assert submitted[0].body == b"handled"
+
+
+def test_inline_event_loop_on_notify_readable_clears_eventfd_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _on_notify_readable invokes clear_request_notification on real reader wakeups."""
+    import vertebra.server.worker as worker_mod
+
+    clear_calls = 0
+    processed_batches: list[int] = []
+    r_fd, w_fd = os.pipe()
+    os.set_blocking(r_fd, False)
+    woke = False
+
+    def fake_try_get_batch() -> Any:
+        if woke:
+            return [Request.from_parts("GET", "/woke", b"", request_id=2, handler_id=1)]
+        return None
+
+    def fake_clear() -> None:
+        nonlocal clear_calls
+        clear_calls += 1
+        os.read(r_fd, 64)
+
+    def fake_prepare() -> bool:
+        nonlocal woke
+        if not woke:
+            woke = True
+            os.write(w_fd, b"x")
+        return True
+
+    def fake_process_batch(self: Worker, batch: Any, **_kwargs: Any) -> None:
+        del self
+        processed_batches.append(len(batch))
+
+    monkeypatch.setattr(worker_mod, "try_get_batch", fake_try_get_batch)
+    monkeypatch.setattr(worker_mod, "clear_request_notification", fake_clear)
+    monkeypatch.setattr(worker_mod, "cancel_request_sleep", lambda: None)
+    monkeypatch.setattr(worker_mod, "prepare_request_sleep", fake_prepare)
+    monkeypatch.setattr(Worker, "_process_batch", fake_process_batch)
+
+    worker = Worker({1: lambda: b"ok"}, max_batches=1)
+    loop_pool = EventLoopPool(size=1, inline_single_loop=True)
+    try:
+        worker._run_inline_event_loop(
+            notify_fd=r_fd,
+            timeout_sec=0.05,
+            compiled_handlers=compile_handler_table({1: lambda: b"ok"}),
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=True,
+            native_only=True,
+            single_root_asgi=None,
+            single_root_rsgi=None,
+            loop_pool=loop_pool,
+            executor=None,
+        )
+    finally:
+        loop_pool.stop()
+        os.close(r_fd)
+        os.close(w_fd)
+
+    assert clear_calls == 1
+    assert processed_batches == [1]
+
+
+def test_asgi_scope_setdefault_pop_and_async_one_arg_extractor() -> None:
+    """Verify AsgiScope setdefault/pop slot updates and async 1-arg body coercion."""
+    scope = AsgiScope.from_parts(method="GET", path="/items")
+    state = scope.setdefault("state", {"ready": True})
+    assert state == {"ready": True}
+    assert scope.pop("state") == {"ready": True}
+    assert "state" not in scope
+    assert scope.setdefault("extensions", {"custom": {}}) == {"custom": {}}
+
+    async def echo_body(body: bytes) -> bytes:
+        return body
+
+    class BytearrayReq:
+        body = bytearray(b"mut-bytes")
+
+    spec = compile_handler_spec(echo_body)
+    assert spec.is_async is True
+    assert asyncio.run(spec.invoker(BytearrayReq())) == b"mut-bytes"

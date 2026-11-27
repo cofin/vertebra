@@ -816,7 +816,6 @@ class Worker:
         asyncio.set_event_loop(loop)
         batches_processed = 0
         watchdog_sec = max(0.01, min(0.1, timeout_sec))
-        grace_pending = False
         drain_handle: asyncio.Handle | None = None
 
         def _schedule_drain() -> None:
@@ -830,17 +829,16 @@ class Worker:
             _drain_batches()
 
         def _on_notify_readable() -> None:
-            nonlocal drain_handle, grace_pending
+            nonlocal drain_handle
             cancel_request_sleep()
             clear_request_notification()
-            grace_pending = False
             if drain_handle is not None:
                 drain_handle.cancel()
                 drain_handle = None
             _drain_batches()
 
         def _drain_batches() -> None:
-            nonlocal batches_processed, grace_pending
+            nonlocal batches_processed
             drained = 0
             while drained < _INLINE_DRAIN_BUDGET:
                 if self._should_stop(batches_processed):
@@ -849,11 +847,9 @@ class Worker:
                     return
                 batch = try_get_batch()
                 if batch is None or len(batch) == 0:
-                    if drained > 0 and not grace_pending:
-                        grace_pending = True
+                    if drained > 0:
                         _schedule_drain()
                         return
-                    grace_pending = False
                     if not prepare_request_sleep():
                         cancel_request_sleep()
                         _schedule_drain()
@@ -861,7 +857,6 @@ class Worker:
                         cancel_request_sleep()
                         loop.stop()
                     return
-                grace_pending = False
                 self._process_batch(
                     batch,
                     compiled_handlers=compiled_handlers,
@@ -880,7 +875,7 @@ class Worker:
             _schedule_drain()
 
         def _watchdog() -> None:
-            nonlocal batches_processed, grace_pending
+            nonlocal batches_processed
             if self._should_stop(batches_processed):
                 cancel_request_sleep()
                 loop.stop()
@@ -888,7 +883,6 @@ class Worker:
             batch = try_get_batch()
             if batch is not None and len(batch) > 0:
                 cancel_request_sleep()
-                grace_pending = False
                 self._process_batch(
                     batch,
                     compiled_handlers=compiled_handlers,
@@ -952,10 +946,15 @@ class Worker:
                     return
                 batch = remaining
 
-            if all_sync_native:
+            if all_sync_native or native_only:
                 raw_items: list[tuple[int, int, Any] | tuple[int, int, Any, bytes]] = []
                 append_raw = raw_items.append
                 get_spec = compiled_handlers.get
+                use_drive_native = (
+                    not all_sync_native and self._error_handler is None and getattr(loop_pool, "size", 1) == 1
+                )
+                async_native_items: list[tuple[int, Any, int]] | None = None
+                async_coros: list[Coroutine[Any, Any, None]] | None = None
                 for req in batch:
                     if req.handler_id == _ZPAGES_HANDLER_ID:
                         self._handle_zpage_request(req, loop_pool)
@@ -965,56 +964,7 @@ class Worker:
                     if spec is None:
                         append_raw((req_id, 404, b"not found"))
                         continue
-                    try:
-                        raw = spec.invoker(req)
-                        status = spec.status_code
-                        if isinstance(raw, _RAW_BUFFER_TYPES):
-                            append_raw((req_id, status, raw))
-                        elif isinstance(raw, str):
-                            append_raw((req_id, status, raw.encode("utf-8")))
-                        elif isinstance(raw, Response):
-                            if raw.request_id == 0:
-                                raw.request_id = req_id
-                            submit_response(raw)
-                        elif _is_potential_special_return(raw):
-                            if raw_items:
-                                submit_batch_raw(raw_items)
-                                raw_items.clear()
-                            _submit_coerced(
-                                raw,
-                                req_id,
-                                Response,
-                                submit_response,
-                                submit_response_raw,
-                                status_code=status,
-                                scheduler=loop_pool,
-                            )
-                        else:
-                            append_raw((req_id, status, encode_json_bytes(raw), _JSON_CONTENT_TYPE_COMPACT))
-                    except Exception as exc:
-                        err_resp = build_error_response(exc, req, self._error_handler, Response)
-                        submit_response(err_resp)
-                if raw_items:
-                    submit_batch_raw(raw_items)
-                return
-
-            if native_only:
-                raw_items = []
-                append_raw = raw_items.append
-                get_spec = compiled_handlers.get
-                use_drive_native = self._error_handler is None and getattr(loop_pool, "size", 1) == 1
-                async_native_items: list[tuple[int, Any, int]] = []
-                async_coros: list[Coroutine[Any, Any, None]] = []
-                for req in batch:
-                    if req.handler_id == _ZPAGES_HANDLER_ID:
-                        self._handle_zpage_request(req, loop_pool)
-                        continue
-                    req_id = req.request_id
-                    spec = get_spec(req.handler_id)
-                    if spec is None:
-                        append_raw((req_id, 404, b"not found"))
-                        continue
-                    if spec.is_async:
+                    if not all_sync_native and spec.is_async:
                         try:
                             coro = spec.invoker(req)
                         except Exception as exc:
@@ -1022,13 +972,18 @@ class Worker:
                             submit_response(err_resp)
                             continue
                         if use_drive_native:
+                            if async_native_items is None:
+                                async_native_items = []
                             async_native_items.append((req_id, coro, spec.status_code))
                         else:
+                            if async_coros is None:
+                                async_coros = []
+                            err_target = req if self._error_handler is not None else _AsyncErrorStub(req_id)
                             async_coros.append(
                                 _await_async_item(
                                     coro,
                                     req_id,
-                                    _AsyncErrorStub(req_id),
+                                    err_target,
                                     self._error_handler,
                                     Response,
                                     submit_response,

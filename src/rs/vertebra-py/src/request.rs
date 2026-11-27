@@ -58,7 +58,6 @@ pub struct Request {
     pub(crate) batch: Arc<BatchSnapshot>,
     pub(crate) index: usize,
     cached_headers: OnceLock<Headers>,
-    cached_body: OnceLock<Bytes>,
 }
 
 impl Request {
@@ -68,7 +67,6 @@ impl Request {
             batch,
             index,
             cached_headers: OnceLock::new(),
-            cached_body: OnceLock::new(),
         }
     }
 
@@ -79,11 +77,6 @@ impl Request {
                 Headers::new(Bytes::copy_from_slice(raw))
             })
             .clone()
-    }
-
-    pub fn get_body_bytes(&self) -> &Bytes {
-        self.cached_body
-            .get_or_init(|| Bytes::copy_from_slice(self.batch.body(self.index)))
     }
 }
 

@@ -398,6 +398,42 @@ impl RsgiHttpProtocol {
         Ok(())
     }
 
+    fn finish_direct_stream_error(
+        &self,
+        py: Python<'_>,
+        stream: &RsgiStreamState,
+    ) -> PyResult<bool> {
+        let mut error_stream_status: Option<u16> = None;
+        let mut send_500 = false;
+        {
+            let mut inner = stream
+                .inner
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("stream state lock poisoned"))?;
+            if inner.stream_started {
+                if !inner.stream_closed {
+                    inner.stream_closed = true;
+                    error_stream_status = Some(stream.status);
+                }
+            } else if !inner.stream_closed && !stream.disconnected.load(Ordering::Acquire) {
+                inner.stream_closed = true;
+                send_500 = true;
+            }
+        }
+        if let Some(status) = error_stream_status {
+            let _ = ResponseSubmitter::submit_stream_frame_inner(
+                py,
+                self.request_id,
+                status,
+                FLAG_STREAMING | FLAG_ERROR,
+                b"",
+                b"",
+            );
+            return Ok(false);
+        }
+        Ok(send_500)
+    }
+
     pub(crate) fn take_completed_for_batch(
         &self,
         py: Python<'_>,
@@ -469,75 +505,25 @@ impl RsgiHttpProtocol {
             }
         };
         if let Some(stream) = direct_stream {
-            let mut error_stream_status: Option<u16> = None;
-            let mut send_500 = false;
-            {
-                let mut inner = stream.inner.lock().ok()?;
-                if inner.stream_started {
-                    if !inner.stream_closed {
-                        inner.stream_closed = true;
-                        error_stream_status = Some(stream.status);
-                    }
-                } else if !inner.stream_closed && !stream.disconnected.load(Ordering::Acquire) {
-                    inner.stream_closed = true;
-                    send_500 = true;
-                }
-            }
-            if let Some(status) = error_stream_status {
-                let _ = ResponseSubmitter::submit_stream_frame_inner(
-                    py,
-                    self.request_id,
-                    status,
-                    FLAG_STREAMING | FLAG_ERROR,
-                    b"",
-                    b"",
-                );
-                return None;
-            }
-            if send_500 {
-                return Some(FlushedProtocolResponse {
+            return self
+                .finish_direct_stream_error(py, &stream)
+                .ok()
+                .filter(|&send_500| send_500)
+                .map(|_| FlushedProtocolResponse {
                     request_id: self.request_id,
                     status: 500,
                     headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
                     body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
                 });
-            }
-            return None;
         }
         maybe_unary
     }
 
     pub(crate) fn finalize_async_return(&self, py: Python<'_>) -> PyResult<()> {
-        let mut direct_stream: Option<Arc<RsgiStreamState>> = None;
-        let maybe_resp = {
-            let mut st = self
-                .state
-                .lock()
-                .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
-            if !self.direct_submit {
-                None
-            } else if let Some(ref stream) = st.stream {
-                direct_stream = Some(Arc::clone(stream));
-                st.submitted = true;
-                None
-            } else if st.submitted {
-                None
-            } else if !st.started {
-                st.submitted = true;
-                Some(FlushedProtocolResponse {
-                    request_id: self.request_id,
-                    status: 500,
-                    headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
-                    body: PreparedRawBody::Owned(ERROR_500_BODY.to_vec()),
-                })
-            } else {
-                Some(Self::extract_prepared(self.request_id, &mut st))
-            }
-        };
-        if let Some(stream) = direct_stream {
-            return self.finish_direct_stream(py, &stream);
+        if !self.direct_submit {
+            return Ok(());
         }
-        if let Some(flushed) = maybe_resp {
+        if let Some(flushed) = self.take_completed_for_batch(py, true)? {
             ResponseSubmitter::submit_raw_inner(
                 py,
                 flushed.request_id,
@@ -569,35 +555,7 @@ impl RsgiHttpProtocol {
             }
         };
         if let Some(stream) = direct_stream {
-            let mut error_stream_status: Option<u16> = None;
-            let mut send_500 = false;
-            {
-                let mut inner = stream
-                    .inner
-                    .lock()
-                    .map_err(|_| PyRuntimeError::new_err("stream state lock poisoned"))?;
-                if inner.stream_started {
-                    if !inner.stream_closed {
-                        inner.stream_closed = true;
-                        error_stream_status = Some(stream.status);
-                    }
-                } else if !inner.stream_closed && !stream.disconnected.load(Ordering::Acquire) {
-                    inner.stream_closed = true;
-                    send_500 = true;
-                }
-            }
-            if let Some(status) = error_stream_status {
-                let _ = ResponseSubmitter::submit_stream_frame_inner(
-                    py,
-                    self.request_id,
-                    status,
-                    FLAG_STREAMING | FLAG_ERROR,
-                    b"",
-                    b"",
-                );
-                return Ok(());
-            }
-            if send_500 {
+            if self.finish_direct_stream_error(py, &stream)? {
                 ResponseSubmitter::submit_raw_inner(
                     py,
                     self.request_id,
@@ -703,38 +661,51 @@ impl RsgiHttpProtocol {
         };
         let fut_py = fut.unbind();
 
+        let attach_to_stream =
+            |stream: Arc<RsgiStreamState>, fut_py: Py<PyAny>| -> PyResult<Py<PyAny>> {
+                let mut inner = stream
+                    .inner
+                    .lock()
+                    .map_err(|_| PyRuntimeError::new_err("stream state lock poisoned"))?;
+                if let Some(ref existing) = inner.disconnect_future {
+                    return Ok(existing.clone_ref(py));
+                }
+                if stream.disconnected.load(Ordering::Acquire) {
+                    let _ = fut_py
+                        .bind(py)
+                        .call_method1(pyo3::intern!(py, "set_result"), (py.None(),));
+                    return Ok(fut_py);
+                }
+                inner.disconnect_future = Some(fut_py.clone_ref(py));
+                Ok(fut_py)
+            };
+
         if let Some(stream) = stream {
-            let mut inner = stream
-                .inner
+            return attach_to_stream(stream, fut_py);
+        }
+
+        let late_stream = {
+            let mut st = self
+                .state
                 .lock()
-                .map_err(|_| PyRuntimeError::new_err("stream state lock poisoned"))?;
-            if let Some(ref existing) = inner.disconnect_future {
+                .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
+            if let Some(ref stream) = st.stream {
+                Some(Arc::clone(stream))
+            } else if let Some(ref existing) = st.disconnect_future {
                 return Ok(existing.clone_ref(py));
-            }
-            if stream.disconnected.load(Ordering::Acquire) {
+            } else if self.disconnected.load(Ordering::Acquire) {
                 let _ = fut_py
                     .bind(py)
                     .call_method1(pyo3::intern!(py, "set_result"), (py.None(),));
                 return Ok(fut_py);
+            } else {
+                st.disconnect_future = Some(fut_py.clone_ref(py));
+                return Ok(fut_py);
             }
-            inner.disconnect_future = Some(fut_py.clone_ref(py));
-            return Ok(fut_py);
+        };
+        if let Some(stream) = late_stream {
+            return attach_to_stream(stream, fut_py);
         }
-
-        let mut st = self
-            .state
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("protocol state lock poisoned"))?;
-        if let Some(ref existing) = st.disconnect_future {
-            return Ok(existing.clone_ref(py));
-        }
-        if self.disconnected.load(Ordering::Acquire) {
-            let _ = fut_py
-                .bind(py)
-                .call_method1(pyo3::intern!(py, "set_result"), (py.None(),));
-            return Ok(fut_py);
-        }
-        st.disconnect_future = Some(fut_py.clone_ref(py));
         Ok(fut_py)
     }
 
@@ -1388,6 +1359,61 @@ mod tests {
             let stream_resp = streaming.take_response(py).expect("take streamed response");
             assert_eq!(stream_resp.status, 202);
             assert_eq!(stream_resp.body.as_ref(), b"part1-part2");
+        });
+    }
+
+    #[test]
+    fn shared_rsgi_meta_preserves_custom_fields_and_tls_scheme() {
+        Python::attach(|py| {
+            let meta = Arc::new(RsgiServerMeta::new(
+                "http",
+                "http",
+                "api.internal:9000",
+                "10.0.0.5:41234",
+                "/v2/",
+            ));
+            let plain_snap = crate::synthetic::SyntheticRequest::build(
+                "GET",
+                "/v2/items",
+                Some("q=1"),
+                b"",
+                b"",
+                1,
+                0,
+                "1.1",
+            );
+            let scope = RsgiScope::from_batch_with_meta(&plain_snap, 0, Arc::clone(&meta));
+            assert_eq!(scope.server(py).to_str().unwrap(), "api.internal:9000");
+            assert_eq!(scope.client(py).to_str().unwrap(), "10.0.0.5:41234");
+            assert_eq!(scope.root_path(py).to_str().unwrap(), "/v2");
+            assert_eq!(scope.path(py).to_str().unwrap(), "/items");
+            assert_eq!(scope.scheme(py).to_str().unwrap(), "http");
+
+            let mut writer = vertebra_core::transport::ShmBatchWriter {
+                nodes: vec![vertebra_core::transport::TransportNode {
+                    method_tag: 0,
+                    http_version_tag: 1,
+                    _pad: [0; 2],
+                    handler_id: 0,
+                    correlation_id: 2,
+                    path_offset: 0,
+                    path_len: "/v2/secure".len() as u32,
+                    query_offset: 0,
+                    query_len: 0,
+                    headers_offset: 0,
+                    headers_len: 0,
+                    body_offset: 0,
+                    body_len: 0,
+                }],
+                components: vec![b"/v2/secure", b"", b""],
+                flags: 1,
+            };
+            let mut raw = vec![0u8; writer.serialized_size()];
+            writer.serialize_into(&mut raw);
+            let tls_snap = BatchSnapshot::deserialize_from(&raw).expect("tls snap");
+            let tls_scope = RsgiScope::from_batch_with_meta(&tls_snap, 0, meta);
+            assert_eq!(tls_scope.scheme(py).to_str().unwrap(), "https");
+            assert_eq!(tls_scope.path(py).to_str().unwrap(), "/secure");
         });
     }
 }

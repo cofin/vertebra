@@ -398,8 +398,14 @@ mod tests {
     #[test]
     fn insert_with_now_records_batch_timestamp_for_expiry() {
         let mut slab = InFlightRequests::new(4);
-        let old_now = Instant::now() - Duration::from_secs(10);
-        let fresh_now = Instant::now();
+        let now = Instant::now();
+        let (old_now, fresh_now, timeout) =
+            if let Some(past) = now.checked_sub(Duration::from_secs(10)) {
+                (past, now, Duration::from_secs(5))
+            } else {
+                std::thread::sleep(Duration::from_millis(25));
+                (now, Instant::now(), Duration::from_millis(10))
+            };
         let (tx1, _rx1) = oneshot::channel();
         let (tx2, _rx2) = oneshot::channel();
 
@@ -412,7 +418,7 @@ mod tests {
         assert_eq!(cid1.shard(), 1);
         assert_eq!(cid2.shard(), 1);
 
-        let expired = slab.take_expired_with_worker(Duration::from_secs(5));
+        let expired = slab.take_expired_with_worker(timeout);
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].1, 7);
         assert_eq!(slab.in_flight(), 1);

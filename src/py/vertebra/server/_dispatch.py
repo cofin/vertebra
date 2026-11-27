@@ -1494,7 +1494,7 @@ def _compile_non_di_param(
         return _CompiledParamPlan(name=param_name, kind="query", extractor=_extract_query_param), False, True, False
 
     return (
-        _CompiledParamPlan(name=param_name, kind="request", extractor=_build_simple_wrapper(_extract_request)),
+        _CompiledParamPlan(name=param_name, kind="request", extractor=None),
         False,
         False,
         True,

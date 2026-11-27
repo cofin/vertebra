@@ -148,7 +148,25 @@ static NEXT_THREAD_SHARD: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     static THREAD_BUCKET_SHARD: usize =
         NEXT_THREAD_SHARD.fetch_add(1, Ordering::Relaxed) & (BUCKET_SHARDS - 1);
+    #[cfg(not(target_os = "linux"))]
     static CLOCK_SAMPLE_COUNTER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(target_os = "linux")]
+#[inline]
+fn monotonic_coarse_ms() -> Option<u64> {
+    let mut ts = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: `ts.as_mut_ptr()` points to valid aligned storage for `libc::timespec` and
+    // `CLOCK_MONOTONIC_COARSE` is a read-only kernel clock query; `assume_init()` runs only on `0`.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_COARSE, ts.as_mut_ptr()) };
+    if rc == 0 {
+        let ts = unsafe { ts.assume_init() };
+        let secs = u64::try_from(ts.tv_sec).ok()?;
+        let nanos = u64::try_from(ts.tv_nsec).ok()?;
+        Some(secs.saturating_mul(1000).saturating_add(nanos / 1_000_000))
+    } else {
+        None
+    }
 }
 
 #[inline]
@@ -237,7 +255,10 @@ pub struct BackpressureController {
     resume_notify: Notify,
     metrics: Arc<BackpressureMetrics>,
     clock_origin: Instant,
+    #[cfg(target_os = "linux")]
+    coarse_origin_ms: Option<u64>,
     clock_offset_ms: AtomicU64,
+    #[cfg(not(target_os = "linux"))]
     cached_elapsed_ms: AtomicU64,
     window_ms: u64,
     bucket_ms: u64,
@@ -278,8 +299,11 @@ impl BackpressureController {
             resume_notify: Notify::new(),
             metrics: Arc::new(BackpressureMetrics::default()),
             clock_origin: Instant::now(),
+            #[cfg(target_os = "linux")]
+            coarse_origin_ms: monotonic_coarse_ms(),
             clock_offset_ms: AtomicU64::new(0),
-            cached_elapsed_ms: AtomicU64::new(0),
+            #[cfg(not(target_os = "linux"))]
+            cached_elapsed_ms: AtomicU64::new(u64::MAX),
             window_ms,
             bucket_ms,
             half_open_probes,
@@ -290,25 +314,40 @@ impl BackpressureController {
 
     #[inline]
     fn elapsed_ms(&self) -> u64 {
-        (self.clock_origin.elapsed().as_millis() as u64)
-            .saturating_add(self.clock_offset_ms.load(Ordering::Acquire))
+        let real_ms = self.clock_origin.elapsed().as_millis() as u64;
+        #[cfg(not(target_os = "linux"))]
+        self.cached_elapsed_ms.store(real_ms, Ordering::Relaxed);
+        real_ms.saturating_add(self.clock_offset_ms.load(Ordering::Acquire))
     }
 
     #[inline]
     fn coarse_elapsed_ms(&self) -> u64 {
-        let count = CLOCK_SAMPLE_COUNTER.with(|c| {
-            let n = c.get().wrapping_add(1);
-            c.set(n);
-            n
-        });
-        let real_ms = if (count & 63) == 1 {
-            let now = self.clock_origin.elapsed().as_millis() as u64;
-            self.cached_elapsed_ms.store(now, Ordering::Relaxed);
-            now
-        } else {
-            self.cached_elapsed_ms.load(Ordering::Relaxed)
-        };
-        real_ms.saturating_add(self.clock_offset_ms.load(Ordering::Acquire))
+        #[cfg(target_os = "linux")]
+        {
+            if let (Some(origin), Some(now)) = (self.coarse_origin_ms, monotonic_coarse_ms()) {
+                return now
+                    .saturating_sub(origin)
+                    .saturating_add(self.clock_offset_ms.load(Ordering::Acquire));
+            }
+            self.elapsed_ms()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let count = CLOCK_SAMPLE_COUNTER.with(|c| {
+                let n = c.get().wrapping_add(1);
+                c.set(n);
+                n
+            });
+            let cached = self.cached_elapsed_ms.load(Ordering::Relaxed);
+            let real_ms = if (count & 63) == 1 || cached == u64::MAX {
+                let now = self.clock_origin.elapsed().as_millis() as u64;
+                self.cached_elapsed_ms.store(now, Ordering::Relaxed);
+                now
+            } else {
+                cached
+            };
+            real_ms.saturating_add(self.clock_offset_ms.load(Ordering::Acquire))
+        }
     }
 
     /// Advance the circuit-breaker clock by `delta` for deterministic testing.
@@ -895,5 +934,29 @@ mod tests {
             c.record_failure();
         }
         assert_eq!(c.snapshot().circuit_state, CircuitState::Open);
+        c.advance_circuit_clock_for_test(Duration::from_millis(250));
+        assert_eq!(c.snapshot().circuit_state, CircuitState::HalfOpen);
+        c.record_success();
+        c.record_success();
+        assert_eq!(c.snapshot().circuit_state, CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn priority_route_bypasses_unary_saturation_without_mutating_in_flight() {
+        let c = BackpressureController::new(cfg(1, 0));
+        let _unary = c.try_acquire_for_path("/api/work").await.expect("unary");
+        assert_eq!(c.snapshot().in_flight, 1);
+        assert_eq!(
+            c.try_acquire_for_path("/api/work").await.unwrap_err(),
+            RejectionReason::Saturated
+        );
+
+        let priority = c
+            .try_acquire_for_path("/healthz")
+            .await
+            .expect("priority route bypasses unary saturation");
+        assert_eq!(c.snapshot().in_flight, 1);
+        drop(priority);
+        assert_eq!(c.snapshot().in_flight, 1);
     }
 }

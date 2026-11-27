@@ -1691,16 +1691,11 @@ impl<'a> ShmBatchWriter<'a> {
 
     pub fn serialized_size(&self) -> usize {
         let slab_len: usize = self.components.iter().map(|c| c.len()).sum();
-        const BATCH_HEADER_SIZE: usize = 16;
         BATCH_HEADER_SIZE + self.nodes.len() * std::mem::size_of::<TransportNode>() + slab_len
     }
 
-    pub fn serialize_into(mut self, out: &mut [u8]) -> usize {
-        self.serialize_into_slice(out)
-    }
-
     /// Serialize this batch into `out` while retaining `nodes` and `components` heap allocations.
-    pub fn serialize_into_slice(&mut self, out: &mut [u8]) -> usize {
+    pub fn serialize_into(&mut self, out: &mut [u8]) -> usize {
         let node_count = self.nodes.len() as u32;
         let slab_len: usize = self.components.iter().map(|c| c.len()).sum();
 
@@ -1746,21 +1741,13 @@ impl<'a> ShmBatchWriter<'a> {
         offset
     }
 
-    /// Write an oversized batch into a named overflow SHM region and return `(region_name, envelope)`.
-    #[cfg(unix)]
-    pub fn write_overflow_envelope(mut self) -> Result<(String, Vec<u8>), crate::shm::ShmError> {
-        self.write_overflow_envelope_in_place()
-    }
-
     /// Write an oversized batch into a named overflow SHM region while retaining scratch allocations.
     #[cfg(unix)]
-    pub fn write_overflow_envelope_in_place(
-        &mut self,
-    ) -> Result<(String, Vec<u8>), crate::shm::ShmError> {
+    pub fn write_overflow_envelope(&mut self) -> Result<(String, Vec<u8>), crate::shm::ShmError> {
         let total_len = self.serialized_size();
         let (name, mut region) = crate::shm::ShmRegion::create_overflow_region("rq", total_len)?;
         // SAFETY: `region` was freshly created exclusively with at least `total_len` bytes.
-        let written = self.serialize_into_slice(unsafe { &mut region.as_mut_slice()[..total_len] });
+        let written = self.serialize_into(unsafe { &mut region.as_mut_slice()[..total_len] });
         debug_assert_eq!(written, total_len);
         let name_bytes = name.as_bytes();
         let mut envelope = Vec::with_capacity(16 + name_bytes.len());
