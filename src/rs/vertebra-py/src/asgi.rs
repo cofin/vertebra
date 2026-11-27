@@ -2663,24 +2663,13 @@ fn resolve_inline_loop<'py>(
 
 fn flush_and_gather_inline(
     py: Python<'_>,
-    ready_responses: &[FlushedProtocolResponse],
+    ready_responses: Vec<FlushedProtocolResponse>,
     spawned_tasks: &[Bound<'_, PyAny>],
     active_loop: Option<&Bound<'_, PyAny>>,
     drive_until_complete: bool,
 ) -> PyResult<()> {
     if !ready_responses.is_empty() {
-        let items: Vec<(u64, u16, &[u8], &[u8])> = ready_responses
-            .iter()
-            .map(|r| {
-                (
-                    r.request_id,
-                    r.status,
-                    r.headers_raw.as_slice(),
-                    r.body.as_slice(py),
-                )
-            })
-            .collect();
-        ResponseSubmitter::submit_batch_raw_inner(py, &items)?;
+        ResponseSubmitter::submit_batch_flushed(py, ready_responses)?;
     }
 
     if drive_until_complete
@@ -2780,7 +2769,7 @@ fn drive_asgi_targets_inline(
 
     flush_and_gather_inline(
         py,
-        &ready_responses,
+        ready_responses,
         &spawned_tasks,
         active_loop,
         drive_until_complete,
@@ -2969,7 +2958,7 @@ fn drive_native_items_inline(
 
     flush_and_gather_inline(
         py,
-        &ready_responses,
+        ready_responses,
         &spawned_tasks,
         active_loop,
         drive_until_complete,

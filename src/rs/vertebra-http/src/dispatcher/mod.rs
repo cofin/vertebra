@@ -183,7 +183,9 @@ impl Dispatcher {
     ) -> usize {
         match &self.backend {
             DispatchBackend::Direct(tx) => direct::dispatch_direct_vec(tx, requests),
-            DispatchBackend::Bridge(bridge) => bridge::dispatch_bridge_vec(bridge, requests),
+            DispatchBackend::Bridge(bridge) => {
+                bridge::dispatch_bridge_vec(bridge, batcher_shard, requests)
+            }
             DispatchBackend::Shm(shm) => shm.dispatch_shm_vec_from_shard(batcher_shard, requests),
         }
     }

@@ -629,21 +629,12 @@ impl WsgiExecutor {
 
     fn submit_inline_completed(
         py: Python<'_>,
-        completed: &[FlushedProtocolResponse],
+        completed: Vec<FlushedProtocolResponse>,
     ) -> PyResult<()> {
         if completed.is_empty() {
             return Ok(());
         }
-        let mut raw_refs: Vec<(u64, u16, &[u8], &[u8])> = Vec::with_capacity(completed.len());
-        for item in completed {
-            raw_refs.push((
-                item.request_id,
-                item.status,
-                item.headers_raw.as_slice(),
-                item.body.as_slice(py),
-            ));
-        }
-        ResponseSubmitter::submit_batch_raw_inner(py, &raw_refs)
+        ResponseSubmitter::submit_batch_flushed(py, completed)
     }
 
     fn dispatch_concurrent(
@@ -692,8 +683,9 @@ impl WsgiExecutor {
                 ));
             }
         }
-        Self::submit_inline_completed(py, &completed)?;
-        Ok(completed.len())
+        let len = completed.len();
+        Self::submit_inline_completed(py, completed)?;
+        Ok(len)
     }
 
     pub(crate) fn dispatch_batch(
@@ -735,7 +727,7 @@ impl WsgiExecutor {
             if end.saturating_sub(start) >= self.stall_threshold_ns {
                 self.mark_concurrent_window(end);
             }
-            Self::submit_inline_completed(py, &[flushed])?;
+            Self::submit_inline_completed(py, vec![flushed])?;
             return Ok(1);
         }
 
@@ -791,7 +783,7 @@ impl WsgiExecutor {
 
         self.unpublish_active_handoff(&handoff);
         drop(handoff);
-        Self::submit_inline_completed(py, &completed)?;
+        Self::submit_inline_completed(py, completed)?;
         Ok(total)
     }
 

@@ -43,6 +43,10 @@ struct EmbeddedPythonWorkers {
 
 #[cfg(feature = "python")]
 impl EmbeddedPythonWorkers {
+    fn consumer_count(&self) -> usize {
+        self.handles.len().max(1)
+    }
+
     fn shutdown(self) {
         Python::attach(|py| {
             let _ = self.stop_event.bind(py).call_method0("set");
@@ -298,9 +302,7 @@ fn spawn_python_workers(
             .getattr("FREE_THREADED")
             .and_then(|v| v.extract::<bool>())
             .unwrap_or(false);
-        let available_cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+        let available_cpus = vertebra_http::config::num_cpus();
         let worker_threads = if free_threaded {
             thread_count.min(available_cpus).max(1)
         } else {
@@ -632,11 +634,18 @@ async fn run_server(
         info!(bind = %config.bind, "vertebra-server starting (no python)");
     }
 
-    let shard_count = if config.topology == Topology::Shm {
-        config.workers.count.clamp(1, 8)
-    } else {
-        config.worker_threads.clamp(1, 8)
-    };
+    #[cfg(feature = "python")]
+    let embedded_consumers = embedded_workers
+        .as_ref()
+        .map_or(config.worker_threads, EmbeddedPythonWorkers::consumer_count);
+    #[cfg(not(feature = "python"))]
+    let embedded_consumers = config.worker_threads;
+
+    let shard_count = vertebra_http::config::compute_batcher_shard_count(
+        config.topology,
+        config.workers.count,
+        embedded_consumers,
+    );
     let collector_shards = RequestBatcher::spawn_pool(
         Arc::clone(&dispatcher),
         BatchLimit::default(),

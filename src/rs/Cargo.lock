@@ -6655,6 +6655,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "hmac 0.12.1",
+ "http",
  "jsonwebtoken",
  "libc",
  "lz4_flex",

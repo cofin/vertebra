@@ -1124,18 +1124,7 @@ fn drive_rsgi_targets_inline(
     })?;
 
     if !ready_responses.is_empty() {
-        let items: Vec<(u64, u16, &[u8], &[u8])> = ready_responses
-            .iter()
-            .map(|r| {
-                (
-                    r.request_id,
-                    r.status,
-                    r.headers_raw.as_slice(),
-                    r.body.as_slice(py),
-                )
-            })
-            .collect();
-        ResponseSubmitter::submit_batch_raw_inner(py, &items)?;
+        ResponseSubmitter::submit_batch_flushed(py, ready_responses)?;
     }
 
     if drive_until_complete

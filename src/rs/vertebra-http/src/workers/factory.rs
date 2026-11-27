@@ -672,9 +672,7 @@ impl EmbeddedSupervisor {
     }
 
     fn spawn_one(&self, worker_id: usize) -> Result<Child, RingFactoryError> {
-        let available_cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+        let available_cpus = crate::config::num_cpus();
         let threads_hint = std::env::var("VERTEBRA_THREADS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok());

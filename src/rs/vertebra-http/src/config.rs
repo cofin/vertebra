@@ -386,25 +386,7 @@ impl ServerConfig {
             config.topology = t;
         }
 
-        // Thread scaling config (clamped to available_parallelism / taskset affinity for Tokio)
-        let available_cpus = num_cpus();
-        let mut explicit_tokio_threads = false;
-        if let Ok(threads) = std::env::var("VERTEBRA_THREADS")
-            && let Ok(n) = threads.parse::<usize>()
-            && n > 0
-        {
-            config.thread_count = n;
-            config.worker_threads = n.min(available_cpus).max(1);
-        }
-        if let Ok(tokio_threads) = std::env::var("VERTEBRA_TOKIO_THREADS")
-            && let Ok(n) = tokio_threads.parse::<usize>()
-            && n > 0
-        {
-            config.worker_threads = n;
-            explicit_tokio_threads = true;
-        }
-
-        // Worker config
+        // Worker config (must run before thread budgeting so topology is finalized)
         if let Ok(count) = std::env::var("VERTEBRA_WORKERS")
             && let Ok(n) = count.parse::<usize>()
         {
@@ -418,12 +400,12 @@ impl ServerConfig {
                 config.reuse_port = true;
             }
         }
-        if config.topology == Topology::Shm && config.workers.count > 1 && !explicit_tokio_threads {
-            config.worker_threads = available_cpus
-                .saturating_sub(config.workers.count)
-                .clamp(1, 4)
-                .min(available_cpus);
-        }
+
+        // Thread scaling config (clamped to available_parallelism / cgroup quota for Tokio)
+        let available_cpus = num_cpus();
+        config.apply_runtime_thread_env(available_cpus, cfg!(Py_GIL_DISABLED), |k| {
+            std::env::var(k).ok()
+        });
         if let Ok(python) = std::env::var("VERTEBRA_PYTHON_BIN") {
             config.workers.python_bin = python;
         }
@@ -597,9 +579,59 @@ impl ServerConfig {
             self.stream_queue_depth = n;
         }
     }
+
+    fn apply_runtime_thread_env<F>(
+        &mut self,
+        available_cpus: usize,
+        free_threaded: bool,
+        get_env: F,
+    ) where
+        F: Fn(&str) -> Option<String>,
+    {
+        let available_cpus = available_cpus.max(1);
+        let mut explicit_tokio_threads = false;
+        if let Some(threads) = get_env("VERTEBRA_THREADS")
+            && let Ok(n) = threads.trim().parse::<usize>()
+            && n > 0
+        {
+            self.thread_count = n;
+            self.worker_threads = n.min(available_cpus).max(1);
+        }
+        if let Some(tokio_threads) = get_env("VERTEBRA_TOKIO_THREADS")
+            && let Ok(n) = tokio_threads.trim().parse::<usize>()
+            && n > 0
+        {
+            self.worker_threads = n;
+            explicit_tokio_threads = true;
+        }
+        if !explicit_tokio_threads {
+            if self.topology == Topology::Shm && self.workers.count > 1 {
+                self.worker_threads = available_cpus
+                    .saturating_sub(self.workers.count)
+                    .clamp(1, 4)
+                    .min(available_cpus);
+            } else if self.topology == Topology::Embedded && !free_threaded {
+                self.worker_threads = 1;
+            }
+        }
+    }
 }
 
-fn num_cpus() -> usize {
+/// Compute `RequestBatcher` shard count aligned to active Python consumers (`1..=8`).
+#[inline]
+pub fn compute_batcher_shard_count(
+    topology: Topology,
+    shm_workers: usize,
+    embedded_consumers: usize,
+) -> usize {
+    match topology {
+        Topology::Shm => shm_workers.clamp(1, 8),
+        Topology::Embedded => embedded_consumers.clamp(1, 8),
+    }
+}
+
+/// Return available logical CPUs bounded by Linux cgroup v2 `cpu.max` quota when present.
+pub fn num_cpus() -> usize {
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
@@ -822,5 +854,67 @@ mod tests {
             _ => None,
         });
         assert!(!cfg.zpages.enabled);
+    }
+
+    #[test]
+    fn runtime_thread_env_defaults_embedded_gil_to_single_thread_and_honors_overrides() {
+        let mut gil_embedded = ServerConfig {
+            topology: Topology::Embedded,
+            ..ServerConfig::default()
+        };
+        gil_embedded.apply_runtime_thread_env(12, false, |_| None);
+        assert_eq!(gil_embedded.worker_threads, 1);
+
+        let mut gil_with_threads = ServerConfig {
+            topology: Topology::Embedded,
+            ..ServerConfig::default()
+        };
+        gil_with_threads.apply_runtime_thread_env(12, false, |k| match k {
+            "VERTEBRA_THREADS" => Some("8".to_string()),
+            _ => None,
+        });
+        assert_eq!(gil_with_threads.worker_threads, 1);
+        assert_eq!(gil_with_threads.thread_count, 8);
+
+        let mut gil_explicit_tokio = ServerConfig {
+            topology: Topology::Embedded,
+            ..ServerConfig::default()
+        };
+        gil_explicit_tokio.apply_runtime_thread_env(12, false, |k| match k {
+            "VERTEBRA_TOKIO_THREADS" => Some("2".to_string()),
+            _ => None,
+        });
+        assert_eq!(gil_explicit_tokio.worker_threads, 2);
+
+        let mut ft_embedded = ServerConfig {
+            topology: Topology::Embedded,
+            worker_threads: 12,
+            ..ServerConfig::default()
+        };
+        ft_embedded.apply_runtime_thread_env(12, true, |_| None);
+        assert_eq!(ft_embedded.worker_threads, 12);
+
+        let mut shm_4w = ServerConfig {
+            topology: Topology::Shm,
+            ..ServerConfig::default()
+        };
+        shm_4w.workers.count = 4;
+        shm_4w.apply_runtime_thread_env(12, false, |_| None);
+        assert_eq!(shm_4w.worker_threads, 4);
+    }
+
+    #[test]
+    fn compute_batcher_shard_count_aligns_with_active_consumers() {
+        assert_eq!(compute_batcher_shard_count(Topology::Embedded, 1, 1), 1);
+        assert_eq!(compute_batcher_shard_count(Topology::Embedded, 1, 12), 8);
+        assert_eq!(compute_batcher_shard_count(Topology::Embedded, 1, 0), 1);
+        assert_eq!(compute_batcher_shard_count(Topology::Shm, 4, 0), 4);
+        assert_eq!(compute_batcher_shard_count(Topology::Shm, 0, 0), 1);
+        assert_eq!(compute_batcher_shard_count(Topology::Shm, 16, 0), 8);
+        let available = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let cpus = num_cpus();
+        assert!(cpus >= 1 && cpus <= available);
     }
 }

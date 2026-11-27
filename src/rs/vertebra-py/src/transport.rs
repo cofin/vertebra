@@ -24,7 +24,7 @@ use vertebra_core::ipc::{
 use vertebra_core::tiered_ring::TieredRingConfig;
 use vertebra_core::transport::{Backend, Transport, TransportError, encode_headers_compact};
 
-use crate::asgi::encode_py_headers_into;
+use crate::asgi::{FlushedProtocolResponse, PreparedRawBody, encode_py_headers_into};
 use crate::request::RequestBatch;
 use crate::response::Response;
 
@@ -452,6 +452,85 @@ impl ResponseSubmitter {
         Ok(())
     }
 
+    /// Submit owned flushed protocol responses, moving `Vec<u8>` headers and owned bodies zero-copy on Embedded mode.
+    pub(crate) fn submit_batch_flushed(
+        py: Python<'_>,
+        items: Vec<FlushedProtocolResponse>,
+    ) -> PyResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(transport) = SHM_TRANSPORT.get() {
+            let _shm_guard = lock_shm_response(py);
+            let mut pending = false;
+            for item in &items {
+                send_shm_response_inline_or_detached(
+                    py,
+                    transport,
+                    &mut pending,
+                    item.request_id,
+                    item.status,
+                    item.headers_raw.as_slice(),
+                    item.body.as_slice(py),
+                )
+                .map_err(map_shm_submit_err)?;
+            }
+            flush_shm_response_notification(transport, &mut pending)
+                .map_err(|e| map_shm_submit_err((true, e)))?;
+            return Ok(());
+        }
+
+        let bridge = BatchBridge::get().ok_or_else(|| {
+            PyRuntimeError::new_err("transport not initialized; call init_transport() first")
+        })?;
+
+        let mut total_bytes = 0usize;
+        let mut bridge_responses = Vec::with_capacity(items.len());
+        for item in items {
+            let headers_raw = if item.headers_raw.is_empty() {
+                Bytes::new()
+            } else {
+                Bytes::from(item.headers_raw)
+            };
+            let body = match item.body {
+                PreparedRawBody::Empty => Bytes::new(),
+                PreparedRawBody::Owned(vec) => {
+                    if vec.is_empty() {
+                        Bytes::new()
+                    } else {
+                        Bytes::from(vec)
+                    }
+                }
+                PreparedRawBody::PyBytes(py_b) => {
+                    let slice = py_b.bind(py).as_bytes();
+                    if slice.is_empty() {
+                        Bytes::new()
+                    } else {
+                        Bytes::copy_from_slice(slice)
+                    }
+                }
+            };
+            total_bytes = total_bytes
+                .saturating_add(headers_raw.len())
+                .saturating_add(body.len());
+            bridge_responses.push(BridgeResponse {
+                request_id: item.request_id,
+                status: item.status,
+                headers_raw,
+                body,
+            });
+        }
+
+        let res = if total_bytes <= INLINE_SUBMIT_THRESHOLD {
+            bridge.submit_responses(bridge_responses)
+        } else {
+            py.detach(|| bridge.submit_responses(bridge_responses))
+        };
+        res.map_err(|e| PyRuntimeError::new_err(format!("failed to submit responses: {e}")))?;
+        Ok(())
+    }
+
     pub fn submit_stream_frame_inner(
         py: Python<'_>,
         request_id: u64,
@@ -687,21 +766,58 @@ pub fn set_stream_sink_py(_py: Python<'_>, sink: Option<Py<PyAny>>) -> PyResult<
 #[pyfunction]
 #[pyo3(name = "submit_results")]
 pub fn submit_results(py: Python<'_>, responses: Vec<Py<Response>>) -> PyResult<()> {
-    let mut prepared = Vec::with_capacity(responses.len());
+    if responses.is_empty() {
+        return Ok(());
+    }
+    if SHM_TRANSPORT.get().is_some() {
+        let mut prepared = Vec::with_capacity(responses.len());
+        for py_resp in &responses {
+            let resp = py_resp.borrow(py);
+            prepared.push((
+                resp.request_id,
+                resp.status,
+                encode_headers_compact(&resp.headers),
+                resp.body.clone(),
+            ));
+        }
+        let items: Vec<(u64, u16, &[u8], &[u8])> = prepared
+            .iter()
+            .map(|(id, st, h, b)| (*id, *st, h.as_slice(), b.as_ref()))
+            .collect();
+        return ResponseSubmitter::submit_batch_raw_inner(py, &items);
+    }
+
+    let bridge = BatchBridge::get().ok_or_else(|| {
+        PyRuntimeError::new_err("transport not initialized; call init_transport() first")
+    })?;
+    let mut total_bytes = 0usize;
+    let mut bridge_responses = Vec::with_capacity(responses.len());
     for py_resp in &responses {
         let resp = py_resp.borrow(py);
-        prepared.push((
-            resp.request_id,
-            resp.status,
-            encode_headers_compact(&resp.headers),
-            resp.body.clone(),
-        ));
+        let headers_vec = encode_headers_compact(&resp.headers);
+        let headers_raw = if headers_vec.is_empty() {
+            Bytes::new()
+        } else {
+            Bytes::from(headers_vec)
+        };
+        let body = resp.body.clone();
+        total_bytes = total_bytes
+            .saturating_add(headers_raw.len())
+            .saturating_add(body.len());
+        bridge_responses.push(BridgeResponse {
+            request_id: resp.request_id,
+            status: resp.status,
+            headers_raw,
+            body,
+        });
     }
-    let items: Vec<(u64, u16, &[u8], &[u8])> = prepared
-        .iter()
-        .map(|(id, st, h, b)| (*id, *st, h.as_slice(), b.as_ref()))
-        .collect();
-    ResponseSubmitter::submit_batch_raw_inner(py, &items)
+    let res = if total_bytes <= INLINE_SUBMIT_THRESHOLD {
+        bridge.submit_responses(bridge_responses)
+    } else {
+        py.detach(|| bridge.submit_responses(bridge_responses))
+    };
+    res.map_err(|e| PyRuntimeError::new_err(format!("failed to submit responses: {e}")))?;
+    Ok(())
 }
 
 /// Submit a single processed response back to the HTTP server.
@@ -711,10 +827,36 @@ pub fn submit_response(py: Python<'_>, response: Py<Response>) -> PyResult<()> {
     let resp = response.borrow(py);
     let request_id = resp.request_id;
     let status = resp.status;
-    let headers_raw = encode_headers_compact(&resp.headers);
+    let headers_vec = encode_headers_compact(&resp.headers);
     let body = resp.body.clone();
     drop(resp);
-    ResponseSubmitter::submit_raw_inner(py, request_id, status, &headers_raw, &body)
+
+    if SHM_TRANSPORT.get().is_some() {
+        return ResponseSubmitter::submit_raw_inner(py, request_id, status, &headers_vec, &body);
+    }
+
+    let bridge = BatchBridge::get().ok_or_else(|| {
+        PyRuntimeError::new_err("transport not initialized; call init_transport() first")
+    })?;
+    let headers_raw = if headers_vec.is_empty() {
+        Bytes::new()
+    } else {
+        Bytes::from(headers_vec)
+    };
+    let payload_len = headers_raw.len().saturating_add(body.len());
+    let bridge_resp = BridgeResponse {
+        request_id,
+        status,
+        headers_raw,
+        body,
+    };
+    let res = if payload_len <= INLINE_SUBMIT_THRESHOLD {
+        bridge.submit_response(bridge_resp)
+    } else {
+        py.detach(|| bridge.submit_response(bridge_resp))
+    };
+    res.map_err(|e| PyRuntimeError::new_err(format!("failed to submit response: {e}")))?;
+    Ok(())
 }
 
 /// Submit a raw response directly without allocating a `Response` pyclass instance.
@@ -1522,5 +1664,79 @@ mod tests {
         seen.sort_unstable();
         let expected: Vec<u64> = (1..=(TOTAL as u64)).collect();
         assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn submit_batch_flushed_preserves_owned_pointers_and_handles_variants() {
+        pyo3::Python::attach(|py| {
+            init_transport("inprocess", 4096, 64, 64).expect("init bridge");
+            let bridge = BatchBridge::get().expect("bridge initialized");
+            let delivered: Arc<Mutex<Vec<BridgeResponse>>> = Arc::new(Mutex::new(Vec::new()));
+            let del_sink = Arc::clone(&delivered);
+            bridge.set_batch_response_sink(Arc::new(move |resps| {
+                del_sink.lock().unwrap().extend(resps);
+            }));
+
+            ResponseSubmitter::submit_batch_flushed(py, Vec::new()).expect("empty batch noop");
+            assert!(delivered.lock().unwrap().is_empty());
+
+            let headers_vec = b"\x04x-id\x01\x001".to_vec();
+            let body_vec = b"zero-copy-body-payload".to_vec();
+            let headers_ptr = headers_vec.as_ptr();
+            let body_ptr = body_vec.as_ptr();
+
+            let large_body = vec![b'L'; INLINE_SUBMIT_THRESHOLD + 128];
+            let large_ptr = large_body.as_ptr();
+
+            let py_bytes = PyBytes::new(py, b"from-pybytes").unbind();
+
+            ResponseSubmitter::submit_batch_flushed(
+                py,
+                vec![
+                    FlushedProtocolResponse {
+                        request_id: 1,
+                        status: 200,
+                        headers_raw: headers_vec,
+                        body: PreparedRawBody::Owned(body_vec),
+                    },
+                    FlushedProtocolResponse {
+                        request_id: 2,
+                        status: 204,
+                        headers_raw: Vec::new(),
+                        body: PreparedRawBody::Empty,
+                    },
+                    FlushedProtocolResponse {
+                        request_id: 3,
+                        status: 200,
+                        headers_raw: Vec::new(),
+                        body: PreparedRawBody::PyBytes(py_bytes),
+                    },
+                ],
+            )
+            .expect("submit mixed flushed batch");
+
+            ResponseSubmitter::submit_batch_flushed(
+                py,
+                vec![FlushedProtocolResponse {
+                    request_id: 4,
+                    status: 200,
+                    headers_raw: Vec::new(),
+                    body: PreparedRawBody::Owned(large_body),
+                }],
+            )
+            .expect("submit large detached batch");
+
+            let batch = delivered.lock().unwrap();
+            assert_eq!(batch.len(), 4);
+            assert_eq!(batch[0].headers_raw.as_ptr(), headers_ptr);
+            assert_eq!(batch[0].body.as_ptr(), body_ptr);
+            assert!(batch[1].headers_raw.is_empty());
+            assert!(batch[1].body.is_empty());
+            assert_eq!(batch[2].body.as_ref(), b"from-pybytes");
+            assert_eq!(batch[3].body.as_ptr(), large_ptr);
+            assert_eq!(batch[3].body.len(), INLINE_SUBMIT_THRESHOLD + 128);
+
+            bridge.clear_batch_response_sink();
+        });
     }
 }

@@ -24,6 +24,7 @@ thiserror = { workspace = true }
 tokio = { version = "1.54", default-features = false, features = ["sync"] }
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64"] }
 bytes = { workspace = true }
+http = { workspace = true }
 chrono = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true }
 lz4_flex = { workspace = true, optional = true }
