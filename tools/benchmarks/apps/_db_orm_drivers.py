@@ -13,7 +13,7 @@ import threading
 import weakref
 from typing import Any, Final
 
-from tools.benchmarks.apps._data_backend import DataBackendConfig, WorldRow
+from tools.benchmarks.apps._data_backend import WORLD_ROW_COUNT, DataBackendConfig, WorldRow
 from tools.benchmarks.apps._db_drivers import (
     POSTGRES_BENCH_INSTALL_HINT,
     WorldDriver,
@@ -21,8 +21,9 @@ from tools.benchmarks.apps._db_drivers import (
     normalize_sqlite_target,
     record_to_world_row,
     require_postgres_dsn,
+    resolve_async_broker_transport,
     resolve_benchmark_broker,
-    resolve_broker_transports,
+    resolve_sync_broker_transport,
     seed_postgres_world_async,
     seed_postgres_world_sync,
     seed_sqlite_world_sync,
@@ -48,15 +49,6 @@ _SQLITE_CREATE_WORLD_SQL: Final[str] = (
     "CREATE TABLE IF NOT EXISTS world (id INTEGER PRIMARY KEY, randomnumber INTEGER NOT NULL)"
 )
 _SQLITE_INSERT_WORLD_SQL: Final[str] = "INSERT OR IGNORE INTO world (id, randomnumber) VALUES (?, ?)"
-_PG_CREATE_WORLD_SQL: Final[str] = (
-    "CREATE TABLE IF NOT EXISTS world (id INTEGER PRIMARY KEY, randomnumber INTEGER NOT NULL)"
-)
-_PG_SEED_WORLD_SQL: Final[str] = (
-    "INSERT INTO world (id, randomnumber) "
-    "SELECT g, ((g::BIGINT * 1103515245 + 12345) % 10000)::INT + 1 "
-    "FROM generate_series(1, 10000) AS g "
-    "ON CONFLICT (id) DO NOTHING"
-)
 
 
 def rewrite_sqlalchemy_url(
@@ -77,8 +69,6 @@ def rewrite_sqlalchemy_url(
             scheme = "sqlite+aiosqlite" if is_async else "sqlite"
         if target == ":memory:":
             return f"{scheme}:///:memory:"
-        if target.startswith("/"):
-            return f"{scheme}:///{target}"
         return f"{scheme}:///{target}"
 
     if norm_backend == "postgres":
@@ -99,7 +89,7 @@ def _seed_sqlite_session_sqlspec_sync(session: Any) -> None:
     session.execute(_SQLITE_CREATE_WORLD_SQL)
     row = session.select_one("SELECT COUNT(*) AS cnt FROM world")
     existing = int(next(iter(row.values()))) if isinstance(row, dict) else int(row[0])
-    if existing < len(world_seed_rows()):
+    if existing < WORLD_ROW_COUNT:
         for row_id, random_num in world_seed_rows():
             session.execute(_SQLITE_INSERT_WORLD_SQL, (row_id, random_num))
         commit_fn = getattr(session, "commit", None)
@@ -112,7 +102,7 @@ async def _seed_sqlite_session_sqlspec_async(session: Any) -> None:
     await session.execute(_SQLITE_CREATE_WORLD_SQL)
     row = await session.select_one("SELECT COUNT(*) AS cnt FROM world")
     existing = int(next(iter(row.values()))) if isinstance(row, dict) else int(row[0])
-    if existing < len(world_seed_rows()):
+    if existing < WORLD_ROW_COUNT:
         for row_id, random_num in world_seed_rows():
             await session.execute(_SQLITE_INSERT_WORLD_SQL, (row_id, random_num))
         commit_fn = getattr(session, "commit", None)
@@ -138,7 +128,6 @@ class SQLSpecWorldDriver:
         self._sync_lock = threading.Lock()
         self._loop_lock = threading.Lock()
         self._sync_cfg: Any = None
-        self._sync_seeded = False
         self._async_cfgs: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Any] = weakref.WeakKeyDictionary()
         self._async_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
             weakref.WeakKeyDictionary()
@@ -226,7 +215,7 @@ class SQLSpecWorldDriver:
             if pg_mod is None:
                 msg = "vertebra.extensions.sqlspec.adapters.postgres is required for Vertebra SQLSpec PostgreSQL"
                 raise RuntimeError(msg)
-            _, async_broker = resolve_broker_transports(self.config.broker_mode, pool_size=self.pool_size)
+            async_broker = resolve_async_broker_transport(self.config.broker_mode, pool_size=self.pool_size)
             return pg_mod.PostgresAsyncConfig(
                 connection_config={
                     "dsn": self.db_target,
@@ -330,6 +319,8 @@ class SQLSpecWorldDriver:
         return updated
 
     async def fetch_world_async(self, row_id: int) -> WorldRow:
+        if self.flavor == "upstream":
+            await ensure_task_context()
         cfg = await self._ensure_async_cfg()
         sql = self._select_sql(is_async=True)
         async with cfg.provide_session() as session:
@@ -339,6 +330,8 @@ class SQLSpecWorldDriver:
         return record_to_world_row(rec, row_id)
 
     async def fetch_worlds_async(self, row_ids: list[int]) -> list[WorldRow]:
+        if self.flavor == "upstream":
+            await ensure_task_context()
         cfg = await self._ensure_async_cfg()
         sql = self._select_sql(is_async=True)
         rows: list[WorldRow] = []
@@ -351,6 +344,8 @@ class SQLSpecWorldDriver:
         return rows
 
     async def update_worlds_async(self, updates: list[tuple[int, int]]) -> list[WorldRow]:
+        if self.flavor == "upstream":
+            await ensure_task_context()
         cfg = await self._ensure_async_cfg()
         select_sql = self._select_sql(is_async=True)
         update_sql = self._update_sql(is_async=True)
@@ -487,7 +482,7 @@ class AdvancedAlchemyWorldDriver:
         self._base_cls.metadata.create_all(engine)
         with engine.begin() as conn:
             existing = int(conn.execute(self._sa.text("SELECT COUNT(*) FROM world")).scalar_one())
-            if existing < len(world_seed_rows()):
+            if existing < WORLD_ROW_COUNT:
                 conn.execute(
                     self._sa.text("INSERT OR IGNORE INTO world (id, randomnumber) VALUES (:id, :rn)"),
                     [{"id": row_id, "rn": rn} for row_id, rn in world_seed_rows()],
@@ -497,7 +492,7 @@ class AdvancedAlchemyWorldDriver:
         async with engine.begin() as conn:
             await conn.run_sync(self._base_cls.metadata.create_all)
             existing = int((await conn.execute(self._sa.text("SELECT COUNT(*) FROM world"))).scalar_one())
-            if existing < len(world_seed_rows()):
+            if existing < WORLD_ROW_COUNT:
                 await conn.execute(
                     self._sa.text("INSERT OR IGNORE INTO world (id, randomnumber) VALUES (:id, :rn)"),
                     [{"id": row_id, "rn": rn} for row_id, rn in world_seed_rows()],
@@ -521,7 +516,7 @@ class AdvancedAlchemyWorldDriver:
             if self.use_broker_pool:
                 vtb_pool = import_optional("vertebra.extensions.sqlalchemy.pool")
                 assert vtb_pool is not None
-                sync_transport, _ = resolve_broker_transports(self.config.broker_mode, pool_size=self.pool_size)
+                sync_transport = resolve_sync_broker_transport(self.config.broker_mode, pool_size=self.pool_size)
                 assert sync_transport is not None
                 engine_kwargs["poolclass"] = vtb_pool.BrokerPool.bind_class(
                     broker=sync_transport,
@@ -571,7 +566,7 @@ class AdvancedAlchemyWorldDriver:
             if self.use_broker_pool:
                 vtb_pool = import_optional("vertebra.extensions.sqlalchemy.pool")
                 assert vtb_pool is not None
-                _, async_transport = resolve_broker_transports(self.config.broker_mode, pool_size=self.pool_size)
+                async_transport = resolve_async_broker_transport(self.config.broker_mode, pool_size=self.pool_size)
                 assert async_transport is not None
                 engine_kwargs["poolclass"] = vtb_pool.AsyncBrokerPool.bind_class(
                     broker=async_transport,

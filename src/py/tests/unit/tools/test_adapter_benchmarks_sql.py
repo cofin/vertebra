@@ -20,6 +20,7 @@ from tools.benchmarks.adapters.sql import (
     COMPARATOR_PAIRS,
     COMPARATORLESS_CASES,
     SUPPORTED_SQL_ENGINES,
+    capture_advanced_alchemy_report,
     capture_duckdb_report,
     capture_oracle_report,
     capture_postgres_adapter_report,
@@ -812,7 +813,7 @@ def test_sql_cli_oracle_reset_relay_flag(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 def test_capture_advanced_alchemy_report_sqlite_and_cli(tmp_path: Path) -> None:
     """Run offline Advanced Alchemy SQLite comparator, check comparator pairs, and verify CLI capture."""
-    from tools.benchmarks.adapters.sql import capture_advanced_alchemy_report
+    has_aiosqlite = import_optional("aiosqlite") is not None
 
     assert "advanced_alchemy" in SUPPORTED_SQL_ENGINES
     assert COMPARATOR_PAIRS["vertebra-aa-sqlite-sync"] == ("vanilla-aa-sqlite-sync",)
@@ -834,10 +835,20 @@ def test_capture_advanced_alchemy_report_sqlite_and_cli(tmp_path: Path) -> None:
         assert (case_name, "vertebra-aa-sqlite-sync") in by_key
         assert (case_name, "vertebra-aa-sqlite-async") in by_key
         assert (case_name, "vanilla-aa-sqlite-sync") in by_key
+        if has_aiosqlite:
+            assert (case_name, "vanilla-aa-sqlite-async") in by_key
 
     outcomes = check_report_against_comparators(roundtripped, max_median_ratio=100.0)
     assert outcomes
-    assert all(outcome.status != "missing" for outcome in outcomes)
+    sync_outcomes = [outcome for outcome in outcomes if outcome.vertebra_driver == "vertebra-aa-sqlite-sync"]
+    async_outcomes = [outcome for outcome in outcomes if outcome.vertebra_driver == "vertebra-aa-sqlite-async"]
+    assert len(sync_outcomes) == 2
+    assert all(outcome.status != "missing" for outcome in sync_outcomes)
+    assert len(async_outcomes) == 2
+    if has_aiosqlite:
+        assert all(outcome.status != "missing" for outcome in async_outcomes)
+    else:
+        assert all(outcome.status == "missing" for outcome in async_outcomes)
 
     out_file = tmp_path / "aa-sqlite.json"
     rc = main(

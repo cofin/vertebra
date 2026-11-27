@@ -1390,16 +1390,12 @@ def _rewrite_aa_url(engine: AdvancedAlchemyEngine, dsn: str, *, dialect: str) ->
     """Rewrite a SQLite path/URI or PostgreSQL DSN into an explicit SQLAlchemy URL."""
     cleaned = dsn.strip()
     if engine == "sqlite":
-        if not cleaned or cleaned == ":memory:":
+        from tools.benchmarks.apps._db_drivers import normalize_sqlite_target
+
+        target = normalize_sqlite_target(cleaned)
+        if target == ":memory:":
             return f"{dialect}:///:memory:"
-        if "://" in cleaned:
-            parsed = urlsplit(cleaned)
-            raw_path = parsed.path
-            if parsed.netloc == ":memory:" or (not parsed.netloc and raw_path in ("", "/", "/:memory:", ":memory:")):
-                return f"{dialect}:///:memory:"
-            target = raw_path[1:] if raw_path.startswith("//") else raw_path
-            return f"{dialect}:///{target.lstrip('/') if not target.startswith('/') else target}"
-        return f"{dialect}:///{cleaned}"
+        return f"{dialect}:///{target}"
     _, remainder = cleaned.split("://", 1) if "://" in cleaned else ("postgresql", cleaned)
     return f"{dialect}://{remainder}"
 

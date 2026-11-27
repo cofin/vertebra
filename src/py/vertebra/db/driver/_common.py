@@ -209,9 +209,10 @@ class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
         if lease is None or broker is None:
             return
         plan = self._lease_plan()
-        if plan.lease_releases_itself(lease):
+        release_method = plan.lease_release_method(lease)
+        if release_method is not None:
             with contextlib.suppress(Exception):
-                lease.release()
+                getattr(lease, release_method)()
             return
         if plan.has_sync_release:
             with contextlib.suppress(Exception):

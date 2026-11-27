@@ -247,15 +247,15 @@ def test_data_backend_offline_operations(db_backend: str, db_dsn: str) -> None:
 
 
 def test_sqlite_in_memory_isolation() -> None:
-    """Verify two SQLite :memory: backends keep independent state through the driver API."""
-    first = DataBackend(DataBackendConfig(db_backend="sqlite", db_dsn=":memory:"))
-    second = DataBackend(DataBackendConfig(db_backend="sqlite", db_dsn=":memory:"))
+    """Verify two SQLite :memory: drivers keep independent state through the public WorldDriver API."""
+    from tools.benchmarks.apps._db_drivers import build_world_driver
+
+    first = build_world_driver(DataBackendConfig(db_backend="sqlite", db_dsn=":memory:"), pool_size=4)
+    second = build_world_driver(DataBackendConfig(db_backend="sqlite", db_dsn=":memory:"), pool_size=4)
     try:
-        assert first._driver is not None
-        assert second._driver is not None
-        first._driver.update_worlds_sync([(1, 99999)])
-        row_first = first._driver.fetch_world_sync(1)
-        row_second = second._driver.fetch_world_sync(1)
+        first.update_worlds_sync([(1, 99999)])
+        row_first = first.fetch_world_sync(1)
+        row_second = second.fetch_world_sync(1)
         assert row_first.randomNumber == 99999
         assert row_second.randomNumber != 99999
     finally:

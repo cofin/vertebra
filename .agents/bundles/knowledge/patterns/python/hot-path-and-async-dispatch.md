@@ -61,7 +61,7 @@ sources:
 # Hot-Path Caching & Single-Wake Async Dispatch
 
 <!-- truth: start -->
-- Route and framework handlers compile signatures at startup (`HandlerSpec`, `DirectPlan`, `FastPathProvider`), specializing 1-argument simple extractors (`req`, `body`, query/path params) in `compile_handler_spec` without `inspect.signature()` on the request path.
+- Route and framework handlers compile signatures at startup (`HandlerSpec`, `DirectPlan`, `FastPathProvider`), specializing 1-argument simple extractors (`request`/`req`, `body`, `headers`, `method`, `path`, raw `query`) in `compile_handler_spec` without `inspect.signature()` on the request path.
 - Synchronous and mixed sync/async `native_only` routes bypass `partition_batch` in a single pass, flushing completed replies via `submit_batch_raw` and stepping async coroutines via `drive_native_batch` without `ThreadPoolExecutor` hops.
 - `Worker._run_inline_event_loop` splits `_on_notify_readable` and `_drain_batches` with a 1-turn `call_soon` grace check before re-arming Dekker `prepare_request_sleep` / `cancel_request_sleep` barriers on `loop.add_reader(notify_fd)`.
 - `Request::body` returns Python `bytes` directly from the underlying `BatchSnapshot` slice, and suspended `async_native` coroutines drop `Request` references before `await` so in-flight I/O never pins `Arc<BatchSnapshot>` slabs in `BufferPool`.
@@ -71,7 +71,7 @@ Python worker code on the request hot path ([`worker.py`](../../../../../src/py/
 
 ## 1. Startup Signature Caching (`HandlerSpec` / `compile_handler_spec`)
 
-Never call `inspect.signature()` on the request path. [`compile_handler_spec(handler, sync_to_thread=...)`](../../../../../src/py/vertebra/server/_dispatch.py) (pre-compiled at worker startup via `compile_handler_table(handlers)`) compiles a `HandlerSpec` and specialized invoker closure once, including direct 1-argument simple extractors (`request`, `body`, single path/query parameter, or zero-argument handlers) that avoid `dict`/`kwargs` packing on the hot path:
+Never call `inspect.signature()` on the request path. [`compile_handler_spec(handler, sync_to_thread=...)`](../../../../../src/py/vertebra/server/_dispatch.py) (pre-compiled at worker startup via `compile_handler_table(handlers)`) compiles a `HandlerSpec` and specialized invoker closure once, including direct 1-argument simple extractors for built-in request accessors (`request`/`req`, `body`, `headers`, `method`, `path`, raw `query` — excluding handlers requiring parsed path or query maps) and zero-argument handlers that avoid `dict`/`kwargs` packing on the hot path:
 
 ```python
 class HandlerSpec(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
@@ -82,6 +82,8 @@ class HandlerSpec(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     param_names: tuple[str, ...]
     invoker: Callable[..., Any]
     sync_to_thread: bool = False
+    status_code: int = 200
+    arg_resolver: Callable[[Any], tuple[Any, ...]] | None = None
 
 def compile_handler_table(handlers: Mapping[int, Callable[..., Any]]) -> dict[int, HandlerSpec]:
     """Pre-compile dispatch specs for all registered handler callables."""
@@ -97,7 +99,7 @@ def compile_handler_table(handlers: Mapping[int, Callable[..., Any]]) -> dict[in
 ## 3. Direct `Request::body`, Zero-Copy Response Coercion & Snapshot Unpinning
 
 - **Direct `Request::body` & Zero-Copy Buffer Coercion (`_serialize_result` / `coerce_response`)**: [`Request::body`](../../../../../src/rs/vertebra-py/src/request.rs)[^src-vertebra-py-src-request-rs] materializes Python `bytes` directly from the `BatchSnapshot` body slice (`PyBytes::new`), while `req.body_view` exposes a zero-copy `memoryview`. `_serialize_result` accepts `bytes | bytearray | memoryview`, `str`, `Response`, and `msgspec`-serializable values (`encode_json_bytes`), forwarding buffers directly to Rust `submit_batch_raw` / `submit_response_raw` (`PyBuffer` extraction).
-- **Unpinning `BatchSnapshot` Across `await`**: Before awaiting an `async_native` handler coroutine, `_dispatch_async_item` extracts `request_id`, `method`, and `path` into a lightweight `_AsyncErrorStub` and drops the `Request` reference so suspended I/O tasks never pin `Arc<BatchSnapshot>` slabs in `BufferPool`.
+- **Unpinning `BatchSnapshot` Across `await`**: Before awaiting an `async_native` handler coroutine, `_dispatch_async_item` extracts `request_id` into a lightweight `_AsyncErrorStub` and drops the `Request` reference so suspended I/O tasks never pin `Arc<BatchSnapshot>` slabs in `BufferPool`.
 - **Loop-Local & Fused Fast Paths**: Use [`SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]`](../../../../../src/py/vertebra/utils/sync_tools.py) to shard non-thread-safe primitives across `EventLoopPool` loops on free-threaded Python `3.14t`/`3.15t`, and [`FastPath` / `dispatch_handler_direct`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py)[^src-extensions-litestar-fastpath-py] for fused Litestar direct dispatch.
 - **Prepared Database & Tool Boundaries**: Prepared statement retention, native parameter bind modes, and Arrow zero-copy rules are documented in [Database Drivers, Native Dialers & Arrow Zero-Copy](../../domains/data/database-drivers-and-dialers.md), while typed tool schema compilation and confirmation gates live in [MCP, WebMCP & A2A Protocol Harness](../../domains/agent/mcp-and-a2a-protocol-harness.md).
 

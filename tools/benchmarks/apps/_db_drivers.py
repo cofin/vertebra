@@ -49,8 +49,10 @@ __all__ = (
     "normalize_sqlite_target",
     "record_to_world_row",
     "require_postgres_dsn",
+    "resolve_async_broker_transport",
     "resolve_benchmark_broker",
     "resolve_broker_transports",
+    "resolve_sync_broker_transport",
     "seed_postgres_world_async",
     "seed_postgres_world_sync",
     "seed_sqlite_world_sync",
@@ -59,6 +61,8 @@ __all__ = (
 
 POSTGRES_BENCH_INSTALL_HINT: Final[str] = "uv sync --group postgres-bench"
 _POSTGRES_SCHEMES: Final[tuple[str, ...]] = ("postgres://", "postgresql://", "postgresql+")
+_PG_SEED_ADVISORY_LOCK_KEY: Final[int] = 745_018_293
+_PG_ADVISORY_LOCK_SQL: Final[str] = f"SELECT pg_advisory_xact_lock({_PG_SEED_ADVISORY_LOCK_KEY})"
 
 _SQLITE_CREATE_WORLD_SQL: Final[str] = (
     "CREATE TABLE IF NOT EXISTS world (id INTEGER PRIMARY KEY, randomnumber INTEGER NOT NULL)"
@@ -164,7 +168,7 @@ def normalize_sqlite_target(raw_dsn: str) -> str:
             return raw_path[1:]
         if parsed.netloc:
             return f"{parsed.netloc}{raw_path}"
-        return raw_path.lstrip("/") if not raw_path.startswith("/") else raw_path
+        return raw_path
     if "?" in dsn:
         return dsn.split("?", 1)[0]
     return dsn
@@ -211,6 +215,38 @@ def _worker_broker_config(shm_name: str, *, pool_size: int) -> BrokerConfig:
         socket_path=os.environ.get("VERTEBRA_BROKER_SOCKET") or None,
         attach_secret=os.environ.get("VERTEBRA_BROKER_SECRET") or None,
     )
+
+
+def resolve_sync_broker_transport(
+    broker_mode: str,
+    *,
+    pool_size: int = 40,
+) -> SyncSHMBrokerTransport | None:
+    """Resolve a single sync SHM broker transport when ``broker_mode == 'shm_broker'``."""
+    if broker_mode.strip().lower() != "shm_broker":
+        return None
+    shm_name = os.environ.get("VERTEBRA_BROKER_SHM", "").strip()
+    shm_fd = os.environ.get("VERTEBRA_BROKER_SHM_FD", "").strip()
+    if shm_name and not shm_fd:
+        return SyncSHMBrokerTransport(_worker_broker_config(shm_name, pool_size=pool_size))
+    native_broker = DatabaseRegistry.default_broker(pool_size=max(1, pool_size))
+    return SyncSHMBrokerTransport(native=native_broker)
+
+
+def resolve_async_broker_transport(
+    broker_mode: str,
+    *,
+    pool_size: int = 40,
+) -> AsyncSHMBrokerTransport | None:
+    """Resolve a single async SHM broker transport when ``broker_mode == 'shm_broker'``."""
+    if broker_mode.strip().lower() != "shm_broker":
+        return None
+    shm_name = os.environ.get("VERTEBRA_BROKER_SHM", "").strip()
+    shm_fd = os.environ.get("VERTEBRA_BROKER_SHM_FD", "").strip()
+    if shm_name and not shm_fd:
+        return AsyncSHMBrokerTransport(_worker_broker_config(shm_name, pool_size=pool_size))
+    native_broker = DatabaseRegistry.default_broker(pool_size=max(1, pool_size))
+    return AsyncSHMBrokerTransport(native=native_broker)
 
 
 def resolve_benchmark_broker(broker_mode: str, *, pool_size: int = 40) -> Any:
@@ -275,20 +311,46 @@ def _seed_sqlite_connection_inline(conn: sqlite3.Connection, *, is_memory: bool)
         conn.commit()
 
 
+def _seed_pg_native_sync(driver: SyncPostgreSQLDriver) -> None:
+    """Create and seed the PostgreSQL ``world`` table under a transaction-scoped advisory lock."""
+    driver.begin()
+    try:
+        driver.execute(_PG_ADVISORY_LOCK_SQL)
+        driver.execute(_PG_CREATE_WORLD_SQL)
+        driver.execute(_PG_SEED_WORLD_SQL)
+        driver.commit()
+    except BaseException:
+        with contextlib.suppress(Exception):
+            driver.rollback()
+        raise
+
+
+async def _seed_pg_native_async(driver: AsyncPostgreSQLDriver) -> None:
+    """Asynchronously create and seed the PostgreSQL ``world`` table under an advisory lock."""
+    await driver.begin()
+    try:
+        await driver.execute(_PG_ADVISORY_LOCK_SQL)
+        await driver.execute(_PG_CREATE_WORLD_SQL)
+        await driver.execute(_PG_SEED_WORLD_SQL)
+        await driver.commit()
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await driver.rollback()
+        raise
+
+
 def seed_postgres_world_sync(dsn: str) -> None:
     """Idempotently create and seed the 10,000-row PostgreSQL ``world`` table via ``SyncPostgreSQLDriver``."""
     cfg = PostgreSQLConfig.from_url(dsn, min_size=1, max_size=2)
     with SyncPostgreSQLDriver(cfg) as drv:
-        drv.execute(_PG_CREATE_WORLD_SQL)
-        drv.execute(_PG_SEED_WORLD_SQL)
+        _seed_pg_native_sync(drv)
 
 
 async def seed_postgres_world_async(dsn: str) -> None:
     """Idempotently create and seed the 10,000-row PostgreSQL ``world`` table via ``AsyncPostgreSQLDriver``."""
     cfg = PostgreSQLConfig.from_url(dsn, min_size=1, max_size=2)
     async with AsyncPostgreSQLDriver(cfg) as drv:
-        await drv.execute(_PG_CREATE_WORLD_SQL)
-        await drv.execute(_PG_SEED_WORLD_SQL)
+        await _seed_pg_native_async(drv)
 
 
 class NativeSQLiteWorldDriver:
@@ -605,8 +667,7 @@ class NativePostgresWorldDriver:
             if not self._seeded:
                 with self._seed_lock:
                     if not self._seeded:
-                        self._sync_driver.execute(_PG_CREATE_WORLD_SQL)
-                        self._sync_driver.execute(_PG_SEED_WORLD_SQL)
+                        _seed_pg_native_sync(self._sync_driver)
                         self._seeded = True
             return self._sync_driver
 
@@ -629,8 +690,7 @@ class NativePostgresWorldDriver:
                 return existing
             driver = AsyncPostgreSQLDriver(self.async_pg_config)
             if not self._seeded:
-                await driver.execute(_PG_CREATE_WORLD_SQL)
-                await driver.execute(_PG_SEED_WORLD_SQL)
+                await _seed_pg_native_async(driver)
                 self._seeded = True
             self._async_drivers[loop] = driver
             return driver
@@ -735,12 +795,15 @@ class StdlibPostgresWorldDriver:
                     if not self._seeded:
                         if self._sync_pool is not None:
                             with self._sync_pool.connection() as conn:
+                                conn.execute(_PG_ADVISORY_LOCK_SQL)
                                 conn.execute(_PG_CREATE_WORLD_SQL)
                                 conn.execute(_PG_SEED_WORLD_SQL)
                                 conn.commit()
                         elif self._sync_conn is not None:
-                            self._sync_conn.execute(_PG_CREATE_WORLD_SQL)
-                            self._sync_conn.execute(_PG_SEED_WORLD_SQL)
+                            with self._sync_conn.transaction():
+                                self._sync_conn.execute(_PG_ADVISORY_LOCK_SQL)
+                                self._sync_conn.execute(_PG_CREATE_WORLD_SQL)
+                                self._sync_conn.execute(_PG_SEED_WORLD_SQL)
                         self._seeded = True
             return self._sync_pool, self._sync_conn
 
@@ -767,7 +830,8 @@ class StdlibPostgresWorldDriver:
                 raise RuntimeError(msg)
             pool = await asyncpg_mod.create_pool(self.dsn, min_size=1, max_size=self.pool_size)
             if not self._seeded:
-                async with pool.acquire() as conn:
+                async with pool.acquire() as conn, conn.transaction():
+                    await conn.execute(_PG_ADVISORY_LOCK_SQL)
                     await conn.execute(_PG_CREATE_WORLD_SQL)
                     await conn.execute(_PG_SEED_WORLD_SQL)
                 self._seeded = True

@@ -457,8 +457,8 @@ async def test_session_broker_attach_and_acquire_avoid_placeholder_compile_and_s
 
 @pytest.mark.anyio
 async def test_broker_lease_plan_releases_async_connection_lease_via_release_sync() -> None:
-    """Verify _BrokerLeasePlan and _release_lease release AsyncConnectionLease via release_sync()."""
-    from vertebra.db.driver._common import _BrokerLeasePlan, _release_lease
+    """Verify _BrokerLeasePlan, _release_lease, and _release_pid_lease release AsyncConnectionLease via release_sync()."""
+    from vertebra.db.driver._common import CommonDriverMixin, _BrokerLeasePlan, _release_lease
 
     transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
     plan = _BrokerLeasePlan(transport)
@@ -467,6 +467,20 @@ async def test_broker_lease_plan_releases_async_connection_lease_via_release_syn
     assert plan.lease_release_method(lease) == "release_sync"
     _release_lease(transport, plan, lease)
     assert transport.metrics().active_leases == 0
+
+    class _DummyDriver(CommonDriverMixin[Any]):
+        def __init__(self, broker: Any) -> None:
+            self._broker = broker
+            self._cached_lease_plan = None
+
+    dummy = _DummyDriver(transport)
+    lease_two = await transport.acquire(worker_id=2)
+    assert transport.metrics().active_leases == 1
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        dummy._release_pid_lease(lease_two)
+    assert transport.metrics().active_leases == 0
+    assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
 
 
 @pytest.mark.anyio
