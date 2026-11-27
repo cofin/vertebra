@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 
 use vertebra_core::transport::BatchSnapshot;
 
-use crate::asgi::{FlushedProtocolResponse, log_app_exception};
+use crate::asgi::log_app_exception;
 use crate::transport::ResponseSubmitter;
 use crate::wsgi::environ::WsgiServerConfig;
 use crate::wsgi::runner::execute_single_wsgi_item;
@@ -627,16 +627,6 @@ impl WsgiExecutor {
         drop(removed);
     }
 
-    fn submit_inline_completed(
-        py: Python<'_>,
-        completed: Vec<FlushedProtocolResponse>,
-    ) -> PyResult<()> {
-        if completed.is_empty() {
-            return Ok(());
-        }
-        ResponseSubmitter::submit_batch_flushed(py, completed)
-    }
-
     fn dispatch_concurrent(
         self: &Arc<Self>,
         app: &Bound<'_, PyAny>,
@@ -684,7 +674,7 @@ impl WsgiExecutor {
             }
         }
         let len = completed.len();
-        Self::submit_inline_completed(py, completed)?;
+        ResponseSubmitter::submit_batch_flushed(py, completed)?;
         Ok(len)
     }
 
@@ -727,7 +717,7 @@ impl WsgiExecutor {
             if end.saturating_sub(start) >= self.stall_threshold_ns {
                 self.mark_concurrent_window(end);
             }
-            Self::submit_inline_completed(py, vec![flushed])?;
+            ResponseSubmitter::submit_batch_flushed(py, vec![flushed])?;
             return Ok(1);
         }
 
@@ -783,7 +773,7 @@ impl WsgiExecutor {
 
         self.unpublish_active_handoff(&handoff);
         drop(handoff);
-        Self::submit_inline_completed(py, completed)?;
+        ResponseSubmitter::submit_batch_flushed(py, completed)?;
         Ok(total)
     }
 

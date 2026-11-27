@@ -333,6 +333,22 @@ fn send_shm_response_inline_or_detached(
     })
 }
 
+#[inline]
+fn submit_bridge_responses(
+    py: Python<'_>,
+    bridge: &BatchBridge,
+    bridge_responses: Vec<BridgeResponse>,
+    total_bytes: usize,
+) -> PyResult<()> {
+    let res = if total_bytes <= INLINE_SUBMIT_THRESHOLD {
+        bridge.submit_responses(bridge_responses)
+    } else {
+        py.detach(|| bridge.submit_responses(bridge_responses))
+    };
+    res.map_err(|e| PyRuntimeError::new_err(format!("failed to submit responses: {e}")))?;
+    Ok(())
+}
+
 pub struct ResponseSubmitter;
 
 impl ResponseSubmitter {
@@ -443,13 +459,7 @@ impl ResponseSubmitter {
             });
         }
 
-        let res = if total_bytes <= INLINE_SUBMIT_THRESHOLD {
-            bridge.submit_responses(bridge_responses)
-        } else {
-            py.detach(|| bridge.submit_responses(bridge_responses))
-        };
-        res.map_err(|e| PyRuntimeError::new_err(format!("failed to submit responses: {e}")))?;
-        Ok(())
+        submit_bridge_responses(py, bridge, bridge_responses, total_bytes)
     }
 
     /// Submit owned flushed protocol responses, moving `Vec<u8>` headers and owned bodies zero-copy on Embedded mode.
@@ -522,13 +532,7 @@ impl ResponseSubmitter {
             });
         }
 
-        let res = if total_bytes <= INLINE_SUBMIT_THRESHOLD {
-            bridge.submit_responses(bridge_responses)
-        } else {
-            py.detach(|| bridge.submit_responses(bridge_responses))
-        };
-        res.map_err(|e| PyRuntimeError::new_err(format!("failed to submit responses: {e}")))?;
-        Ok(())
+        submit_bridge_responses(py, bridge, bridge_responses, total_bytes)
     }
 
     pub fn submit_stream_frame_inner(
@@ -811,13 +815,7 @@ pub fn submit_results(py: Python<'_>, responses: Vec<Py<Response>>) -> PyResult<
             body,
         });
     }
-    let res = if total_bytes <= INLINE_SUBMIT_THRESHOLD {
-        bridge.submit_responses(bridge_responses)
-    } else {
-        py.detach(|| bridge.submit_responses(bridge_responses))
-    };
-    res.map_err(|e| PyRuntimeError::new_err(format!("failed to submit responses: {e}")))?;
-    Ok(())
+    submit_bridge_responses(py, bridge, bridge_responses, total_bytes)
 }
 
 /// Submit a single processed response back to the HTTP server.
@@ -1342,6 +1340,38 @@ fn send_shm_response_detached(
 }
 
 #[cfg(test)]
+pub(crate) struct TestBridgeGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    pub(crate) bridge: &'static BatchBridge,
+}
+
+#[cfg(test)]
+impl Drop for TestBridgeGuard {
+    fn drop(&mut self) {
+        self.bridge.clear_batch_response_sink();
+        self.bridge.clear_response_sink();
+        self.bridge.clear_stream_sink();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn lock_test_bridge() -> TestBridgeGuard {
+    static TEST_BRIDGE_LOCK: Mutex<()> = Mutex::new(());
+    let guard = TEST_BRIDGE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    init_transport("inprocess", 4096, 64, 64).expect("init inprocess bridge");
+    let bridge = BatchBridge::get().expect("bridge initialized");
+    bridge.clear_batch_response_sink();
+    bridge.clear_response_sink();
+    bridge.clear_stream_sink();
+    TestBridgeGuard {
+        _guard: guard,
+        bridge,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
@@ -1539,14 +1569,14 @@ mod tests {
 
     #[test]
     fn submit_stream_frame_validates_flags_and_closed_delivery() {
+        let guard = lock_test_bridge();
+        let bridge = guard.bridge;
         pyo3::Python::attach(|py| {
             let err =
                 ResponseSubmitter::submit_stream_frame_inner(py, 1, 200, FLAG_FINAL, b"", b"x")
                     .expect_err("missing FLAG_STREAMING should fail");
             assert!(err.is_instance_of::<PyValueError>(py));
 
-            init_transport("inprocess", 4096, 64, 64).expect("init bridge");
-            let bridge = BatchBridge::get().expect("bridge initialized");
             bridge.set_stream_sink(Arc::new(|_| StreamDelivery::Closed));
 
             let closed_err = ResponseSubmitter::submit_stream_frame_inner(
@@ -1668,9 +1698,9 @@ mod tests {
 
     #[test]
     fn submit_batch_flushed_preserves_owned_pointers_and_handles_variants() {
+        let guard = lock_test_bridge();
+        let bridge = guard.bridge;
         pyo3::Python::attach(|py| {
-            init_transport("inprocess", 4096, 64, 64).expect("init bridge");
-            let bridge = BatchBridge::get().expect("bridge initialized");
             let delivered: Arc<Mutex<Vec<BridgeResponse>>> = Arc::new(Mutex::new(Vec::new()));
             let del_sink = Arc::clone(&delivered);
             bridge.set_batch_response_sink(Arc::new(move |resps| {
@@ -1735,8 +1765,73 @@ mod tests {
             assert_eq!(batch[2].body.as_ref(), b"from-pybytes");
             assert_eq!(batch[3].body.as_ptr(), large_ptr);
             assert_eq!(batch[3].body.len(), INLINE_SUBMIT_THRESHOLD + 128);
+        });
+    }
 
-            bridge.clear_batch_response_sink();
+    #[test]
+    fn submit_results_and_submit_response_preserve_zero_copy_bodies_on_bridge() {
+        let guard = lock_test_bridge();
+        let bridge = guard.bridge;
+        pyo3::Python::attach(|py| {
+            let batch_captured: Arc<Mutex<Vec<BridgeResponse>>> = Arc::new(Mutex::new(Vec::new()));
+            let single_captured: Arc<Mutex<Vec<BridgeResponse>>> = Arc::new(Mutex::new(Vec::new()));
+            let bc = Arc::clone(&batch_captured);
+            bridge.set_batch_response_sink(Arc::new(move |resps| {
+                bc.lock().unwrap().extend(resps);
+            }));
+            let sc = Arc::clone(&single_captured);
+            bridge.set_response_sink(Arc::new(move |resp| {
+                sc.lock().unwrap().push(resp);
+            }));
+
+            let body_a = Bytes::from(b"batch-body-a".to_vec());
+            let body_a_ptr = body_a.as_ptr();
+            let body_b = Bytes::from(b"single-body-b".to_vec());
+            let body_b_ptr = body_b.as_ptr();
+
+            let resp_a = Py::new(
+                py,
+                Response {
+                    status: 201,
+                    body: body_a,
+                    headers: vec![(b"x-mode".to_vec(), b"batch".to_vec())],
+                    request_id: 41,
+                },
+            )
+            .expect("create response a");
+            submit_results(py, vec![resp_a]).expect("submit_results");
+
+            let resp_b = Py::new(
+                py,
+                Response {
+                    status: 202,
+                    body: body_b,
+                    headers: vec![(b"x-mode".to_vec(), b"single".to_vec())],
+                    request_id: 42,
+                },
+            )
+            .expect("create response b");
+            submit_response(py, resp_b).expect("submit_response");
+
+            let batch = batch_captured.lock().unwrap();
+            assert_eq!(batch.len(), 1);
+            assert_eq!(batch[0].request_id, 41);
+            assert_eq!(batch[0].status, 201);
+            assert_eq!(batch[0].body.as_ptr(), body_a_ptr);
+            assert_eq!(
+                batch[0].headers_raw.as_ref(),
+                encode_headers_compact(&[(b"x-mode".to_vec(), b"batch".to_vec())]).as_slice()
+            );
+
+            let single = single_captured.lock().unwrap();
+            assert_eq!(single.len(), 1);
+            assert_eq!(single[0].request_id, 42);
+            assert_eq!(single[0].status, 202);
+            assert_eq!(single[0].body.as_ptr(), body_b_ptr);
+            assert_eq!(
+                single[0].headers_raw.as_ref(),
+                encode_headers_compact(&[(b"x-mode".to_vec(), b"single".to_vec())]).as_slice()
+            );
         });
     }
 }

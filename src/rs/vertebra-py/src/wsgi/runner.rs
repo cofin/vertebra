@@ -595,10 +595,10 @@ pub fn drive_wsgi_batch(
 mod tests {
     use super::*;
     use crate::synthetic::SyntheticRequest;
-    use crate::transport::init_transport;
+    use crate::transport::lock_test_bridge;
     use crate::wsgi::pool::{WsgiExecutionMode, WsgiExecutor, WsgiPoolConfig};
     use std::ffi::CString;
-    use vertebra_core::bridge::{BatchBridge, BridgeResponse};
+    use vertebra_core::bridge::BridgeResponse;
 
     #[test]
     fn targets_to_wsgi_items_detects_contiguous_and_indexed() {
@@ -627,9 +627,9 @@ mod tests {
 
     #[test]
     fn wsgi_batch_submits_200_and_500_responses_to_bridge_sink() {
+        let guard = lock_test_bridge();
+        let bridge = guard.bridge;
         Python::attach(|py| {
-            init_transport("inprocess", 4096, 64, 64).expect("init inprocess bridge");
-            let bridge = BatchBridge::get().expect("bridge initialized");
             let captured: Arc<Mutex<Vec<BridgeResponse>>> = Arc::new(Mutex::new(Vec::new()));
             let cap_sink = Arc::clone(&captured);
             bridge.set_response_sink(Arc::new(move |resp| {

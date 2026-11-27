@@ -408,7 +408,7 @@ pub(super) fn dispatch_bridge_vec(
 
     let mut current_attempt = 0usize;
     let mut current_shard_idx = start;
-    let mut current_guard = Some(bridge_corr.shards[current_shard_idx].lock().unwrap());
+    let mut current_guard = None;
 
     for req in requests.drain(..) {
         let is_fnf = (req.flags & flags::FIRE_AND_FORGET) != 0;
@@ -495,9 +495,33 @@ pub(super) fn dispatch_bridge_vec(
 mod tests {
     use super::*;
 
-    fn ensure_test_bridge() -> &'static BatchBridge {
+    static TEST_BRIDGE_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestBridgeGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        bridge: &'static BatchBridge,
+    }
+
+    impl Drop for TestBridgeGuard {
+        fn drop(&mut self) {
+            self.bridge.clear_batch_response_sink();
+            self.bridge.clear_response_sink();
+            self.bridge.clear_stream_sink();
+            drain_bridge_batches(self.bridge);
+        }
+    }
+
+    fn lock_test_bridge() -> TestBridgeGuard {
+        let guard = TEST_BRIDGE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _ = BatchBridge::init(64, 65_536, 16, 1);
-        BatchBridge::get().expect("global BatchBridge initialized")
+        let bridge = BatchBridge::get().expect("global BatchBridge initialized");
+        drain_bridge_batches(bridge);
+        TestBridgeGuard {
+            _guard: guard,
+            bridge,
+        }
     }
 
     fn drain_bridge_batches(bridge: &BatchBridge) {
@@ -524,8 +548,8 @@ mod tests {
 
     #[test]
     fn dispatch_bridge_vec_single_shard_batch_allocation_and_batch_sink_delivery() {
-        let bridge = ensure_test_bridge();
-        drain_bridge_batches(bridge);
+        let guard = lock_test_bridge();
+        let bridge = guard.bridge;
 
         let corr = Arc::new(BridgeCorrelation::with_capacity(1024));
         let mut reqs = Vec::new();
@@ -559,7 +583,9 @@ mod tests {
             });
         }
 
-        corr.complete_bridge_batch(resps);
+        bridge
+            .submit_responses(resps)
+            .expect("batch response sink delivery");
         assert_eq!(corr.in_flight(), 0);
         for (i, mut rx) in rxs.into_iter().enumerate() {
             let resp = rx.try_recv().expect("response delivered");
@@ -570,8 +596,8 @@ mod tests {
 
     #[test]
     fn dispatch_bridge_vec_spills_shards_and_rejects_overflow_outside_locks() {
-        let bridge = ensure_test_bridge();
-        drain_bridge_batches(bridge);
+        let guard = lock_test_bridge();
+        let bridge = guard.bridge;
 
         let corr = Arc::new(BridgeCorrelation::with_capacity(512));
         let mut reqs = Vec::new();
@@ -706,8 +732,8 @@ mod tests {
 
     #[test]
     fn dispatch_bridge_vec_handles_mixed_fire_and_forget_batch() {
-        let bridge = ensure_test_bridge();
-        drain_bridge_batches(bridge);
+        let guard = lock_test_bridge();
+        let bridge = guard.bridge;
 
         let corr = Arc::new(BridgeCorrelation::with_capacity(512));
         let (fnf_req, _fnf_rx) = make_pending("/fnf", flags::FIRE_AND_FORGET);

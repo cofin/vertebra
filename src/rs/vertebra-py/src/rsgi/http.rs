@@ -1213,12 +1213,11 @@ mod tests {
     use super::*;
     use pyo3::types::PyList;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use vertebra_core::bridge::BatchBridge;
 
     #[test]
     fn disconnect_before_first_send_suppresses_spurious_500_on_error_finalization() {
-        crate::transport::init_transport("inprocess", 4096, 64, 64).expect("init bridge");
-        let bridge = BatchBridge::get().expect("bridge initialized");
+        let guard = crate::transport::lock_test_bridge();
+        let bridge = guard.bridge;
         let unary_count = Arc::new(AtomicUsize::new(0));
         let unary_count_sink = Arc::clone(&unary_count);
         bridge.set_response_sink(Arc::new(move |_| {
