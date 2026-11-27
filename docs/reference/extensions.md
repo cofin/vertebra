@@ -87,7 +87,7 @@
         - delete_object
         - delete_object_async
 
-::: vertebra.extensions.sqlalchemy.pool.BrokerPool
+::: vertebra.extensions.sqlalchemy.pool.SyncBrokerPool
     options:
       heading_level: 4
       members: false

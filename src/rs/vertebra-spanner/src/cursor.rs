@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use vertebra_db::py_async::{
-    ReadyAwaitable, RustDbTaskAwaitable, block_on_db, ready_ok, spawn_rust_db_task_with_attr,
+    ReadyAwaitable, TaskAwaitable, block_on_db, ready_ok, spawn_rust_db_task_with_attr,
 };
 use vertebra_db::py_cursor::{
     BufferedCursorState, DEFAULT_PLAN_CACHE_CAPACITY, PlanLruCache, build_description_7tuple,
@@ -792,7 +792,7 @@ impl PyAsyncSpannerCursor {
         slf: &Bound<'_, Self>,
         guard: ExecutingGuard,
         fut: Fut,
-    ) -> PyResult<RustDbTaskAwaitable>
+    ) -> PyResult<TaskAwaitable>
     where
         Fut: std::future::Future<Output = Result<SpannerCursorOutcome, SpannerError>>
             + Send
@@ -863,7 +863,7 @@ impl PyAsyncSpannerCursor {
         slf: &Bound<'py, Self>,
         sql: &str,
         params: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let py = slf.py();
         let this = slf.get();
         let guard = this.begin_statement(py)?;
@@ -886,7 +886,7 @@ impl PyAsyncSpannerCursor {
         slf: &Bound<'py, Self>,
         sql: &str,
         seq_of_params: &Bound<'py, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let py = slf.py();
         let this = slf.get();
         let guard = this.begin_statement(py)?;

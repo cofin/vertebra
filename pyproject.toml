@@ -697,3 +697,6 @@ replace = 'vertebra-core=={new_version}'
 filename = "src/rs/vertebra-valkey/pyproject.toml"
 search = 'vertebra-core=={current_version}'
 replace = 'vertebra-core=={new_version}'
+
+[tool.codespell]
+ignore-words-list = "aadd,asend,asess,caf,checkin,dependant,ser"

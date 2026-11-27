@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::sync::oneshot;
-use vertebra_db::py_async::{RustDbTaskAwaitable, spawn_rust_db_task_with_attr};
+use vertebra_db::py_async::{TaskAwaitable, spawn_rust_db_task_with_attr};
 
 use crate::client::{
     BindArgs, ORACLE_COMPLETION_DRAINER_ATTR, OracleBreakHandle, OracleWorkerHandle, OutBindSpec,
@@ -607,7 +607,7 @@ impl AsyncOracleListener {
         &self,
         py: Python<'_>,
         timeout: Option<f64>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         if let Some(t) = timeout
             && (!t.is_finite() || t < 0.0)
         {
@@ -651,7 +651,7 @@ impl AsyncOracleListener {
         )
     }
 
-    pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn close(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let newly_closed = self.state.mark_closed();
         self.break_handle.break_execution();
         let join_arc = Arc::clone(&self.join_handle);

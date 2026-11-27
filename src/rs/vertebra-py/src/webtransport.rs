@@ -17,7 +17,7 @@ use vertebra_core::bridge::{
 };
 use vertebra_core::py_async::spawn_rust_task_with_attr;
 
-use crate::async_bridge::{CORE_COMPLETION_DRAINER_ATTR, RustDbTaskAwaitable};
+use crate::async_bridge::{CORE_COMPLETION_DRAINER_ATTR, TaskAwaitable};
 
 fn map_wt_err(_py: Python<'_>, err: WebTransportBridgeError) -> PyErr {
     match err {
@@ -86,7 +86,7 @@ impl WebTransportStream {
     }
 
     #[pyo3(signature = (max_bytes=65536))]
-    fn recv<'py>(&self, py: Python<'py>, max_bytes: usize) -> PyResult<RustDbTaskAwaitable> {
+    fn recv<'py>(&self, py: Python<'py>, max_bytes: usize) -> PyResult<TaskAwaitable> {
         let stream = Arc::clone(&self.inner);
         spawn_rust_task_with_attr(
             py,
@@ -97,7 +97,7 @@ impl WebTransportStream {
         )
     }
 
-    fn send<'py>(&self, py: Python<'py>, data: &Bound<'_, PyAny>) -> PyResult<RustDbTaskAwaitable> {
+    fn send<'py>(&self, py: Python<'py>, data: &Bound<'_, PyAny>) -> PyResult<TaskAwaitable> {
         let payload = extract_buffer_bytes(py, data)?;
         let stream = Arc::clone(&self.inner);
         spawn_rust_task_with_attr(
@@ -109,7 +109,7 @@ impl WebTransportStream {
         )
     }
 
-    fn finish<'py>(&self, py: Python<'py>) -> PyResult<RustDbTaskAwaitable> {
+    fn finish<'py>(&self, py: Python<'py>) -> PyResult<TaskAwaitable> {
         let stream = Arc::clone(&self.inner);
         spawn_rust_task_with_attr(
             py,
@@ -155,7 +155,7 @@ impl WebTransportSession {
         Ok(PyList::new(py, pairs)?.into_any().unbind())
     }
 
-    fn accept_bi<'py>(&self, py: Python<'py>) -> PyResult<RustDbTaskAwaitable> {
+    fn accept_bi<'py>(&self, py: Python<'py>) -> PyResult<TaskAwaitable> {
         let session = Arc::clone(&self.inner);
         spawn_rust_task_with_attr(
             py,
@@ -169,7 +169,7 @@ impl WebTransportSession {
         )
     }
 
-    fn open_bi<'py>(&self, py: Python<'py>) -> PyResult<RustDbTaskAwaitable> {
+    fn open_bi<'py>(&self, py: Python<'py>) -> PyResult<TaskAwaitable> {
         let session = Arc::clone(&self.inner);
         spawn_rust_task_with_attr(
             py,
@@ -183,7 +183,7 @@ impl WebTransportSession {
         )
     }
 
-    fn recv_datagram<'py>(&self, py: Python<'py>) -> PyResult<RustDbTaskAwaitable> {
+    fn recv_datagram<'py>(&self, py: Python<'py>) -> PyResult<TaskAwaitable> {
         let session = Arc::clone(&self.inner);
         spawn_rust_task_with_attr(
             py,
@@ -207,7 +207,7 @@ impl WebTransportSession {
         py: Python<'py>,
         error_code: u32,
         reason: &str,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let session = Arc::clone(&self.inner);
         let owned_reason = reason.to_string();
         spawn_rust_task_with_attr(

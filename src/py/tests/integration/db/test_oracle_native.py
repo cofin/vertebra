@@ -32,7 +32,7 @@ from vertebra.db.driver import (
     NotFoundError,
     QueryCancelledError,
 )
-from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope
+from vertebra.db.rls import AsyncTenantConnectionScope, SyncTenantConnectionScope
 from vertebra.utils.module_loader import ensure_module
 
 pytestmark = [pytest.mark.driver_engine("oracle")]
@@ -287,7 +287,7 @@ async def test_oracle_26ai_vpd_client_identifier_reset_across_rollback(
         context_namespace="USERENV",
     )
     with SyncOraclePool(pooled_cfg) as sync_pool:
-        with sync_pool.lease() as leased_drv, TenantConnectionScope(leased_drv, "tenant-alpha"):
+        with sync_pool.lease() as leased_drv, SyncTenantConnectionScope(leased_drv, "tenant-alpha"):
             leased_drv._client.set_session_attrs(module="vtb-order-svc", action="sync-checkout")
             ctx_row = leased_drv.select_one(
                 "SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') AS cid, "

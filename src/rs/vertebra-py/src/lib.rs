@@ -29,10 +29,10 @@ pub mod wsgi;
 
 pub use agent::{SchemaDigestCache, classify_jsonrpc_frame};
 pub use asgi::{
-    AsgiProtocol, AsgiScope, AsgiScopeIterator, PyEmptyAwaitable, PyValueAwaitable,
-    drive_asgi_batch, drive_native_batch,
+    AsgiProtocol, AsgiScope, AsgiScopeIterator, EmptyAwaitable, ValueAwaitable, drive_asgi_batch,
+    drive_native_batch,
 };
-pub use async_bridge::{RustDbTaskAwaitable, TaskPanicError};
+pub use async_bridge::{TaskAwaitable, TaskPanicError};
 pub use broker::{
     BrokerAttachClient, BrokerAttachServer, BrokerEngineRegistry, BrokerStats, LeaseBroker,
     LeaseGrant, PartitionStats, ReclaimedLease, ShmCache, ShmCacheStats, StatementCache,
@@ -93,8 +93,8 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<asgi::AsgiScope>()?;
     m.add_class::<asgi::AsgiScopeIterator>()?;
     m.add_class::<asgi::AsgiProtocol>()?;
-    m.add_class::<asgi::PyEmptyAwaitable>()?;
-    m.add_class::<asgi::PyValueAwaitable>()?;
+    m.add_class::<asgi::EmptyAwaitable>()?;
+    m.add_class::<asgi::ValueAwaitable>()?;
     m.add_class::<wsgi::WsgiEnviron>()?;
     m.add_class::<wsgi::WsgiEnvironIterator>()?;
     m.add_class::<wsgi::WsgiInput>()?;

@@ -36,7 +36,7 @@ use vertebra_db::arrow_shm::{
 };
 use vertebra_db::duckdb::DuckdbConfig;
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
+    TaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
 pub use vertebra_db::py_broker::FREE_THREADED;
 use vertebra_db::py_broker::{BrokerPoolRegistry, next_shm_name};
@@ -3026,7 +3026,7 @@ impl AsyncDuckDBClient {
         py: Python<'_>,
         work: W,
         map_ok: M,
-    ) -> PyResult<RustDbTaskAwaitable>
+    ) -> PyResult<TaskAwaitable>
     where
         T: Send + 'static,
         W: FnOnce(Arc<DuckDBInner>, Arc<AtomicBool>) -> Result<T, DuckDBClientError>
@@ -3057,7 +3057,7 @@ impl AsyncDuckDBClient {
         py: Python<'_>,
         work: W,
         map_ok: M,
-    ) -> PyResult<RustDbTaskAwaitable>
+    ) -> PyResult<TaskAwaitable>
     where
         T: Send + 'static,
         W: FnOnce(Arc<DuckDBInner>) -> Result<T, DuckDBClientError> + Send + 'static,
@@ -3083,7 +3083,7 @@ impl AsyncDuckDBClient {
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
         map_ok: M,
-    ) -> PyResult<RustDbTaskAwaitable>
+    ) -> PyResult<TaskAwaitable>
     where
         M: FnOnce(Python<'_>, StatementOutcome) -> PyResult<Py<PyAny>> + Send + 'static,
     {
@@ -3104,7 +3104,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         py: Python<'_>,
         sql: &str,
         parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
         let sql_owned = sql.to_string();
         self.spawn_cancellable(
@@ -3119,7 +3119,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         py: Python<'_>,
         sql: &str,
         parameter_sets: &Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let bound_sets = extract_parameter_sets(parameter_sets).map_err(|e| e.into_py_err(py))?;
         let sql_owned = sql.to_string();
         self.spawn_cancellable(
@@ -3137,7 +3137,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         parameters: Option<&Bound<'_, PyAny>>,
         batch_size: usize,
         threshold_rows: usize,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
         let sql_owned = sql.to_string();
         self.spawn_cancellable(
@@ -3162,7 +3162,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         sql: &str,
         parameters: Option<&Bound<'_, PyAny>>,
         batch_size: usize,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let bound = extract_bound_params(parameters).map_err(|e| e.into_py_err(py))?;
         let sql_owned = sql.to_string();
         self.spawn_cancellable(
@@ -3182,7 +3182,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         source: &Bound<'_, PyAny>,
         columns: Option<Vec<String>>,
         create_if_missing: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let load_source = extract_bulk_load_source(py, source, columns.as_deref())
             .map_err(|e| e.into_py_err(py))?;
         let table_owned = table.to_string();
@@ -3201,7 +3201,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         )
     }
 
-    pub fn begin(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn begin(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         self.spawn_cancellable(
             py,
             |inner, cancel_flag| inner.begin_tx(&cancel_flag),
@@ -3209,7 +3209,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         )
     }
 
-    pub fn commit(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn commit(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         self.spawn_cancellable(
             py,
             |inner, cancel_flag| inner.commit_tx(&cancel_flag),
@@ -3217,7 +3217,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         )
     }
 
-    pub fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn rollback(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         self.spawn_cancellable(
             py,
             |inner, cancel_flag| inner.rollback_tx(&cancel_flag),
@@ -3225,7 +3225,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         )
     }
 
-    pub fn savepoint(&self, py: Python<'_>, name: &str) -> PyResult<RustDbTaskAwaitable> {
+    pub fn savepoint(&self, py: Python<'_>, name: &str) -> PyResult<TaskAwaitable> {
         let name_owned = name.to_string();
         self.spawn_blocking_op(
             py,
@@ -3234,11 +3234,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         )
     }
 
-    pub fn rollback_to_savepoint(
-        &self,
-        py: Python<'_>,
-        name: &str,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    pub fn rollback_to_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<TaskAwaitable> {
         let name_owned = name.to_string();
         self.spawn_cancellable(
             py,
@@ -3247,7 +3243,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         )
     }
 
-    pub fn release_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<RustDbTaskAwaitable> {
+    pub fn release_savepoint(&self, py: Python<'_>, name: &str) -> PyResult<TaskAwaitable> {
         let name_owned = name.to_string();
         self.spawn_blocking_op(
             py,
@@ -3256,7 +3252,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         )
     }
 
-    pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn close(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let inner = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -3282,7 +3278,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         py: Python<'_>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.spawn_single_call(py, sql, params, |py, outcome| {
             let (rows, names) = outcome_to_rows(py, outcome)?;
             Ok((rows, names).into_pyobject(py)?.into_any().unbind())
@@ -3295,7 +3291,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         py: Python<'_>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.spawn_single_call(py, sql, params, |py, outcome| {
             Ok(outcome_to_dicts(py, outcome)?.into_any().unbind())
         })
@@ -3307,7 +3303,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         py: Python<'_>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.spawn_single_call(py, sql, params, outcome_to_value)
     }
 
@@ -3317,7 +3313,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         py: Python<'_>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.spawn_single_call(py, sql, params, |py, outcome| {
             Ok(outcome_to_dml(&outcome)
                 .into_pyobject(py)?
@@ -3326,7 +3322,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         })
     }
 
-    pub fn __aenter__(slf: Py<Self>, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn __aenter__(slf: Py<Self>, py: Python<'_>) -> PyResult<TaskAwaitable> {
         spawn_rust_db_task_with_attr(
             py,
             async move { Ok::<Py<Self>, DuckDBClientError>(slf) },
@@ -3343,7 +3339,7 @@ impl_duckdb_client_pymethods!(AsyncDuckDBClient, "AsyncDuckDBClient", AsyncDuckD
         _exc_type: Option<&Bound<'_, PyAny>>,
         _exc_val: Option<&Bound<'_, PyAny>>,
         _exc_tb: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.close(py)
     }
 });

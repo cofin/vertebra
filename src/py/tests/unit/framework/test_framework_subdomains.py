@@ -38,7 +38,7 @@ from vertebra.framework.security import (
     requires_tenant,
 )
 from vertebra.framework.ssr import SSRFrame
-from vertebra.framework.stores import BaseNativeKVStore, KeyValueStore, MemoryStore, NamespacedStore
+from vertebra.framework.stores import BaseKeyValueStore, KeyValueStore, MemoryStore, NamespacedStore
 from vertebra.typing import MissingDependencyError, UnsupportedBackendError
 from vertebra.wasm import WASM_MAGIC_HEADER, WASMModuleConfig, WASMSandboxPolicy
 
@@ -513,21 +513,21 @@ async def test_key_value_store_redis_invalidation_read_through_and_ttl_renewal(
         await store.close()
 
 
-@pytest.mark.parametrize("store_cls", [BaseNativeKVStore, MemoryStore])
+@pytest.mark.parametrize("store_cls", [BaseKeyValueStore, MemoryStore])
 @pytest.mark.parametrize("bad_limit", [-1, -100])
 def test_base_native_kv_store_rejects_negative_max_l1_entries(
-    store_cls: type[BaseNativeKVStore],
+    store_cls: type[BaseKeyValueStore],
     bad_limit: int,
 ) -> None:
-    """BaseNativeKVStore and subclasses raise ValueError for negative max_l1_entries."""
+    """BaseKeyValueStore and subclasses raise ValueError for negative max_l1_entries."""
     with pytest.raises(ValueError, match="max_l1_entries must be >= 0"):
         store_cls(max_l1_entries=bad_limit)
 
 
 @pytest.mark.anyio
 async def test_base_native_kv_store_l1_lru_eviction_and_zero_disable() -> None:
-    """BaseNativeKVStore bounds _l1_cache with LRU eviction, promotes hits, and disables L1 at 0."""
-    store = BaseNativeKVStore(max_l1_entries=4)
+    """BaseKeyValueStore bounds _l1_cache with LRU eviction, promotes hits, and disables L1 at 0."""
+    store = BaseKeyValueStore(max_l1_entries=4)
     for idx in range(4):
         await store.set(f"k{idx}", f"v{idx}".encode())
     assert await store.get("k0") == b"v0"
@@ -545,7 +545,7 @@ async def test_base_native_kv_store_l1_lru_eviction_and_zero_disable() -> None:
     assert "vertebra:k6" in store._l1_cache
     assert list(store._l1_cache.keys()) == ["vertebra:k7", "vertebra:k8", "vertebra:k6", "vertebra:k9"]
 
-    disabled = BaseNativeKVStore(max_l1_entries=0)
+    disabled = BaseKeyValueStore(max_l1_entries=0)
     await disabled.set("ephemeral", b"123")
     assert len(disabled._l1_cache) == 0
     assert await disabled.get("ephemeral") is None

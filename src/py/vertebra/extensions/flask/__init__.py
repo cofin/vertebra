@@ -21,9 +21,9 @@ if TYPE_CHECKING:
     from vertebra.extensions.flask.mail import MailBackend, MailConfig, MailMessage
     from vertebra.extensions.flask.mcp import (
         MCPConfig,
-        MCPRegistry,
         PromptController,
         SkillController,
+        ToolRegistry,
         WebMCPConfig,
         WebMCPManifest,
         WebMCPToolDescriptor,
@@ -126,7 +126,7 @@ __all__ = (
     "JWTAuthGuard",
     "LocalConfig",
     "MCPConfig",
-    "MCPRegistry",
+    "ToolRegistry",
     "MailBackend",
     "MailConfig",
     "MailMessage",
@@ -219,7 +219,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "JWTAuthGuard": ("vertebra.extensions.flask.security", "JWTAuthGuard"),
     "LocalConfig": ("vertebra.extensions.flask.storage", "LocalConfig"),
     "MCPConfig": ("vertebra.extensions.flask.mcp", "MCPConfig"),
-    "MCPRegistry": ("vertebra.extensions.flask.mcp", "MCPRegistry"),
+    "ToolRegistry": ("vertebra.extensions.flask.mcp", "ToolRegistry"),
     "MailBackend": ("vertebra.extensions.flask.mail", "MailBackend"),
     "MailConfig": ("vertebra.extensions.flask.mail", "MailConfig"),
     "MailMessage": ("vertebra.extensions.flask.mail", "MailMessage"),

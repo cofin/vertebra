@@ -11,7 +11,15 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from vertebra.build import BuildConfig, BuildOrchestrator
+from vertebra.build import (
+    BuildConfig,
+    BuildOrchestrator,
+    BundleConfig,
+    BundleDevConfig,
+    BundleOutput,
+    Bundler,
+    BundleResult,
+)
 from vertebra.cli.build import build
 
 
@@ -264,10 +272,10 @@ def test_native_dev_retains_watcher_and_rebuilds_on_change(
     orig_bundler_cls = bundler_mod.Bundler
 
     class _BundlerProxy:
-        def __init__(self) -> None:
-            self._inner = orig_bundler_cls()
+        def __init__(self, config: Any = None, *, dev_config: Any = None) -> None:
+            self._inner = orig_bundler_cls(config, dev_config=dev_config)
 
-        def build(self, config: Any) -> Any:
+        def build(self, config: Any = None) -> Any:
             result = self._inner.build(config)
             if write_applied.is_set():
                 rebuilt.set()
@@ -300,3 +308,32 @@ def test_native_dev_retains_watcher_and_rebuilds_on_change(
     finally:
         orch.stop()
         assert orch.is_watching is False
+
+
+def test_public_bundler_facade_config_first_api(tmp_path: Path) -> None:
+    """Public vertebra.build.Bundler accepts BundleConfig at init and supports context management."""
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    entry = src_dir / "main.ts"
+    entry.write_text("export const answer: number = 7;\n", encoding="utf-8")
+    outdir = tmp_path / "dist"
+
+    bundle_cfg = BundleConfig(entry=str(entry), outdir=str(outdir), minify=True, sourcemap=True)
+    dev_cfg = BundleDevConfig(entry=str(entry), watch_dirs=[str(src_dir)])
+
+    with Bundler(bundle_cfg, dev_config=dev_cfg) as bundler:
+        assert bundler.config is not None
+        assert bundler.config.entry == str(entry)
+        assert bundler.dev_config is not None
+        result = bundler.build()
+        assert isinstance(result, BundleResult)
+        assert any(isinstance(out, BundleOutput) and out.path == "main.js" for out in result.outputs)
+
+    via_factory = Bundler.from_config(bundle_cfg)
+    assert via_factory.build().outputs
+    assert "7" in (outdir / "main.js").read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="BundleConfig"):
+        Bundler().build()
+    with pytest.raises(ValueError, match="BundleDevConfig"):
+        Bundler().start_dev()

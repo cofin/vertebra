@@ -11,7 +11,7 @@ use pyo3::types::{PyBytes, PyDict, PyTuple};
 use tokio::sync::Notify;
 use vertebra_db::LeaseGuard;
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, block_on_db, db_runtime_handle, spawn_rust_db_task_with_attr,
+    TaskAwaitable, block_on_db, db_runtime_handle, spawn_rust_db_task_with_attr,
     spawn_rust_db_task_with_attr_and_cancel,
 };
 
@@ -57,7 +57,7 @@ fn spawn_cancellable_op<'py, F, T, MapOk, MapErr>(
     fut: F,
     map_ok: MapOk,
     map_err: MapErr,
-) -> PyResult<Bound<'py, RustDbTaskAwaitable>>
+) -> PyResult<Bound<'py, TaskAwaitable>>
 where
     F: Future<Output = Result<T, PostgresError>> + Send + 'static,
     T: Send + 'static,
@@ -255,7 +255,7 @@ impl PyAsyncPostgresCopyOut {
         &self,
         py: Python<'py>,
         return_false: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         if !self.closed_flag.load(Ordering::Acquire) && self.busy.load(Ordering::Acquire) {
             self.session.trigger_async_cancel(self.lease_op_gen);
         }
@@ -299,10 +299,7 @@ impl PyAsyncPostgresCopyOut {
     }
 
     /// Resolve to the next decoded binary row as `tuple[bytes | None, ...]`, or raise `StopAsyncIteration`.
-    pub fn __anext__<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Option<Bound<'py, RustDbTaskAwaitable>>> {
+    pub fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, TaskAwaitable>>> {
         let busy_guard = OwnedBusyGuard::try_enter(py, &self.busy, "COPY TO")?;
         if self.closed_flag.load(Ordering::Acquire) && !self.exhausted_flag.load(Ordering::Acquire)
         {
@@ -360,12 +357,12 @@ impl PyAsyncPostgresCopyOut {
     }
 
     /// Asynchronously close an unfinished `COPY TO` stream via `CancelRequest` drain/retire, or no-op if closed.
-    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_close(py, false)
     }
 
     /// Enter an `async with` scope resolving to this `AsyncPostgresCopyOut`.
-    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let py = slf.py();
         let py_self: Py<Self> = slf.into_pyobject(py)?.unbind();
         let awaitable = spawn_rust_db_task_with_attr(
@@ -386,7 +383,7 @@ impl PyAsyncPostgresCopyOut {
         exc_type: Option<&Bound<'py, PyAny>>,
         exc_val: Option<&Bound<'py, PyAny>>,
         exc_tb: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let _ = (exc_type, exc_val, exc_tb);
         self.spawn_close(py, true)
     }
@@ -437,7 +434,7 @@ impl PyAsyncPostgresCopyIn {
         busy_guard: OwnedBusyGuard,
         reason: &'static str,
         err: PyErr,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let cleanup_guard = self.session.begin_copy_task_cleanup(self.lease_op_gen);
         let stream = Arc::clone(&self.stream);
         let cancel_session = Arc::clone(&self.session);
@@ -468,7 +465,7 @@ impl PyAsyncPostgresCopyIn {
         &self,
         py: Python<'py>,
         return_false: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         if !self.closed_flag.load(Ordering::Acquire) && self.busy.load(Ordering::Acquire) {
             self.session.trigger_async_cancel(self.lease_op_gen);
         }
@@ -512,7 +509,7 @@ impl PyAsyncPostgresCopyIn {
         py: Python<'py>,
         rows: &Bound<'py, PyAny>,
         column_oids: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let busy_guard = OwnedBusyGuard::try_enter(py, &self.busy, "COPY FROM")?;
         if self.closed_flag.load(Ordering::Acquire) {
             return Err(postgres_error_to_py(
@@ -584,7 +581,7 @@ impl PyAsyncPostgresCopyIn {
         &self,
         py: Python<'py>,
         batch_ipc: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let busy_guard = OwnedBusyGuard::try_enter(py, &self.busy, "COPY FROM")?;
         if self.closed_flag.load(Ordering::Acquire) {
             return Err(postgres_error_to_py(
@@ -652,7 +649,7 @@ impl PyAsyncPostgresCopyIn {
     }
 
     /// Asynchronously emit the binary `-1i16` trailer and `CopyDone`, commit COPY-owned scope, and resolve row count.
-    pub fn finish<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn finish<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let busy_guard = OwnedBusyGuard::try_enter(py, &self.busy, "COPY FROM")?;
         if self.closed_flag.load(Ordering::Acquire) {
             return Err(postgres_error_to_py(
@@ -697,12 +694,12 @@ impl PyAsyncPostgresCopyIn {
     }
 
     /// Asynchronously abort an unfinished `COPY FROM` stream via `CopyFail` + rollback, or no-op once closed.
-    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_close(py, false)
     }
 
     /// Enter an `async with` scope resolving to this `AsyncPostgresCopyIn`.
-    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let py = slf.py();
         let py_self: Py<Self> = slf.into_pyobject(py)?.unbind();
         let awaitable = spawn_rust_db_task_with_attr(
@@ -723,7 +720,7 @@ impl PyAsyncPostgresCopyIn {
         exc_type: Option<&Bound<'py, PyAny>>,
         exc_val: Option<&Bound<'py, PyAny>>,
         exc_tb: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let _ = (exc_type, exc_val, exc_tb);
         self.spawn_close(py, true)
     }
@@ -770,7 +767,7 @@ impl PyAsyncPostgresPortal {
         &self,
         py: Python<'py>,
         #[pyo3(from_py_with = extract_max_rows)] max_rows: i32,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let portal = Arc::clone(&self.portal);
         let op_gen = self.session.reserve_operation_generation();
         spawn_cancellable_op(
@@ -787,7 +784,7 @@ impl PyAsyncPostgresPortal {
     }
 
     /// Close the portal idempotently and complete/roll back its pinned `TransactionScope` asynchronously.
-    pub fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let portal = Arc::clone(&self.portal);
         let awaitable = spawn_rust_db_task_with_attr(
             py,
@@ -842,10 +839,7 @@ impl PyAsyncPostgresArrowStream {
         }
     }
 
-    fn spawn_aclose_inner<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    fn spawn_aclose_inner<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let _ = py.import("asyncio")?.call_method0("get_running_loop")?;
         match self.shared.begin_aclose() {
             AsyncArrowCloseStart::ImmediateNoOp => {
@@ -906,7 +900,7 @@ impl PyAsyncPostgresArrowStream {
     }
 
     /// Reserve an `OperationGeneration`, advance the portal off the event loop, and resolve to the next `vertebra._vertebra.ArrowCursor` batch.
-    pub fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let _ = py.import("asyncio")?.call_method0("get_running_loop")?;
         let start = self
             .shared
@@ -943,12 +937,12 @@ impl PyAsyncPostgresArrowStream {
     }
 
     /// Idempotently close the Arrow portal stream across `Unopened`, `Fetching`, `Open`, `Closing`, and `Closed` states.
-    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_aclose_inner(py)
     }
 
     /// Enter an `async with` scope resolving to this `AsyncPostgresArrowStream`.
-    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let py = slf.py();
         let py_self: Py<Self> = slf.into_pyobject(py)?.unbind();
         let awaitable = spawn_rust_db_task_with_attr(
@@ -969,7 +963,7 @@ impl PyAsyncPostgresArrowStream {
         exc_type: Option<&Bound<'py, PyAny>>,
         exc_val: Option<&Bound<'py, PyAny>>,
         exc_tb: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let _ = (exc_type, exc_val, exc_tb);
         self.spawn_aclose_inner(py)
     }
@@ -1018,7 +1012,7 @@ pub(crate) fn spawn_open_listener<'py>(
     channels: &Bound<'py, PyAny>,
     queue_capacity: usize,
     reconnect: bool,
-) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+) -> PyResult<Bound<'py, TaskAwaitable>> {
     let validated_channels = extract_listener_channels(py, channels)?;
     if session.is_closed() {
         return Err(postgres_error_to_py(
@@ -1388,10 +1382,7 @@ impl PyAsyncPostgresListener {
         }
     }
 
-    fn spawn_aclose_inner<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    fn spawn_aclose_inner<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let listener = Arc::clone(&self.listener);
         spawn_rust_db_task_with_attr_and_cancel(
             py,
@@ -1413,7 +1404,7 @@ impl PyAsyncPostgresListener {
     }
 
     /// Await the next `(pid, channel, payload_bytes, reconnected_gap)` notification tuple or `None` after `aclose()`.
-    pub fn next<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn next<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let _ = py.import("asyncio")?.call_method0("get_running_loop")?;
         let call_id = self
             .next_ctl
@@ -1529,7 +1520,7 @@ impl PyAsyncPostgresListener {
         &self,
         py: Python<'py>,
         channels: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let validated = extract_listener_channels(py, channels)?;
         let listener = Arc::clone(&self.listener);
         let awaitable = spawn_rust_db_task_with_attr(
@@ -1547,7 +1538,7 @@ impl PyAsyncPostgresListener {
         &self,
         py: Python<'py>,
         channels: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let validated = extract_listener_channels(py, channels)?;
         let listener = Arc::clone(&self.listener);
         let awaitable = spawn_rust_db_task_with_attr(
@@ -1561,12 +1552,12 @@ impl PyAsyncPostgresListener {
     }
 
     /// Idempotently shut down the dedicated listener, waking any pending `next()` with `None` and cancelling reconnect sleeps.
-    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_aclose_inner(py)
     }
 
     /// Enter an `async with` scope resolving to this `AsyncPostgresListener`.
-    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let py = slf.py();
         let py_self: Py<Self> = slf.into_pyobject(py)?.unbind();
         let awaitable = spawn_rust_db_task_with_attr(
@@ -1587,7 +1578,7 @@ impl PyAsyncPostgresListener {
         exc_type: Option<&Bound<'py, PyAny>>,
         exc_val: Option<&Bound<'py, PyAny>>,
         exc_tb: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let _ = (exc_type, exc_val, exc_tb);
         self.spawn_aclose_inner(py)
     }
@@ -1803,7 +1794,7 @@ impl PyAsyncPostgresClient {
         params: Option<&Bound<'py, PyAny>>,
         parameter_oids: Option<&Bound<'py, PyAny>>,
         timeout: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         crate::cursor::spawn_single_call(
             py,
             crate::cursor::CursorSource::Session(Arc::clone(&self.session)),
@@ -1828,7 +1819,7 @@ impl PyAsyncPostgresClient {
         params: Option<&Bound<'py, PyAny>>,
         parameter_oids: Option<&Bound<'py, PyAny>>,
         timeout: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         crate::cursor::spawn_single_call(
             py,
             crate::cursor::CursorSource::Session(Arc::clone(&self.session)),
@@ -1853,7 +1844,7 @@ impl PyAsyncPostgresClient {
         params: Option<&Bound<'py, PyAny>>,
         parameter_oids: Option<&Bound<'py, PyAny>>,
         timeout: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         crate::cursor::spawn_single_call(
             py,
             crate::cursor::CursorSource::Session(Arc::clone(&self.session)),
@@ -1878,7 +1869,7 @@ impl PyAsyncPostgresClient {
         params: Option<&Bound<'py, PyAny>>,
         parameter_oids: Option<&Bound<'py, PyAny>>,
         timeout: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         crate::cursor::spawn_single_call(
             py,
             crate::cursor::CursorSource::Session(Arc::clone(&self.session)),
@@ -1920,7 +1911,7 @@ impl PyAsyncPostgresClient {
     }
 
     /// Establish a physical PostgreSQL session asynchronously and publish `Ready` exclusively inside `map_ok`.
-    pub fn connect(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn connect(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         match self
             .session
             .begin_client_connect()
@@ -1947,7 +1938,7 @@ impl PyAsyncPostgresClient {
     }
 
     /// Synchronously mark the session `Closed` and schedule asynchronous `Terminate` (`'X'`) or pool return shutdown.
-    pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn close(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let result = (|| {
             let action = self
                 .session
@@ -1978,7 +1969,7 @@ impl PyAsyncPostgresClient {
     }
 
     /// Trigger an out-of-band generation-fenced protocol `CancelRequest` asynchronously without waiting on the session execution lock.
-    pub fn cancel<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn cancel<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let awaitable = spawn_rust_db_task_with_attr(
             py,
@@ -2002,7 +1993,7 @@ impl PyAsyncPostgresClient {
         parameters: Option<&Bound<'py, PyAny>>,
         parameter_oids: Option<&Bound<'py, PyAny>>,
         timeout: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let timeout_secs = extract_strict_opt_f64(timeout)?;
         let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
             .map_err(|e| postgres_error_to_py(py, e))?;
@@ -2051,7 +2042,7 @@ impl PyAsyncPostgresClient {
         py: Python<'py>,
         sql: &str,
         timeout: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let timeout_secs = extract_strict_opt_f64(timeout)?;
         let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
             .map_err(|e| postgres_error_to_py(py, e))?;
@@ -2097,7 +2088,7 @@ impl PyAsyncPostgresClient {
         parameters: Option<&Bound<'py, PyAny>>,
         parameter_oids: Option<&Bound<'py, PyAny>>,
         #[pyo3(from_py_with = extract_batch_size)] batch_size: i32,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.session
             .ensure_ordinary_reservable()
             .map_err(|e| postgres_error_to_py(py, e))?;
@@ -2148,7 +2139,7 @@ impl PyAsyncPostgresClient {
         timeout: Option<&Bound<'py, PyAny>>,
         #[pyo3(from_py_with = extract_threshold_rows)] threshold_rows: usize,
         #[pyo3(from_py_with = extract_max_result_bytes)] max_result_bytes: usize,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let timeout_secs = extract_strict_opt_f64(timeout)?;
         let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
             .map_err(|e| postgres_error_to_py(py, e))?;
@@ -2247,11 +2238,7 @@ impl PyAsyncPostgresClient {
     }
 
     /// Asynchronously open an exclusive binary `COPY ... TO STDOUT (FORMAT binary)` streaming iterator.
-    pub fn copy_to<'py>(
-        &self,
-        py: Python<'py>,
-        sql: &str,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn copy_to<'py>(&self, py: Python<'py>, sql: &str) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let wrapper_session = Arc::clone(&self.session);
         let op_gen = session.reserve_operation_generation();
@@ -2281,7 +2268,7 @@ impl PyAsyncPostgresClient {
         &self,
         py: Python<'py>,
         sql: &str,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let wrapper_session = Arc::clone(&self.session);
         let op_gen = session.reserve_operation_generation();
@@ -2315,7 +2302,7 @@ impl PyAsyncPostgresClient {
         first_batch_ipc: &Bound<'py, PyAny>,
         columns: Option<&Bound<'py, PyAny>>,
         schema_name: Option<&str>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let cols_owned = extract_opt_copy_columns(columns)?;
         let ipc_owned = extract_ipc_buffer_bytes(py, first_batch_ipc, "first_batch_ipc")?;
         let session = Arc::clone(&self.session);
@@ -2351,10 +2338,7 @@ impl PyAsyncPostgresClient {
     }
 
     /// Open a retained pipeline transaction (`BEGIN` at `'I'`) or savepoint (`SAVEPOINT` at `'T'`) asynchronously and resolve to its integer scope identifier.
-    pub fn pipeline_begin<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn pipeline_begin<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let op_gen = session.reserve_operation_generation();
         spawn_cancellable_op(
@@ -2373,7 +2357,7 @@ impl PyAsyncPostgresClient {
         py: Python<'py>,
         #[pyo3(from_py_with = extract_scope_id)] scope_id: PipelineScopeToken,
         operations: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let batch = match extract_pipeline_batch(py, operations) {
             Ok(b) => b,
             Err(err) => {
@@ -2405,7 +2389,7 @@ impl PyAsyncPostgresClient {
         py: Python<'py>,
         #[pyo3(from_py_with = extract_scope_id)] scope_id: PipelineScopeToken,
         #[pyo3(from_py_with = extract_strict_bool)] success: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let op_gen = session.reserve_operation_generation();
         spawn_cancellable_op(
@@ -2423,7 +2407,7 @@ impl PyAsyncPostgresClient {
     }
 
     /// Start an explicit transaction (`BEGIN`) asynchronously.
-    pub fn begin<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn begin<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let op_gen = session.reserve_operation_generation();
         spawn_cancellable_op(
@@ -2440,7 +2424,7 @@ impl PyAsyncPostgresClient {
     }
 
     /// Commit the current transaction (`COMMIT`) asynchronously.
-    pub fn commit<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn commit<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let op_gen = session.reserve_operation_generation();
         spawn_cancellable_op(
@@ -2457,7 +2441,7 @@ impl PyAsyncPostgresClient {
     }
 
     /// Roll back the current transaction (`ROLLBACK`) asynchronously.
-    pub fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let op_gen = session.reserve_operation_generation();
         spawn_cancellable_op(
@@ -2478,7 +2462,7 @@ impl PyAsyncPostgresClient {
         &self,
         py: Python<'py>,
         #[pyo3(from_py_with = extract_strict_u64)] token: u64,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let op_gen = session.reserve_operation_generation();
         spawn_cancellable_op(
@@ -2501,7 +2485,7 @@ impl PyAsyncPostgresClient {
         &self,
         py: Python<'py>,
         #[pyo3(from_py_with = extract_strict_u64)] token: u64,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let op_gen = session.reserve_operation_generation();
         spawn_cancellable_op(
@@ -2524,7 +2508,7 @@ impl PyAsyncPostgresClient {
         &self,
         py: Python<'py>,
         #[pyo3(from_py_with = extract_strict_u64)] token: u64,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let session = Arc::clone(&self.session);
         let op_gen = session.reserve_operation_generation();
         spawn_cancellable_op(
@@ -2551,7 +2535,7 @@ impl PyAsyncPostgresClient {
         channels: &Bound<'py, PyAny>,
         #[pyo3(from_py_with = extract_queue_capacity)] queue_capacity: usize,
         #[pyo3(from_py_with = extract_strict_bool)] reconnect: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         spawn_open_listener(py, &self.session, channels, queue_capacity, reconnect)
     }
 
@@ -2561,7 +2545,7 @@ impl PyAsyncPostgresClient {
         py: Python<'py>,
         slot: String,
         publication: String,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         crate::replication::spawn_replication_identity(py, &self.session, slot, publication)
     }
 
@@ -2577,7 +2561,7 @@ impl PyAsyncPostgresClient {
         #[pyo3(from_py_with = crate::replication::extract_replication_queue_capacity)]
         queue_capacity: usize,
         #[pyo3(from_py_with = extract_strict_bool)] reconnect: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         crate::replication::spawn_open_replication(
             py,
             &self.session,

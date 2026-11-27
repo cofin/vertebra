@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use vertebra_db::py_async::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
+use vertebra_db::py_async::{TaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
 
 use crate::client::{
     SpannerBeginTransactionOptions, SpannerClient as NativeSpannerClient, SpannerClientConfig,
@@ -656,7 +656,7 @@ impl PyAsyncSpannerClient {
         params_json: Option<String>,
         staleness_mode: &str,
         staleness_ms: i64,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| spanner_error_to_py(py, e))?;
@@ -681,7 +681,7 @@ impl PyAsyncSpannerClient {
         params_json: Option<String>,
         request_tag: Option<String>,
         transaction_tag: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| spanner_error_to_py(py, e))?;
@@ -713,7 +713,7 @@ impl PyAsyncSpannerClient {
         statements_json: String,
         request_tag: Option<String>,
         transaction_tag: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| spanner_error_to_py(py, e))?;
@@ -744,7 +744,7 @@ impl PyAsyncSpannerClient {
         sql: String,
         params_json: Option<String>,
         exclude_txn_from_change_streams: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| spanner_error_to_py(py, e))?;
@@ -777,7 +777,7 @@ impl PyAsyncSpannerClient {
         transaction_tag: Option<String>,
         exclude_txn_from_change_streams: bool,
         max_commit_delay_ms: Option<u64>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| spanner_error_to_py(py, e))?;
@@ -808,7 +808,7 @@ impl PyAsyncSpannerClient {
         py: Python<'_>,
         mutation_groups_json: String,
         exclude_txn_from_change_streams: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| spanner_error_to_py(py, e))?;
@@ -828,7 +828,7 @@ impl PyAsyncSpannerClient {
         )
     }
 
-    fn update_ddl(&self, py: Python<'_>, statements: Vec<String>) -> PyResult<RustDbTaskAwaitable> {
+    fn update_ddl(&self, py: Python<'_>, statements: Vec<String>) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| spanner_error_to_py(py, e))?;
@@ -860,7 +860,7 @@ impl PyAsyncSpannerClient {
         data_boost_enabled: bool,
         staleness_mode: &str,
         staleness_ms: i64,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| spanner_error_to_py(py, e))?;
@@ -900,7 +900,7 @@ impl PyAsyncSpannerClient {
         previous_transaction_id: Option<Vec<u8>>,
         exclude_txn_from_change_streams: bool,
         max_commit_delay_ms: Option<u64>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         self.inner
             .ensure_open()
             .map_err(|e| spanner_error_to_py(py, e))?;
@@ -1084,7 +1084,7 @@ impl PyAsyncSpannerReadWriteTransaction {
         sql: String,
         params_json: Option<String>,
         request_tag: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let params = parse_spanner_parameters_json(params_json.as_deref())
             .map_err(|e| spanner_error_to_py(py, e))?;
         let tx = self.inner.clone();
@@ -1104,7 +1104,7 @@ impl PyAsyncSpannerReadWriteTransaction {
         sql: String,
         params_json: Option<String>,
         request_tag: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let params = parse_spanner_parameters_json(params_json.as_deref())
             .map_err(|e| spanner_error_to_py(py, e))?;
         let tx = self.inner.clone();
@@ -1123,7 +1123,7 @@ impl PyAsyncSpannerReadWriteTransaction {
         py: Python<'_>,
         statements_json: String,
         request_tag: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let stmts = parse_batch_dml_statements_json(&statements_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
         let tx = self.inner.clone();
@@ -1137,11 +1137,7 @@ impl PyAsyncSpannerReadWriteTransaction {
     }
 
     #[pyo3(signature = (mutations_json=None))]
-    fn commit(
-        &self,
-        py: Python<'_>,
-        mutations_json: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    fn commit(&self, py: Python<'_>, mutations_json: Option<String>) -> PyResult<TaskAwaitable> {
         let mutations = match mutations_json.as_deref() {
             Some(json) => parse_mutations_json(json).map_err(|e| spanner_error_to_py(py, e))?,
             None => Vec::new(),
@@ -1156,7 +1152,7 @@ impl PyAsyncSpannerReadWriteTransaction {
         )
     }
 
-    fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    fn rollback(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let tx = self.inner.clone();
         spawn_rust_db_task_with_attr(
             py,

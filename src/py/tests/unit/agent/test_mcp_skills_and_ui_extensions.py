@@ -28,10 +28,9 @@ from vertebra.agent.mcp import (
     UI_MIME_TYPE,
     MCPConfig,
     MCPCore,
-    McpHttpRequest,
-    McpHttpResponse,
-    McpIcon,
-    MCPRegistry,
+    MCPHttpRequest,
+    MCPHttpResponse,
+    MCPIcon,
     MCPSessionStore,
     MCPSkillsConfig,
     MCPTaskStore,
@@ -72,9 +71,9 @@ async def _post_mcp(
     *,
     headers: dict[str, str] | None = None,
     context: AgentContext | None = None,
-) -> McpHttpResponse:
+) -> MCPHttpResponse:
     return await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers=headers or {},
@@ -100,7 +99,7 @@ async def _init_legacy_session(
     if capabilities is not None:
         params["capabilities"] = capabilities
     resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=context,
@@ -129,7 +128,7 @@ async def test_mcp_list_changed_logging_and_progress_notifications() -> None:
 
     sid = await _init_legacy_session(core)
     sse_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="GET",
             path="/mcp",
             headers={"Accept": "text/event-stream", "Mcp-Session-Id": sid},
@@ -210,7 +209,7 @@ async def test_mcp_list_changed_logging_and_progress_notifications() -> None:
     disabled_tools_core = MCPCore(config=MCPConfig(tools_enabled=False, logging=False))
     disabled_sid = await _init_legacy_session(disabled_tools_core)
     disabled_stream_resp = await disabled_tools_core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="GET",
             path="/mcp",
             headers={"Accept": "text/event-stream", "Mcp-Session-Id": disabled_sid},
@@ -253,7 +252,7 @@ async def test_mcp_resource_subscriptions_fanout_cleanup_and_listen() -> None:
     alice = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
     sid = await _init_legacy_session(core, context=alice)
     get_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="GET",
             path="/mcp",
             context=alice,
@@ -262,9 +261,9 @@ async def test_mcp_resource_subscriptions_fanout_cleanup_and_listen() -> None:
     )
     assert get_resp.stream is not None
 
-    async def _post_alice(req_id: int, method: str, params: dict[str, Any], sess_id: str = sid) -> McpHttpResponse:
+    async def _post_alice(req_id: int, method: str, params: dict[str, Any], sess_id: str = sid) -> MCPHttpResponse:
         return await core.handle(
-            McpHttpRequest(
+            MCPHttpRequest(
                 method="POST",
                 path="/mcp",
                 context=alice,
@@ -282,7 +281,7 @@ async def test_mcp_resource_subscriptions_fanout_cleanup_and_listen() -> None:
     assert decode_json(missing_resp.body)["error"]["code"] == INVALID_PARAMS
 
     listen_406 = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2026-07-28", "Accept": "application/json"},
@@ -292,7 +291,7 @@ async def test_mcp_resource_subscriptions_fanout_cleanup_and_listen() -> None:
     assert listen_406.status == 406
 
     listen_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2026-07-28", "Accept": "text/event-stream"},
@@ -345,7 +344,7 @@ async def test_mcp_resource_subscriptions_fanout_cleanup_and_listen() -> None:
     assert await core.notify_resource_updated("item://42") == 0
 
     del_resp = await core.handle(
-        McpHttpRequest(method="DELETE", path="/mcp", context=alice, headers={"Mcp-Session-Id": sid})
+        MCPHttpRequest(method="DELETE", path="/mcp", context=alice, headers={"Mcp-Session-Id": sid})
     )
     assert del_resp.status == 204
     await _aclose(get_resp.stream)
@@ -353,7 +352,7 @@ async def test_mcp_resource_subscriptions_fanout_cleanup_and_listen() -> None:
 
     sid_ttl = await _init_legacy_session(core, context=alice)
     ttl_stream_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="GET",
             path="/mcp",
             context=alice,
@@ -562,7 +561,7 @@ async def test_mcp_skills_extension_pagination_blobs_prompts_and_notifications(t
     )
 
     disc_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2026-07-28"},
@@ -574,7 +573,7 @@ async def test_mcp_skills_extension_pagination_blobs_prompts_and_notifications(t
     assert caps["extensions"][SKILLS_EXTENSION] == {"listChanged": True, "directoryRead": True}
 
     page1_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2026-07-28"},
@@ -586,7 +585,7 @@ async def test_mcp_skills_extension_pagination_blobs_prompts_and_notifications(t
     next_cursor = page1["nextCursor"]
 
     page2_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2026-07-28"},
@@ -600,7 +599,7 @@ async def test_mcp_skills_extension_pagination_blobs_prompts_and_notifications(t
     assert "nextCursor" not in page2
 
     filtered_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2026-07-28"},
@@ -633,7 +632,7 @@ async def test_mcp_skills_extension_pagination_blobs_prompts_and_notifications(t
 
     sid = await _init_legacy_session(core)
     sse_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="GET",
             path="/mcp",
             headers={"Accept": "text/event-stream", "Mcp-Session-Id": sid},
@@ -664,7 +663,7 @@ async def test_mcp_skills_extension_pagination_blobs_prompts_and_notifications(t
         assert restricted_core.skill_catalog is not None
         restricted_core.skill_catalog.read_directory("skill://vision-skill")
     dir_resp = await restricted_core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2026-07-28"},
@@ -732,7 +731,7 @@ async def test_mcp_apps_projection_app_only_filtering_etag_and_webmcp() -> None:
             name="dashboard_ui",
             title="Live Dashboard",
             mime_type=UI_MIME_TYPE,
-            icons=[McpIcon(src="https://cdn.example/dash.png", mimeType="image/png", sizes=("64x64",))],
+            icons=[MCPIcon(src="https://cdn.example/dash.png", mimeType="image/png", sizes=("64x64",))],
             meta={"ui": {"prefersBorder": True}},
         )
         def dashboard_ui(self) -> str:
@@ -967,7 +966,7 @@ def test_starlette_and_fastapi_mount_skills_well_known_and_ui_validation(tmp_pat
         assert [s["name"] for s in skills_resp.json()["result"]["skills"]] == ["triage"]
 
     bad_app = FastAPI() if use_fastapi else Starlette()
-    bad_registry = MCPRegistry()
+    bad_registry = ToolRegistry()
 
     @mcp_tool(name="broken_asgi", ui_resource_uri="ui://missing/asgi.html")
     def broken_asgi() -> str:
@@ -1022,7 +1021,7 @@ def test_flask_and_django_mount_skills_well_known_and_ui_validation(tmp_path: Pa
     assert dj_resp.status == 200
     assert [s["name"] for s in decode_json(bytes(dj_resp.body))["result"]["skills"]] == ["triage"]
 
-    standalone_dj_reg = MCPRegistry()
+    standalone_dj_reg = ToolRegistry()
     direct_resp = dispatch_django_mcp(
         standalone_dj_reg,
         NativeRequest.from_parts(
@@ -1043,7 +1042,7 @@ def test_flask_and_django_mount_skills_well_known_and_ui_validation(tmp_path: Pa
     with pytest.raises(ImproperConfigurationError, match="ui://missing/django.html"):
         attach_django_mcp([broken_django], skills=skills_cfg)
 
-    bad_standalone_dj_reg = MCPRegistry()
+    bad_standalone_dj_reg = ToolRegistry()
     bad_standalone_dj_reg.register_tool(broken_django)
     with pytest.raises(ImproperConfigurationError, match="ui://missing/django.html"):
         dispatch_django_mcp(bad_standalone_dj_reg, b"{}", skills=skills_cfg)
@@ -1057,7 +1056,7 @@ async def _aclose(stream: Any) -> None:
 @pytest.mark.anyio
 async def test_mcp_completions_capability_sync_async_pagination_and_unknown_ref() -> None:
     """Verify completions capability discovery, sync/async providers, 100-item truncation, and unknown refs."""
-    registry = MCPRegistry()
+    registry = ToolRegistry()
 
     def _sync_prompt_complete(arg_name: str, arg_value: str) -> list[str]:
         assert arg_name == "language"
@@ -1179,7 +1178,7 @@ async def test_mcp_task_store_ttl_pruning_and_queue_service_dispatch_cancellatio
     ctx = AgentContext(identity=CallerIdentity(user_id="u1", tenant_id="t1"))
 
     run_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=ctx,
@@ -1210,7 +1209,7 @@ async def test_mcp_task_store_ttl_pruning_and_queue_service_dispatch_cancellatio
     assert executed == ["alpha"]
 
     cancel_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=ctx,
@@ -1231,7 +1230,7 @@ async def test_mcp_task_store_ttl_pruning_and_queue_service_dispatch_cancellatio
     )
     cancelled_id = decode_json(cancel_resp.body)["result"]["task"]["taskId"]
     await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=ctx,
@@ -1315,7 +1314,7 @@ async def test_mcp_distributed_cache_stores_cross_worker_and_aclose() -> None:
     worker1.stream_broker.publish(sid, SseFrame(id="evt-2", event="message", data='{"seq":2}'))
 
     sse_resp = await worker2.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="GET",
             path="/mcp",
             context=alice,

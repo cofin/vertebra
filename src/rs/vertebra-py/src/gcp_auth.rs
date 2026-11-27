@@ -14,9 +14,7 @@ use vertebra_core::gcp_auth::{
     invoke_capsule_refresh_on_runtime, validate_gcp_http_method,
 };
 
-use crate::async_bridge::{
-    RustDbTaskAwaitable, block_on_db, db_runtime_handle, spawn_rust_db_task,
-};
+use crate::async_bridge::{TaskAwaitable, block_on_db, db_runtime_handle, spawn_rust_db_task};
 use crate::errors::{auth_error_to_py, exception_types};
 
 // SAFETY: C-ABI callback registered inside `GcpTokenCacheCapsule`; callers must supply a live
@@ -202,7 +200,7 @@ impl PySyncGcpTokenCache {
     }
 }
 
-/// Asynchronous lock-free Google Cloud OAuth2 token cache returning `RustDbTaskAwaitable`.
+/// Asynchronous lock-free Google Cloud OAuth2 token cache returning `TaskAwaitable`.
 #[pyclass(name = "AsyncGcpTokenCache", frozen, immutable_type)]
 pub struct PyAsyncGcpTokenCache {
     inner: Arc<NativeGcpTokenCache>,
@@ -276,7 +274,7 @@ impl PyAsyncGcpTokenCache {
     }
 
     #[pyo3(signature = (*, force_refresh=false))]
-    fn get_token(&self, py: Python<'_>, force_refresh: bool) -> PyResult<RustDbTaskAwaitable> {
+    fn get_token(&self, py: Python<'_>, force_refresh: bool) -> PyResult<TaskAwaitable> {
         let cache = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
@@ -343,7 +341,7 @@ fn validate_request_args(method: &str, timeout_ms: i64) -> PyResult<(&'static st
     Ok((normalized_method, timeout_ms as u64))
 }
 
-/// Execute a connection-pooled HTTP/2 or HTTP/1.1 unary POST request asynchronously via `RustDbTaskAwaitable`.
+/// Execute a connection-pooled HTTP/2 or HTTP/1.1 unary POST request asynchronously via `TaskAwaitable`.
 #[pyfunction]
 #[pyo3(signature = (url, headers, body, timeout_ms=30_000))]
 pub fn gcp_http2_post_async(
@@ -352,7 +350,7 @@ pub fn gcp_http2_post_async(
     headers: HashMap<String, String>,
     body: Vec<u8>,
     timeout_ms: u64,
-) -> PyResult<RustDbTaskAwaitable> {
+) -> PyResult<TaskAwaitable> {
     spawn_rust_db_task(
         py,
         async move { native_gcp_http2_post(&url, &headers, body, timeout_ms).await },
@@ -395,7 +393,7 @@ pub fn gcp_http2_request_sync<'py>(
     Ok((status, resp_headers, PyBytes::new(py, &resp_body)))
 }
 
-/// Execute a connection-pooled HTTP/2 or HTTP/1.1 request asynchronously via `RustDbTaskAwaitable`.
+/// Execute a connection-pooled HTTP/2 or HTTP/1.1 request asynchronously via `TaskAwaitable`.
 #[pyfunction]
 #[pyo3(signature = (method, url, headers, body=None, timeout_ms=30_000))]
 pub fn gcp_http2_request_async(
@@ -405,7 +403,7 @@ pub fn gcp_http2_request_async(
     headers: HashMap<String, String>,
     body: Option<Vec<u8>>,
     timeout_ms: i64,
-) -> PyResult<RustDbTaskAwaitable> {
+) -> PyResult<TaskAwaitable> {
     let (normalized_method, timeout_u64) = validate_request_args(method, timeout_ms)?;
     spawn_rust_db_task(
         py,

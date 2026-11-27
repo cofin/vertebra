@@ -7,9 +7,7 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList, PyTuple};
 use tokio::sync::Notify;
-use vertebra_db::py_async::{
-    RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr_and_cancel,
-};
+use vertebra_db::py_async::{TaskAwaitable, block_on_db, spawn_rust_db_task_with_attr_and_cancel};
 use vertebra_resp::client::py_helpers::{
     PipelineBuilder, decode_hgetall_py, decode_pipeline_py, extract_bytes_arg, extract_bytes_list,
     extract_command_arg, extract_hset_pairs, extract_pairs_bytes, extract_streams_arg,
@@ -50,7 +48,7 @@ fn spawn_valkey_task<'py, F, T, MapOk>(
     py: Python<'py>,
     fut: F,
     map_ok: MapOk,
-) -> PyResult<Bound<'py, RustDbTaskAwaitable>>
+) -> PyResult<Bound<'py, TaskAwaitable>>
 where
     F: std::future::Future<Output = Result<T, ValkeyError>> + Send + 'static,
     T: Send + 'static,
@@ -79,7 +77,7 @@ fn spawn_valkey_cmd_task<'py, F, T, MapOk>(
     config: &ValkeyConfigInner,
     fut: F,
     map_ok: MapOk,
-) -> PyResult<Bound<'py, RustDbTaskAwaitable>>
+) -> PyResult<Bound<'py, TaskAwaitable>>
 where
     F: std::future::Future<Output = Result<T, ValkeyError>> + Send + 'static,
     T: Send + 'static,
@@ -1041,7 +1039,7 @@ impl AsyncValkeyClient {
         slot_map_to_py_dict(py, self.engine.slot_map())
     }
 
-    pub fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let engine = Arc::clone(&self.engine);
         spawn_valkey_task(
             py,
@@ -1053,14 +1051,11 @@ impl AsyncValkeyClient {
         )
     }
 
-    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.close(py)
     }
 
-    pub fn __aenter__<'py>(
-        slf: Py<Self>,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn __aenter__<'py>(slf: Py<Self>, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         spawn_valkey_task(py, async move { Ok(slf) }, |_py, obj| Ok(obj.into_any()))
     }
 
@@ -1071,7 +1066,7 @@ impl AsyncValkeyClient {
         _exc_type: Option<&Bound<'_, PyAny>>,
         _exc_val: Option<&Bound<'_, PyAny>>,
         _exc_tb: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let engine = Arc::clone(&self.engine);
         spawn_valkey_task(
             py,
@@ -1083,7 +1078,7 @@ impl AsyncValkeyClient {
         )
     }
 
-    pub fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
             py,
@@ -1097,7 +1092,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1115,7 +1110,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         keys: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_list = extract_bytes_list(keys)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1145,7 +1140,7 @@ impl AsyncValkeyClient {
         ex: Option<i64>,
         nx: bool,
         xx: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let val_bytes = extract_bytes_arg(value)?;
         let engine = Arc::clone(&self.engine);
@@ -1162,7 +1157,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         keys: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_list = extract_varargs_bytes(keys)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1178,7 +1173,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         keys: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_list = extract_varargs_bytes(keys)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1194,7 +1189,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         keys: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_list = extract_varargs_bytes(keys)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1210,7 +1205,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
         seconds: i64,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1230,7 +1225,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
         ms: i64,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1249,7 +1244,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1268,7 +1263,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1289,7 +1284,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
         amount: i64,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
         let cmd = vec![
@@ -1316,7 +1311,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
         amount: i64,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
         let cmd = vec![
@@ -1344,7 +1339,7 @@ impl AsyncValkeyClient {
         cursor: u64,
         match_pattern: Option<String>,
         count: Option<u64>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
             py,
@@ -1374,7 +1369,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         prefix: &Bound<'_, PyAny>,
         count: u64,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let prefix_bytes = extract_bytes_arg(prefix)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1390,7 +1385,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         asynchronous: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
             py,
@@ -1405,7 +1400,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         channel: String,
         message: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let msg_bytes = extract_bytes_arg(message)?;
         let engine = Arc::clone(&self.engine);
         let cmd = vec![b"PUBLISH".to_vec(), channel.into_bytes(), msg_bytes];
@@ -1428,7 +1423,7 @@ impl AsyncValkeyClient {
         key: &Bound<'_, PyAny>,
         mapping: &Bound<'_, PyAny>,
         value: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let pairs = extract_hset_pairs(py, mapping, value)?;
         let cmd = build_hset_cmd(&key_bytes, &pairs);
@@ -1451,7 +1446,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
         field: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let field_bytes = extract_bytes_arg(field)?;
         let cmd = vec![b"HGET".to_vec(), key_bytes.clone(), field_bytes];
@@ -1478,7 +1473,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let cmd = vec![b"HGETALL".to_vec(), key_bytes.clone()];
         let engine = Arc::clone(&self.engine);
@@ -1499,7 +1494,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
         fields: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let field_list = extract_varargs_bytes(fields)?;
         if field_list.is_empty() {
@@ -1531,7 +1526,7 @@ impl AsyncValkeyClient {
         ttl_seconds: i64,
         fields: &Bound<'_, PyAny>,
         condition: Option<String>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.exec_hash_expire_async(py, "HEXPIRE", key, ttl_seconds, fields, condition)
     }
 
@@ -1543,7 +1538,7 @@ impl AsyncValkeyClient {
         ttl_ms: i64,
         fields: &Bound<'_, PyAny>,
         condition: Option<String>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.exec_hash_expire_async(py, "HPEXPIRE", key, ttl_ms, fields, condition)
     }
 
@@ -1555,7 +1550,7 @@ impl AsyncValkeyClient {
         unix_time_seconds: i64,
         fields: &Bound<'_, PyAny>,
         condition: Option<String>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.exec_hash_expire_async(py, "HEXPIREAT", key, unix_time_seconds, fields, condition)
     }
 
@@ -1567,7 +1562,7 @@ impl AsyncValkeyClient {
         unix_time_ms: i64,
         fields: &Bound<'_, PyAny>,
         condition: Option<String>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.exec_hash_expire_async(py, "HPEXPIREAT", key, unix_time_ms, fields, condition)
     }
 
@@ -1577,7 +1572,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
         fields: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.exec_hash_query_async(py, "HTTL", key, fields, true)
     }
 
@@ -1587,7 +1582,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
         fields: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.exec_hash_query_async(py, "HPTTL", key, fields, true)
     }
 
@@ -1597,7 +1592,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
         fields: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.exec_hash_query_async(py, "HPERSIST", key, fields, false)
     }
 
@@ -1605,7 +1600,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         script: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let script_bytes = extract_bytes_arg(script)?;
         let engine = Arc::clone(&self.engine);
         spawn_valkey_cmd_task(
@@ -1623,7 +1618,7 @@ impl AsyncValkeyClient {
         script: &Bound<'_, PyAny>,
         keys: Option<&Bound<'_, PyAny>>,
         args: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let script_bytes = extract_bytes_arg(script)?;
         let key_list = match keys {
             Some(k) if !k.is_none() => extract_bytes_list(k)?,
@@ -1654,7 +1649,7 @@ impl AsyncValkeyClient {
         keys: Option<&Bound<'_, PyAny>>,
         args: Option<&Bound<'_, PyAny>>,
         script: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_list = match keys {
             Some(k) if !k.is_none() => extract_bytes_list(k)?,
             _ => Vec::new(),
@@ -1685,7 +1680,7 @@ impl AsyncValkeyClient {
         &self,
         py: Python<'py>,
         args: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let items = args.extract::<Vec<Bound<'_, PyAny>>>()?;
         if items.is_empty() {
             return Err(
@@ -1719,7 +1714,7 @@ impl AsyncValkeyClient {
         group: String,
         id: &str,
         mkstream: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let cmd = build_xgroup_create(&key_bytes, &group, id, mkstream);
         let engine = Arc::clone(&self.engine);
@@ -1745,7 +1740,7 @@ impl AsyncValkeyClient {
         maxlen: Option<u64>,
         approximate: bool,
         nomkstream: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let pairs = extract_pairs_bytes(py, fields)?;
         let cmd = build_xadd(&key_bytes, &pairs, id, maxlen, approximate, nomkstream)
@@ -1775,7 +1770,7 @@ impl AsyncValkeyClient {
         count: Option<u64>,
         block_ms: Option<u64>,
         noack: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let stream_pairs = extract_streams_arg(streams)?;
         let cmd = build_xreadgroup(&group, &consumer, &stream_pairs, count, block_ms, noack)
             .map_err(|e| e.to_py_err(py))?;
@@ -1799,7 +1794,7 @@ impl AsyncValkeyClient {
         key: &Bound<'_, PyAny>,
         group: String,
         ids: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let id_list = crate::pubsub::extract_string_args(ids)?;
         let cmd = build_xack(&key_bytes, &group, &id_list).map_err(|e| e.to_py_err(py))?;
@@ -1828,7 +1823,7 @@ impl AsyncValkeyClient {
         start_id: &str,
         count: Option<u64>,
         justid: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let cmd = build_xautoclaim(
             &key_bytes,
@@ -1859,7 +1854,7 @@ impl AsyncValkeyClient {
         min: &str,
         max: &str,
         count: Option<u64>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let cmd = build_xrange(&key_bytes, min, max, count);
         let engine = Arc::clone(&self.engine);
@@ -1880,7 +1875,7 @@ impl AsyncValkeyClient {
         py: Python<'py>,
         key: &Bound<'_, PyAny>,
         ids: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let id_list = crate::pubsub::extract_string_args(ids)?;
         let cmd = build_xdel(&key_bytes, &id_list).map_err(|e| e.to_py_err(py))?;
@@ -1909,7 +1904,7 @@ impl AsyncValkeyClient {
         gt: bool,
         lt: bool,
         ch: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let member_list = extract_zadd_members(py, members)?;
         let cmd = build_zadd(&key_bytes, &member_list, nx, xx, gt, lt, ch)
@@ -1947,7 +1942,7 @@ impl AsyncValkeyClient {
         ttl_val: i64,
         fields: &Bound<'_, PyAny>,
         condition: Option<String>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let field_list = extract_varargs_bytes(fields)?;
         let cmd = build_hash_expire_cmd(
@@ -1978,7 +1973,7 @@ impl AsyncValkeyClient {
         key: &Bound<'_, PyAny>,
         fields: &Bound<'_, PyAny>,
         read_only: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let field_list = extract_varargs_bytes(fields)?;
         let cmd = build_hash_field_query_cmd(cmd_name, &key_bytes, &field_list)
@@ -2430,7 +2425,7 @@ define_valkey_pipeline!(SyncValkeyPipeline, {
 });
 
 define_valkey_pipeline!(AsyncValkeyPipeline, {
-    pub fn execute<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn execute<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let queued = self.inner.drain_all();
         let engine = Arc::clone(&self.inner.engine);
         let transaction = self.inner.transaction;
@@ -2442,10 +2437,7 @@ define_valkey_pipeline!(AsyncValkeyPipeline, {
         )
     }
 
-    pub fn __aenter__<'py>(
-        slf: Py<Self>,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn __aenter__<'py>(slf: Py<Self>, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         spawn_valkey_task(py, async move { Ok(slf) }, |_py, obj| Ok(obj.into_any()))
     }
 
@@ -2456,7 +2448,7 @@ define_valkey_pipeline!(AsyncValkeyPipeline, {
         _exc_type: Option<&Bound<'_, PyAny>>,
         _exc_val: Option<&Bound<'_, PyAny>>,
         _exc_tb: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.inner.clear();
         spawn_valkey_task(py, async move { Ok(false) }, |py, suppressed| {
             Ok(PyBool::new(py, suppressed).to_owned().into_any().unbind())

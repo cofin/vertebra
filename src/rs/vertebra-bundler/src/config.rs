@@ -72,7 +72,7 @@ impl Default for BundleConfig {
 /// Configuration for development mode with HMR
 #[pyclass(immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
-pub struct DevConfig {
+pub struct BundleDevConfig {
     /// Entry point file path
     #[pyo3(get, set)]
     pub entry: String,
@@ -95,7 +95,7 @@ pub struct DevConfig {
 }
 
 #[pymethods]
-impl DevConfig {
+impl BundleDevConfig {
     #[new]
     #[pyo3(signature = (entry, watch_dirs=vec!["src".to_string()], hmr_port=5173, extensions=vec!["ts".to_string(), "tsx".to_string(), "js".to_string(), "jsx".to_string()], debounce_ms=100))]
     pub fn new(
@@ -115,7 +115,7 @@ impl DevConfig {
     }
 }
 
-impl Default for DevConfig {
+impl Default for BundleDevConfig {
     fn default() -> Self {
         Self {
             entry: "src/main.ts".to_string(),
@@ -132,13 +132,13 @@ impl Default for DevConfig {
     }
 }
 
-/// Build result returned from bundler
+/// Result returned from a bundler build
 #[pyclass(immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
-pub struct BuildResult {
+pub struct BundleResult {
     /// Output files generated
     #[pyo3(get)]
-    pub outputs: Vec<OutputFile>,
+    pub outputs: Vec<BundleOutput>,
 
     /// Build duration in milliseconds
     #[pyo3(get)]
@@ -150,9 +150,9 @@ pub struct BuildResult {
 }
 
 #[pymethods]
-impl BuildResult {
+impl BundleResult {
     #[new]
-    pub fn new(outputs: Vec<OutputFile>, duration_ms: u64, warnings: Vec<String>) -> Self {
+    pub fn new(outputs: Vec<BundleOutput>, duration_ms: u64, warnings: Vec<String>) -> Self {
         Self {
             outputs,
             duration_ms,
@@ -162,7 +162,7 @@ impl BuildResult {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "BuildResult(outputs={}, duration_ms={}, warnings={})",
+            "BundleResult(outputs={}, duration_ms={}, warnings={})",
             self.outputs.len(),
             self.duration_ms,
             self.warnings.len()
@@ -170,10 +170,10 @@ impl BuildResult {
     }
 }
 
-/// Single output file from build
+/// Single output file produced by a bundler build
 #[pyclass(immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
-pub struct OutputFile {
+pub struct BundleOutput {
     /// Output path relative to outdir
     #[pyo3(get)]
     pub path: String,
@@ -188,7 +188,7 @@ pub struct OutputFile {
 }
 
 #[pymethods]
-impl OutputFile {
+impl BundleOutput {
     #[new]
     pub fn new(path: String, size: u64, is_entry: bool) -> Self {
         Self {
@@ -200,7 +200,7 @@ impl OutputFile {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "OutputFile(path='{}', size={}, is_entry={})",
+            "BundleOutput(path='{}', size={}, is_entry={})",
             self.path, self.size, self.is_entry
         )
     }
@@ -221,8 +221,8 @@ mod tests {
     }
 
     #[test]
-    fn test_dev_config_defaults() {
-        let config = DevConfig::default();
+    fn test_bundle_dev_config_defaults() {
+        let config = BundleDevConfig::default();
         assert_eq!(config.entry, "src/main.ts");
         assert_eq!(config.watch_dirs, vec!["src"]);
         assert_eq!(config.hmr_port, 5173);

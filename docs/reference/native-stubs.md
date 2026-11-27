@@ -76,7 +76,19 @@ Low-level Rust classes and functions declared in PEP 561 `.pyi` stub files acros
       members: false
       show_signature: false
 
-::: vertebra._bundler.BuildResult
+::: vertebra._bundler.BundleDevConfig
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+::: vertebra._bundler.BundleResult
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+::: vertebra._bundler.BundleOutput
     options:
       heading_level: 4
       members: false

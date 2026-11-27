@@ -15,7 +15,7 @@ use duckdb::types::Value as DuckValue;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use vertebra_db::py_async::{
-    ReadyAwaitable, RustDbTaskAwaitable, ready_ok, spawn_rust_db_task_with_attr,
+    ReadyAwaitable, TaskAwaitable, ready_ok, spawn_rust_db_task_with_attr,
 };
 
 use super::{
@@ -538,7 +538,7 @@ impl AsyncDuckDBCursor {
         guard: ExecutingGuard,
         begin: bool,
         run: F,
-    ) -> PyResult<RustDbTaskAwaitable>
+    ) -> PyResult<TaskAwaitable>
     where
         F: FnOnce(&DuckDBInner, &Arc<AtomicBool>) -> Result<StatementOutcome, DuckDBClientError>
             + Send
@@ -642,7 +642,7 @@ impl AsyncDuckDBCursor {
         slf: &Bound<'py, Self>,
         sql: &str,
         params: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let py = slf.py();
         let this = slf.get();
         let guard = this.begin_statement(py)?;
@@ -657,7 +657,7 @@ impl AsyncDuckDBCursor {
         slf: &Bound<'py, Self>,
         sql: &str,
         seq_of_params: &Bound<'py, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let py = slf.py();
         let this = slf.get();
         let guard = this.begin_statement(py)?;

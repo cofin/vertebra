@@ -106,7 +106,7 @@ from vertebra.extensions.sqlalchemy.dialects import (
     AsyncSQLiteDialect,
     SyncMSSQLDialect,
 )
-from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool
+from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, SyncBrokerPool
 from vertebra.storage import SyncObjectStore
 
 _HAS_DUCKDB_ENGINE = importlib.util.find_spec("duckdb_engine") is not None
@@ -915,11 +915,11 @@ def test_sqlalchemy_and_alchemy_extensions_import_without_sqlspec(module_name: s
         "sys.modules['sqlspec'] = None; "
         f"importlib.import_module({module_name!r}); "
         "from vertebra.extensions.alchemy import create_sync_alchemy_config; "
-        "from vertebra.extensions.sqlalchemy.pool import BrokerPool; "
+        "from vertebra.extensions.sqlalchemy.pool import SyncBrokerPool; "
         "from vertebra.extensions.broker import BrokerConfig, SyncSHMBrokerTransport; "
         "t = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0)); "
         "cfg = create_sync_alchemy_config('sqlite+vtb:///:memory:', broker=t); "
-        "p = BrokerPool(broker=t, url='sqlite+vtb:///%3Amemory%3A'); "
+        "p = SyncBrokerPool(broker=t, url='sqlite+vtb:///%3Amemory%3A'); "
         "p.dispose(); t.close(); "
         "assert 'sqlspec' not in sys.modules or sys.modules['sqlspec'] is None"
     )
@@ -1749,14 +1749,14 @@ def test_sqlite_get_pool_class_broker_routes_to_bound_broker_pool(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Verify SQLite ?broker=true returns a bound BrokerPool / AsyncBrokerPool from DatabaseRegistry."""
+    """Verify SQLite ?broker=true returns a bound SyncBrokerPool / AsyncBrokerPool from DatabaseRegistry."""
     fake_broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
     db_path = tmp_path / "brokered.db"
     try:
         monkeypatch.setattr(DatabaseRegistry, "default_broker", classmethod(lambda cls: fake_broker))
         sync_pool_cls = SyncSQLiteDialect.get_pool_class(make_url(f"sqlite+vtb:///{db_path}?broker=true"))
         async_pool_cls = AsyncSQLiteDialect.get_pool_class(make_url(f"sqlite+vtb_async:///{db_path}?broker=true"))
-        assert issubclass(sync_pool_cls, BrokerPool)
+        assert issubclass(sync_pool_cls, SyncBrokerPool)
         assert issubclass(async_pool_cls, AsyncBrokerPool)
     finally:
         fake_broker.close()

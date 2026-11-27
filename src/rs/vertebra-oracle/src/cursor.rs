@@ -12,7 +12,7 @@ use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyNone, PyString, PyTuple, PyType,
 };
 use vertebra_db::py_async::{
-    ReadyAwaitable, RustDbTaskAwaitable, ready_ok, spawn_rust_db_task_with_attr,
+    ReadyAwaitable, TaskAwaitable, ready_ok, spawn_rust_db_task_with_attr,
 };
 use vertebra_db::py_cursor::{BufferedCursorState, build_description_7tuple};
 #[cfg(test)]
@@ -1109,7 +1109,7 @@ pub(crate) fn spawn_single_call(
     worker: Arc<OracleWorkerHandle>,
     prepared: PreparedExecute,
     shape: fn(Python<'_>, BuiltReply) -> PyResult<Py<PyAny>>,
-) -> PyResult<RustDbTaskAwaitable> {
+) -> PyResult<TaskAwaitable> {
     let PreparedExecute {
         cmd,
         facts,
@@ -1608,7 +1608,7 @@ impl AsyncOracleCursor {
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
         out_binds: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let py = slf.py();
         let this = slf.get();
         this.ensure_open(py)?;
@@ -1665,7 +1665,7 @@ impl AsyncOracleCursor {
         slf: &Bound<'_, Self>,
         sql: &str,
         seq_of_params: &Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let py = slf.py();
         let this = slf.get();
         this.ensure_open(py)?;

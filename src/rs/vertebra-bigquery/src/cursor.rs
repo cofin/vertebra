@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyMapping, PyString, PyTuple};
 use vertebra_db::py_async::{
-    ReadyAwaitable, RustDbTaskAwaitable, block_on_db, ready_ok, spawn_rust_db_task_with_attr,
+    ReadyAwaitable, TaskAwaitable, block_on_db, ready_ok, spawn_rust_db_task_with_attr,
 };
 use vertebra_db::py_cursor::{BufferedCursorState, build_description_7tuple};
 #[cfg(test)]
@@ -658,7 +658,7 @@ impl PyAsyncBigQueryCursor {
         slf: &Bound<'_, Self>,
         guard: ExecutingGuard,
         fut: Fut,
-    ) -> PyResult<RustDbTaskAwaitable>
+    ) -> PyResult<TaskAwaitable>
     where
         Fut: std::future::Future<Output = Result<BigQueryCursorOutcome, BigQueryError>>
             + Send
@@ -737,7 +737,7 @@ impl PyAsyncBigQueryCursor {
         slf: &Bound<'py, Self>,
         sql: &str,
         params: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let py = slf.py();
         let this = slf.get();
         let guard = this.begin_statement(py)?;
@@ -757,7 +757,7 @@ impl PyAsyncBigQueryCursor {
         slf: &Bound<'py, Self>,
         sql: &str,
         seq_of_params: &Bound<'py, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let py = slf.py();
         let this = slf.get();
         let guard = this.begin_statement(py)?;

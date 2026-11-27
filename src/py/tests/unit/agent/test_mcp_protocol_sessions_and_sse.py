@@ -45,8 +45,8 @@ from vertebra.agent.mcp import (
     UNSUPPORTED_PROTOCOL_VERSION,
     MCPConfig,
     MCPCore,
-    McpHttpRequest,
-    McpHttpResponse,
+    MCPHttpRequest,
+    MCPHttpResponse,
     MCPSessionStore,
     PromptArgument,
     PromptEntry,
@@ -57,7 +57,7 @@ from vertebra.agent.mcp import (
     ToolRegistry,
     encode_mcp_header_value,
 )
-from vertebra.agent.mcp.routes import AsgiMcpApp, WsgiMcpApp
+from vertebra.agent.mcp.routes import AsgiMCPApp, WsgiMCPApp
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.extensions.django.mcp import dispatch_mcp_request as dispatch_django_mcp
@@ -75,7 +75,7 @@ def test_mcp_flask_missing_refuses_fabricated_request(monkeypatch: pytest.Monkey
     """An unavailable Flask dependency raises before dispatching an invented request."""
     monkeypatch.setattr("vertebra.agent.mcp.routes.import_optional", lambda name: None)
     with pytest.raises(MissingDependencyError):
-        WsgiMcpApp(MCPCore()).handle_flask_view()
+        WsgiMCPApp(MCPCore()).handle_flask_view()
 
 
 @pytest.mark.anyio
@@ -103,7 +103,7 @@ async def test_mcp_asgi_adapter_context_controls_guard(authenticated: bool) -> N
     async def send(message: dict[str, Any]) -> None:
         messages.append(message)
 
-    await AsgiMcpApp(core)(scope, receive, send)
+    await AsgiMCPApp(core)(scope, receive, send)
     result = decode_json(messages[-1]["body"])
     assert ("result" in result) is authenticated
     assert calls == (["ran"] if authenticated else [])
@@ -219,7 +219,7 @@ async def test_mcp_tool_guard_errors_map_to_typed_codes_before_confirmation_and_
     meta: dict[str, Any] = {"io.modelcontextprotocol/task": True} if promoted else {}
 
     resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             body=encode_json_bytes(
@@ -404,7 +404,7 @@ async def test_mcp_http_param_header_validation(
     )
 
     resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers=headers,
@@ -435,7 +435,7 @@ async def test_mcp_protocol_version_negotiation_echoes_supported_versions(versio
     """All four supported protocol versions negotiate and echo MCP-Protocol-Version."""
     core = MCPCore()
     resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": version},
@@ -458,7 +458,7 @@ async def test_mcp_unsupported_protocol_version_returns_supported_versions_data(
         {"_meta": {"io.modelcontextprotocol/protocolVersion": "1900-01-01"}} if surface == "meta" else {}
     )
     resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers=headers,
@@ -478,7 +478,7 @@ async def test_mcp_header_and_meta_version_conflict_returns_header_mismatch() ->
     """Disagreeing MCP-Protocol-Version header and _meta version return HTTP 400 and -32020."""
     core = MCPCore()
     resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2026-07-28"},
@@ -520,7 +520,7 @@ async def test_mcp_disabled_capabilities_omitted_and_gated_with_method_not_found
     core.register_extension("io.modelcontextprotocol/custom", {"enabled": True})
 
     discover_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2026-07-28"},
@@ -535,7 +535,7 @@ async def test_mcp_disabled_capabilities_omitted_and_gated_with_method_not_found
         assert SKILLS_EXTENSION not in caps["extensions"]
 
     init_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             body=encode_json_bytes(
@@ -549,7 +549,7 @@ async def test_mcp_disabled_capabilities_omitted_and_gated_with_method_not_found
     assert init_caps["extensions"][UI_EXTENSION] == {"mimeTypes": [UI_MIME_TYPE]}
 
     call_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2025-11-25"},
@@ -566,7 +566,7 @@ async def test_mcp_legacy_logging_set_level_accepts_valid_levels(level: str) -> 
     """Legacy logging/setLevel updates session log_level across all RFC 5424 severity names."""
     core = MCPCore()
     init_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             body=encode_json_bytes(
@@ -577,7 +577,7 @@ async def test_mcp_legacy_logging_set_level_accepts_valid_levels(level: str) -> 
     session_id = init_resp.headers["Mcp-Session-Id"]
 
     set_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"Mcp-Session-Id": session_id, "MCP-Protocol-Version": "2025-11-25"},
@@ -599,7 +599,7 @@ async def test_mcp_legacy_logging_set_level_rejects_invalid_levels(bad_level: An
     """Invalid logging/setLevel arguments fail with JSON-RPC -32602."""
     core = MCPCore()
     resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2025-11-25"},
@@ -636,7 +636,7 @@ async def test_mcp_legacy_initialize_ping_and_client_capabilities(requested: str
     owner = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
 
     init_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=owner,
@@ -665,7 +665,7 @@ async def test_mcp_legacy_initialize_ping_and_client_capabilities(requested: str
     assert "logging" in init_result["capabilities"]
 
     notif_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=owner,
@@ -677,7 +677,7 @@ async def test_mcp_legacy_initialize_ping_and_client_capabilities(requested: str
     assert notif_resp.headers["Mcp-Session-Id"] == session_id
 
     ping_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=owner,
@@ -689,7 +689,7 @@ async def test_mcp_legacy_initialize_ping_and_client_capabilities(requested: str
     assert decode_json(ping_resp.body)["result"] == {}
 
     call_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=owner,
@@ -765,7 +765,7 @@ async def test_mcp_session_store_ttl_owner_isolation_and_capacity() -> None:
 
     core = MCPCore(config=MCPConfig(max_sessions=1))
     first = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
@@ -773,7 +773,7 @@ async def test_mcp_session_store_ttl_owner_isolation_and_capacity() -> None:
     )
     assert first.status == 200
     full = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             body=encode_json_bytes({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}),
@@ -794,7 +794,7 @@ async def test_mcp_legacy_invalid_session_returns_404_and_modern_strips_session(
     bob = AgentContext(identity=CallerIdentity(user_id="bob", tenant_id="t1"))
 
     init_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=alice,
@@ -815,7 +815,7 @@ async def test_mcp_legacy_invalid_session_returns_404_and_modern_strips_session(
         caller_ctx = None
 
     bad_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=caller_ctx,
@@ -829,7 +829,7 @@ async def test_mcp_legacy_invalid_session_returns_404_and_modern_strips_session(
     assert err["message"] == "Session not found or expired"
 
     modern_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Session-Id": "caller-invented-id"},
@@ -846,7 +846,7 @@ async def test_mcp_batch_arrays_rejected_outside_2025_03_26(version: str) -> Non
     """JSON-RPC batch arrays return HTTP 400 and -32600 on 2025-06-18, 2025-11-25, and 2026-07-28."""
     core = MCPCore()
     resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             headers={"MCP-Protocol-Version": version},
@@ -865,7 +865,7 @@ async def test_mcp_2025_03_26_batch_dispatch_and_delete_session_termination() ->
     bob = AgentContext(identity=CallerIdentity(user_id="bob", tenant_id="t1"))
 
     init_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=alice,
@@ -878,7 +878,7 @@ async def test_mcp_2025_03_26_batch_dispatch_and_delete_session_termination() ->
     sid = init_resp.headers["Mcp-Session-Id"]
 
     batch_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=alice,
@@ -900,7 +900,7 @@ async def test_mcp_2025_03_26_batch_dispatch_and_delete_session_termination() ->
     assert by_id[10]["error"]["code"] == INVALID_REQUEST
     assert by_id[11]["result"] == {}
 
-    options_resp = await core.handle(McpHttpRequest(method="OPTIONS", path="/mcp"))
+    options_resp = await core.handle(MCPHttpRequest(method="OPTIONS", path="/mcp"))
     assert options_resp.status == 204
     assert options_resp.headers["Allow"] == "GET, POST, DELETE, OPTIONS"
     assert options_resp.headers["Access-Control-Allow-Methods"] == "GET, POST, DELETE, OPTIONS"
@@ -908,13 +908,13 @@ async def test_mcp_2025_03_26_batch_dispatch_and_delete_session_termination() ->
     recv_stream, _ = core.stream_broker.subscribe(sid)
 
     wrong_owner_del = await core.handle(
-        McpHttpRequest(method="DELETE", path="/mcp", context=bob, headers={"Mcp-Session-Id": sid})
+        MCPHttpRequest(method="DELETE", path="/mcp", context=bob, headers={"Mcp-Session-Id": sid})
     )
     assert wrong_owner_del.status == 404
     assert await core.session_store.get(sid, "t1:alice") is not None
 
     del_resp = await core.handle(
-        McpHttpRequest(method="DELETE", path="/mcp", context=alice, headers={"Mcp-Session-Id": sid})
+        MCPHttpRequest(method="DELETE", path="/mcp", context=alice, headers={"Mcp-Session-Id": sid})
     )
     assert del_resp.status == 204
     assert await core.session_store.get(sid, "t1:alice") is None
@@ -923,7 +923,7 @@ async def test_mcp_2025_03_26_batch_dispatch_and_delete_session_termination() ->
         await recv_stream.receive()
 
     post_del = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=alice,
@@ -952,7 +952,7 @@ async def _init_legacy_session(
     if capabilities is not None:
         params["capabilities"] = capabilities
     resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="POST",
             path="/mcp",
             context=context,
@@ -991,7 +991,7 @@ async def test_mcp_get_sse_negotiation_matrix(
 ) -> None:
     """GET /mcp enforces 2026-07-28 405, Accept 405/406, and unknown session 404."""
     core = MCPCore(config=MCPConfig(enable_get_sse=enable_get_sse))
-    resp = await core.handle(McpHttpRequest(method="GET", path="/mcp", headers=headers))
+    resp = await core.handle(MCPHttpRequest(method="GET", path="/mcp", headers=headers))
     assert resp.status == expected_status
     assert resp.stream is None
 
@@ -1007,7 +1007,7 @@ async def test_mcp_get_sse_session_replay_keepalive_and_owner_limit() -> None:
     core.stream_broker.publish(sid, SseFrame(id="ev-2", event="message", data='{"jsonrpc":"2.0","method":"n2"}'))
 
     get_resp = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="GET",
             path="/mcp",
             context=alice,
@@ -1024,7 +1024,7 @@ async def test_mcp_get_sse_session_replay_keepalive_and_owner_limit() -> None:
     extra_streams = [get_resp.stream]
     for _ in range(7):
         extra = await core.handle(
-            McpHttpRequest(
+            MCPHttpRequest(
                 method="GET",
                 path="/mcp",
                 context=alice,
@@ -1036,7 +1036,7 @@ async def test_mcp_get_sse_session_replay_keepalive_and_owner_limit() -> None:
         extra_streams.append(extra.stream)
 
     ninth = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="GET",
             path="/mcp",
             context=alice,
@@ -1049,7 +1049,7 @@ async def test_mcp_get_sse_session_replay_keepalive_and_owner_limit() -> None:
 
     await _aclose(extra_streams.pop())
     replacement = await core.handle(
-        McpHttpRequest(
+        MCPHttpRequest(
             method="GET",
             path="/mcp",
             context=alice,
@@ -1094,13 +1094,13 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
         inner = core.stream_broker.open_stream(sid, owner_id=None, heartbeat_seconds=5.0, max_streams_per_owner=8)
         return _wrap_tracking_stream(inner)
 
-    asgi_app = AsgiMcpApp(core)
+    asgi_app = AsgiMCPApp(core)
     asgi_stream, asgi_closed = _open_session_stream()
     original_handle = core.handle
 
-    async def _asgi_handle(req: McpHttpRequest) -> McpHttpResponse:
+    async def _asgi_handle(req: MCPHttpRequest) -> MCPHttpResponse:
         if req.method == "GET":
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=200,
                 headers={"Content-Type": "text/event-stream", "Mcp-Session-Id": sid},
                 body=b"",
@@ -1147,9 +1147,9 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
 
     starlette_stream, starlette_closed = _open_session_stream()
 
-    async def _starlette_handle(req: McpHttpRequest) -> McpHttpResponse:
+    async def _starlette_handle(req: MCPHttpRequest) -> MCPHttpResponse:
         if req.method == "GET":
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=200,
                 headers={"Content-Type": "text/event-stream"},
                 body=b"",
@@ -1178,9 +1178,9 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
 
     wsgi_stream, wsgi_closed = _open_session_stream()
 
-    async def _wsgi_handle(req: McpHttpRequest) -> McpHttpResponse:
+    async def _wsgi_handle(req: MCPHttpRequest) -> MCPHttpResponse:
         if req.method == "GET":
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=200,
                 headers={"Content-Type": "text/event-stream"},
                 body=b"",
@@ -1189,7 +1189,7 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
         return await original_handle(req)
 
     cast(Any, core).handle = _wsgi_handle
-    wsgi_app = WsgiMcpApp(core)
+    wsgi_app = WsgiMCPApp(core)
     wsgi_meta: dict[str, Any] = {}
 
     def _start_resp(status: str, headers: list[tuple[str, str]]) -> None:
@@ -1215,9 +1215,9 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
 
     flask_stream, flask_closed = _open_session_stream()
 
-    async def _flask_handle(req: McpHttpRequest) -> McpHttpResponse:
+    async def _flask_handle(req: MCPHttpRequest) -> MCPHttpResponse:
         if req.method == "GET":
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=200,
                 headers={"Content-Type": "text/event-stream"},
                 body=b"",
@@ -1245,15 +1245,15 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
     django_reg = ToolRegistry()
     django_core = MCPCore(config=MCPConfig(server_name="dj-sse"), registry=django_reg)
     dj_sid = await _init_legacy_session(django_core)
-    cast(Any, django_reg)._mcp_app = WsgiMcpApp(django_core)
+    cast(Any, django_reg)._mcp_app = WsgiMCPApp(django_core)
     dj_inner = django_core.stream_broker.open_stream(dj_sid, owner_id=None, heartbeat_seconds=5.0)
     dj_tracking, django_stream_closed = _wrap_tracking_stream(dj_inner)
 
     orig_dj_handle = django_core.handle
 
-    async def _dj_handle(req: McpHttpRequest) -> McpHttpResponse:
+    async def _dj_handle(req: MCPHttpRequest) -> MCPHttpResponse:
         if req.method == "GET":
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=200,
                 headers={"Content-Type": "text/event-stream"},
                 body=b"",
@@ -1312,15 +1312,15 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
     ls_inner = ls_service.stream_broker.open_stream(ls_sid, owner_id=None, heartbeat_seconds=5.0)
     ls_tracking, ls_stream_closed = _wrap_tracking_stream(ls_inner)
 
-    async def _ls_stream_handle(req: McpHttpRequest) -> McpHttpResponse:
+    async def _ls_stream_handle(req: MCPHttpRequest) -> MCPHttpResponse:
         if req.method == "GET":
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=200,
                 headers={"Content-Type": "text/event-stream"},
                 body=b"",
                 stream=ls_tracking,
             )
-        return McpHttpResponse(status=204, headers={"Allow": "GET, POST, DELETE, OPTIONS"}, body=b"")
+        return MCPHttpResponse(status=204, headers={"Allow": "GET, POST, DELETE, OPTIONS"}, body=b"")
 
     cast(Any, ls_service).handle = _ls_stream_handle
     mcp_route = next(h for h in litestar_app.routes if h.path == "/mcp")

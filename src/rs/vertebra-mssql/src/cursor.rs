@@ -8,7 +8,7 @@ use pyo3::types::{PyBytes, PyDict, PyList, PySequence, PyString, PyTuple};
 use tiberius::ColumnType;
 use tokio::sync::Mutex as AsyncMutex;
 use vertebra_db::py_async::{
-    ReadyAwaitable, RustDbTaskAwaitable, ready_err, ready_ok, spawn_rust_db_task_with_attr,
+    ReadyAwaitable, TaskAwaitable, ready_err, ready_ok, spawn_rust_db_task_with_attr,
 };
 use vertebra_db::py_cursor::{
     BufferedCursorState, DEFAULT_PLAN_CACHE_CAPACITY, PlanLruCache, build_description_7tuple,
@@ -591,7 +591,7 @@ impl PyAsyncMSSQLCursor {
         py: Python<'_>,
         sql: &str,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let (client, state, in_flight, lazy_begin) = {
             let this = slf.borrow(py);
             (
@@ -690,7 +690,7 @@ impl PyAsyncMSSQLCursor {
         py: Python<'_>,
         sql: &str,
         seq_of_params: &Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let (client, state, in_flight, lazy_begin) = {
             let this = slf.borrow(py);
             (

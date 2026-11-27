@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "AsyncTenantConnectionScope",
-    "TenantConnectionScope",
+    "SyncTenantConnectionScope",
     "TenantPredicate",
     "TenantScopeConfig",
 )
@@ -69,7 +69,7 @@ class TenantPredicate(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
 _DEFAULT_TENANT_SCOPE = TenantScopeConfig()
 
 
-class TenantConnectionScope:
+class SyncTenantConnectionScope:
     """Synchronous tenant connection scope enforcing mandatory context reset or physical session eviction."""
 
     __slots__ = ("_config", "_driver", "_tenant_value")

@@ -32,7 +32,7 @@ from sqlalchemy.pool import NullPool
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
-from vertebra.agent.mcp.routes import WsgiMcpApp
+from vertebra.agent.mcp.routes import WsgiMCPApp
 from vertebra.cache import SyncCacheStore
 from vertebra.db.driver import NotificationEvent, SyncNotificationSource
 from vertebra.extensions.alchemy import (
@@ -500,7 +500,7 @@ def test_flask_mcp_protocol_request_cases(
 
 
 def test_flask_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
-    """Flask MCP uses canonical MCPConfig, WsgiMcpApp over MCPCore, and reuses the persistent Portal loop."""
+    """Flask MCP uses canonical MCPConfig, WsgiMCPApp over MCPCore, and reuses the persistent Portal loop."""
     assert MCPConfig is CanonicalMCPConfig
 
     observed_loops: list[tuple[int, int]] = []
@@ -516,7 +516,7 @@ def test_flask_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
 
     app.add_url_rule("/probe/<int:seq>", endpoint="probe_loop", view_func=probe_loop, methods=["POST"])
     plugin = VertebraPlugin(app, config=VertebraConfig(mcp=MCPConfig(server_name="flask-mcp")))
-    assert isinstance(getattr(plugin, "_mcp_app", None), WsgiMcpApp)
+    assert isinstance(getattr(plugin, "_mcp_app", None), WsgiMCPApp)
 
     def _call_tool(seq: int) -> None:
         call_resp = plugin.handle_request(

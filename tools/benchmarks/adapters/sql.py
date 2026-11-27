@@ -1136,7 +1136,7 @@ async def capture_sqlalchemy_report(
     include_external: bool = True,
     strict_free_threading: bool = False,
 ) -> AdapterBenchmarkReport:
-    """Measure SQLAlchemy `+vtb` dialect (with optional `BrokerPool`) against vanilla SQLAlchemy."""
+    """Measure SQLAlchemy `+vtb` dialect (with optional `SyncBrokerPool`) against vanilla SQLAlchemy."""
     _validate_sampling(iterations, warmup)
     gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
 
@@ -1157,7 +1157,7 @@ async def capture_sqlalchemy_report(
         if resolved_broker is None:
             msg = "use_broker_pool=True requires an explicit broker or DatabaseRegistry.default_broker()"
             raise ValueError(msg)
-        poolclass = vtb_pool_mod.BrokerPool.bind_class(broker=resolved_broker, url=url)
+        poolclass = vtb_pool_mod.SyncBrokerPool.bind_class(broker=resolved_broker, url=url)
     else:
         poolclass = sa_pool_mod.NullPool
 
@@ -1759,7 +1759,7 @@ def _build_parser() -> argparse.ArgumentParser:
     capture_cmd.add_argument(
         "--use-broker-pool",
         action="store_true",
-        help="Bind SQLAlchemy BrokerPool when --engine=sqlalchemy.",
+        help="Bind SQLAlchemy SyncBrokerPool when --engine=sqlalchemy.",
     )
     capture_cmd.add_argument(
         "--oracle-reset-relay",

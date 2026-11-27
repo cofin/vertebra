@@ -5,9 +5,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use tokio::sync::Notify;
-use vertebra_db::py_async::{
-    RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr_and_cancel,
-};
+use vertebra_db::py_async::{TaskAwaitable, block_on_db, spawn_rust_db_task_with_attr_and_cancel};
 use vertebra_resp::config::{ValkeyConfigInner, await_pending_python_token};
 use vertebra_resp::error::ValkeyError;
 pub use vertebra_resp::pubsub::{
@@ -34,7 +32,7 @@ fn drain_listener_messages(
 fn spawn_valkey_listener_unit<'py, F>(
     py: Python<'py>,
     fut: F,
-) -> PyResult<Bound<'py, RustDbTaskAwaitable>>
+) -> PyResult<Bound<'py, TaskAwaitable>>
 where
     F: std::future::Future<Output = Result<(), ValkeyError>> + Send + 'static,
 {
@@ -208,7 +206,7 @@ impl AsyncValkeyListener {
         args: &Bound<'_, PyAny>,
         need_token: bool,
         kind: u8,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let items = extract_string_args(args)?;
         let pending_tok = if need_token {
             self.core
@@ -247,7 +245,7 @@ impl AsyncValkeyListener {
         &self,
         py: Python<'py>,
         channels: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_sub(py, channels, true, 0)
     }
 
@@ -256,7 +254,7 @@ impl AsyncValkeyListener {
         &self,
         py: Python<'py>,
         patterns: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_sub(py, patterns, true, 1)
     }
 
@@ -265,7 +263,7 @@ impl AsyncValkeyListener {
         &self,
         py: Python<'py>,
         channels: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_sub(py, channels, true, 2)
     }
 
@@ -274,7 +272,7 @@ impl AsyncValkeyListener {
         &self,
         py: Python<'py>,
         channels: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_sub(py, channels, false, 3)
     }
 
@@ -283,7 +281,7 @@ impl AsyncValkeyListener {
         &self,
         py: Python<'py>,
         patterns: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_sub(py, patterns, false, 4)
     }
 
@@ -292,7 +290,7 @@ impl AsyncValkeyListener {
         &self,
         py: Python<'py>,
         channels: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_sub(py, channels, false, 5)
     }
 
@@ -301,7 +299,7 @@ impl AsyncValkeyListener {
         &self,
         py: Python<'py>,
         timeout_ms: Option<u64>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let core = Arc::clone(&self.core);
         let cancel_notify = Arc::new(Notify::new());
         let cancel_wait = Arc::clone(&cancel_notify);
@@ -332,7 +330,7 @@ impl AsyncValkeyListener {
         drain_listener_messages(&self.core, py, max_messages)
     }
 
-    pub fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let core = Arc::clone(&self.core);
         spawn_valkey_listener_unit(py, async move {
             core.close().await;
@@ -340,14 +338,11 @@ impl AsyncValkeyListener {
         })
     }
 
-    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.close(py)
     }
 
-    pub fn __aenter__<'py>(
-        slf: Py<Self>,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn __aenter__<'py>(slf: Py<Self>, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move { Ok::<Py<Self>, ValkeyError>(slf) },
@@ -365,7 +360,7 @@ impl AsyncValkeyListener {
         _exc_type: Option<&Bound<'_, PyAny>>,
         _exc_val: Option<&Bound<'_, PyAny>>,
         _exc_tb: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let core = Arc::clone(&self.core);
         spawn_rust_db_task_with_attr_and_cancel(
             py,

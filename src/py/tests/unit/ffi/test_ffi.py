@@ -30,7 +30,7 @@ from vertebra._vertebra import (
     Response,
     RsgiHttpProtocol,
     RsgiTransport,
-    RustDbTaskAwaitable,
+    TaskAwaitable,
     TaskPanicError,
     WsgiEnviron,
     WsgiEnvironIterator,
@@ -301,9 +301,9 @@ def test_dekker_request_sleep_helpers_roundtrip() -> None:
 
 
 def test_async_bridge_exports_preserved() -> None:
-    """Verify async_bridge.rs exports ReadyAwaitable, RustDbTaskAwaitable, and TaskPanicError on vertebra._vertebra."""
+    """Verify async_bridge.rs exports ReadyAwaitable, TaskAwaitable, and TaskPanicError on vertebra._vertebra."""
     assert issubclass(TaskPanicError, RuntimeError)
-    assert hasattr(RustDbTaskAwaitable, "__await__")
+    assert hasattr(TaskAwaitable, "__await__")
     assert hasattr(ReadyAwaitable, "__await__")
     assert hasattr(ReadyAwaitable, "__iter__")
     assert hasattr(ReadyAwaitable, "__next__")

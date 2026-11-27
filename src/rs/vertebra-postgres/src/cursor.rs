@@ -18,7 +18,7 @@ use vertebra_db::CancelHandle;
 #[cfg(unix)]
 use vertebra_db::py_async::db_runtime_handle;
 use vertebra_db::py_async::{
-    ReadyAwaitable, RustDbTaskAwaitable, block_on_db, ready_err, ready_ok,
+    ReadyAwaitable, TaskAwaitable, block_on_db, ready_err, ready_ok,
     spawn_rust_db_task_with_attr_and_cancel,
 };
 use vertebra_db::py_cursor::{BufferedCursorState, build_description_7tuple};
@@ -893,7 +893,7 @@ pub(crate) fn spawn_single_call<'py>(
     parameter_oids: Option<&Bound<'py, PyAny>>,
     timeout: Option<&Bound<'py, PyAny>>,
     build: fn(Python<'_>, &QueryResult) -> PyResult<Py<PyAny>>,
-) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+) -> PyResult<Bound<'py, TaskAwaitable>> {
     let call = prepare_statement_call(py, sql, params, parameter_oids, timeout)?;
     ensure_source_ready(py, &source, closed_pool_message)?;
     spawn_single_call_prepared(py, source, call, build)
@@ -904,7 +904,7 @@ fn spawn_single_call_prepared<'py>(
     source: CursorSource,
     call: StatementCall,
     build: fn(Python<'_>, &QueryResult) -> PyResult<Py<PyAny>>,
-) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+) -> PyResult<Bound<'py, TaskAwaitable>> {
     let budget = CommandBudget::start_from_duration(call.timeout)
         .map_err(|e| postgres_error_to_py(py, e))?;
     let cancel_session = match &source {
@@ -1629,7 +1629,7 @@ impl PyAsyncPostgresCursor {
         params: Option<&Bound<'py, PyAny>>,
         parameter_oids: Option<&Bound<'py, PyAny>>,
         timeout: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let py = slf.py();
         let this = slf.get();
         this.lock_state().ensure_open(py)?;
@@ -1731,7 +1731,7 @@ impl PyAsyncPostgresCursor {
         slf: &Bound<'py, Self>,
         sql: &str,
         seq_of_params: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let py = slf.py();
         let this = slf.get();
         this.lock_state().ensure_open(py)?;

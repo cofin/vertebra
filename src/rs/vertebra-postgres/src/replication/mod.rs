@@ -28,7 +28,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, spawn_rust_db_task_with_attr, spawn_rust_db_task_with_attr_and_cancel,
+    TaskAwaitable, spawn_rust_db_task_with_attr, spawn_rust_db_task_with_attr_and_cancel,
     spawn_rust_db_task_with_attr_and_future,
 };
 
@@ -1024,7 +1024,7 @@ impl PyAsyncPostgresReplication {
         &self,
         py: Python<'py>,
         stop_on_none: bool,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let _ = py.import("asyncio")?.call_method0("get_running_loop")?;
         let (call_id, guard) = self.next_ctl.try_claim(py)?;
         let ctl_worker = Arc::clone(&self.next_ctl);
@@ -1090,10 +1090,7 @@ impl PyAsyncPostgresReplication {
         Bound::new(py, awaitable)
     }
 
-    fn spawn_aclose_inner<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    fn spawn_aclose_inner<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let supervisor = Arc::clone(&self.supervisor);
         spawn_rust_db_task_with_attr_and_cancel(
             py,
@@ -1115,7 +1112,7 @@ impl PyAsyncPostgresReplication {
     }
 
     /// Await the next `PostgresReplicationRecord` (`control`, `begin`, `insert`, `update`, `delete`, `truncate`, `message`, `commit`) or `None` once closed.
-    pub fn next<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn next<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_next_inner(py, false)
     }
 
@@ -1125,7 +1122,7 @@ impl PyAsyncPostgresReplication {
     }
 
     /// Await the next `PostgresReplicationRecord` or raise `StopAsyncIteration` once closed.
-    pub fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_next_inner(py, true)
     }
 
@@ -1139,12 +1136,12 @@ impl PyAsyncPostgresReplication {
     }
 
     /// Idempotently shut down the replication supervisor and terminate the active WAL stream cleanly.
-    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, TaskAwaitable>> {
         self.spawn_aclose_inner(py)
     }
 
     /// Enter an `async with` block resolving to this `AsyncPostgresReplication`.
-    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    pub fn __aenter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, TaskAwaitable>> {
         let py = slf.py();
         let py_self: Py<Self> = slf.into_pyobject(py)?.unbind();
         let awaitable = spawn_rust_db_task_with_attr(
@@ -1165,7 +1162,7 @@ impl PyAsyncPostgresReplication {
         exc_type: Option<&Bound<'py, PyAny>>,
         exc_val: Option<&Bound<'py, PyAny>>,
         exc_tb: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+    ) -> PyResult<Bound<'py, TaskAwaitable>> {
         let _ = (exc_type, exc_val, exc_tb);
         self.spawn_aclose_inner(py)
     }
@@ -1277,7 +1274,7 @@ pub(crate) fn spawn_replication_identity<'py>(
     session: &Arc<crate::session::SessionHandle>,
     slot: String,
     publication: String,
-) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+) -> PyResult<Bound<'py, TaskAwaitable>> {
     let config = validate_replication_client_and_identifiers(
         py,
         session,
@@ -1303,7 +1300,7 @@ pub(crate) fn spawn_open_replication<'py>(
     start_lsn: Option<u64>,
     queue_capacity: usize,
     reconnect: bool,
-) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+) -> PyResult<Bound<'py, TaskAwaitable>> {
     let config = validate_replication_client_and_identifiers(
         py,
         session,

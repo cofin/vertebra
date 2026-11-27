@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from vertebra.agent.runtime import ConfirmationGate
 
 __all__ = (
-    "MCPRegistry",
     "RegistryChangeKind",
     "ToolRegistry",
 )
@@ -461,7 +460,3 @@ class ToolRegistry:
         ]
         has_varargs = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in sig.parameters.values())
         return has_varargs or len(positional) >= 1
-
-
-class MCPRegistry(ToolRegistry):
-    """MCP capability registry extending ToolRegistry across tools, resources, templates, and prompts."""

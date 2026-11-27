@@ -12,7 +12,7 @@ from typing import Any
 from vertebra.agent.core.guards import GuardChain, GuardProtocol
 from vertebra.agent.core.schema import Tool
 from vertebra.agent.mcp.models import (
-    McpIcon,
+    MCPIcon,
     PromptArgument,
     PromptEntry,
     PromptMessage,
@@ -114,7 +114,7 @@ def mcp_resource(
     mime_type: str = "text/plain",
     *,
     title: str | None = None,
-    icons: Sequence[McpIcon | Mapping[str, Any]] | None = None,
+    icons: Sequence[MCPIcon | Mapping[str, Any]] | None = None,
     meta: Mapping[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator marking a route handler or method as an MCP resource or resource template."""
@@ -172,7 +172,7 @@ def resource(
     mime_type: str = "text/plain",
     *,
     title: str | None = None,
-    icons: Sequence[McpIcon | Mapping[str, Any]] | None = None,
+    icons: Sequence[MCPIcon | Mapping[str, Any]] | None = None,
     meta: Mapping[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator marking a method as an MCP resource provider."""
@@ -378,7 +378,7 @@ def _attach_resource_meta(
     description: str | None,
     mime_type: str,
     title: str | None,
-    icons: Sequence[McpIcon | Mapping[str, Any]] | None,
+    icons: Sequence[MCPIcon | Mapping[str, Any]] | None,
     meta: Mapping[str, Any] | None,
     allow_template: bool,
 ) -> Callable[..., Any]:

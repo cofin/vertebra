@@ -18,7 +18,7 @@ from vertebra.framework.email.providers import (
     HttpTransportClient,
     _RetryableRestTransport,
 )
-from vertebra.framework.email.smtp import SmtpEmailTransport
+from vertebra.framework.email.smtp import SMTPEmailTransport
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 _py_sign_headers: Any = None
@@ -28,10 +28,10 @@ with contextlib.suppress(ImportError, AttributeError):
 if TYPE_CHECKING:
     from vertebra.framework.email.base import EmailConfig, EmailMessage
 
-__all__ = ("SesEmailTransport",)
+__all__ = ("SESEmailTransport",)
 
 
-class SesEmailTransport(_RetryableRestTransport):
+class SESEmailTransport(_RetryableRestTransport):
     """Transactional email transport for AWS SES v2 REST API."""
 
     __slots__ = ("_endpoint_url", "_smtp_helper")
@@ -49,7 +49,7 @@ class SesEmailTransport(_RetryableRestTransport):
             self._endpoint_url = f"{base}/v2/email/outbound-emails"
         else:
             self._endpoint_url = f"https://email.{config.aws_region}.amazonaws.com/v2/email/outbound-emails"
-        self._smtp_helper = SmtpEmailTransport(config)
+        self._smtp_helper = SMTPEmailTransport(config)
 
     def _build_payload(self, message: EmailMessage) -> dict[str, Any]:
         """Convert EmailMessage into SES v2 outbound email request payload."""

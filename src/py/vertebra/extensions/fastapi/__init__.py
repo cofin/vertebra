@@ -23,9 +23,9 @@ if TYPE_CHECKING:
         dispatch_handler_direct,
     )
     from vertebra.extensions.fastapi.mcp import (
-        MCPRegistry,
         PromptController,
         SkillController,
+        ToolRegistry,
         WebMCPConfig,
         WebMCPManifest,
         WebMCPToolDescriptor,
@@ -150,7 +150,7 @@ __all__ = (
     "JWKSConfig",
     "JWKSVerifier",
     "LocalConfig",
-    "MCPRegistry",
+    "ToolRegistry",
     "MemoryConfig",
     "MsgspecJSONResponse",
     "OffloadPlan",
@@ -248,7 +248,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "JWKSConfig": ("vertebra.extensions.fastapi.security", "JWKSConfig"),
     "JWKSVerifier": ("vertebra.extensions.fastapi.security", "JWKSVerifier"),
     "LocalConfig": ("vertebra.extensions.fastapi.storage", "LocalConfig"),
-    "MCPRegistry": ("vertebra.extensions.fastapi.mcp", "MCPRegistry"),
+    "ToolRegistry": ("vertebra.extensions.fastapi.mcp", "ToolRegistry"),
     "MemoryConfig": ("vertebra.extensions.fastapi.storage", "MemoryConfig"),
     "MsgspecJSONResponse": ("vertebra.extensions.fastapi.responses", "MsgspecJSONResponse"),
     "OffloadPlan": ("vertebra.extensions.fastapi.offload", "OffloadPlan"),

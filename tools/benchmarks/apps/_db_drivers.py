@@ -265,7 +265,7 @@ def resolve_broker_transports(
     *,
     pool_size: int = 40,
 ) -> tuple[SyncSHMBrokerTransport | None, AsyncSHMBrokerTransport | None]:
-    """Resolve paired sync and async SHM broker transports for SQLAlchemy ``BrokerPool``."""
+    """Resolve paired sync and async SHM broker transports for SQLAlchemy ``SyncBrokerPool``."""
     if broker_mode.strip().lower() != "shm_broker":
         return None, None
     shm_name = os.environ.get("VERTEBRA_BROKER_SHM", "").strip()

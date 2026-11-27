@@ -36,34 +36,36 @@ a2a = A2AService(A2AConfig(path="/a2a", agent_card=card))
 - **Browser WebMCP**: Use `@vertebra/client/webmcp` to register client-side tools on `document.modelContext` (falling back to `navigator.modelContext`) via `registerWebMCPTools`. Mark server tools with `@mcp_tool(webmcp=True)` to publish them in `/.well-known/webmcp.json`, including confirmation hints when `requires_confirmation=True`.
 - **Protocol bridges**: Convert between MCP tools and A2A agents in either direction using `vertebra.agent.bridges`.
 
-## SpecTree Planning & DAG Workflows
+## PlanTree Decomposition & DAG Workflows
 
-Break goals into dependency trees with `SpecTree`, or run parallel topological waves with `DynamicWorkflow` and `WorkflowEngine`:
+Break goals into dependency trees with `PlanTree`, or run parallel topological waves with `Workflow` and `WorkflowEngine`:
 
 ```python
-from vertebra.agent.spec import SpecTree
+from vertebra.agent.planning import PlanTree
 from vertebra.agent.workflow import (
-    DynamicWorkflow,
+    Workflow,
     WorkflowEngine,
-    WorkflowNode,
+    WorkflowStep,
 )
 
-tree = SpecTree(root_goal="Fulfill enterprise order")
-validate_node = tree.add_node(
+tree = PlanTree(root_goal="Fulfill enterprise order")
+validate_node = tree.add_step(
     "validate-inventory",
+    "Validate inventory",
     description="Verify warehouse stock",
 )
-ship_node = tree.add_node(
+ship_node = tree.add_step(
     "create-shipment",
+    "Create shipment",
     description="Book carrier label",
     depends_on=(validate_node.id,),
 )
 
-workflow = DynamicWorkflow(
+workflow = Workflow(
     name="order-fulfillment",
-    nodes=[
-        WorkflowNode(name="validate", fn=lambda ctx: {"ok": True}),
-        WorkflowNode(
+    steps=[
+        WorkflowStep(name="validate", fn=lambda ctx: {"ok": True}),
+        WorkflowStep(
             name="ship",
             depends_on=("validate",),
             fn=lambda ctx: {"shipped": ctx.get_output("validate")["ok"]},

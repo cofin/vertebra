@@ -12,8 +12,8 @@ from vertebra.framework.queues._resp import (
 )
 from vertebra.framework.queues._resp import (
     REDIS_QUEUE_DIALECT,
+    AsyncRESPStreamClient,
     RESPQueueDialect,
-    RESPStreamClient,
     RESPStreamQueueBackend,
     SyncRESPStreamClient,
     _BaseRESPStreamAdapter,
@@ -33,17 +33,14 @@ if TYPE_CHECKING:
     from vertebra.framework.queues.base import QueueBackendSettings, QueueConfig
 
 __all__ = (
+    "AsyncRESPStreamClient",
     "RedisQueueBackend",
-    "RedisStreamClient",
-    "SyncRedisStreamClient",
+    "SyncRESPStreamClient",
 )
-
-RedisStreamClient = RESPStreamClient
-SyncRedisStreamClient = SyncRESPStreamClient
 
 
 class _RedisStreamAdapter(_BaseRESPStreamAdapter):
-    """Adapter bridging AsyncRedisClient to the RedisStreamClient protocol."""
+    """Adapter bridging AsyncRedisClient to the AsyncRESPStreamClient protocol."""
 
     __slots__ = ()
 
@@ -84,7 +81,7 @@ class _RedisStreamAdapter(_BaseRESPStreamAdapter):
 
 
 class _SyncRedisStreamAdapter(_BaseSyncRESPStreamAdapter):
-    """Adapter bridging SyncRedisClient to the SyncRedisStreamClient protocol."""
+    """Adapter bridging SyncRedisClient to the SyncRESPStreamClient protocol."""
 
     __slots__ = ()
 
@@ -113,7 +110,7 @@ class RedisQueueBackend(RESPStreamQueueBackend):
         self,
         config: QueueConfig | QueueBackendSettings | None = None,
         *,
-        client: RESPStreamClient | None = None,
+        client: AsyncRESPStreamClient | None = None,
         sync_client: SyncRESPStreamClient | None = None,
         notification_source: AsyncRedisNotificationSource | None = None,
         sync_notification_source: SyncRedisNotificationSource | None = None,
@@ -128,7 +125,7 @@ class RedisQueueBackend(RESPStreamQueueBackend):
         )
 
     @classmethod
-    def _wrap_async_client(cls, client: Any) -> RESPStreamClient:
+    def _wrap_async_client(cls, client: Any) -> AsyncRESPStreamClient:
         return _RedisStreamAdapter(client)
 
     @classmethod

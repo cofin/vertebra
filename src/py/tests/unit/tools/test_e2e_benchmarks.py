@@ -627,7 +627,7 @@ def test_data_backend_four_adapters_sqlite_sync_and_async(
 
 
 def test_data_backend_validation_postgres_dsn_and_broker_pool_checkout(tmp_path: Path) -> None:
-    """Verify config validation, Postgres missing-DSN errors, URL rewriting, and BrokerPool/AsyncBrokerPool checkout."""
+    """Verify config validation, Postgres missing-DSN errors, URL rewriting, and SyncBrokerPool/AsyncBrokerPool checkout."""
     cfg = load_backend_config({})
     assert cfg.db_backend == "memory"
     assert cfg.db_adapter == "native"

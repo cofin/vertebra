@@ -12,8 +12,8 @@ from vertebra.framework.queues._resp import (
 )
 from vertebra.framework.queues._resp import (
     VALKEY_QUEUE_DIALECT,
+    AsyncRESPStreamClient,
     RESPQueueDialect,
-    RESPStreamClient,
     RESPStreamQueueBackend,
     SyncRESPStreamClient,
     _BaseRESPStreamAdapter,
@@ -33,17 +33,14 @@ if TYPE_CHECKING:
     from vertebra.framework.queues.base import QueueBackendSettings, QueueConfig
 
 __all__ = (
-    "SyncValkeyStreamClient",
+    "AsyncRESPStreamClient",
+    "SyncRESPStreamClient",
     "ValkeyQueueBackend",
-    "ValkeyStreamClient",
 )
-
-ValkeyStreamClient = RESPStreamClient
-SyncValkeyStreamClient = SyncRESPStreamClient
 
 
 class _ValkeyStreamAdapter(_BaseRESPStreamAdapter):
-    """Adapter bridging AsyncValkeyClient to the ValkeyStreamClient protocol."""
+    """Adapter bridging AsyncValkeyClient to the AsyncRESPStreamClient protocol."""
 
     __slots__ = ()
 
@@ -88,7 +85,7 @@ class _ValkeyStreamAdapter(_BaseRESPStreamAdapter):
 
 
 class _SyncValkeyStreamAdapter(_BaseSyncRESPStreamAdapter):
-    """Adapter bridging SyncValkeyClient to the SyncValkeyStreamClient protocol."""
+    """Adapter bridging SyncValkeyClient to the SyncRESPStreamClient protocol."""
 
     __slots__ = ()
 
@@ -121,7 +118,7 @@ class ValkeyQueueBackend(RESPStreamQueueBackend):
         self,
         config: QueueConfig | QueueBackendSettings | None = None,
         *,
-        client: RESPStreamClient | None = None,
+        client: AsyncRESPStreamClient | None = None,
         sync_client: SyncRESPStreamClient | None = None,
         notification_source: AsyncValkeyNotificationSource | None = None,
         sync_notification_source: SyncValkeyNotificationSource | None = None,
@@ -136,7 +133,7 @@ class ValkeyQueueBackend(RESPStreamQueueBackend):
         )
 
     @classmethod
-    def _wrap_async_client(cls, client: Any) -> RESPStreamClient:
+    def _wrap_async_client(cls, client: Any) -> AsyncRESPStreamClient:
         return _ValkeyStreamAdapter(client)
 
     @classmethod

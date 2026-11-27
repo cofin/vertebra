@@ -341,18 +341,18 @@ fn ensure_completion_ring(
 
 /// Native Rust awaitable backed by the shared Tokio runtime and [`AsyncCompletionQueue`].
 #[pyclass(
-    name = "RustTaskAwaitable",
+    name = "TaskAwaitable",
     module = "vertebra._vertebra",
     frozen,
     immutable_type
 )]
-pub struct RustTaskAwaitable {
+pub struct TaskAwaitable {
     future: Py<PyAny>,
     awaited: AtomicBool,
     on_unawaited_drop: Arc<Mutex<Option<BoxedCancelCallback>>>,
 }
 
-impl RustTaskAwaitable {
+impl TaskAwaitable {
     /// Return a cloned Python reference to the underlying `asyncio.Future`.
     pub fn future_handle(&self, py: Python<'_>) -> Py<PyAny> {
         self.future.clone_ref(py)
@@ -360,7 +360,7 @@ impl RustTaskAwaitable {
 }
 
 #[pymethods]
-impl RustTaskAwaitable {
+impl TaskAwaitable {
     fn __await__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.awaited.store(true, Ordering::Release);
         let iter = self
@@ -371,7 +371,7 @@ impl RustTaskAwaitable {
     }
 }
 
-impl Drop for RustTaskAwaitable {
+impl Drop for TaskAwaitable {
     fn drop(&mut self) {
         if !self.awaited.load(Ordering::Acquire) {
             let cb = self
@@ -458,7 +458,7 @@ pub fn spawn_rust_task_with_attr_and_future<F, T, E, M, EMap>(
     map_ok: M,
     map_err: EMap,
     attr_name: &'static str,
-) -> PyResult<RustTaskAwaitable>
+) -> PyResult<TaskAwaitable>
 where
     F: Future<Output = Result<T, E>> + Send + 'static,
     T: Send + 'static,
@@ -516,7 +516,7 @@ where
         abort_for_drop.abort();
     }
 
-    Ok(RustTaskAwaitable {
+    Ok(TaskAwaitable {
         future: fut_for_await,
         awaited: AtomicBool::new(false),
         on_unawaited_drop: Arc::new(Mutex::new(Some(Box::new(move || abort_for_drop.abort())))),
@@ -531,7 +531,7 @@ pub fn spawn_rust_task_with_attr<F, T, E, M, EMap>(
     map_ok: M,
     map_err: EMap,
     attr_name: &'static str,
-) -> PyResult<RustTaskAwaitable>
+) -> PyResult<TaskAwaitable>
 where
     F: Future<Output = Result<T, E>> + Send + 'static,
     T: Send + 'static,
@@ -557,7 +557,7 @@ pub fn spawn_rust_task_with_attr_and_cancel<'py, F, T, E, MapOk, MapErr, OnCance
     map_err: MapErr,
     on_cancel: OnCancel,
     attr_name: &'static str,
-) -> PyResult<Bound<'py, RustTaskAwaitable>>
+) -> PyResult<Bound<'py, TaskAwaitable>>
 where
     F: Future<Output = Result<T, E>> + Send + 'static,
     T: Send + 'static,
@@ -582,7 +582,7 @@ where
     let fut_for_cb = py_fut.clone().unbind();
     let awaitable = Bound::new(
         py,
-        RustTaskAwaitable {
+        TaskAwaitable {
             future: py_fut.unbind(),
             awaited: AtomicBool::new(false),
             on_unawaited_drop: Arc::clone(&cancel_slot),

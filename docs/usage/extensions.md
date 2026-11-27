@@ -232,7 +232,7 @@ Extend Oracle APEX applications incrementally with `vertebra.extensions.apex` an
 
 - **Attaching workers**: Workers attach by shared-memory name or over an authenticated Unix domain socket using `VERTEBRA_BROKER_SECRET`.
 - **Supervision and recovery**: Run `vtb broker serve` to host pools and drain or roll back active connections on shutdown. If a worker crashes or a check-in fails, the broker quarantines the slot, rolls back the server transaction, disposes the dirty connection, and raises `LeaseQuarantinedError`. Inspect pool health with `vtb broker status`.
-- **SQLAlchemy and Advanced Alchemy**: Pass `BrokerPool` (or its async variant) and `broker_creator` to engine creation, or pass a transport to your Advanced Alchemy config factory.
+- **SQLAlchemy and Advanced Alchemy**: Pass `SyncBrokerPool` (or its async variant) and `broker_creator` to engine creation, or pass a transport to your Advanced Alchemy config factory.
 
 ```python
 from sqlalchemy import create_engine, text
@@ -241,7 +241,7 @@ from vertebra.extensions.broker import (
     BrokerHost,
     SyncSHMBrokerTransport,
 )
-from vertebra.extensions.sqlalchemy import BrokerPool, broker_creator
+from vertebra.extensions.sqlalchemy import SyncBrokerPool, broker_creator
 
 config = BrokerConfig(pool_size=4, shm_name="/vtb-app-broker", role="owner")
 with BrokerHost(config) as host:
@@ -251,7 +251,7 @@ with BrokerHost(config) as host:
         role="worker",
     )
     transport = SyncSHMBrokerTransport(worker_cfg)
-    pool_cls = BrokerPool.bind_class(
+    pool_cls = SyncBrokerPool.bind_class(
         broker=transport,
         url="sqlite+vtb:///app.db",
     )

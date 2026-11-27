@@ -51,7 +51,7 @@ __all__ = (
     "AsyncSHMBrokerTransport",
     "BrokerConfig",
     "BrokerMetrics",
-    "BrokerStream",
+    "SyncBrokerStream",
     "ChannelMessage",
     "PoolMetrics",
     "StatementPlan",
@@ -454,10 +454,10 @@ class _BaseBrokerStream:
         return chunk_iter
 
 
-class BrokerStream(_BaseBrokerStream):
+class SyncBrokerStream(_BaseBrokerStream):
     """Streaming cursor over DBRPC query execution or chunk sources with cancellation quarantine."""
 
-    def __iter__(self) -> BrokerStream:
+    def __iter__(self) -> SyncBrokerStream:
         return self
 
     def __next__(self) -> DbRpcResponse:
@@ -505,7 +505,7 @@ class BrokerStream(_BaseBrokerStream):
             with contextlib.suppress(Exception):
                 close_fn()
 
-    def __enter__(self) -> BrokerStream:
+    def __enter__(self) -> SyncBrokerStream:
         return self
 
     def __exit__(
@@ -1483,9 +1483,9 @@ class SyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         | Callable[[], Iterator[DbRpcResponse | bytes | str]]
         | None = None,
         on_cancel: Callable[[], None] | None = None,
-    ) -> BrokerStream:
+    ) -> SyncBrokerStream:
         """Open a streaming DBRPC cursor supporting ``VTBARROW`` and row chunk responses."""
-        return BrokerStream(
+        return SyncBrokerStream(
             self,
             dialect_tag,
             engine_pool_id,

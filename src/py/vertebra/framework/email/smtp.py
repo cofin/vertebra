@@ -18,10 +18,10 @@ if TYPE_CHECKING:
 
     from vertebra.framework.email.base import EmailAttachment, EmailConfig, EmailMessage
 
-__all__ = ("SmtpEmailTransport",)
+__all__ = ("SMTPEmailTransport",)
 
 
-class SmtpEmailTransport:
+class SMTPEmailTransport:
     """Pooled SMTP client transport with TLS and health check re-connection."""
 
     __slots__ = (
@@ -188,7 +188,7 @@ class SmtpEmailTransport:
     async def send(self, message: EmailMessage) -> EmailReceipt:
         """Dispatch message via SMTP pool with retry on disconnect."""
         if self._closed:
-            raise RuntimeError("SmtpEmailTransport is closed")
+            raise RuntimeError("SMTPEmailTransport is closed")
 
         mime_msg = self.build_mime_message(message)
         recipients = [r.strip() for r in (*message.to, *message.cc, *message.bcc) if r.strip()]

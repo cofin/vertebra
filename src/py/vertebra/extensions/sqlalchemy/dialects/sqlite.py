@@ -42,7 +42,7 @@ class _SQLiteDialectMixin:
 
     @classmethod
     def get_pool_class(cls, url: URL) -> type[Pool]:
-        """Return StaticPool for in-memory URLs and bound BrokerPool, NullPool, or QueuePool for files."""
+        """Return StaticPool for in-memory URLs and bound SyncBrokerPool, NullPool, or QueuePool for files."""
         is_async = bool(getattr(cls, "is_async", False))
         query: dict[str, Any] = dict(url.query) if url.query else {}
         if (

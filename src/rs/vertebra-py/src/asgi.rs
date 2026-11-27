@@ -832,16 +832,16 @@ pub(crate) fn push_compact_header(buf: &mut Vec<u8>, name: &[u8], value: &[u8]) 
 /// Immediately completed zero-suspension awaitable resolving to `None`.
 #[cfg_attr(
     not(Py_GIL_DISABLED),
-    pyclass(name = "PyEmptyAwaitable", frozen, freelist = 128, immutable_type)
+    pyclass(name = "EmptyAwaitable", frozen, freelist = 128, immutable_type)
 )]
 #[cfg_attr(
     Py_GIL_DISABLED,
-    pyclass(name = "PyEmptyAwaitable", frozen, immutable_type)
+    pyclass(name = "EmptyAwaitable", frozen, immutable_type)
 )]
-pub struct PyEmptyAwaitable;
+pub struct EmptyAwaitable;
 
 #[pymethods]
-impl PyEmptyAwaitable {
+impl EmptyAwaitable {
     #[new]
     pub fn py_new() -> Self {
         Self
@@ -860,14 +860,13 @@ impl PyEmptyAwaitable {
     }
 }
 
-static EMPTY_AWAITABLE: pyo3::sync::PyOnceLock<Py<PyEmptyAwaitable>> =
-    pyo3::sync::PyOnceLock::new();
+static EMPTY_AWAITABLE: pyo3::sync::PyOnceLock<Py<EmptyAwaitable>> = pyo3::sync::PyOnceLock::new();
 
 #[inline]
-pub fn get_empty_awaitable(py: Python<'_>) -> PyResult<Py<PyEmptyAwaitable>> {
+pub fn get_empty_awaitable(py: Python<'_>) -> PyResult<Py<EmptyAwaitable>> {
     EMPTY_AWAITABLE
         .get_or_try_init(py, || {
-            let empty = Py::new(py, PyEmptyAwaitable)?;
+            let empty = Py::new(py, EmptyAwaitable)?;
             mark_immortal_if_supported(empty.bind(py).as_any());
             Ok(empty)
         })
@@ -877,17 +876,17 @@ pub fn get_empty_awaitable(py: Python<'_>) -> PyResult<Py<PyEmptyAwaitable>> {
 /// Immediately completed zero-suspension awaitable resolving to a stored Python value.
 #[cfg_attr(
     not(Py_GIL_DISABLED),
-    pyclass(name = "PyValueAwaitable", frozen, freelist = 128, immutable_type)
+    pyclass(name = "ValueAwaitable", frozen, freelist = 128, immutable_type)
 )]
 #[cfg_attr(
     Py_GIL_DISABLED,
-    pyclass(name = "PyValueAwaitable", frozen, immutable_type)
+    pyclass(name = "ValueAwaitable", frozen, immutable_type)
 )]
-pub struct PyValueAwaitable {
+pub struct ValueAwaitable {
     value: Py<PyAny>,
 }
 
-impl PyValueAwaitable {
+impl ValueAwaitable {
     #[inline]
     pub fn with_value(py: Python<'_>, value: Py<PyAny>) -> PyResult<Py<Self>> {
         Py::new(py, Self { value })
@@ -895,7 +894,7 @@ impl PyValueAwaitable {
 }
 
 #[pymethods]
-impl PyValueAwaitable {
+impl ValueAwaitable {
     #[new]
     #[pyo3(signature = (value=None))]
     pub fn py_new(py: Python<'_>, value: Option<Py<PyAny>>) -> Self {
@@ -1584,13 +1583,13 @@ impl AsgiProtocol {
             st.body_received = true;
             drop(st);
             let msg = build_http_request_dict(py, self.body_source.as_slice())?;
-            return Ok(PyValueAwaitable::with_value(py, msg.into_any().unbind())?.into_any());
+            return Ok(ValueAwaitable::with_value(py, msg.into_any().unbind())?.into_any());
         }
 
         if self.disconnected.load(Ordering::Acquire) {
             drop(st);
             let disc = build_http_disconnect_dict(py)?;
-            return Ok(PyValueAwaitable::with_value(py, disc.into_any().unbind())?.into_any());
+            return Ok(ValueAwaitable::with_value(py, disc.into_any().unbind())?.into_any());
         }
 
         if let Some(ref fut) = st.disconnect_future {
@@ -1618,7 +1617,7 @@ impl AsgiProtocol {
         &self,
         py: Python<'_>,
         message: &Bound<'_, PyDict>,
-    ) -> PyResult<Py<PyEmptyAwaitable>> {
+    ) -> PyResult<Py<EmptyAwaitable>> {
         self.send(py, message)
     }
 
@@ -1629,7 +1628,7 @@ impl AsgiProtocol {
         status: u16,
         headers: Option<&Bound<'_, PyAny>>,
         body: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyEmptyAwaitable>> {
+    ) -> PyResult<Py<EmptyAwaitable>> {
         let mut immediate_flush: Option<FlushedProtocolResponse> = None;
         {
             let mut st = self
@@ -1685,7 +1684,7 @@ impl AsgiProtocol {
         &self,
         py: Python<'_>,
         message: &Bound<'_, PyDict>,
-    ) -> PyResult<Py<PyEmptyAwaitable>> {
+    ) -> PyResult<Py<EmptyAwaitable>> {
         let type_obj = message
             .get_item(pyo3::intern!(py, "type"))?
             .ok_or_else(|| PyKeyError::new_err("type"))?;

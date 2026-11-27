@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "AsyncBrokerPool",
-    "BrokerPool",
+    "SyncBrokerPool",
     "broker_creator",
 )
 
@@ -86,7 +86,7 @@ def broker_creator(
     return lambda: SyncDBAPIConnection(url, broker=broker, share_pool=share_pool, **conn_kwargs)
 
 
-class BrokerPool(Pool):
+class SyncBrokerPool(Pool):
     """Synchronous SQLAlchemy ``Pool`` leasing connections per config ``pool_key()`` partition."""
 
     _bound_broker: ClassVar[Any] = None
@@ -128,7 +128,7 @@ class BrokerPool(Pool):
         resolved_on_dispose = on_dispose if on_dispose is not None else cls._bound_on_dispose
 
         if resolved_broker is None:
-            raise ImproperConfigurationError("BrokerPool requires a configured broker transport or session broker")
+            raise ImproperConfigurationError("SyncBrokerPool requires a configured broker transport or session broker")
 
         resolved_size, resolved_overflow = _validate_pool_bounds(pool_size, max_overflow)
 
@@ -152,12 +152,12 @@ class BrokerPool(Pool):
             )
             partition_key = f"{resolved_url}#pool-{id(self)}" if is_memory else resolved_url
         if not partition_key:
-            raise ImproperConfigurationError("BrokerPool requires a config, url, or explicit pool_key")
+            raise ImproperConfigurationError("SyncBrokerPool requires a config, url, or explicit pool_key")
 
         resolved_creator = creator
         if resolved_creator is None:
             if not resolved_url:
-                raise ImproperConfigurationError("BrokerPool requires a creator callable or database url")
+                raise ImproperConfigurationError("SyncBrokerPool requires a creator callable or database url")
             resolved_creator = broker_creator(
                 resolved_url,
                 broker=resolved_broker,
@@ -189,7 +189,7 @@ class BrokerPool(Pool):
 
         super().__init__(resolved_creator, reset_on_return=reset_on_return, **pool_kw)
         if "_dispatch" not in pool_kw:
-            sa_event.listen(self, "invalidate", BrokerPool._on_connection_invalidate)
+            sa_event.listen(self, "invalidate", SyncBrokerPool._on_connection_invalidate)
             if resolved_on_rollback is not None:
 
                 def _on_reset(dbapi_connection: Any, connection_record: Any, reset_state: Any) -> None:
@@ -215,13 +215,13 @@ class BrokerPool(Pool):
         acquire_timeout_ms: int | None = None,
         on_rollback: Callable[[Any], None] | None = None,
         on_dispose: Callable[[Any], None] | None = None,
-    ) -> type[BrokerPool]:
+    ) -> type[SyncBrokerPool]:
         """Bind broker parameters onto a subclass compatible with SQLAlchemy's ``poolclass`` API."""
         if broker is None:
-            raise ImproperConfigurationError("BrokerPool.bind_class requires a non-None broker")
-        with BrokerPool._bound_lock:
-            BrokerPool._bound_counter += 1
-            sub_name = f"{cls.__name__}Bound{BrokerPool._bound_counter}"
+            raise ImproperConfigurationError("SyncBrokerPool.bind_class requires a non-None broker")
+        with SyncBrokerPool._bound_lock:
+            SyncBrokerPool._bound_counter += 1
+            sub_name = f"{cls.__name__}Bound{SyncBrokerPool._bound_counter}"
         bound_cls: Any = type(
             sub_name,
             (cls,),
@@ -236,7 +236,7 @@ class BrokerPool(Pool):
                 "_bound_on_dispose": staticmethod(on_dispose) if on_dispose is not None else None,
             },
         )
-        return cast("type[BrokerPool]", bound_cls)
+        return cast("type[SyncBrokerPool]", bound_cls)
 
     def status(self) -> str:
         """Return human-readable pool status including active lease and idle connection counts."""
@@ -245,7 +245,7 @@ class BrokerPool(Pool):
             idle = len(self._idle_entries)
         return f"{type(self).__name__}(partition={self._partition_key!r}, active_leases={leased}, idle={idle})"
 
-    def recreate(self) -> BrokerPool:
+    def recreate(self) -> SyncBrokerPool:
         """Return a freshly initialized copy of this pool preserving broker configuration."""
         return self.__class__(
             self._creator,
@@ -308,7 +308,7 @@ class BrokerPool(Pool):
 
     @staticmethod
     def _run_coro_sync(coro: Coroutine[Any, Any, Any]) -> Any:
-        if BrokerPool._has_running_loop():
+        if SyncBrokerPool._has_running_loop():
             coro.close()
             msg = "Async broker operations cannot block an active event loop outside greenlet; dispose inside async greenlet or implement quarantine_sync"
             raise ImproperConfigurationError(msg)
@@ -583,7 +583,7 @@ class BrokerPool(Pool):
             self._close_entry_safely(record)
 
 
-class AsyncBrokerPool(BrokerPool):
+class AsyncBrokerPool(SyncBrokerPool):
     """Asynchronous SQLAlchemy ``Pool`` coordinating async greenlet checkouts with SHM broker leases."""
 
     _dialect: _ConnDialect | Dialect = _AsyncConnDialect()

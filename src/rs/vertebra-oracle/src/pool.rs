@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use tokio::sync::Notify;
-use vertebra_db::py_async::{RustDbTaskAwaitable, db_runtime_handle, spawn_rust_db_task_with_attr};
+use vertebra_db::py_async::{TaskAwaitable, db_runtime_handle, spawn_rust_db_task_with_attr};
 
 use crate::client::{
     AsyncOracleClient, ORACLE_COMPLETION_DRAINER_ATTR, OracleWorkerHandle, SyncOracleClient,
@@ -1213,7 +1213,7 @@ impl AsyncOraclePool {
         vector_return_format: &str,
         enable_lowercase_column_names: bool,
         shape: fn(Python<'_>, BuiltReply) -> PyResult<Py<PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let parsed_format =
             VectorReturnFormat::parse(vector_return_format).map_err(|e| e.to_py_err(py))?;
         let options = OracleValueOptions {
@@ -1279,9 +1279,9 @@ impl AsyncOraclePool {
 impl_oracle_pool_pymethods!(
     AsyncOraclePool,
     client = AsyncOracleClient,
-    acquire_ret = RustDbTaskAwaitable,
-    unit_ret = RustDbTaskAwaitable,
-    single_ret = RustDbTaskAwaitable,
+    acquire_ret = TaskAwaitable,
+    unit_ret = TaskAwaitable,
+    single_ret = TaskAwaitable,
     single_calls = [
         fetch_rows => reply_rows_and_names,
         fetch_dicts => reply_dicts,
@@ -1310,7 +1310,7 @@ impl_oracle_pool_pymethods!(
             module: Option<String>,
             action: Option<String>,
             ecid: Option<String>,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let inner = Arc::clone(&self.inner);
             spawn_rust_db_task_with_attr(
                 py,
@@ -1348,7 +1348,7 @@ impl_oracle_pool_pymethods!(
             client: &AsyncOracleClient,
             connection_tag: Option<String>,
             discard: bool,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let inner = Arc::clone(&self.inner);
             let worker = Arc::clone(client.worker());
             spawn_rust_db_task_with_attr(
@@ -1372,7 +1372,7 @@ impl_oracle_pool_pymethods!(
             &self,
             py: Python<'_>,
             client: &AsyncOracleClient,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let inner = Arc::clone(&self.inner);
             let worker = Arc::clone(client.worker());
             spawn_rust_db_task_with_attr(
@@ -1390,7 +1390,7 @@ impl_oracle_pool_pymethods!(
             )
         }
 
-        pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        pub fn close(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
             let inner = Arc::clone(&self.inner);
             spawn_rust_db_task_with_attr(
                 py,

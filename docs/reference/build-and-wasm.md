@@ -25,6 +25,30 @@ Build orchestration (`vertebra.build`), schema and client code generation, repro
     options:
       heading_level: 3
 
+::: vertebra.build._bundler.BundleConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.build._bundler.BundleDevConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.build._bundler.BundleResult
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.build._bundler.BundleOutput
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.build._bundler.Bundler
+    options:
+      heading_level: 3
+
 ## Schema & Client Codegen
 
 ::: vertebra.build.codegen.plugin.CodegenConfig

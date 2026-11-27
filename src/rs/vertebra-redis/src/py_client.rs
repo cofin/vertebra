@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyTuple};
-use vertebra_db::py_async::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
+use vertebra_db::py_async::{TaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
 use vertebra_resp::client::RespEngine;
 use vertebra_resp::client::py_helpers::{
     parse_redis_fields, parse_redis_streams_arg, parse_redis_zadd_mapping, py_seq_to_redis_args,
@@ -190,7 +190,7 @@ impl AsyncRedisPipeline {
         Ok(slf.into())
     }
 
-    pub fn results(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn results(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let cmds = std::mem::take(&mut *self.commands.lock());
         let engine = Arc::clone(&self.engine);
         let atomic = self.atomic;
@@ -203,7 +203,7 @@ impl AsyncRedisPipeline {
         )
     }
 
-    pub fn submit_results(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn submit_results(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         self.results(py)
     }
 }
@@ -722,7 +722,7 @@ pub struct AsyncRedisClient {
     engine: Arc<RespEngine>,
 }
 
-fn spawn_task<F, T, MapOk>(py: Python<'_>, fut: F, map_ok: MapOk) -> PyResult<RustDbTaskAwaitable>
+fn spawn_task<F, T, MapOk>(py: Python<'_>, fut: F, map_ok: MapOk) -> PyResult<TaskAwaitable>
 where
     F: std::future::Future<Output = Result<T, RespError>> + Send + 'static,
     T: Send + 'static,
@@ -809,7 +809,7 @@ impl AsyncRedisClient {
         self.engine.is_closed()
     }
 
-    pub fn connect(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn connect(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let engine = Arc::clone(&self.engine);
         spawn_task(py, async move { engine.connect().await }, |py, ()| {
             Ok(py.None())
@@ -821,11 +821,7 @@ impl AsyncRedisClient {
     }
 
     #[pyo3(signature = (password = None))]
-    pub fn reconnect(
-        &self,
-        py: Python<'_>,
-        password: Option<&str>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    pub fn reconnect(&self, py: Python<'_>, password: Option<&str>) -> PyResult<TaskAwaitable> {
         let engine = Arc::clone(&self.engine);
         let pw = password.map(str::to_string);
         spawn_task(py, async move { engine.reconnect(pw).await }, |py, ()| {
@@ -833,7 +829,7 @@ impl AsyncRedisClient {
         })
     }
 
-    pub fn get(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn get(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<TaskAwaitable> {
         let k = py_to_redis_arg(&key)?;
         let engine = Arc::clone(&self.engine);
         spawn_task(py, async move { engine.get_bytes(k).await }, |py, res| {
@@ -854,7 +850,7 @@ impl AsyncRedisClient {
         px: Option<i64>,
         nx: bool,
         xx: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         validate_set_options(ex, px, nx, xx)?;
         let k = py_to_redis_arg(&key)?;
         let v = py_to_redis_arg(&value)?;
@@ -866,7 +862,7 @@ impl AsyncRedisClient {
         )
     }
 
-    pub fn delete(&self, py: Python<'_>, keys: Bound<'_, PyAny>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn delete(&self, py: Python<'_>, keys: Bound<'_, PyAny>) -> PyResult<TaskAwaitable> {
         let ks = py_seq_to_redis_args(&keys)?;
         let engine = Arc::clone(&self.engine);
         spawn_task(
@@ -881,7 +877,7 @@ impl AsyncRedisClient {
         )
     }
 
-    pub fn unlink(&self, py: Python<'_>, keys: Bound<'_, PyAny>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn unlink(&self, py: Python<'_>, keys: Bound<'_, PyAny>) -> PyResult<TaskAwaitable> {
         let ks = py_seq_to_redis_args(&keys)?;
         let engine = Arc::clone(&self.engine);
         spawn_task(
@@ -896,7 +892,7 @@ impl AsyncRedisClient {
         )
     }
 
-    pub fn pttl(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn pttl(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<TaskAwaitable> {
         let k = py_to_redis_arg(&key)?;
         let engine = Arc::clone(&self.engine);
         spawn_task(
@@ -918,7 +914,7 @@ impl AsyncRedisClient {
         cursor: u64,
         match_pattern: Option<String>,
         count: Option<u64>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = Arc::clone(&self.engine);
         spawn_task(
             py,
@@ -927,7 +923,7 @@ impl AsyncRedisClient {
         )
     }
 
-    pub fn flushdb(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn flushdb(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
         let engine = Arc::clone(&self.engine);
         spawn_task(
             py,
@@ -944,7 +940,7 @@ impl AsyncRedisClient {
         py: Python<'_>,
         channel: &str,
         message: Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let msg = py_to_redis_arg(&message)?;
         let ch = channel.to_string();
         let engine = Arc::clone(&self.engine);
@@ -960,7 +956,7 @@ impl AsyncRedisClient {
         py: Python<'_>,
         shard_channel: &str,
         message: Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let msg = py_to_redis_arg(&message)?;
         let ch = shard_channel.to_string();
         let engine = Arc::clone(&self.engine);
@@ -975,7 +971,7 @@ impl AsyncRedisClient {
         &self,
         py: Python<'_>,
         args: Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let cmd = py_seq_to_redis_args(&args)?;
         let engine = Arc::clone(&self.engine);
         spawn_task(
@@ -1000,7 +996,7 @@ impl AsyncRedisClient {
         script: &str,
         keys: Bound<'_, PyAny>,
         args: Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let script_bytes = script.as_bytes().to_vec();
         let key_list = py_seq_to_redis_args(&keys)?;
         let arg_list = py_seq_to_redis_args(&args)?;
@@ -1044,7 +1040,7 @@ impl AsyncRedisClient {
         group: &str,
         id: &str,
         mkstream: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = Arc::clone(&self.engine);
         let s = stream.as_bytes().to_vec();
         let g = group.to_string();
@@ -1065,7 +1061,7 @@ impl AsyncRedisClient {
         id: &str,
         maxlen: Option<u64>,
         approximate: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let parsed = parse_redis_fields(&fields)?;
         let engine = Arc::clone(&self.engine);
         let s = stream.as_bytes().to_vec();
@@ -1090,7 +1086,7 @@ impl AsyncRedisClient {
         streams_obj: Bound<'_, PyAny>,
         count: Option<u64>,
         block_ms: Option<u64>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let parsed = parse_redis_streams_arg(&streams_obj)?;
         let engine = Arc::clone(&self.engine);
         let g = group.to_string();
@@ -1112,7 +1108,7 @@ impl AsyncRedisClient {
         stream: &str,
         group: &str,
         ids: Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let id_list = extract_id_strings(&ids)?;
         let engine = Arc::clone(&self.engine);
         let s = stream.as_bytes().to_vec();
@@ -1139,7 +1135,7 @@ impl AsyncRedisClient {
         min_idle_ms: u64,
         start_id: &str,
         count: Option<u64>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = Arc::clone(&self.engine);
         let s = stream.as_bytes().to_vec();
         let g = group.to_string();
@@ -1164,7 +1160,7 @@ impl AsyncRedisClient {
         start: &str,
         end: &str,
         count: Option<u64>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = Arc::clone(&self.engine);
         let s = stream.as_bytes().to_vec();
         let st = start.to_string();
@@ -1181,7 +1177,7 @@ impl AsyncRedisClient {
         py: Python<'_>,
         stream: &str,
         ids: Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let id_list = extract_id_strings(&ids)?;
         let engine = Arc::clone(&self.engine);
         let s = stream.as_bytes().to_vec();
@@ -1202,7 +1198,7 @@ impl AsyncRedisClient {
         py: Python<'_>,
         key: &str,
         mapping: Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let parsed = parse_redis_zadd_mapping(&mapping)?;
         let engine = Arc::clone(&self.engine);
         let k = key.as_bytes().to_vec();
@@ -1230,7 +1226,7 @@ impl AsyncRedisClient {
         withscores: bool,
         offset: Option<u64>,
         count: Option<u64>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let engine = Arc::clone(&self.engine);
         let k = key.as_bytes().to_vec();
         let mn = min.to_string();
@@ -1251,7 +1247,7 @@ impl AsyncRedisClient {
         py: Python<'_>,
         key: &str,
         members: Bound<'_, PyAny>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let mems = py_seq_to_redis_args(&members)?;
         let engine = Arc::clone(&self.engine);
         let k = key.as_bytes().to_vec();

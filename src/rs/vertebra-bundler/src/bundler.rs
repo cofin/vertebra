@@ -1,6 +1,6 @@
 //! Bundler -- Main bundler implementation using OXC
 
-use crate::config::{BuildResult, BundleConfig, DevConfig, OutputFile};
+use crate::config::{BundleConfig, BundleDevConfig, BundleOutput, BundleResult};
 use crate::errors::{BundlerError, Result};
 use crate::hmr::{HmrEvent, SourceWatcher};
 use crossbeam_channel::Receiver;
@@ -10,7 +10,9 @@ use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 use oxc_transformer::{TransformOptions, Transformer};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyType;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -19,6 +21,8 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 #[pyclass(name = "Bundler", immutable_type)]
 pub struct Bundler {
+    config: Option<BundleConfig>,
+    dev_config: Option<BundleDevConfig>,
     watcher: Option<SourceWatcher>,
     rx: Option<Receiver<HmrEvent>>,
     hmr_port: Option<u16>,
@@ -27,34 +31,99 @@ pub struct Bundler {
 
 #[pymethods]
 impl Bundler {
-    /// Create a new Bundler instance
+    /// Create a new Bundler instance, optionally bound to a build and dev configuration.
     #[new]
-    pub fn new() -> Self {
-        Self::default()
+    #[pyo3(signature = (config=None, *, dev_config=None))]
+    pub fn new(config: Option<BundleConfig>, dev_config: Option<BundleDevConfig>) -> Self {
+        Self {
+            config,
+            dev_config,
+            ..Self::default()
+        }
     }
 
-    /// Build a bundle from the given configuration
-    pub fn build(&self, py: Python<'_>, config: &BundleConfig) -> PyResult<BuildResult> {
-        let result = py.detach(|| self.build_internal(config))?;
+    /// Construct a Bundler bound to a BundleConfig and optional BundleDevConfig.
+    #[classmethod]
+    #[pyo3(signature = (config, *, dev_config=None))]
+    pub fn from_config(
+        _cls: &Bound<'_, PyType>,
+        config: BundleConfig,
+        dev_config: Option<BundleDevConfig>,
+    ) -> Self {
+        Self {
+            config: Some(config),
+            dev_config,
+            ..Self::default()
+        }
+    }
+
+    /// Return the bound production bundle configuration, if any.
+    #[getter]
+    pub fn config(&self) -> Option<BundleConfig> {
+        self.config.clone()
+    }
+
+    /// Return the bound dev watcher configuration, if any.
+    #[getter]
+    pub fn dev_config(&self) -> Option<BundleDevConfig> {
+        self.dev_config.clone()
+    }
+
+    /// Enter a context manager scope returning this Bundler instance.
+    pub fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Exit a context manager scope, stopping any active dev watcher.
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    pub fn __exit__(
+        &mut self,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        self.stop_dev()?;
+        Ok(false)
+    }
+
+    /// Build a bundle from the bound configuration or an explicit override.
+    #[pyo3(signature = (config=None))]
+    pub fn build(&self, py: Python<'_>, config: Option<&BundleConfig>) -> PyResult<BundleResult> {
+        let effective = config.or(self.config.as_ref()).ok_or_else(|| {
+            PyValueError::new_err(
+                "Bundler.build() requires a BundleConfig passed to Bundler(config) or build(config)",
+            )
+        })?;
+        let result = py.detach(|| self.build_internal(effective))?;
         Ok(result)
     }
 
-    /// Start development mode with HMR
-    pub fn start_dev(&mut self, _py: Python<'_>, config: &DevConfig) -> PyResult<()> {
+    /// Start development mode with HMR using the bound dev configuration or an explicit override.
+    #[pyo3(signature = (config=None))]
+    pub fn start_dev(&mut self, _py: Python<'_>, config: Option<&BundleDevConfig>) -> PyResult<()> {
         if self.is_dev_mode {
             return Err(BundlerError::Watcher("Dev mode already started".to_string()).into());
         }
 
-        let watch_dirs: Vec<PathBuf> = config.watch_dirs.iter().map(PathBuf::from).collect();
+        let effective = config.or(self.dev_config.as_ref()).ok_or_else(|| {
+            PyValueError::new_err(
+                "Bundler.start_dev() requires a BundleDevConfig passed to Bundler(dev_config=...) or start_dev(config)",
+            )
+        })?;
 
-        let (mut watcher, rx) =
-            SourceWatcher::new(watch_dirs, config.extensions.clone(), config.debounce_ms)?;
+        let watch_dirs: Vec<PathBuf> = effective.watch_dirs.iter().map(PathBuf::from).collect();
+
+        let (mut watcher, rx) = SourceWatcher::new(
+            watch_dirs,
+            effective.extensions.clone(),
+            effective.debounce_ms,
+        )?;
 
         watcher.start()?;
 
         self.watcher = Some(watcher);
         self.rx = Some(rx);
-        self.hmr_port = Some(config.hmr_port);
+        self.hmr_port = Some(effective.hmr_port);
         self.is_dev_mode = true;
 
         Ok(())
@@ -152,7 +221,7 @@ impl Bundler {
 
 impl Bundler {
     /// Internal build implementation
-    fn build_internal(&self, config: &BundleConfig) -> Result<BuildResult> {
+    fn build_internal(&self, config: &BundleConfig) -> Result<BundleResult> {
         let start = Instant::now();
         let mut outputs = Vec::new();
         let warnings = Vec::new();
@@ -187,7 +256,7 @@ impl Bundler {
             let map_path = out_dir.join(&map_name);
             if let Some(map_str) = sourcemap {
                 fs::write(&map_path, &map_str)?;
-                outputs.push(OutputFile::new(map_name, map_str.len() as u64, false));
+                outputs.push(BundleOutput::new(map_name, map_str.len() as u64, false));
                 final_code.push_str(&format!("\n//# sourceMappingURL={}.js.map\n", entry_stem));
             }
         }
@@ -195,11 +264,15 @@ impl Bundler {
         // Write output
         fs::write(&output_path, &final_code)?;
 
-        outputs.push(OutputFile::new(output_name, final_code.len() as u64, true));
+        outputs.push(BundleOutput::new(
+            output_name,
+            final_code.len() as u64,
+            true,
+        ));
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        Ok(BuildResult::new(outputs, duration_ms, warnings))
+        Ok(BundleResult::new(outputs, duration_ms, warnings))
     }
 }
 

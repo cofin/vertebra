@@ -18,15 +18,17 @@ uv add "vertebra-core[bundler]"
 ## Usage
 
 ```python
-from vertebra._bundler import BundleConfig, Bundler
+from vertebra.build import BundleConfig, Bundler
 
-config = BundleConfig(
-    entry="frontend/src/main.tsx",
-    outdir="static/dist",
-    minify=True,
-    sourcemap=True,
+bundler = Bundler(
+    BundleConfig(
+        entry="frontend/src/main.tsx",
+        outdir="static/dist",
+        minify=True,
+        sourcemap=True,
+    )
 )
-result = Bundler().build(config)
+result = bundler.build()
 ```
 
 Or from the command line:

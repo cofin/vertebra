@@ -172,25 +172,29 @@ class BuildOrchestrator:
 
     def _run_native(self, *, dev: bool) -> None:
         bundler_mod = ensure_module("vertebra._bundler", package="vertebra-core[bundler]", extra="bundler")
-        bundler = bundler_mod.Bundler()
         bundle_config = bundler_mod.BundleConfig(
             entry=str(self.project_dir / self.config.entry),
             outdir=str(self.project_dir / self.config.outdir),
             minify=True,
             sourcemap=True,
         )
-        result = bundler.build(bundle_config)
+        dev_config = (
+            bundler_mod.BundleDevConfig(
+                entry=str(self.project_dir / self.config.entry),
+                watch_dirs=[str(self.project_dir / "src")],
+                hmr_port=self._dev_port or 5173,
+            )
+            if dev
+            else None
+        )
+        bundler = bundler_mod.Bundler(bundle_config, dev_config=dev_config)
+        result = bundler.build()
         logger.info("Build: %d files in %dms", len(result.outputs), result.duration_ms)
 
         if dev:
             self._stop_event.clear()
             self._native_bundler = bundler
-            dev_config = bundler_mod.DevConfig(
-                entry=str(self.project_dir / self.config.entry),
-                watch_dirs=[str(self.project_dir / "src")],
-                hmr_port=self._dev_port or 5173,
-            )
-            bundler.start_dev(dev_config)
+            bundler.start_dev()
             atexit.register(self.stop)
 
             def _dev_loop() -> None:
@@ -205,7 +209,7 @@ class BuildOrchestrator:
                     if not changed:
                         continue
                     try:
-                        bundler.build(bundle_config)
+                        bundler.build()
                         if self._hmr_base_url:
                             HmrNotifier(self._hmr_base_url).notify_reload(reason=changed[0])
                     except Exception:

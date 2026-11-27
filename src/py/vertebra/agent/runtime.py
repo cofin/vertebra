@@ -16,11 +16,11 @@ from typing import Any, Literal, Protocol, cast, runtime_checkable
 import anyio
 import msgspec
 
+from vertebra.agent.agents import TRANSFER_TOOL_NAME, Agent, AgentGroup, AgentMessage
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.core.guards import TurnBudget
 from vertebra.agent.core.schema import Tool, ToolCall, ToolResult, execute_tool_calls
 from vertebra.agent.core.sse import SseFrame
-from vertebra.agent.spec import TRANSFER_TOOL_NAME, Agent, AgentGroup, AgentMessage
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.telemetry.genai import GenAiUsage
 from vertebra.typing import VertebraError

@@ -42,7 +42,7 @@ from django.utils import deprecation as django_deprecation
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
-from vertebra.agent.mcp.routes import WsgiMcpApp
+from vertebra.agent.mcp.routes import WsgiMCPApp
 from vertebra.db.dbapi import SyncDBAPIConnection
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.django import (
@@ -932,7 +932,7 @@ def test_django_mcp_protocol_request_cases(
 
 
 def test_django_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
-    """Django MCP uses canonical MCPConfig, WsgiMcpApp over MCPCore, and reuses the persistent Portal loop."""
+    """Django MCP uses canonical MCPConfig, WsgiMCPApp over MCPCore, and reuses the persistent Portal loop."""
     assert MCPConfig is CanonicalMCPConfig
 
     observed_loops: list[tuple[int, int]] = []
@@ -956,7 +956,7 @@ def test_django_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
         urlpatterns=urlpatterns,
         config=VertebraConfig(mcp=MCPConfig(server_name="django-mcp")),
     )
-    assert isinstance(getattr(plugin, "_mcp_app", None), WsgiMcpApp)
+    assert isinstance(getattr(plugin, "_mcp_app", None), WsgiMCPApp)
 
     wrapped_wsgi = plugin.wrap_wsgi_application(lambda _e, sr: (sr("404 Not Found", []), [b""])[1])
     wsgi_get = run_wsgi_callable(wrapped_wsgi, WsgiEnviron.from_parts(method="GET", path="/mcp"))

@@ -7,15 +7,17 @@ Vertebra includes a built-in Rust JavaScript bundler, an embedded QuickJS server
 Bundle TypeScript, JSX/TSX, and CSS assets directly from Python without running a Node.js build server:
 
 ```python
-from vertebra._bundler import BundleConfig, Bundler
+from vertebra.build import BundleConfig, Bundler
 
-config = BundleConfig(
-    entry="frontend/src/main.tsx",
-    outdir="static/dist",
-    minify=True,
-    sourcemap=True,
+bundler = Bundler(
+    BundleConfig(
+        entry="frontend/src/main.tsx",
+        outdir="static/dist",
+        minify=True,
+        sourcemap=True,
+    )
 )
-result = Bundler().build(config)
+result = bundler.build()
 ```
 
 Or run it from the CLI:

@@ -37,7 +37,7 @@ from vertebra.agent.core.jsonrpc import (
     METHOD_NOT_FOUND,
     PARSE_ERROR,
     JSONRPCError,
-    JSONRPCErrorException,
+    JSONRPCException,
     JSONRPCRequest,
     JSONRPCRouter,
 )
@@ -58,9 +58,9 @@ from vertebra.agent.mcp.models import (
     UNSUPPORTED_PROTOCOL_VERSION,
     BlobContent,
     MCPConfig,
-    McpHttpRequest,
-    McpHttpResponse,
-    McpLogLevel,
+    MCPHttpRequest,
+    MCPHttpResponse,
+    MCPLogLevel,
     NegotiatedProtocol,
     PromptEntry,
     PromptMessage,
@@ -104,7 +104,7 @@ CACHEABLE_METHODS: frozenset[str] = frozenset(
         "skills/list",
     }
 )
-MCP_LOG_LEVEL_INDEX: dict[McpLogLevel, int] = {lvl: idx for idx, lvl in enumerate(MCP_LOG_LEVELS)}
+MCP_LOG_LEVEL_INDEX: dict[MCPLogLevel, int] = {lvl: idx for idx, lvl in enumerate(MCP_LOG_LEVELS)}
 _REGISTRY_CHANGE_KINDS: tuple[RegistryChangeKind, ...] = ("tools", "resources", "prompts")
 
 
@@ -233,7 +233,7 @@ class MCPCore:
         """Register an MCP capability extension under ``capabilities.extensions``."""
         self._extensions[name] = dict(payload) if payload is not None else {}
 
-    async def handle(self, request: McpHttpRequest) -> McpHttpResponse:
+    async def handle(self, request: MCPHttpRequest) -> MCPHttpResponse:
         """Process an HTTP request under its caller context and restore the prior binding."""
         context = request.context if isinstance(request.context, AgentContext) else AgentContext()
         token = bind_agent_context(context)
@@ -246,7 +246,7 @@ class MCPCore:
         """Execute a tool invocation with parameter validation and structured outputs."""
         return await self._handle_tools_call(params, context=context)
 
-    async def log(self, level: McpLogLevel, data: Any, *, logger: str | None = None) -> int:
+    async def log(self, level: MCPLogLevel, data: Any, *, logger: str | None = None) -> int:
         """Broadcast a level-gated notifications/message SSE frame to active legacy streams."""
         if level not in MCP_LOG_LEVEL_INDEX:
             raise ValueError(f"Invalid MCP log level {level!r}; expected one of {', '.join(MCP_LOG_LEVELS)}")
@@ -441,7 +441,7 @@ class MCPCore:
         requested_version: str,
         *,
         req_id: Any = None,
-    ) -> McpHttpResponse:
+    ) -> MCPHttpResponse:
         return self._jsonrpc_http_error(
             status=400,
             code=UNSUPPORTED_PROTOCOL_VERSION,
@@ -463,7 +463,7 @@ class MCPCore:
         frame_method: str | None,
         session_version: str | None = None,
         req_id: Any = None,
-    ) -> NegotiatedProtocol | McpHttpResponse:
+    ) -> NegotiatedProtocol | MCPHttpResponse:
         """Validate protocol version headers and metadata and resolve modern vs legacy mode."""
         if header_version is not None and header_version not in SUPPORTED_PROTOCOL_VERSIONS:
             return self._unsupported_version_response(header_version, req_id=req_id)
@@ -630,14 +630,14 @@ class MCPCore:
             }
         )
 
-    async def _handle_http(self, request: McpHttpRequest, context: AgentContext) -> McpHttpResponse:
+    async def _handle_http(self, request: MCPHttpRequest, context: AgentContext) -> MCPHttpResponse:
         """Validate HTTP metadata and dispatch with the bound caller context."""
         lower_headers = {k.lower(): v for k, v in request.headers.items()}
         origin = lower_headers.get("origin")
         host = lower_headers.get("host")
 
         if not self._is_origin_allowed(origin, host):
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=403,
                 headers={"Content-Type": "text/plain"},
                 body=b"Forbidden: Disallowed Origin",
@@ -654,7 +654,7 @@ class MCPCore:
                 ),
                 "Allow": "GET, POST, DELETE, OPTIONS",
             }
-            return McpHttpResponse(status=204, headers=cors_headers, body=b"")
+            return MCPHttpResponse(status=204, headers=cors_headers, body=b"")
 
         if method == "DELETE":
             header_version = lower_headers.get("mcp-protocol-version")
@@ -675,7 +675,7 @@ class MCPCore:
                     message="Session not found or expired",
                 )
             self.stream_broker.close_session(session_id)
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=204,
                 headers={"MCP-Protocol-Version": deleted.protocol_version},
                 body=b"",
@@ -685,7 +685,7 @@ class MCPCore:
             return await self._handle_get(lower_headers, context)
 
         if method != "POST":
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=405,
                 headers={"Content-Type": "text/plain", "Allow": "POST, DELETE, OPTIONS"},
                 body=b"Method Not Allowed",
@@ -727,7 +727,7 @@ class MCPCore:
             frame_method=frame_method,
             req_id=frame_id,
         )
-        if isinstance(prelim, McpHttpResponse):
+        if isinstance(prelim, MCPHttpResponse):
             return prelim
 
         mcp_method_header = lower_headers.get("mcp-method")
@@ -759,7 +759,7 @@ class MCPCore:
             session_version=session.protocol_version if session is not None else None,
             req_id=frame_id,
         )
-        if isinstance(negotiated, McpHttpResponse):
+        if isinstance(negotiated, MCPHttpResponse):
             return negotiated
 
         if frame_kind == 2:
@@ -835,7 +835,7 @@ class MCPCore:
             }
             if not negotiated.modern and session is not None:
                 not_mod_headers["Mcp-Session-Id"] = session.session_id
-            return McpHttpResponse(status=304, headers=not_mod_headers, body=b"")
+            return MCPHttpResponse(status=304, headers=not_mod_headers, body=b"")
 
         accept_types = self._parse_accept_header(lower_headers.get("accept"))
         if (
@@ -888,10 +888,10 @@ class MCPCore:
                 resp_headers["Mcp-Session-Id"] = session.session_id
 
         if frame_kind == 0 or resp_bytes is None:
-            return McpHttpResponse(status=202, headers=resp_headers, body=b"")
+            return MCPHttpResponse(status=202, headers=resp_headers, body=b"")
 
         status = int(context.metadata.get("mcp_http_status", 200))
-        return McpHttpResponse(status=status, headers=resp_headers, body=resp_bytes)
+        return MCPHttpResponse(status=status, headers=resp_headers, body=resp_bytes)
 
     @staticmethod
     def _parse_accept_header(accept_header: str | None) -> list[str]:
@@ -916,7 +916,7 @@ class MCPCore:
                 accepted.append(media_type)
         return accepted
 
-    async def _handle_get(self, lower_headers: Mapping[str, str], context: AgentContext) -> McpHttpResponse:
+    async def _handle_get(self, lower_headers: Mapping[str, str], context: AgentContext) -> MCPHttpResponse:
         header_version = lower_headers.get("mcp-protocol-version")
         if header_version is not None and header_version not in SUPPORTED_PROTOCOL_VERSIONS:
             return self._unsupported_version_response(header_version)
@@ -928,10 +928,10 @@ class MCPCore:
             session_id=session_id,
             frame_method=None,
         )
-        if isinstance(negotiated, McpHttpResponse):
+        if isinstance(negotiated, MCPHttpResponse):
             return negotiated
         if negotiated.modern or not self.config.enable_get_sse:
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=405,
                 headers={"Content-Type": "text/plain", "Allow": "POST, DELETE, OPTIONS"},
                 body=b"Method Not Allowed",
@@ -940,12 +940,12 @@ class MCPCore:
         accept_types = self._parse_accept_header(lower_headers.get("accept"))
         if "text/event-stream" not in accept_types:
             if not accept_types or "*/*" in accept_types:
-                return McpHttpResponse(
+                return MCPHttpResponse(
                     status=405,
                     headers={"Content-Type": "text/plain", "Allow": "POST, DELETE, OPTIONS"},
                     body=b"Method Not Allowed",
                 )
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=406,
                 headers={"Content-Type": "text/plain"},
                 body=b"Not Acceptable: text/event-stream required",
@@ -991,7 +991,7 @@ class MCPCore:
         }
         if session is not None:
             sse_headers["Mcp-Session-Id"] = session.session_id
-        return McpHttpResponse(status=200, headers=sse_headers, body=b"", stream=stream)
+        return MCPHttpResponse(status=200, headers=sse_headers, body=b"", stream=stream)
 
     def _open_post_progress_stream(
         self,
@@ -1003,7 +1003,7 @@ class MCPCore:
         session: MCPSession | None,
         frame_method: str | None,
         current_etag: str,
-    ) -> McpHttpResponse:
+    ) -> MCPHttpResponse:
         send_chan, recv_chan = anyio.create_memory_object_stream[bytes](128)
 
         async def _emit_post_progress(progress_payload: dict[str, Any]) -> None:
@@ -1063,7 +1063,7 @@ class MCPCore:
             sse_headers["ETag"] = current_etag
         if not negotiated.modern and session is not None:
             sse_headers["Mcp-Session-Id"] = session.session_id
-        return McpHttpResponse(status=200, headers=sse_headers, body=b"", stream=_post_sse_stream())
+        return MCPHttpResponse(status=200, headers=sse_headers, body=b"", stream=_post_sse_stream())
 
     def _is_resolvable_resource_uri(self, uri: str) -> bool:
         if self.registry.get_resource(uri) is not None:
@@ -1108,7 +1108,7 @@ class MCPCore:
             if inspect.isawaitable(outcome):
                 outcome = await outcome
         except Exception as exc:
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(
                     code=PERMISSION_DENIED,
                     message=f"Subscription unauthorized for resource '{uri}'",
@@ -1116,7 +1116,7 @@ class MCPCore:
                 )
             ) from exc
         if not bool(outcome):
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(
                     code=PERMISSION_DENIED,
                     message=f"Subscription denied for resource '{uri}'",
@@ -1133,9 +1133,9 @@ class MCPCore:
         context: AgentContext,
         negotiated: NegotiatedProtocol,
         frame_id: str | None,
-    ) -> McpHttpResponse:
+    ) -> MCPHttpResponse:
         if "text/event-stream" not in accept_types:
-            return McpHttpResponse(
+            return MCPHttpResponse(
                 status=406,
                 headers={"Content-Type": "text/plain"},
                 body=b"Not Acceptable: text/event-stream required",
@@ -1186,7 +1186,7 @@ class MCPCore:
                     )
                 try:
                     await self._authorize_subscription(uri, context)
-                except JSONRPCErrorException as exc:
+                except JSONRPCException as exc:
                     return self._jsonrpc_http_error(
                         status=200,
                         code=exc.error.code,
@@ -1283,7 +1283,7 @@ class MCPCore:
             self.stream_broker.publish(stream_id, self._make_sse_frame(init_payload))
 
         wrapped_stream = _ListenStreamWrapper(self, stream_id, stream_id, raw_stream)
-        return McpHttpResponse(
+        return MCPHttpResponse(
             status=200,
             headers={
                 "Content-Type": "text/event-stream",
@@ -1302,7 +1302,7 @@ class MCPCore:
         frame_method: str | None,
         params: Mapping[str, Any],
         req_id: Any = None,
-    ) -> McpHttpResponse | None:
+    ) -> MCPHttpResponse | None:
         """Validate every Mcp-Param-<name> header against decoded JSON-RPC body parameters."""
         param_headers = [
             (raw_key, raw_val) for raw_key, raw_val in headers.items() if raw_key.lower().startswith("mcp-param-")
@@ -1371,7 +1371,7 @@ class MCPCore:
     ) -> NoReturn:
         if isinstance(exc, PermissionDeniedError):
             reason = str(exc) or "Permission denied"
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(
                     code=PERMISSION_DENIED,
                     message=reason,
@@ -1379,7 +1379,7 @@ class MCPCore:
                 )
             ) from exc
         reason = str(exc) or "Rate limit exceeded"
-        raise JSONRPCErrorException(
+        raise JSONRPCException(
             JSONRPCError(
                 code=RATE_LIMITED,
                 message=reason,
@@ -1417,7 +1417,7 @@ class MCPCore:
         message: str,
         req_id: Any = None,
         data: Any = None,
-    ) -> McpHttpResponse:
+    ) -> MCPHttpResponse:
         err = JSONRPCError(code=code, message=message, data=data)
         err_body = encode_json_bytes(
             {
@@ -1426,7 +1426,7 @@ class MCPCore:
                 "error": err.to_dict(),
             }
         )
-        return McpHttpResponse(status=status, headers={"Content-Type": "application/json"}, body=err_body)
+        return MCPHttpResponse(status=status, headers={"Content-Type": "application/json"}, body=err_body)
 
     @staticmethod
     def _with_meta(
@@ -1528,7 +1528,7 @@ class MCPCore:
         except SessionLimitExceededError as exc:
             if isinstance(context, AgentContext):
                 context.metadata["mcp_http_status"] = 503
-            raise JSONRPCErrorException(JSONRPCError(code=SESSION_CAPACITY_EXHAUSTED, message=str(exc))) from exc
+            raise JSONRPCException(JSONRPCError(code=SESSION_CAPACITY_EXHAUSTED, message=str(exc))) from exc
 
         if isinstance(context, AgentContext):
             context.session_id = session.session_id
@@ -1554,11 +1554,11 @@ class MCPCore:
 
     async def _handle_logging_set_level(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Validate and persist a legacy session minimum log severity level."""
-        level_map: dict[str, McpLogLevel] = {lvl: lvl for lvl in MCP_LOG_LEVELS}
+        level_map: dict[str, MCPLogLevel] = {lvl: lvl for lvl in MCP_LOG_LEVELS}
         raw_level = params.get("level") if isinstance(params, Mapping) else None
         typed_level = level_map.get(raw_level) if isinstance(raw_level, str) else None
         if typed_level is None:
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(
                     code=INVALID_PARAMS,
                     message=f"Invalid log level {raw_level!r}; expected one of {', '.join(MCP_LOG_LEVELS)}",
@@ -1740,7 +1740,7 @@ class MCPCore:
         """Execute a tool invocation with parameter validation and structured outputs."""
         if not isinstance(params, Mapping) or "name" not in params:
             msg = "Missing required 'name' in tools/call parameters"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         tool_name = str(params["name"])
         arguments = params.get("arguments", {})
@@ -1751,7 +1751,7 @@ class MCPCore:
         spec = self.registry.get_spec(tool_name)
         if target_tool is None or (spec is not None and "mcp" not in spec.exposure):
             msg = f"Unknown tool: {tool_name}"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         try:
             await target_tool.authorize(context)
@@ -1807,7 +1807,7 @@ class MCPCore:
                 return self._with_meta("tools/call", self._format_tool_output(raw_result, is_error=False))
             except ToolArgumentError as exc:
                 msg = f"Invalid arguments for tool '{tool_name}': {exc.message}"
-                raise JSONRPCErrorException(
+                raise JSONRPCException(
                     JSONRPCError(code=INVALID_PARAMS, message=msg, data={"pointer": exc.pointer})
                 ) from exc
             except (PermissionDeniedError, RateLimitExceededError, BudgetExceededError) as exc:
@@ -1888,7 +1888,7 @@ class MCPCore:
         """Read content of a static resource or matched template or skill."""
         if not isinstance(params, Mapping) or "uri" not in params:
             msg = "Missing required 'uri' in resources/read parameters"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         uri = str(params["uri"])
 
@@ -1922,7 +1922,7 @@ class MCPCore:
                 return self._with_meta("resources/read", {"contents": [content_item]}, context=context)
             except Exception as exc:
                 msg = f"Failed to read skill resource '{uri}': {exc}"
-                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg)) from exc
+                raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg)) from exc
 
         with self.telemetry.span_resource(uri):
             res_entry = self.registry.get_resource(uri)
@@ -1961,7 +1961,7 @@ class MCPCore:
                 return self._with_meta("resources/read", {"contents": [tmpl_item]}, context=context)
 
         msg = f"Resource not found: {uri}"
-        raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+        raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
     async def _require_legacy_session(self, context: Any) -> tuple[MCPSession, str | None]:
         owner_id = self._caller_owner(context)
@@ -1971,7 +1971,7 @@ class MCPCore:
             if isinstance(raw_sid, str) and raw_sid:
                 session_id = raw_sid
         if not session_id:
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(
                     code=INVALID_PARAMS,
                     message="Resource subscriptions require an initialized legacy MCP session",
@@ -1979,7 +1979,7 @@ class MCPCore:
             )
         session = await self.session_store.get(session_id, owner_id)
         if session is None:
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(
                     code=INVALID_PARAMS,
                     message="Session not found or expired",
@@ -1991,17 +1991,17 @@ class MCPCore:
         """Subscribe an initialized legacy session to updates for a resolvable, authorized resource URI."""
         session, owner_id = await self._require_legacy_session(context)
         if not isinstance(params, Mapping) or not isinstance(params.get("uri"), str) or not params["uri"]:
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(code=INVALID_PARAMS, message="Missing required 'uri' in resources/subscribe parameters")
             )
         uri = str(params["uri"])
         if not self._is_resolvable_resource_uri(uri):
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(code=INVALID_PARAMS, message=f"Unknown or unresolvable resource URI: {uri}")
             )
         await self._authorize_subscription(uri, context)
         if uri not in session.subscriptions and len(session.subscriptions) >= self.config.max_subscriptions_per_session:
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(
                     code=SESSION_CAPACITY_EXHAUSTED,
                     message=f"Maximum resource subscriptions ({self.config.max_subscriptions_per_session}) exceeded for session",
@@ -2019,7 +2019,7 @@ class MCPCore:
         """Unsubscribe a legacy session from resource updates idempotently."""
         session, owner_id = await self._require_legacy_session(context)
         if not isinstance(params, Mapping) or not isinstance(params.get("uri"), str) or not params["uri"]:
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(code=INVALID_PARAMS, message="Missing required 'uri' in resources/unsubscribe parameters")
             )
         uri = str(params["uri"])
@@ -2072,7 +2072,7 @@ class MCPCore:
         """Retrieve and instantiate an MCP prompt template."""
         if not isinstance(params, Mapping) or "name" not in params:
             msg = "Missing required 'name' in prompts/get parameters"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         prompt_name = str(params["name"])
         arguments = params.get("arguments", {})
@@ -2083,7 +2083,7 @@ class MCPCore:
             prompt_entry = self._combined_prompts_map().get(prompt_name)
             if prompt_entry is None:
                 msg = f"Prompt not found: {prompt_name}"
-                raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+                raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
             messages: list[dict[str, Any]] = []
             if prompt_entry.getter is not None:
@@ -2124,13 +2124,13 @@ class MCPCore:
                 elif isinstance(raw_tags, Sequence) and not isinstance(raw_tags, bytes):
                     parsed_tags = [str(t) for t in raw_tags]
                 else:
-                    raise JSONRPCErrorException(
+                    raise JSONRPCException(
                         JSONRPCError(code=INVALID_PARAMS, message="Invalid 'tags' parameter in skills/list")
                     )
             raw_query = params.get("query")
             if raw_query is not None:
                 if not isinstance(raw_query, str):
-                    raise JSONRPCErrorException(
+                    raise JSONRPCException(
                         JSONRPCError(code=INVALID_PARAMS, message="Invalid 'query' parameter in skills/list")
                     )
                 parsed_query = raw_query
@@ -2164,18 +2164,18 @@ class MCPCore:
         """Retrieve complete skill package details by name or uri."""
         if not isinstance(params, Mapping):
             msg = "Missing required parameters in skills/get"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         skill_name = params.get("name") or params.get("uri")
         if not skill_name:
             msg = "Missing required 'name' or 'uri' in skills/get parameters"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         if self.skill_catalog is None:
             msg = "Skill catalog not configured"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         skill = self.skill_catalog.get_skill(str(skill_name))
         if skill is None:
             msg = f"Skill not found: {skill_name}"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         files_summary = {
             k: {"digest": f.digest, "sizeBytes": f.size_bytes, "mimeType": f.mime_type} for k, f in skill.files.items()
         }
@@ -2200,14 +2200,14 @@ class MCPCore:
         """Read directory listing for a skill package URI."""
         if not isinstance(params, Mapping) or "uri" not in params:
             msg = "Missing required 'uri' in resources/directory/read parameters"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         if self.skill_catalog is None:
             return self._with_meta("resources/directory/read", {"files": []}, context=context)
         uri = str(params["uri"])
         try:
             files = self.skill_catalog.read_directory(uri)
         except SkillAccessError as exc:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
         return self._with_meta("resources/directory/read", {"files": files}, context=context)
 
     def _caller_owner(self, context: Any) -> str | None:
@@ -2241,7 +2241,7 @@ class MCPCore:
             owner_id=owner_id,
             reason=f"Tool '{tool_name}' requires confirmation.",
         )
-        raise JSONRPCErrorException(
+        raise JSONRPCException(
             JSONRPCError(
                 code=CONFIRMATION_REQUIRED,
                 message=f"Tool '{tool_name}' requires confirmation",
@@ -2252,38 +2252,38 @@ class MCPCore:
     async def _handle_tasks_get(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Retrieve task execution record by task ID."""
         if not isinstance(params, Mapping):
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
         task_id = params.get("taskId") or params.get("task_id")
         if not task_id:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.get(str(task_id), self._caller_owner(context))
             return self._with_meta("tasks/get", {"task": self._task_to_dict(task)})
         except TaskLookupError as exc:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
     async def _handle_tasks_update(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Submit required inputs to resume a waiting task."""
         if not isinstance(params, Mapping):
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
         task_id = params.get("taskId") or params.get("task_id")
         inputs = params.get("inputs") or {}
         if not task_id:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.submit_input(str(task_id), self._caller_owner(context), inputs)
             return self._with_meta("tasks/update", {"task": self._task_to_dict(task)})
         except (TaskLookupError, TaskStateError) as exc:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
     async def _handle_tasks_cancel(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Cancel an in-flight task."""
         if not isinstance(params, Mapping):
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
         task_id = params.get("taskId") or params.get("task_id")
         reason = params.get("reason")
         if not task_id:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.cancel(str(task_id), self._caller_owner(context), reason)
             if task.status == "cancelled":
@@ -2296,7 +2296,7 @@ class MCPCore:
                     run.cancel()
             return self._with_meta("tasks/cancel", {"task": self._task_to_dict(task)})
         except TaskLookupError as exc:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
     async def _execute_queued_tool_task(
         self,
@@ -2346,11 +2346,11 @@ class MCPCore:
     async def _handle_completion(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Handle argument completion request."""
         if not isinstance(params, Mapping):
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Invalid completion params"))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message="Invalid completion params"))
         ref = params.get("ref")
         argument = params.get("argument")
         if not isinstance(ref, Mapping) or not isinstance(argument, Mapping):
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(code=INVALID_PARAMS, message="Missing 'ref' or 'argument' in completion/complete")
             )
         ref_type = ref.get("type")
@@ -2361,16 +2361,16 @@ class MCPCore:
         else:
             ref_name = ref.get("name") or ref.get("uri")
         if not isinstance(ref_name, str) or not ref_name:
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(code=INVALID_PARAMS, message="Missing completion reference 'name' or 'uri'")
             )
         arg_name = argument.get("name")
         if not isinstance(arg_name, str) or not arg_name:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing completion argument 'name'"))
+            raise JSONRPCException(JSONRPCError(code=INVALID_PARAMS, message="Missing completion argument 'name'"))
         arg_value = str(argument.get("value", ""))
         callback = self.registry.get_completion(ref_name)
         if callback is None:
-            raise JSONRPCErrorException(
+            raise JSONRPCException(
                 JSONRPCError(code=INVALID_PARAMS, message=f"Unknown completion reference: {ref_name}")
             )
         raw_result = await self._invoke_completion_callback(callback, ref_name, arg_name, arg_value, context)

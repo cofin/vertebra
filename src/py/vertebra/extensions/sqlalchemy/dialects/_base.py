@@ -13,7 +13,7 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool, Pool, QueuePool
 from vertebra.db.dbapi import SyncDBAPIModule
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.sqlalchemy.async_adapter import SQLAlchemyAsyncDBAPI
-from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool
+from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, SyncBrokerPool
 from vertebra.typing import ImproperConfigurationError
 
 _GRPC_UNAVAILABLE_CODE: int = 14
@@ -143,7 +143,7 @@ def _resolve_broker_pool_class(
         if broker is None:
             msg = "No default broker is registered in DatabaseRegistry; register a broker before enabling ?broker=true"
             raise ImproperConfigurationError(msg)
-        pool_cls: type[BrokerPool] = AsyncBrokerPool if is_async else BrokerPool
+        pool_cls: type[SyncBrokerPool] = AsyncBrokerPool if is_async else SyncBrokerPool
         return pool_cls.bind_class(
             broker=broker,
             url=url.render_as_string(hide_password=False),
@@ -255,7 +255,7 @@ class _SyncDialectMixin(_CommonDialectMixin):
 
     @classmethod
     def get_pool_class(cls, url: URL) -> type[Pool]:
-        """Return bound BrokerPool, NullPool, or QueuePool based on broker configuration."""
+        """Return bound SyncBrokerPool, NullPool, or QueuePool based on broker configuration."""
         return _resolve_broker_pool_class(url, is_async=False, default_null_pool=cls._use_null_pool_when_unbrokered)
 
     def get_driver_connection(self, connection: Any) -> Any:

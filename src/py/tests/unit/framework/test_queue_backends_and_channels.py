@@ -42,6 +42,7 @@ from vertebra.db.driver import AsyncQueueStore, QueueEntry, QueueReservation, Sy
 from vertebra.extensions.litestar.queues.backend import StoreQueueBackend, StoreQueueBackendConfig
 from vertebra.extensions.litestar.queues.shm_backend import SHMQueueBackendConfig
 from vertebra.framework.queues import (
+    AsyncRESPStreamClient,
     MemoryQueueBackend,
     OracleQueueBackend,
     OracleQueueExecutor,
@@ -53,17 +54,16 @@ from vertebra.framework.queues import (
     RedisQueueBackend,
     TaskEnvelope,
     ValkeyQueueBackend,
-    ValkeyStreamClient,
     task,
 )
 from vertebra.framework.queues.backends import (
     ValkeyQueueBackend as BackendsValkeyQueueBackend,
 )
 from vertebra.framework.queues.valkey import (
-    ValkeyQueueBackend as DirectValkeyQueueBackend,
+    AsyncRESPStreamClient as DirectValkeyStreamClient,
 )
 from vertebra.framework.queues.valkey import (
-    ValkeyStreamClient as DirectValkeyStreamClient,
+    ValkeyQueueBackend as DirectValkeyQueueBackend,
 )
 from vertebra.typing import (
     ImproperConfigurationError,
@@ -215,7 +215,7 @@ def test_redis_queue_backend_requires_redis_and_host(
         assert svc_exc.value.package == "vertebra-core[valkey]"
 
         fake = FakeRedisStreamClient()
-        assert isinstance(fake, ValkeyStreamClient)
+        assert isinstance(fake, AsyncRESPStreamClient)
         injected = ValkeyQueueBackend(client=fake)
         assert injected.client is fake
     finally:
@@ -276,10 +276,10 @@ def test_valkey_queue_backend_url_schemes(url: str, valid: bool, expected_err: s
 
 
 def test_valkey_queue_backend_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ValkeyQueueBackend and ValkeyStreamClient are isolated from framework.queues.redis."""
+    """ValkeyQueueBackend and AsyncRESPStreamClient are isolated from framework.queues.redis."""
     assert ValkeyQueueBackend is DirectValkeyQueueBackend
     assert BackendsValkeyQueueBackend is DirectValkeyQueueBackend
-    assert ValkeyStreamClient is DirectValkeyStreamClient
+    assert AsyncRESPStreamClient is DirectValkeyStreamClient
 
     source = inspect.getsource(valkey_queue_mod)
     assert "vertebra.framework.queues.redis" not in source

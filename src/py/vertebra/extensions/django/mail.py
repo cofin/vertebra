@@ -14,7 +14,7 @@ from vertebra.framework.email import (
     EmailConfig,
     EmailMessage,
     EmailService,
-    SmtpEmailTransport,
+    SMTPEmailTransport,
 )
 from vertebra.utils.module_loader import ensure_module, import_optional
 
@@ -112,7 +112,7 @@ class EmailBackend(_BaseEmailBackend):
         if self.suppress_send or self._service.config.backend == "memory" or self._is_open:
             return False
         transport = self._service.transport
-        if isinstance(transport, SmtpEmailTransport):
+        if isinstance(transport, SMTPEmailTransport):
             try:
                 if transport._closed:
                     transport._closed = False

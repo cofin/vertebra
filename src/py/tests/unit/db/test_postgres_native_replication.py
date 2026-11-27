@@ -33,7 +33,7 @@ from vertebra.db.adapters.postgres.types import (
 
 
 async def _as_coro(awaitable: Awaitable[Any], started: asyncio.Event | None = None) -> Any:
-    """Wrap a native RustDbTaskAwaitable inside a Python coroutine for asyncio.create_task."""
+    """Wrap a native TaskAwaitable inside a Python coroutine for asyncio.create_task."""
     if started is not None:
         started.set()
     return await awaitable

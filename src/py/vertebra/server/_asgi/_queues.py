@@ -13,7 +13,7 @@ from vertebra._vertebra import (
     STREAM_FLAG_HEADERS_SENT,
     STREAM_FLAG_STREAMING,
     STREAM_FLAG_TRAILERS,
-    PyEmptyAwaitable,
+    EmptyAwaitable,
 )
 
 __all__ = (
@@ -34,7 +34,7 @@ __all__ = (
 DEFAULT_STREAM_QUEUE_MAXSIZE = 256
 DEFAULT_STREAM_HIGH_WATERMARK = 192
 DEFAULT_STREAM_LOW_WATERMARK = 64
-_EMPTY_SEND_AWAITABLE = PyEmptyAwaitable()
+_EMPTY_SEND_AWAITABLE = EmptyAwaitable()
 
 ChunkCallback = Callable[[int, bytes], None]
 type StreamSubmitter = Callable[[int, int, int, list[tuple[bytes, bytes]], bytes], None]
@@ -389,7 +389,7 @@ class AsgiSend:
         status: int,
         headers: Iterable[tuple[bytes | str, bytes | str]] | None = None,
         body: Buffer = b"",
-    ) -> PyEmptyAwaitable:
+    ) -> EmptyAwaitable:
         """Write status, headers, and body in a single call and return an immediately completed awaitable."""
         if self._started:
             msg = "Duplicate 'http.response.start' message"

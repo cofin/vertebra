@@ -26,7 +26,7 @@ Pass a provider to [`build_tools`](agent.md) to expose typed database operations
       members: false
       summary: false
 
-::: vertebra.db.rls.TenantConnectionScope
+::: vertebra.db.rls.SyncTenantConnectionScope
     options:
       heading_level: 4
       members: false

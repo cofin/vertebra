@@ -7,7 +7,7 @@
 | **Agent Plugin & Harness Runtime** | Mount MCP, A2A, and chat routes on `App`, run bounded LLM tool-calling loops, and gate destructive tools behind single-use human approval. |
 | **Model Context Protocol** | Negotiate current and legacy MCP protocol versions, stream SSE notifications, serve `SKILL.md` and UI resources, verify IAP JWTs, and track async tool tasks. |
 | **Agent-to-Agent Protocol & Bridges** | Serve JWS-signed `/.well-known/agent-card.json` descriptors, stream A2A task updates, and bridge MCP tools with A2A agents. |
-| **SpecTree, Workflows & Session Stores** | Break goals into dependency trees, run parallel DAG waves with checkpointing, and store multi-turn conversation state. |
+| **PlanTree, Workflows & Session Stores** | Break goals into dependency trees, run parallel DAG waves with checkpointing, and store multi-turn conversation state. |
 
 ## Agent Plugin & Harness Runtime
 
@@ -126,34 +126,35 @@ Spanner's adapter exports `SpannerToolProvider` with optional read-only snapshot
         - handle_message_stream
         - stream_message
 
-::: vertebra.agent.bridges.McpToolBridge
+::: vertebra.agent.bridges.MCPToolBridge
     options:
       heading_level: 4
       members:
         - from_a2a_service
         - from_agent_card
 
-::: vertebra.agent.bridges.A2aAgentBridge
+::: vertebra.agent.bridges.A2AAgentBridge
     options:
       heading_level: 4
       members:
         - from_mcp_service
 
-## SpecTree, Workflows & Session Stores
+## PlanTree, Workflows & Session Stores
 
-::: vertebra.agent.spec.SpecTree
+::: vertebra.agent.planning.PlanTree
     options:
       heading_level: 4
       members:
         - add_node
+        - add_step
         - ready_nodes
         - to_workflow
 
-::: vertebra.agent.workflow.DynamicWorkflow
+::: vertebra.agent.workflow.Workflow
     options:
       heading_level: 4
       members:
-        - add_node
+        - add
         - add_step
         - topological_waves
 

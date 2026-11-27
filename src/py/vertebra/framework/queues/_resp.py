@@ -37,7 +37,7 @@ __all__ = (
     "AsyncRESPQueueStore",
     "RESPQueueDialect",
     "RESPQueueStoreBase",
-    "RESPStreamClient",
+    "AsyncRESPStreamClient",
     "RESPStreamQueueBackend",
     "SyncRESPQueueStore",
     "SyncRESPStreamClient",
@@ -185,7 +185,7 @@ def _validate_resp_url(dialect: RESPQueueDialect, url: str) -> None:
 
 
 @runtime_checkable
-class RESPStreamClient(Protocol):
+class AsyncRESPStreamClient(Protocol):
     """Protocol covering the subset of async RESP commands required by RESPStreamQueueBackend."""
 
     async def xgroup_create(
@@ -337,7 +337,7 @@ class RESPStreamQueueBackend:
         self,
         config: QueueConfig | QueueBackendSettings | None = None,
         *,
-        client: RESPStreamClient | None = None,
+        client: AsyncRESPStreamClient | None = None,
         sync_client: SyncRESPStreamClient | None = None,
         notification_source: Any = None,
         sync_notification_source: Any = None,
@@ -353,11 +353,11 @@ class RESPStreamQueueBackend:
         self._prefix = getattr(self._config, "stream_prefix", self._DIALECT.default_key_prefix)
         self._notification_source = notification_source
         self._sync_notification_source = sync_notification_source
-        self._client: RESPStreamClient = client if client is not None else self._build_client(self._config)
+        self._client: AsyncRESPStreamClient = client if client is not None else self._build_client(self._config)
         self._sync_client: SyncRESPStreamClient | None = sync_client
 
     @property
-    def client(self) -> RESPStreamClient:
+    def client(self) -> AsyncRESPStreamClient:
         """Return the active async RESP stream client."""
         return self._client
 
@@ -726,7 +726,7 @@ class RESPStreamQueueBackend:
         return env
 
     @classmethod
-    def _wrap_async_client(cls, client: Any) -> RESPStreamClient:
+    def _wrap_async_client(cls, client: Any) -> AsyncRESPStreamClient:
         raise NotImplementedError
 
     @classmethod
@@ -734,7 +734,7 @@ class RESPStreamQueueBackend:
         raise NotImplementedError
 
     @classmethod
-    def _build_client(cls, config: QueueConfig | QueueBackendSettings) -> RESPStreamClient:
+    def _build_client(cls, config: QueueConfig | QueueBackendSettings) -> AsyncRESPStreamClient:
         _validate_resp_url(cls._DIALECT, config.backend_url)
         mod = ensure_module(
             cls._DIALECT.driver_module,
@@ -771,7 +771,7 @@ def _decode_stream_entries(raw: Any) -> list[tuple[str, dict[str, Any]]]:
 
 
 class _BaseRESPStreamAdapter:
-    """Shared async adapter bridging a native Redis/Valkey client to `RESPStreamClient`."""
+    """Shared async adapter bridging a native Redis/Valkey client to `AsyncRESPStreamClient`."""
 
     __slots__ = ("_client",)
 

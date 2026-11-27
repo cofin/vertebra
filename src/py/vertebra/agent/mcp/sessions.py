@@ -13,7 +13,7 @@ from typing import Any
 import anyio
 import msgspec
 
-from vertebra.agent.mcp.models import McpLogLevel
+from vertebra.agent.mcp.models import MCPLogLevel
 from vertebra.cache import AsyncCacheStore
 from vertebra.typing import VertebraError
 from vertebra.utils.serializers import decode_json, encode_json_bytes
@@ -43,7 +43,7 @@ class MCPSession(msgspec.Struct, frozen=True, kw_only=True):
     """Client capability dictionary advertised during `initialize`."""
     client_info: dict[str, Any] = msgspec.field(default_factory=dict)
     """Client implementation descriptor advertised during `initialize`."""
-    log_level: McpLogLevel = "info"
+    log_level: MCPLogLevel = "info"
     """Active minimum log severity configured via `logging/setLevel`."""
     subscriptions: frozenset[str] = msgspec.field(default_factory=frozenset)
     """Resource URIs currently subscribed to by this session."""
@@ -80,7 +80,7 @@ class MCPSessionStore:
         protocol_version: str,
         client_capabilities: Mapping[str, Any] | None = None,
         client_info: Mapping[str, Any] | None = None,
-        log_level: McpLogLevel = "info",
+        log_level: MCPLogLevel = "info",
     ) -> MCPSession:
         """Create and persist a new owner-scoped session if within capacity."""
         async with self._lock:
@@ -122,7 +122,7 @@ class MCPSessionStore:
         session_id: str,
         owner_id: str | None,
         *,
-        log_level: McpLogLevel | None = None,
+        log_level: MCPLogLevel | None = None,
         subscriptions: frozenset[str] | None = None,
     ) -> MCPSession | None:
         """Update mutable session attributes while preserving owner isolation."""
@@ -243,7 +243,7 @@ class CacheMCPSessionStore:
         protocol_version: str,
         client_capabilities: Mapping[str, Any] | None = None,
         client_info: Mapping[str, Any] | None = None,
-        log_level: McpLogLevel = "info",
+        log_level: MCPLogLevel = "info",
     ) -> MCPSession:
         """Create and persist a new owner-scoped session if within capacity."""
         async with self._lock:
@@ -282,7 +282,7 @@ class CacheMCPSessionStore:
         session_id: str,
         owner_id: str | None,
         *,
-        log_level: McpLogLevel | None = None,
+        log_level: MCPLogLevel | None = None,
         subscriptions: frozenset[str] | None = None,
     ) -> MCPSession | None:
         """Update mutable session attributes while preserving owner isolation."""

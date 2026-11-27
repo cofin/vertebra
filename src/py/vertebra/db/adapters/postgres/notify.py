@@ -24,7 +24,7 @@ from vertebra.utils.text import validate_identifier
 if TYPE_CHECKING:
     from vertebra._postgres import AsyncPostgresListener, SyncPostgresListener
     from vertebra.db.adapters.postgres.events import (
-        PostgresNotificationDriver,
+        AsyncPostgresNotificationDriver,
         SyncPostgresNotificationDriver,
     )
     from vertebra.db.cdc import ChangeFeed
@@ -88,7 +88,7 @@ class AsyncPostgresNotificationSource(AsyncNotificationSource):
 
     def __init__(
         self,
-        driver: PostgresNotificationDriver,
+        driver: AsyncPostgresNotificationDriver,
         config: PostgresNotifyConfig | None = None,
         *,
         change_feed: ChangeFeed | None = None,

@@ -63,7 +63,7 @@ from vertebra.agent.core.jsonrpc import (
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
     PARSE_ERROR,
-    JSONRPCErrorException,
+    JSONRPCException,
     JSONRPCRequest,
     JSONRPCRouter,
 )
@@ -84,7 +84,7 @@ from vertebra.agent.core.sse import (
     StreamLimitExceededError,
 )
 from vertebra.agent.mcp.controllers import mcp_resource, mcp_tool, resource
-from vertebra.agent.mcp.models import McpIcon
+from vertebra.agent.mcp.models import MCPIcon
 from vertebra.agent.telemetry import (
     AgentTelemetryRecorder,
 )
@@ -199,11 +199,11 @@ def test_cursor_pagination_roundtrip_and_invalid_cursor() -> None:
     cursor_val = encode_cursor(42)
     assert decode_cursor(cursor_val) == 42
 
-    with pytest.raises(JSONRPCErrorException) as exc_info:
+    with pytest.raises(JSONRPCException) as exc_info:
         decode_cursor("invalid-base64-not-prefixed")
     assert exc_info.value.error.code == INVALID_PARAMS
 
-    with pytest.raises(JSONRPCErrorException) as exc_info2:
+    with pytest.raises(JSONRPCException) as exc_info2:
         decode_cursor("")
     assert exc_info2.value.error.code == INVALID_PARAMS
 
@@ -992,14 +992,14 @@ async def test_sse_broker_open_stream_replay_keepalive_limits_and_cleanup() -> N
 
 
 def test_ui_metadata_models_and_decorators() -> None:
-    """McpIcon serialization and SEP-1865 UI decorator fields merge cleanly into ToolSpec and resource descriptors."""
-    full_icon = McpIcon(src="https://cdn.example/icon.svg", mimeType="image/svg+xml", sizes=("32x32", "any"))
+    """MCPIcon serialization and SEP-1865 UI decorator fields merge cleanly into ToolSpec and resource descriptors."""
+    full_icon = MCPIcon(src="https://cdn.example/icon.svg", mimeType="image/svg+xml", sizes=("32x32", "any"))
     assert full_icon.to_mcp_dict() == {
         "src": "https://cdn.example/icon.svg",
         "mimeType": "image/svg+xml",
         "sizes": ["32x32", "any"],
     }
-    assert McpIcon("https://cdn.example/minimal.png").to_mcp_dict() == {"src": "https://cdn.example/minimal.png"}
+    assert MCPIcon("https://cdn.example/minimal.png").to_mcp_dict() == {"src": "https://cdn.example/minimal.png"}
 
     @mcp_tool(
         name="dash_action",
@@ -1055,7 +1055,7 @@ def test_ui_metadata_models_and_decorators() -> None:
 
     item_meta = cast(Any, read_item)._mcp_resource
     assert item_meta["title"] == "Item"
-    assert item_meta["icons"] == (McpIcon(src="https://cdn.example/item.png", sizes=("16x16",)),)
+    assert item_meta["icons"] == (MCPIcon(src="https://cdn.example/item.png", sizes=("16x16",)),)
     assert item_meta["meta"] == {"x": 2}
 
 
@@ -1268,23 +1268,23 @@ class NestedEnvelope(msgspec.Struct, frozen=True, gc=False):
 @pytest.mark.parametrize(
     "import_order",
     [
-        ("vertebra.agent.spec", "vertebra.agent.workflow"),
-        ("vertebra.agent.workflow", "vertebra.agent.spec"),
-        ("vertebra.agent", "vertebra.agent.spec", "vertebra.agent.workflow"),
+        ("vertebra.agent.planning", "vertebra.agent.workflow"),
+        ("vertebra.agent.workflow", "vertebra.agent.planning"),
+        ("vertebra.agent", "vertebra.agent.agents", "vertebra.agent.planning", "vertebra.agent.workflow"),
     ],
 )
-def test_agent_spec_and_workflow_fresh_interpreter_import_order(import_order: tuple[str, ...]) -> None:
-    """Verify spec and workflow import cleanly in any order in a fresh interpreter."""
+def test_agent_planning_and_workflow_fresh_interpreter_import_order(import_order: tuple[str, ...]) -> None:
+    """Verify planning and workflow import cleanly in any order in a fresh interpreter."""
     imports_stmt = "; ".join(f"import {mod}" for mod in import_order)
     code = (
         f"{imports_stmt}; "
-        "from vertebra.agent.spec import SpecNode, SpecTree; "
-        "from vertebra.agent.workflow import DynamicWorkflow; "
-        "tree = SpecTree(root_id='root'); "
-        "tree.add_node(SpecNode(id='step1', title='Step 1')); "
+        "from vertebra.agent.planning import PlanNode, PlanTree; "
+        "from vertebra.agent.workflow import Workflow; "
+        "tree = PlanTree(root_id='root'); "
+        "tree.add_node(PlanNode(id='step1', title='Step 1')); "
         "wf = tree.to_workflow(); "
-        "assert isinstance(wf, DynamicWorkflow); "
-        "assert 'step1' in wf.nodes"
+        "assert isinstance(wf, Workflow); "
+        "assert 'step1' in wf.steps"
     )
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert res.returncode == 0, res.stderr

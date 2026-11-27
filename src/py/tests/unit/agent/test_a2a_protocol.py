@@ -29,7 +29,7 @@ from vertebra.agent.a2a import (
     TextPart,
 )
 from vertebra.agent.a2a.service import CacheA2ATaskStore
-from vertebra.agent.bridges import A2aAgentBridge, McpToolBridge, mcp_service_to_a2a
+from vertebra.agent.bridges import A2AAgentBridge, MCPToolBridge, mcp_service_to_a2a
 from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.schema import tool
 from vertebra.agent.core.sse import CacheSseStreamBroker
@@ -586,7 +586,7 @@ async def test_a2a_push_notification_crud_delivery_and_ssrf_guard(monkeypatch: p
 
 @pytest.mark.anyio
 async def test_bidirectional_mcp_and_a2a_bridges_preserve_trace_context() -> None:
-    """Verify MCP -> A2aAgentBridge -> McpToolBridge -> MCP preserves unified trace context."""
+    """Verify MCP -> A2AAgentBridge -> MCPToolBridge -> MCP preserves unified trace context."""
     mcp_service = MCPCore(config=MCPConfig(server_name="native-mcp"))
 
     @tool(name="echo_uppercase", description="Converts input text to uppercase")
@@ -595,7 +595,7 @@ async def test_bidirectional_mcp_and_a2a_bridges_preserve_trace_context() -> Non
 
     mcp_service.registry.register_tool(echo_uppercase)
 
-    a2a_service = A2aAgentBridge.from_mcp_service(
+    a2a_service = A2AAgentBridge.from_mcp_service(
         mcp_service,
         base_url="http://localhost:8000",
         path="/a2a",
@@ -607,7 +607,7 @@ async def test_bidirectional_mcp_and_a2a_bridges_preserve_trace_context() -> Non
     helper_a2a = mcp_service_to_a2a(mcp_service, base_url="http://localhost:8000", path="/a2a")
     assert helper_a2a.config.agent_card is not None
 
-    bridged_tools = McpToolBridge.from_a2a_service(a2a_service, prefix="remote")
+    bridged_tools = MCPToolBridge.from_a2a_service(a2a_service, prefix="remote")
     assert len(bridged_tools) == 1
     target_tool = bridged_tools[0]
     assert target_tool.name == "remote_echo_uppercase"

@@ -16,7 +16,7 @@ from typing import Any, Protocol, runtime_checkable
 import anyio
 import msgspec
 
-from vertebra.agent.spec import AgentMessage
+from vertebra.agent.agents import AgentMessage
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 from vertebra.utils.text import validate_identifier

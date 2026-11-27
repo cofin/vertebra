@@ -25,8 +25,8 @@ from vertebra.framework.email import (
     MemoryEmailTransport,
     ResendEmailTransport,
     SendGridEmailTransport,
-    SesEmailTransport,
-    SmtpEmailTransport,
+    SESEmailTransport,
+    SMTPEmailTransport,
     WebhookVerifier,
 )
 from vertebra.framework.queues import QueueConfig, QueueService, RedisQueueBackend
@@ -161,7 +161,7 @@ async def test_memory_transport_idempotency_and_recipient_lookup() -> None:
 
 @pytest.mark.anyio
 async def test_smtp_transport_mime_multipart_attachments_pooling_and_header_injection_guard() -> None:
-    """Test SmtpEmailTransport builds RFC 5322 MIME, reuses pool, and refuses injection."""
+    """Test SMTPEmailTransport builds RFC 5322 MIME, reuses pool, and refuses injection."""
     config = EmailConfig(backend="smtp", pool_size=2)
     mock_clients: list[MockSmtpClient] = []
 
@@ -170,7 +170,7 @@ async def test_smtp_transport_mime_multipart_attachments_pooling_and_header_inje
         mock_clients.append(client)
         return cast("smtplib.SMTP", client)
 
-    transport = SmtpEmailTransport(config, smtp_factory=mock_factory)
+    transport = SMTPEmailTransport(config, smtp_factory=mock_factory)
 
     att1 = EmailAttachment(
         filename="report.pdf",
@@ -223,7 +223,7 @@ async def test_smtp_transport_mime_multipart_attachments_pooling_and_header_inje
         flaky_clients.append(client)
         return cast("smtplib.SMTP", client)
 
-    reconnect_transport = SmtpEmailTransport(config, smtp_factory=flaky_factory)
+    reconnect_transport = SMTPEmailTransport(config, smtp_factory=flaky_factory)
     await reconnect_transport.send(msg)
     assert len(flaky_clients) == 2
 
@@ -468,7 +468,7 @@ def test_webhook_verifier_resend_sendgrid_and_mailgun_signatures() -> None:
 
 @pytest.mark.anyio
 async def test_ses_transport_rust_sigv4_headers_simple_and_raw_mime() -> None:
-    """Test SesEmailTransport SigV4 signing, Simple body, and Raw MIME attachment payload."""
+    """Test SESEmailTransport SigV4 signing, Simple body, and Raw MIME attachment payload."""
     config = EmailConfig(
         backend="ses",
         aws_region="us-east-1",
@@ -483,7 +483,7 @@ async def test_ses_transport_rust_sigv4_headers_simple_and_raw_mime() -> None:
             HttpResponseData(status_code=200, headers={}, body=b'{"MessageId":"ses-msg-002"}'),
         ]
     )
-    transport = SesEmailTransport(config, client=mock_http)
+    transport = SESEmailTransport(config, client=mock_http)
 
     simple_msg = EmailMessage(
         subject="Simple SES",

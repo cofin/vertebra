@@ -17,7 +17,7 @@ import anyio
 import anyio.to_thread
 import msgspec
 
-from vertebra.agent.mcp.models import McpIcon, ResourceEntry, coerce_mcp_icons
+from vertebra.agent.mcp.models import MCPIcon, ResourceEntry, coerce_mcp_icons
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.typing import VertebraError
 
@@ -63,7 +63,7 @@ class Skill(msgspec.Struct, frozen=True, kw_only=True):
     """Optional human-readable display title for the skill."""
     tags: tuple[str, ...] = ()
     """Filterable discovery tags extracted from frontmatter or explicit builder options."""
-    icons: tuple[McpIcon, ...] = ()
+    icons: tuple[MCPIcon, ...] = ()
     """Optional SEP-1865 icon descriptors advertised alongside the skill."""
     meta: dict[str, Any] = msgspec.field(default_factory=dict)
     """Optional ``_meta`` extension payload associated with the skill."""
@@ -81,7 +81,7 @@ class Skill(msgspec.Struct, frozen=True, kw_only=True):
         body: str,
         title: str | None = None,
         tags: Sequence[str] = (),
-        icons: Sequence[McpIcon | Mapping[str, Any]] = (),
+        icons: Sequence[MCPIcon | Mapping[str, Any]] = (),
         meta: Mapping[str, Any] | None = None,
         files: Mapping[str, bytes | str] | None = None,
         frontmatter: Mapping[str, Any] | None = None,
@@ -581,8 +581,8 @@ def _extract_skill_tags(frontmatter: Mapping[str, Any], explicit: Sequence[str] 
 
 def _extract_skill_icons(
     frontmatter: Mapping[str, Any],
-    explicit: Sequence[McpIcon | Mapping[str, Any]] = (),
-) -> tuple[McpIcon, ...]:
+    explicit: Sequence[MCPIcon | Mapping[str, Any]] = (),
+) -> tuple[MCPIcon, ...]:
     if explicit:
         return coerce_mcp_icons(explicit)
     raw = frontmatter.get("icons")

@@ -1,7 +1,7 @@
 """SQLSpec and Advanced Alchemy ``WorldDriver`` implementations for benchmark apps.
 
 Supports both ``vertebra`` (Vertebra SQLSpec adapters and SQLAlchemy ``+vtb`` /
-``+vtb_async`` dialects with ``BrokerPool`` / ``AsyncBrokerPool``) and ``upstream``
+``+vtb_async`` dialects with ``SyncBrokerPool`` / ``AsyncBrokerPool``) and ``upstream``
 (upstream ``sqlspec`` and vanilla SQLAlchemy) flavors across SQLite and PostgreSQL.
 """
 
@@ -518,7 +518,7 @@ class AdvancedAlchemyWorldDriver:
                 assert vtb_pool is not None
                 sync_transport = resolve_sync_broker_transport(self.config.broker_mode, pool_size=self.pool_size)
                 assert sync_transport is not None
-                engine_kwargs["poolclass"] = vtb_pool.BrokerPool.bind_class(
+                engine_kwargs["poolclass"] = vtb_pool.SyncBrokerPool.bind_class(
                     broker=sync_transport,
                     url=url,
                 )

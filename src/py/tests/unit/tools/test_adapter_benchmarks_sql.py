@@ -161,7 +161,7 @@ def test_capture_sqlalchemy_report_vtb_vs_vanilla_sqlite_offline(monkeypatch: py
 
 
 def test_capture_sqlalchemy_report_broker_pool_binding_offline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify `BrokerPool.bind_class` wiring with a fake broker and `ValueError` when no broker is available."""
+    """Verify `SyncBrokerPool.bind_class` wiring with a fake broker and `ValueError` when no broker is available."""
     if import_optional("sqlalchemy") is None:
         pytest.skip("sqlalchemy is not installed")
 
@@ -169,13 +169,13 @@ def test_capture_sqlalchemy_report_broker_pool_binding_offline(monkeypatch: pyte
     assert pool_mod is not None
 
     bind_calls: list[dict[str, Any]] = []
-    real_bind_class = pool_mod.BrokerPool.bind_class
+    real_bind_class = pool_mod.SyncBrokerPool.bind_class
 
     def _spy_bind_class(**kwargs: Any) -> Any:
         bind_calls.append(kwargs)
         return real_bind_class(**kwargs)
 
-    monkeypatch.setattr(pool_mod.BrokerPool, "bind_class", _spy_bind_class)
+    monkeypatch.setattr(pool_mod.SyncBrokerPool, "bind_class", _spy_bind_class)
 
     fake_broker = _FakeBroker()
     report = asyncio.run(

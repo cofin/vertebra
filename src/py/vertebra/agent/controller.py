@@ -12,12 +12,12 @@ from typing import Any, Literal
 
 import msgspec
 
+from vertebra.agent.agents import AgentMessage
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.core.schema import ToolCall
 from vertebra.agent.core.sse import SseFrame, SseStreamBroker
 from vertebra.agent.runtime import AgentRuntime, TurnRequest, TurnResponse
 from vertebra.agent.sessions import ANONYMOUS_OWNER, AgentSessionStore, MemorySessionStore
-from vertebra.agent.spec import AgentMessage
 from vertebra.telemetry.genai import GenAiUsage
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 

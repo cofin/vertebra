@@ -75,7 +75,7 @@ class JSONRPCResponse(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return payload
 
 
-class JSONRPCErrorException(Exception):
+class JSONRPCException(Exception):
     """Exception indicating a structured JSON-RPC error response."""
 
     def __init__(
@@ -129,7 +129,7 @@ class JSONRPCRouter:
             if request.is_notification:
                 return None
             return {"jsonrpc": "2.0", "id": request.id, "result": result}
-        except JSONRPCErrorException as exc:
+        except JSONRPCException as exc:
             if request.is_notification:
                 return None
             return {
@@ -296,7 +296,7 @@ __all__ = [
     "INVALID_PARAMS",
     "INVALID_REQUEST",
     "JSONRPCError",
-    "JSONRPCErrorException",
+    "JSONRPCException",
     "JSONRPCRequest",
     "JSONRPCResponse",
     "JSONRPCRouter",

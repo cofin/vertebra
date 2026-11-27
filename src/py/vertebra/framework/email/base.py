@@ -270,7 +270,7 @@ class EmailService:
             transport_cls = import_string("vertebra.framework.email.memory.MemoryEmailTransport")
             return cast("EmailTransport", transport_cls(config))
         if config.backend == "smtp":
-            transport_cls = import_string("vertebra.framework.email.smtp.SmtpEmailTransport")
+            transport_cls = import_string("vertebra.framework.email.smtp.SMTPEmailTransport")
             return cast("EmailTransport", transport_cls(config))
         if config.backend in ("resend", "sendgrid", "mailgun"):
             if config.backend == "resend":
@@ -282,7 +282,7 @@ class EmailService:
             transport_cls = import_string(mod_path)
             return cast("EmailTransport", transport_cls(config))
         if config.backend == "ses":
-            transport_cls = import_string("vertebra.framework.email.ses.SesEmailTransport")
+            transport_cls = import_string("vertebra.framework.email.ses.SESEmailTransport")
             return cast("EmailTransport", transport_cls(config))
         msg = f"Unsupported email backend: {config.backend!r}"
         raise UnsupportedBackendError(msg)

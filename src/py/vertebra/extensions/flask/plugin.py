@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from vertebra._vertebra import Request, Response, WsgiEnviron, run_wsgi_callable
 from vertebra.extensions.flask.config import VertebraConfig
 from vertebra.extensions.flask.fastpath import FastPath
-from vertebra.extensions.flask.mcp import MCPRegistry, WsgiMcpApp, attach_mcp_routes
+from vertebra.extensions.flask.mcp import ToolRegistry, WsgiMCPApp, attach_mcp_routes
 from vertebra.extensions.flask.offload import offload_middlewares
 from vertebra.extensions.flask.openapi import attach_openapi_docs, extract_openapi_schema
 from vertebra.extensions.flask.router import RouteCompiler
@@ -54,8 +54,8 @@ class VertebraPlugin:
         self._fastpath: FastPath | None = None
         self._offload_bundle: OffloadPlan | None = None
         self._openapi_schema: dict[str, Any] | None = None
-        self._mcp_registry: MCPRegistry | None = None
-        self._mcp_app: WsgiMcpApp | None = None
+        self._mcp_registry: ToolRegistry | None = None
+        self._mcp_app: WsgiMCPApp | None = None
         self._vite_bridge: ViteAssetBridge | None = None
         self._original_wsgi_app: Callable[..., Iterable[bytes]] | None = None
         if app is not None:
@@ -92,8 +92,8 @@ class VertebraPlugin:
         return self._openapi_schema
 
     @property
-    def mcp_registry(self) -> MCPRegistry | None:
-        """Return the ``MCPRegistry`` if MCP is configured."""
+    def mcp_registry(self) -> ToolRegistry | None:
+        """Return the ``ToolRegistry`` if MCP is configured."""
         return self._mcp_registry
 
     @property

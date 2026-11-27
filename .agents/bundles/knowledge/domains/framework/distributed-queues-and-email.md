@@ -106,7 +106,7 @@ sources:
 - `QueueService` (`QueueBackendSettings`, `TaskResultRecord`) and `@task` execute priority, delayed, sync (`enqueue_sync`), and dead-letter jobs across `MemoryQueueBackend`, `SHMQueueBackend`, `PostgreSQLQueueBackend`, `OracleQueueBackend`, `RedisQueueBackend` (`vertebra._redis`), `ValkeyQueueBackend` (`vertebra._valkey`), and `SpannerQueueBackend` (`vertebra._spanner`) [^src-framework-queues-base-py] [^src-framework-queues-redis-py] [^src-framework-queues-valkey-py] [^src-framework-queues-spanner-py].
 - `WorkerRunner` (`server/lanes.py`) enters `Container.scope()` per task attempt and maintains lease heartbeats alongside `CronScheduler` slot-keyed leader election [^src-server-lanes-py].
 - `ChannelsBackend` (`create_channels_backend`) bridges `SyncNotificationSource`/`AsyncNotificationSource` across Memory, Redis, Valkey, PostgreSQL, and Oracle with origin-node deduplication, while `ValkeyStore` (`vertebra._valkey`) and `RedisStore` (`vertebra._redis`) provide RESP3 `CLIENT TRACKING` L1 invalidation and prefix-scoped `SCAN` + `UNLINK` [^src-framework-channels-py] [^src-framework-stores-py].
-- `EmailService` sends transactional email across `MemoryEmailTransport`, `SmtpEmailTransport`, `ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`, and `SesEmailTransport` behind the `EmailTransport` protocol [^src-framework-email-init-py].
+- `EmailService` sends transactional email across `MemoryEmailTransport`, `SMTPEmailTransport`, `ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`, and `SESEmailTransport` behind the `EmailTransport` protocol [^src-framework-email-init-py].
 <!-- truth: end -->
 
 Vertebra provides pluggable distributed background task queues, multi-process cron scheduling, worker execution lanes, distributed channels, RESP3 key-value stores, and transactional email dispatch through [`vertebra.framework.queues`](../../../../../src/py/vertebra/framework/queues/__init__.py)[^src-framework-queues-init-py], [`vertebra.server.lanes`](../../../../../src/py/vertebra/server/lanes.py)[^src-server-lanes-py], [`vertebra.framework.channels`](../../../../../src/py/vertebra/framework/channels.py)[^src-framework-channels-py], [`vertebra.framework.stores`](../../../../../src/py/vertebra/framework/stores.py)[^src-framework-stores-py], and [`vertebra.framework.email`](../../../../../src/py/vertebra/framework/email/__init__.py)[^src-framework-email-init-py]. See [Framework Extension Limitations](framework-extension-limitations.md) for `ShmQueueRing` capacity and host extra boundaries.
@@ -140,11 +140,11 @@ Vertebra provides pluggable distributed background task queues, multi-process cr
 | Transport | Transport & Authentication Mechanics |
 | :--- | :--- |
 | `MemoryEmailTransport` | Records dispatched messages in an in-memory audit log for test inspection (`clear()`, `sent`). |
-| `SmtpEmailTransport` | Standard SMTP over STARTTLS or SSL/TLS with configurable auth credentials. |
+| `SMTPEmailTransport` | Standard SMTP over STARTTLS or SSL/TLS with configurable auth credentials. |
 | `ResendEmailTransport` | HTTP REST API transport using bearer API keys and JSON payload formatting. |
 | `SendGridEmailTransport` | HTTP REST v3 transport with mail-send payload serialization. |
 | `MailgunEmailTransport` | HTTP API transport with basic auth API keys and domain-routed sending. |
-| `SesEmailTransport` | AWS Simple Email Service transport authenticated via native Rust `sign_aws_sigv4_headers` in `vertebra-storage`, eliminating Boto3 dependencies. |
+| `SESEmailTransport` | AWS Simple Email Service transport authenticated via native Rust `sign_aws_sigv4_headers` in `vertebra-storage`, eliminating Boto3 dependencies. |
 
 Provenance sources: [^src-vertebra-storage-src-lib-rs], [^src-tests-unit-framework-test-queue-worker-and-scheduler-py], [^src-tests-unit-framework-test-queue-backends-and-channels-py], [^src-tests-unit-framework-test-email-providers-py].
 

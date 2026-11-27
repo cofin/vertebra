@@ -15,7 +15,7 @@ use vertebra_db::arrow_shm::write_shm_arrow_region_unregistered;
 use vertebra_db::lease_guard::LeaseGuard;
 use vertebra_db::oracle::OracleSessionAttrs;
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
+    TaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
 use vertebra_db::py_broker::next_shm_name;
 use vertebra_db::py_cursor::{DEFAULT_PLAN_CACHE_CAPACITY, PlanLruCache};
@@ -2141,7 +2141,7 @@ impl OracleWorkerHandle {
         py: Python<'_>,
         cmd: WorkerCommand,
         map_ok: M,
-    ) -> PyResult<RustDbTaskAwaitable>
+    ) -> PyResult<TaskAwaitable>
     where
         M: FnOnce(Python<'_>, WorkerReply) -> PyResult<Py<PyAny>> + Send + 'static,
     {
@@ -3126,7 +3126,7 @@ pub struct AsyncOracleClient {
 }
 
 impl AsyncOracleClient {
-    fn dispatch_unit(&self, py: Python<'_>, cmd: WorkerCommand) -> PyResult<RustDbTaskAwaitable> {
+    fn dispatch_unit(&self, py: Python<'_>, cmd: WorkerCommand) -> PyResult<TaskAwaitable> {
         self.worker.dispatch_async(py, cmd, |py, _| Ok(py.None()))
     }
 
@@ -3142,7 +3142,7 @@ impl AsyncOracleClient {
         vector_return_format: &str,
         enable_lowercase_column_names: bool,
         shape: fn(Python<'_>, BuiltReply) -> PyResult<Py<PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    ) -> PyResult<TaskAwaitable> {
         let parsed_format =
             VectorReturnFormat::parse(vector_return_format).map_err(|e| e.to_py_err(py))?;
         let options = OracleValueOptions {
@@ -3165,9 +3165,9 @@ impl AsyncOracleClient {
 impl_oracle_client_pymethods!(
     AsyncOracleClient,
     cursor = AsyncOracleCursor,
-    unit_ret = RustDbTaskAwaitable,
-    single_ret = RustDbTaskAwaitable,
-    pipeline_ret = RustDbTaskAwaitable,
+    unit_ret = TaskAwaitable,
+    single_ret = TaskAwaitable,
+    pipeline_ret = TaskAwaitable,
     single_calls = [
         fetch_rows => reply_rows_and_names,
         fetch_dicts => reply_dicts,
@@ -3175,7 +3175,7 @@ impl_oracle_client_pymethods!(
         execute_dml => reply_dml,
     ],
     extra = {
-        pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        pub fn close(&self, py: Python<'_>) -> PyResult<TaskAwaitable> {
             let previous = {
                 let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
                 slot.take()
@@ -3205,7 +3205,7 @@ impl_oracle_client_pymethods!(
             out_binds: Option<&Bound<'_, PyAny>>,
             fetch_decimals: bool,
             enable_lowercase_column_names: Option<bool>,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
             let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
             let lowercase = enable_lowercase_column_names
@@ -3231,7 +3231,7 @@ impl_oracle_client_pymethods!(
             py: Python<'_>,
             sql: String,
             params_seq: &Bound<'_, PyAny>,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
             let seq = extract_bind_seq(params_seq).map_err(|e| e.to_py_err(py))?;
             if seq.is_empty() {
@@ -3272,7 +3272,7 @@ impl_oracle_client_pymethods!(
             batch_size: usize,
             force_shm: Option<bool>,
             enable_lowercase_column_names: Option<bool>,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
             let lowercase = enable_lowercase_column_names
                 .unwrap_or(self.worker.config().enable_lowercase_column_names);
@@ -3300,7 +3300,7 @@ impl_oracle_client_pymethods!(
             py: Python<'_>,
             operations: &Bound<'_, PyAny>,
             continue_on_error: bool,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
             let lowercase = self.worker.config().enable_lowercase_column_names;
             let ops = extract_pipeline_ops(operations, false, lowercase)
@@ -3349,7 +3349,7 @@ impl_oracle_client_pymethods!(
             consumer_name: Option<String>,
             wait_timeout_seconds: u32,
             max_buffered: usize,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
             validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
             if let Some(ref c) = consumer_name {
@@ -3393,7 +3393,7 @@ impl_oracle_client_pymethods!(
             payload: Vec<u8>,
             consumer_name: Option<String>,
             correlation_id: Option<String>,
-        ) -> PyResult<RustDbTaskAwaitable> {
+        ) -> PyResult<TaskAwaitable> {
             self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
             validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
             if let Some(ref c) = consumer_name {

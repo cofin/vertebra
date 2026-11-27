@@ -35,7 +35,7 @@ from starlette.testclient import TestClient
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.agent.mcp.controllers import mcp_tool
-from vertebra.agent.mcp.routes import AsgiMcpApp
+from vertebra.agent.mcp.routes import AsgiMCPApp
 from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig
 from vertebra.extensions.alchemy import (
     create_async_alchemy_config,
@@ -410,12 +410,12 @@ def test_channels_backend_accepts_engine_neutral_bus() -> None:
 
 @pytest.mark.anyio
 async def test_starlette_mount_mcp_routes_uses_shared_asgi_mcp_app() -> None:
-    """Starlette mount_mcp_routes delegates /mcp to shared AsgiMcpApp over MCPCore."""
+    """Starlette mount_mcp_routes delegates /mcp to shared AsgiMCPApp over MCPCore."""
     app = _make_mock_starlette_app()
     mcp_reg = mount_mcp_routes(app, webmcp_config=WebMCPConfig(enabled=True))
     assert mcp_reg.get_spec("create_item") is not None
     mcp_app = getattr(app.state, "mcp_app", None)
-    assert isinstance(mcp_app, AsgiMcpApp)
+    assert isinstance(mcp_app, AsgiMCPApp)
 
     proto_discover = AsgiProtocol(b'{"jsonrpc":"2.0","id":1,"method":"server/discover"}')
     scope_discover = AsgiScope.from_parts(

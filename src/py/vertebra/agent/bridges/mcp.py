@@ -1,6 +1,6 @@
 """Bridge exposing A2A 1.0 agents and skills as callable MCP tools.
 
-This module provides McpToolBridge which inspects an A2A AgentCard or A2AService,
+This module provides MCPToolBridge which inspects an A2A AgentCard or A2AService,
 synthesizes MCP Tool descriptors for each skill, and propagates W3C trace context.
 """
 
@@ -16,12 +16,12 @@ from vertebra.telemetry.genai import inject_w3c_trace_context
 from vertebra.telemetry.otel import TraceContext
 
 __all__ = [
-    "McpToolBridge",
+    "MCPToolBridge",
     "a2a_card_to_mcp_tools",
 ]
 
 
-class McpToolBridge:
+class MCPToolBridge:
     """Translates A2A 1.0 skills into callable MCP Tool instances."""
 
     @classmethod
@@ -150,4 +150,4 @@ def a2a_card_to_mcp_tools(
     prefix: str | None = None,
 ) -> list[Tool]:
     """Helper shortcut converting AgentCard skills to MCP tools."""
-    return McpToolBridge.from_agent_card(card, transport, prefix=prefix)
+    return MCPToolBridge.from_agent_card(card, transport, prefix=prefix)

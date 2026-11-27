@@ -99,7 +99,7 @@ The frontend surface spans the [`_bundler`](../../../../../src/rs/vertebra-bundl
 
 | Symbol | Python import | Responsibility |
 | --- | --- | --- |
-| `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile` | `vertebra._bundler` | Single-entry Oxc transform with optional minify and dev watcher control (`start_dev`, `stop_dev`, `poll_events`). |
+| `Bundler`, `BundleConfig`, `BundleDevConfig`, `BundleResult`, `BundleOutput` | `vertebra._bundler` | Single-entry Oxc transform with optional minify and dev watcher control (`start_dev`, `stop_dev`, `poll_events`). |
 | `SourceWatcher` (`PySourceWatcher`), `HmrEvent` | `_bundler` only | Debounced file watcher; Python drains changed paths with `poll_events(timeout_ms=None)`. |
 | `SSRPool`, `SSRResult` | `_bundler` only | QuickJS slot pool, fixed 60 s render cache, generation-based reload, `PoolExhausted` when all slots are busy. |
 | `IsolatedDeclarationsGenerator`, `minify_css` | `_bundler` only | `.d.ts` isolated declaration emission and CSS comment/whitespace minification. |

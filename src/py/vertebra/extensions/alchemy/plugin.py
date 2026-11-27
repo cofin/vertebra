@@ -18,7 +18,7 @@ from vertebra.extensions.alchemy.cache import (
     msgspec_model_serializer,
 )
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend, register_storage_backend
-from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool
+from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, SyncBrokerPool
 from vertebra.storage import AsyncObjectStore, SyncObjectStore
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
@@ -590,7 +590,7 @@ def _prepare_engine_config(
     is_async: bool = False,
     has_engine_instance: bool = False,
 ) -> None:
-    """Configure EngineConfig defaults, broker leasing connection args, and BrokerPool/AsyncBrokerPool."""
+    """Configure EngineConfig defaults, broker leasing connection args, and SyncBrokerPool/AsyncBrokerPool."""
     existing = kwargs.get("engine_config")
     if has_engine_instance:
         if isinstance(existing, BaseEngineConfig):
@@ -625,7 +625,7 @@ def _prepare_engine_config(
     scheme = probe_url.split("://", 1)[0].lower() if "://" in probe_url else ""
     is_vtb_dialect = any(marker in scheme for marker in ("+vtb", "+vertebra"))
     if broker is not None:
-        pool_cls = AsyncBrokerPool if is_async else BrokerPool
+        pool_cls = AsyncBrokerPool if is_async else SyncBrokerPool
         if cfg.poolclass is Empty:
             cfg.poolclass = pool_cls.bind_class(broker=broker, url=probe_url)
         if is_vtb_dialect:
