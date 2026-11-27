@@ -105,6 +105,7 @@ struct WorkerSlot {
     running_op: Arc<AtomicU64>,
     interrupts: Arc<Mutex<InterruptState>>,
     last_rowid: Option<Arc<AtomicI64>>,
+    in_transaction: Option<Arc<AtomicBool>>,
 }
 
 impl WorkerSlot {
@@ -113,6 +114,7 @@ impl WorkerSlot {
         is_writer: bool,
         interrupts: Arc<Mutex<InterruptState>>,
         last_rowid: Option<Arc<AtomicI64>>,
+        in_transaction: Option<Arc<AtomicBool>>,
     ) -> Result<Self, SqliteClientError> {
         let conn = open_worker_connection(&config, is_writer)?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
@@ -123,6 +125,7 @@ impl WorkerSlot {
             running_op,
             interrupts,
             last_rowid,
+            in_transaction,
         })
     }
 
@@ -141,9 +144,13 @@ impl WorkerSlot {
                 is_transient: false,
             });
         };
-        run_flagged_op(&self.interrupts, op_id, &self.running_op, || {
+        let res = run_flagged_op(&self.interrupts, op_id, &self.running_op, || {
             f(conn, self.last_rowid.as_ref())
-        })
+        });
+        if let Some(in_tx) = self.in_transaction.as_ref() {
+            in_tx.store(!conn.is_autocommit(), Ordering::Release);
+        }
+        res
     }
 
     fn run_statement(
@@ -544,11 +551,25 @@ fn is_write_keyword(token: &str) -> bool {
         || token.eq_ignore_ascii_case("RELEASE")
 }
 
-fn is_read_only_sql(sql: &str) -> bool {
+fn skips_lazy_begin_first_token(token: &str) -> bool {
+    token.eq_ignore_ascii_case("PRAGMA")
+        || token.eq_ignore_ascii_case("BEGIN")
+        || token.eq_ignore_ascii_case("COMMIT")
+        || token.eq_ignore_ascii_case("END")
+        || token.eq_ignore_ascii_case("ROLLBACK")
+        || token.eq_ignore_ascii_case("RELEASE")
+        || token.eq_ignore_ascii_case("ATTACH")
+        || token.eq_ignore_ascii_case("DETACH")
+        || token.eq_ignore_ascii_case("VACUUM")
+}
+
+fn analyze_statement_facts(sql: &str) -> StatementFacts {
     let bytes = sql.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     let mut first_token: Option<&str> = None;
+    let mut starts_read = false;
+    let mut saw_write = false;
 
     while i < len {
         let b = bytes[i];
@@ -597,6 +618,13 @@ fn is_read_only_sql(sql: &str) -> bool {
             }
             continue;
         }
+        if (b == b':' || b == b'@' || b == b'$') && i + 1 < len && is_ident_continue(bytes[i + 1]) {
+            i += 2;
+            while i < len && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            continue;
+        }
         if is_ident_start(b) {
             let start = i;
             i += 1;
@@ -605,81 +633,39 @@ fn is_read_only_sql(sql: &str) -> bool {
             }
             let token = &sql[start..i];
             if first_token.is_none() {
-                let starts_read = token.eq_ignore_ascii_case("SELECT")
+                first_token = Some(token);
+                starts_read = token.eq_ignore_ascii_case("SELECT")
                     || token.eq_ignore_ascii_case("EXPLAIN")
                     || token.eq_ignore_ascii_case("VALUES")
                     || token.eq_ignore_ascii_case("WITH");
                 if !starts_read {
-                    return false;
+                    saw_write = true;
+                    break;
                 }
-                first_token = Some(token);
             } else if is_write_keyword(token) {
-                return false;
+                saw_write = true;
+                break;
             }
             continue;
         }
         i += 1;
     }
 
-    first_token.is_some()
-}
-
-fn first_sql_token(sql: &str) -> Option<&str> {
-    let bytes = sql.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        let b = bytes[i];
-        if b.is_ascii_whitespace() {
-            i += 1;
-            continue;
-        }
-        if b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
-            i += 2;
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = (i + 2).min(len);
-            continue;
-        }
-        if is_ident_start(b) {
-            let start = i;
-            i += 1;
-            while i < len && is_ident_continue(bytes[i]) {
-                i += 1;
-            }
-            return Some(&sql[start..i]);
-        }
-        return None;
-    }
-    None
-}
-
-fn needs_lazy_begin_sql(sql: &str, read_only: bool) -> bool {
-    if read_only {
-        return false;
-    }
-    let Some(first) = first_sql_token(sql) else {
-        return false;
+    let Some(first) = first_token else {
+        return StatementFacts {
+            read_only: false,
+            needs_lazy_begin: false,
+            is_insert: false,
+        };
     };
-    !(first.eq_ignore_ascii_case("PRAGMA")
-        || first.eq_ignore_ascii_case("BEGIN")
-        || first.eq_ignore_ascii_case("COMMIT")
-        || first.eq_ignore_ascii_case("END")
-        || first.eq_ignore_ascii_case("ROLLBACK")
-        || first.eq_ignore_ascii_case("SAVEPOINT")
-        || first.eq_ignore_ascii_case("RELEASE")
-        || first.eq_ignore_ascii_case("ATTACH")
-        || first.eq_ignore_ascii_case("DETACH")
-        || first.eq_ignore_ascii_case("VACUUM"))
+    let read_only = starts_read && !saw_write;
+    let needs_lazy_begin = !read_only && !skips_lazy_begin_first_token(first);
+    let is_insert = first.eq_ignore_ascii_case("INSERT");
+    StatementFacts {
+        read_only,
+        needs_lazy_begin,
+        is_insert,
+    }
 }
 
 /// Facts about one SQL text that decide routing, lazy_begin, and rowid reporting.
@@ -698,7 +684,7 @@ pub struct SqlitePool {
     config: SqliteClientConfig,
     writer: WorkerSlot,
     readers: Vec<WorkerSlot>,
-    in_transaction: AtomicBool,
+    in_transaction: Arc<AtomicBool>,
     closed: AtomicBool,
     reader_cursor: AtomicUsize,
     interrupts: Arc<Mutex<InterruptState>>,
@@ -713,19 +699,22 @@ impl SqlitePool {
         config.validate()?;
         let interrupts = Arc::new(Mutex::new(InterruptState::default()));
         let last_rowid = Arc::new(AtomicI64::new(0));
+        let in_transaction = Arc::new(AtomicBool::new(false));
 
         let writer = WorkerSlot::spawn(
             config.clone(),
             true,
             Arc::clone(&interrupts),
             Some(Arc::clone(&last_rowid)),
+            Some(Arc::clone(&in_transaction)),
         )?;
 
         let mut readers: Vec<WorkerSlot> = Vec::new();
         // If not plain in-memory, spawn readers
         if !config.is_plain_in_memory() && config.max_readers > 0 {
             for _ in 0..config.max_readers {
-                match WorkerSlot::spawn(config.clone(), false, Arc::clone(&interrupts), None) {
+                match WorkerSlot::spawn(config.clone(), false, Arc::clone(&interrupts), None, None)
+                {
                     Ok(slot) => readers.push(slot),
                     Err(err) => {
                         writer.signal_close();
@@ -742,7 +731,7 @@ impl SqlitePool {
             config,
             writer,
             readers,
-            in_transaction: AtomicBool::new(false),
+            in_transaction,
             closed: AtomicBool::new(false),
             reader_cursor: AtomicUsize::new(0),
             interrupts,
@@ -757,12 +746,7 @@ impl SqlitePool {
         if let Some(facts) = self.statement_facts.read().get(sql) {
             return *facts;
         }
-        let read_only = is_read_only_sql(sql);
-        let facts = StatementFacts {
-            read_only,
-            needs_lazy_begin: needs_lazy_begin_sql(sql, read_only),
-            is_insert: vertebra_core::text::classify_sql_statement(sql).1,
-        };
+        let facts = analyze_statement_facts(sql);
         let mut cache = self.statement_facts.write();
         if cache.len() == STATEMENT_CACHE_CAPACITY {
             cache.clear();
@@ -883,7 +867,9 @@ impl SqlitePool {
         params_seq: Vec<BoundParams>,
     ) -> Result<usize, SqliteClientError> {
         self.dispatch_write(op_id, |slot| {
-            slot.with_conn(op_id, |conn, _| execute_many_statement(conn, &sql, params_seq))
+            slot.with_conn(op_id, |conn, _| {
+                execute_many_statement(conn, &sql, params_seq)
+            })
         })
     }
 
@@ -1229,38 +1215,51 @@ mod tests {
 
     #[test]
     fn is_read_only_sql_lexical_classification() {
-        assert!(is_read_only_sql("SELECT 1"));
-        assert!(is_read_only_sql(
-            "SELECT id, created_at, updated_at, deleted_at FROM items WHERE id = ?"
-        ));
-        assert!(is_read_only_sql("/* trace */ SELECT 1"));
-        assert!(is_read_only_sql("-- leading note\nSELECT 'UPDATE', \"delete\", [insert] FROM items"));
-        assert!(is_read_only_sql("WITH cte AS (SELECT 1) SELECT * FROM cte"));
-        assert!(is_read_only_sql("EXPLAIN QUERY PLAN SELECT 1"));
-        assert!(is_read_only_sql("VALUES (1, 2)"));
+        assert!(analyze_statement_facts("SELECT 1").read_only);
+        assert!(
+            analyze_statement_facts(
+                "SELECT id, created_at, updated_at, deleted_at FROM items WHERE id = ?"
+            )
+            .read_only
+        );
+        assert!(
+            analyze_statement_facts("SELECT * FROM items WHERE status = :update AND tag = @delete")
+                .read_only
+        );
+        assert!(analyze_statement_facts("/* trace */ SELECT 1").read_only);
+        assert!(
+            analyze_statement_facts(
+                "-- leading note\nSELECT 'UPDATE', \"delete\", [insert] FROM items"
+            )
+            .read_only
+        );
+        assert!(analyze_statement_facts("WITH cte AS (SELECT 1) SELECT * FROM cte").read_only);
+        assert!(analyze_statement_facts("EXPLAIN QUERY PLAN SELECT 1").read_only);
+        assert!(analyze_statement_facts("VALUES (1, 2)").read_only);
 
-        assert!(!is_read_only_sql("INSERT INTO items VALUES (1)"));
-        assert!(!is_read_only_sql("UPDATE items SET x = 1"));
-        assert!(!is_read_only_sql("DELETE FROM items"));
-        assert!(!is_read_only_sql("REPLACE INTO items VALUES (1)"));
-        assert!(!is_read_only_sql(
-            "WITH cte AS (SELECT 1) REPLACE INTO items VALUES (1)"
-        ));
-        assert!(!is_read_only_sql(
-            "WITH cte AS (SELECT 1) INSERT INTO items SELECT * FROM cte"
-        ));
-        assert!(!is_read_only_sql("PRAGMA journal_mode = WAL"));
-        assert!(!is_read_only_sql("   -- only a comment"));
-
-        assert!(!needs_lazy_begin_sql("SELECT 1", true));
-        assert!(!needs_lazy_begin_sql("PRAGMA read_uncommitted", false));
-        assert!(!needs_lazy_begin_sql("BEGIN IMMEDIATE", false));
-        assert!(needs_lazy_begin_sql("INSERT INTO items VALUES (1)", false));
-        assert!(needs_lazy_begin_sql("CREATE TABLE items (id INT)", false));
-        assert!(needs_lazy_begin_sql(
-            "WITH cte AS (SELECT 1) REPLACE INTO items VALUES (1)",
-            false
-        ));
+        let ins = analyze_statement_facts("INSERT INTO items VALUES (1)");
+        assert!(!ins.read_only && ins.needs_lazy_begin && ins.is_insert);
+        let semi_ins = analyze_statement_facts("; INSERT INTO items VALUES (1)");
+        assert!(!semi_ins.read_only && semi_ins.needs_lazy_begin && semi_ins.is_insert);
+        assert!(!analyze_statement_facts("UPDATE items SET x = 1").read_only);
+        assert!(!analyze_statement_facts("DELETE FROM items").read_only);
+        assert!(!analyze_statement_facts("REPLACE INTO items VALUES (1)").read_only);
+        let with_replace =
+            analyze_statement_facts("WITH cte AS (SELECT 1) REPLACE INTO items VALUES (1)");
+        assert!(!with_replace.read_only && with_replace.needs_lazy_begin);
+        assert!(
+            !analyze_statement_facts("WITH cte AS (SELECT 1) INSERT INTO items SELECT * FROM cte")
+                .read_only
+        );
+        let pragma = analyze_statement_facts("PRAGMA read_uncommitted");
+        assert!(!pragma.read_only && !pragma.needs_lazy_begin);
+        let begin = analyze_statement_facts("BEGIN IMMEDIATE");
+        assert!(!begin.read_only && !begin.needs_lazy_begin);
+        let sp = analyze_statement_facts("SAVEPOINT sa_savepoint_1");
+        assert!(!sp.read_only && sp.needs_lazy_begin);
+        let empty = analyze_statement_facts("   -- only a comment");
+        assert!(!empty.read_only && !empty.needs_lazy_begin);
+        assert!(analyze_statement_facts("CREATE TABLE items (id INT)").needs_lazy_begin);
     }
 
     #[test]

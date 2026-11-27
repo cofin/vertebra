@@ -2299,8 +2299,7 @@ async def test_async_sqlite_sqlalchemy_reads_succeed_while_writer_holds_lock(tmp
                 asyncio.gather(*(_read_one((i % 20) + 1) for i in range(40))),
                 timeout=2.0,
             )
-            assert len(values) == 40
-            assert values[0] == 7
+            assert values == [((i % 20) + 1) * 7 for i in range(40)]
         finally:
             await engine.dispose()
     finally:
@@ -2330,9 +2329,12 @@ async def test_async_sqlite_sqlalchemy_concurrent_read_modify_write_sessions(tmp
 
         async def _update_row(row_id: int, new_val: int) -> int:
             async with engine.begin() as conn:
-                _ = (
-                    await conn.execute(text("SELECT randomnumber FROM world WHERE id = :id"), {"id": row_id})
-                ).scalar_one()
+                current = int(
+                    (
+                        await conn.execute(text("SELECT randomnumber FROM world WHERE id = :id"), {"id": row_id})
+                    ).scalar_one()
+                )
+                assert current == row_id
                 await conn.execute(
                     text("UPDATE world SET randomnumber = :val WHERE id = :id"),
                     {"val": new_val, "id": row_id},
@@ -2342,7 +2344,40 @@ async def test_async_sqlite_sqlalchemy_concurrent_read_modify_write_sessions(tmp
         results = await asyncio.gather(*(_update_row(i, i * 100) for i in range(1, 21)))
         assert results == [i * 100 for i in range(1, 21)]
         async with engine.connect() as verify_conn:
-            total = int((await verify_conn.execute(text("SELECT SUM(randomnumber) FROM world"))).scalar_one())
-            assert total == sum(i * 100 for i in range(1, 21))
+            rows = (await verify_conn.execute(text("SELECT id, randomnumber FROM world ORDER BY id"))).all()
+            assert [(int(r[0]), int(r[1])) for r in rows] == [(i, i * 100) for i in range(1, 21)]
     finally:
         await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_sqlite_sqlalchemy_begin_nested_savepoint_and_outer_rollback(tmp_path: Path) -> None:
+    """Verify SQLAlchemy begin_nested SAVEPOINT opens an outer transaction and rolls back on outer abort."""
+    sync_db = tmp_path / "nested_sync.db"
+    sync_engine = create_engine(f"sqlite+vtb:///{sync_db}", connect_args={"share_pool": False})
+    try:
+        with sync_engine.begin() as conn:
+            conn.execute(text("CREATE TABLE nested_items (id INTEGER PRIMARY KEY)"))
+        with sync_engine.connect() as conn:
+            with conn.begin_nested():
+                conn.execute(text("INSERT INTO nested_items VALUES (1)"))
+            conn.rollback()
+        with sync_engine.connect() as verify_conn:
+            assert int(verify_conn.execute(text("SELECT COUNT(*) FROM nested_items")).scalar_one()) == 0
+    finally:
+        sync_engine.dispose()
+
+    async_db = tmp_path / "nested_async.db"
+    async_engine = create_async_engine(f"sqlite+vtb_async:///{async_db}", connect_args={"share_pool": False})
+    try:
+        async with async_engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE nested_items (id INTEGER PRIMARY KEY)"))
+        async with async_engine.connect() as conn:
+            async with conn.begin_nested():
+                await conn.execute(text("INSERT INTO nested_items VALUES (1)"))
+            await conn.rollback()
+        async with async_engine.connect() as verify_conn:
+            count = int((await verify_conn.execute(text("SELECT COUNT(*) FROM nested_items"))).scalar_one())
+            assert count == 0
+    finally:
+        await async_engine.dispose()

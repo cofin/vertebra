@@ -2057,3 +2057,26 @@ async def test_lazy_begin_read_then_write_opens_rollbackable_tx() -> None:
         assert await driver.execute_tuples("SELECT val FROM items WHERE id = ?", (1,)) == [(10,)]
     finally:
         await driver.close()
+
+
+@pytest.mark.anyio
+async def test_lazy_begin_raw_sql_transaction_control_syncs_in_transaction() -> None:
+    """Verify raw BEGIN/COMMIT on lazy_begin cursors keeps driver.in_transaction synchronized."""
+    driver = AsyncSQLiteDriver()
+    try:
+        await driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, val INTEGER)")
+        cur = driver.cursor(lazy_begin=True)
+        await cur.execute("BEGIN")
+        assert driver.in_transaction is True
+        await cur.execute("INSERT INTO items VALUES (?, ?)", (1, 100))
+        assert driver.in_transaction is True
+        await cur.execute("COMMIT")
+        assert driver.in_transaction is False
+
+        await cur.execute("INSERT INTO items VALUES (?, ?)", (2, 200))
+        assert driver.in_transaction is True
+        await driver.rollback()
+        assert driver.in_transaction is False
+        assert await driver.execute_tuples("SELECT id, val FROM items ORDER BY id") == [(1, 100)]
+    finally:
+        await driver.close()
