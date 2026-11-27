@@ -409,6 +409,7 @@ pub(super) fn dispatch_bridge_vec(
     let mut current_attempt = 0usize;
     let mut current_shard_idx = start;
     let mut current_guard = None;
+    let now = std::time::Instant::now();
 
     for req in requests.drain(..) {
         let is_fnf = (req.flags & flags::FIRE_AND_FORGET) != 0;
@@ -423,7 +424,7 @@ pub(super) fn dispatch_bridge_vec(
                     .get_or_insert_with(|| bridge_corr.shards[current_shard_idx].lock().unwrap());
                 if guard.in_flight() < guard.capacity() {
                     let cid = guard
-                        .insert(current_shard_idx as u8, reply.take().unwrap(), 0)
+                        .insert_with_now(current_shard_idx as u8, reply.take().unwrap(), 0, now)
                         .expect("correlation slot available after capacity check");
                     allocated = Some(cid.raw());
                     break;

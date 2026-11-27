@@ -158,11 +158,11 @@ impl Request {
 
     #[getter]
     fn body<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
-        let body = self.get_body_bytes();
-        if body.is_empty() {
+        let slice = self.batch.body(self.index);
+        if slice.is_empty() {
             None
         } else {
-            Some(PyBytes::new(py, body))
+            Some(PyBytes::new(py, slice))
         }
     }
 

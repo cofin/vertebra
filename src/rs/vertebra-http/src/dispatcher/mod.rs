@@ -21,7 +21,7 @@ pub mod types;
 
 pub use self::bridge::BridgeCorrelation;
 pub use self::correlation::{CorrelationId, InFlightRequests};
-pub use self::shm::{ShmDispatcher, ShmTargetError};
+pub use self::shm::{ShmDispatchScratch, ShmDispatcher, ShmTargetError};
 pub use self::streams::ResponseStreamRegistry;
 
 use std::sync::Arc;
@@ -181,12 +181,26 @@ impl Dispatcher {
         batcher_shard: Option<usize>,
         requests: &mut Vec<PendingRequest>,
     ) -> usize {
+        let mut scratch = ShmDispatchScratch::default();
+        self.dispatch_requests_from_shard_with_scratch(batcher_shard, requests, &mut scratch)
+    }
+
+    /// Dispatch requests from a specific batcher shard using reusable SHM scratch buffers.
+    #[inline]
+    pub fn dispatch_requests_from_shard_with_scratch(
+        &self,
+        batcher_shard: Option<usize>,
+        requests: &mut Vec<PendingRequest>,
+        scratch: &mut ShmDispatchScratch,
+    ) -> usize {
         match &self.backend {
             DispatchBackend::Direct(tx) => direct::dispatch_direct_vec(tx, requests),
             DispatchBackend::Bridge(bridge) => {
                 bridge::dispatch_bridge_vec(bridge, batcher_shard, requests)
             }
-            DispatchBackend::Shm(shm) => shm.dispatch_shm_vec_from_shard(batcher_shard, requests),
+            DispatchBackend::Shm(shm) => {
+                shm.dispatch_shm_vec_from_shard_with_scratch(batcher_shard, requests, scratch)
+            }
         }
     }
 

@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, trace};
 
 pub use crate::body::PendingResponse;
-use crate::dispatcher::Dispatcher;
+use crate::dispatcher::{Dispatcher, ShmDispatchScratch};
 
 /// Configurable upper bound on requests per batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +179,7 @@ impl RequestBatcher {
         let max_size = self.limit.max.max(1);
         let mut pending: Vec<PendingRequest> = Vec::with_capacity(max_size);
         let mut draining: Vec<PendingRequest> = Vec::with_capacity(max_size);
+        let mut shm_scratch = ShmDispatchScratch::default();
 
         while let Some(req) = self.rx.recv().await {
             pending.push(req);
@@ -203,22 +204,25 @@ impl RequestBatcher {
 
             trace!(depth = pending.len(), "queued request(s)");
             std::mem::swap(&mut pending, &mut draining);
-            self.drain(&mut draining);
+            self.drain(&mut draining, &mut shm_scratch);
         }
 
         if !pending.is_empty() {
             std::mem::swap(&mut pending, &mut draining);
-            self.drain(&mut draining);
+            self.drain(&mut draining, &mut shm_scratch);
         }
         debug!("RequestBatcher shutting down");
     }
 
     #[inline]
-    fn drain(&mut self, draining: &mut Vec<PendingRequest>) {
+    fn drain(&mut self, draining: &mut Vec<PendingRequest>, shm_scratch: &mut ShmDispatchScratch) {
         let count = draining.len();
         debug!(count, "draining batch");
-        self.dispatcher
-            .dispatch_requests_from_shard(self.shard_idx, draining);
+        self.dispatcher.dispatch_requests_from_shard_with_scratch(
+            self.shard_idx,
+            draining,
+            shm_scratch,
+        );
         draining.clear();
     }
 }

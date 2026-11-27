@@ -72,11 +72,14 @@ __all__ = (
     "_MOUNT_INDEX_MASK",
     "_RAW_BUFFER_TYPES",
     "_ZPAGES_HANDLER_ID",
+    "_AsyncErrorStub",
+    "_await_async_item",
     "_call_handler",
     "_handler_meta",
     "_is_potential_special_return",
     "_resolve_asgi_batch_timeout",
     "_resolve_handler_args",
+    "_schedule_coros",
     "_submit_coerced",
     "_try_submit_native_special_return",
     "build_error_response",
@@ -127,7 +130,9 @@ def _extract_request(request: Any) -> Any:
 def _extract_body(request: Any) -> bytes:
     """Extract body bytes from the request."""
     body = getattr(request, "body", b"")
-    return body if isinstance(body, bytes) else bytes(body or b"")
+    if body is None:
+        return b""
+    return body if isinstance(body, bytes) else bytes(body)
 
 
 def _extract_headers(request: Any) -> Any:
@@ -292,25 +297,45 @@ def compile_handler_spec(
         )
 
     if all_simple_extractors and not needs_path_params and not needs_query_map and not has_di_params:
-        simple_extractors = tuple(
-            p.extractor
-            if p.extractor is not None
-            else _build_simple_wrapper(_PARAM_EXTRACTORS.get(p.name, _extract_request))
-            for p in param_plans
-        )
+        raw_extractors = tuple(_PARAM_EXTRACTORS.get(p.name, _extract_request) for p in param_plans)
+        if len(raw_extractors) == 1:
+            ext0 = raw_extractors[0]
+
+            def _resolve_one_simple_arg(
+                request: Any,
+                _fn: Callable[[Any], Any] = ext0,
+            ) -> tuple[Any, ...]:
+                return (_fn(request),)
+
+            def _invoke_one_simple_arg(
+                request: Any,
+                _h: Any = handler,
+                _fn: Callable[[Any], Any] = ext0,
+            ) -> Any:
+                return _h(_fn(request))
+
+            return HandlerSpec(
+                has_params=True,
+                is_async=effective_is_async,
+                param_names=params,
+                invoker=_invoke_one_simple_arg,
+                sync_to_thread=resolved_sync_to_thread,
+                status_code=status_code,
+                arg_resolver=_resolve_one_simple_arg,
+            )
 
         def _resolve_simple_args(
             request: Any,
-            _ext: tuple[Callable[[Any, dict[str, Any], dict[str, str]], Any], ...] = simple_extractors,
+            _ext: tuple[Callable[[Any], Any], ...] = raw_extractors,
         ) -> tuple[Any, ...]:
-            return tuple(fn(request, {}, {}) for fn in _ext)
+            return tuple(fn(request) for fn in _ext)
 
         def _invoke_with_simple_extractors(
             request: Any,
             _h: Any = handler,
-            _ext: tuple[Callable[[Any, dict[str, Any], dict[str, str]], Any], ...] = simple_extractors,
+            _ext: tuple[Callable[[Any], Any], ...] = raw_extractors,
         ) -> Any:
-            return _h(*(fn(request, {}, {}) for fn in _ext))
+            return _h(*[fn(request) for fn in _ext])
 
         return HandlerSpec(
             has_params=has_params,

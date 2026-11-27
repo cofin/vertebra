@@ -88,12 +88,14 @@ impl InFlightRequests {
         }
     }
 
-    /// Insert a reply channel and return a correlation ID preserving 32-bit generation.
-    pub fn insert(
+    /// Insert a reply channel using a caller-supplied timestamp to amortize `Instant::now()` across a batch.
+    #[inline]
+    pub fn insert_with_now(
         &mut self,
         shard: u8,
         reply: oneshot::Sender<PendingResponse>,
         worker_id: u32,
+        now: Instant,
     ) -> Option<CorrelationId> {
         let index = self.free_list.pop()? as usize;
         self.generations[index] = self.generations[index].wrapping_add(1);
@@ -101,11 +103,22 @@ impl InFlightRequests {
 
         self.slots[index] = Some(CorrelationEntry {
             reply,
-            created_at: Instant::now(),
+            created_at: now,
             worker_id,
         });
 
         Some(CorrelationId::encode(shard, index as u32, generation))
+    }
+
+    /// Insert a reply channel and return a correlation ID preserving 32-bit generation.
+    #[inline]
+    pub fn insert(
+        &mut self,
+        shard: u8,
+        reply: oneshot::Sender<PendingResponse>,
+        worker_id: u32,
+    ) -> Option<CorrelationId> {
+        self.insert_with_now(shard, reply, worker_id, Instant::now())
     }
 
     /// Pop a matching reply sender and target worker ID from the slab so the caller can invoke `send` outside locks.
@@ -380,6 +393,31 @@ mod tests {
             },
         );
         assert!(!result);
+    }
+
+    #[test]
+    fn insert_with_now_records_batch_timestamp_for_expiry() {
+        let mut slab = InFlightRequests::new(4);
+        let old_now = Instant::now() - Duration::from_secs(10);
+        let fresh_now = Instant::now();
+        let (tx1, _rx1) = oneshot::channel();
+        let (tx2, _rx2) = oneshot::channel();
+
+        let cid1 = slab
+            .insert_with_now(1, tx1, 7, old_now)
+            .expect("insert old");
+        let cid2 = slab
+            .insert_with_now(1, tx2, 9, fresh_now)
+            .expect("insert fresh");
+        assert_eq!(cid1.shard(), 1);
+        assert_eq!(cid2.shard(), 1);
+
+        let expired = slab.take_expired_with_worker(Duration::from_secs(5));
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].1, 7);
+        assert_eq!(slab.in_flight(), 1);
+        assert!(slab.take_completed(cid2).is_some());
+        assert_eq!(slab.in_flight(), 0);
     }
 
     #[test]

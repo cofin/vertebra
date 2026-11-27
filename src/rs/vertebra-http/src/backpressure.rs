@@ -148,6 +148,7 @@ static NEXT_THREAD_SHARD: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     static THREAD_BUCKET_SHARD: usize =
         NEXT_THREAD_SHARD.fetch_add(1, Ordering::Relaxed) & (BUCKET_SHARDS - 1);
+    static CLOCK_SAMPLE_COUNTER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 #[inline]
@@ -174,20 +175,38 @@ struct QueueWakeState {
 }
 
 /// Lock-free RAII guard for an admitted unary or priority HTTP request.
-#[derive(Debug)]
-pub struct AdmissionPermit {
-    counter: Arc<CacheLine<AtomicUsize>>,
-    wake: Option<Arc<QueueWakeState>>,
+pub struct AdmissionPermit<'a> {
+    controller: &'a BackpressureController,
+    is_priority: bool,
 }
 
-impl Drop for AdmissionPermit {
+impl std::fmt::Debug for AdmissionPermit<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdmissionPermit")
+            .field("is_priority", &self.is_priority)
+            .finish()
+    }
+}
+
+impl Drop for AdmissionPermit<'_> {
     fn drop(&mut self) {
-        self.counter.0.fetch_sub(1, Ordering::AcqRel);
-        std::sync::atomic::fence(Ordering::SeqCst);
-        if let Some(ref wake) = self.wake
-            && wake.queue_depth.0.load(Ordering::Acquire) > 0
-        {
-            wake.slot_notify.notify_one();
+        if self.is_priority {
+            self.controller
+                .priority_in_flight
+                .0
+                .fetch_sub(1, Ordering::AcqRel);
+        } else {
+            self.controller.in_flight.0.fetch_sub(1, Ordering::SeqCst);
+            if self
+                .controller
+                .wake_state
+                .queue_depth
+                .0
+                .load(Ordering::SeqCst)
+                > 0
+            {
+                self.controller.wake_state.slot_notify.notify_one();
+            }
         }
     }
 }
@@ -209,9 +228,9 @@ pub struct BackpressureController {
     config: BackpressureConfig,
     max_in_flight: usize,
     max_priority_in_flight: usize,
-    in_flight: Arc<CacheLine<AtomicUsize>>,
-    priority_in_flight: Arc<CacheLine<AtomicUsize>>,
-    wake_state: Arc<QueueWakeState>,
+    in_flight: CacheLine<AtomicUsize>,
+    priority_in_flight: CacheLine<AtomicUsize>,
+    wake_state: QueueWakeState,
     active_streams: Arc<AtomicUsize>,
     buffered_chunks: AtomicUsize,
     paused: AtomicBool,
@@ -219,6 +238,7 @@ pub struct BackpressureController {
     metrics: Arc<BackpressureMetrics>,
     clock_origin: Instant,
     clock_offset_ms: AtomicU64,
+    cached_elapsed_ms: AtomicU64,
     window_ms: u64,
     bucket_ms: u64,
     half_open_probes: u32,
@@ -246,12 +266,12 @@ impl BackpressureController {
             config,
             max_in_flight,
             max_priority_in_flight,
-            in_flight: Arc::new(CacheLine(AtomicUsize::new(0))),
-            priority_in_flight: Arc::new(CacheLine(AtomicUsize::new(0))),
-            wake_state: Arc::new(QueueWakeState {
+            in_flight: CacheLine(AtomicUsize::new(0)),
+            priority_in_flight: CacheLine(AtomicUsize::new(0)),
+            wake_state: QueueWakeState {
                 queue_depth: CacheLine(AtomicUsize::new(0)),
                 slot_notify: Notify::new(),
-            }),
+            },
             active_streams: Arc::new(AtomicUsize::new(0)),
             buffered_chunks: AtomicUsize::new(0),
             paused: AtomicBool::new(false),
@@ -259,6 +279,7 @@ impl BackpressureController {
             metrics: Arc::new(BackpressureMetrics::default()),
             clock_origin: Instant::now(),
             clock_offset_ms: AtomicU64::new(0),
+            cached_elapsed_ms: AtomicU64::new(0),
             window_ms,
             bucket_ms,
             half_open_probes,
@@ -271,6 +292,23 @@ impl BackpressureController {
     fn elapsed_ms(&self) -> u64 {
         (self.clock_origin.elapsed().as_millis() as u64)
             .saturating_add(self.clock_offset_ms.load(Ordering::Acquire))
+    }
+
+    #[inline]
+    fn coarse_elapsed_ms(&self) -> u64 {
+        let count = CLOCK_SAMPLE_COUNTER.with(|c| {
+            let n = c.get().wrapping_add(1);
+            c.set(n);
+            n
+        });
+        let real_ms = if (count & 63) == 1 {
+            let now = self.clock_origin.elapsed().as_millis() as u64;
+            self.cached_elapsed_ms.store(now, Ordering::Relaxed);
+            now
+        } else {
+            self.cached_elapsed_ms.load(Ordering::Relaxed)
+        };
+        real_ms.saturating_add(self.clock_offset_ms.load(Ordering::Acquire))
     }
 
     /// Advance the circuit-breaker clock by `delta` for deterministic testing.
@@ -480,11 +518,12 @@ impl BackpressureController {
     }
 
     #[inline]
-    fn try_claim_slot(
-        counter: &Arc<CacheLine<AtomicUsize>>,
-        max: usize,
-        wake: Option<Arc<QueueWakeState>>,
-    ) -> Option<AdmissionPermit> {
+    fn try_claim_slot(&self, is_priority: bool) -> Option<AdmissionPermit<'_>> {
+        let (counter, max) = if is_priority {
+            (&self.priority_in_flight, self.max_priority_in_flight)
+        } else {
+            (&self.in_flight, self.max_in_flight)
+        };
         let mut cur = counter.0.load(Ordering::Acquire);
         loop {
             if cur >= max {
@@ -496,8 +535,8 @@ impl BackpressureController {
             {
                 Ok(_) => {
                     return Some(AdmissionPermit {
-                        counter: Arc::clone(counter),
-                        wake,
+                        controller: self,
+                        is_priority,
                     });
                 }
                 Err(actual) => cur = actual,
@@ -510,10 +549,9 @@ impl BackpressureController {
     pub async fn try_acquire_for_path(
         &self,
         path: &str,
-    ) -> Result<AdmissionPermit, RejectionReason> {
+    ) -> Result<AdmissionPermit<'_>, RejectionReason> {
         if self.is_priority_route(path)
-            && let Some(permit) =
-                Self::try_claim_slot(&self.priority_in_flight, self.max_priority_in_flight, None)
+            && let Some(permit) = self.try_claim_slot(true)
         {
             self.metrics.accepted.fetch_add(1, Ordering::Relaxed);
             return Ok(permit);
@@ -523,7 +561,7 @@ impl BackpressureController {
 
     /// Attempt to admit a unary request without locks on the fastpath.
     #[inline]
-    pub async fn try_acquire(&self) -> Result<AdmissionPermit, RejectionReason> {
+    pub async fn try_acquire(&self) -> Result<AdmissionPermit<'_>, RejectionReason> {
         if !self.try_admit_circuit() {
             self.metrics
                 .circuit_rejected
@@ -531,11 +569,7 @@ impl BackpressureController {
             return Err(RejectionReason::CircuitOpen);
         }
 
-        if let Some(permit) = Self::try_claim_slot(
-            &self.in_flight,
-            self.max_in_flight,
-            Some(Arc::clone(&self.wake_state)),
-        ) {
+        if let Some(permit) = self.try_claim_slot(false) {
             self.metrics.accepted.fetch_add(1, Ordering::Relaxed);
             return Ok(permit);
         }
@@ -547,7 +581,7 @@ impl BackpressureController {
             return Err(RejectionReason::Saturated);
         }
 
-        let depth = self.wake_state.queue_depth.0.fetch_add(1, Ordering::AcqRel);
+        let depth = self.wake_state.queue_depth.0.fetch_add(1, Ordering::SeqCst);
         if depth >= self.config.max_queue_depth {
             self.wake_state.queue_depth.0.fetch_sub(1, Ordering::AcqRel);
             self.metrics
@@ -563,11 +597,7 @@ impl BackpressureController {
                 notified.as_mut().enable();
                 std::sync::atomic::fence(Ordering::SeqCst);
 
-                if let Some(permit) = Self::try_claim_slot(
-                    &self.in_flight,
-                    self.max_in_flight,
-                    Some(Arc::clone(&self.wake_state)),
-                ) {
+                if let Some(permit) = self.try_claim_slot(false) {
                     return permit;
                 }
                 notified.await;
@@ -594,13 +624,14 @@ impl BackpressureController {
     /// Record a successful request (2xx/3xx/4xx) without locks.
     #[inline]
     pub fn record_success(&self) {
-        let now_ms = self.elapsed_ms();
-        self.record_bucket_sample(now_ms, false);
-
         let mut word = self.circuit_word.0.load(Ordering::Acquire);
         if word == 0 {
+            let now_ms = self.coarse_elapsed_ms();
+            self.record_bucket_sample(now_ms, false);
             return;
         }
+        let now_ms = self.elapsed_ms();
+        self.record_bucket_sample(now_ms, false);
         loop {
             match word >> PHASE_SHIFT {
                 PHASE_OPEN => {
@@ -822,5 +853,47 @@ mod tests {
         assert_eq!(RejectionReason::QueueTimeout.status(), 503);
         assert_eq!(RejectionReason::StreamLimitExceeded.status(), 503);
         assert_eq!(RejectionReason::CircuitOpen.status(), 429);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dekker_permit_drop_wakes_queued_waiters_without_stall() {
+        let c = Arc::new(BackpressureController::new(BackpressureConfig {
+            max_in_flight: 2,
+            max_queue_depth: 64,
+            max_queue_time: Duration::from_secs(2),
+            ..BackpressureConfig::default()
+        }));
+
+        let mut tasks = Vec::new();
+        for _ in 0..48 {
+            let ctrl = Arc::clone(&c);
+            tasks.push(tokio::spawn(async move {
+                let permit = ctrl.try_acquire().await.expect("waiter must be admitted");
+                tokio::task::yield_now().await;
+                drop(permit);
+            }));
+        }
+        for t in tasks {
+            t.await.expect("task should not panic");
+        }
+        let snap = c.snapshot();
+        assert_eq!(snap.accepted, 48);
+        assert_eq!(snap.in_flight, 0);
+        assert_eq!(snap.queue_depth, 0);
+        assert_eq!(snap.timeout_rejected, 0);
+    }
+
+    #[test]
+    fn coarse_clock_respects_test_offset_and_opens_on_failures() {
+        let c = BackpressureController::new(cfg(16, 16));
+        for _ in 0..70 {
+            c.record_success();
+        }
+        c.advance_circuit_clock_for_test(Duration::from_millis(500));
+        assert!(c.coarse_elapsed_ms() >= 500);
+        for _ in 0..4 {
+            c.record_failure();
+        }
+        assert_eq!(c.snapshot().circuit_state, CircuitState::Open);
     }
 }

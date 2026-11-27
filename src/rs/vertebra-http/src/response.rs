@@ -73,8 +73,27 @@ pub async fn handle(
 
 /// Top-level request handler with connected peer address; called for every accepted HTTP connection.
 pub async fn handle_with_peer(
+    req: Request<Incoming>,
+    peer: SocketAddr,
+    state: Arc<ServerState>,
+) -> Result<HttpResponse, Infallible> {
+    handle_with_peer_inner(req, peer, None, state).await
+}
+
+/// Top-level request handler pinned to a per-connection collector shard.
+pub async fn handle_with_peer_shard(
+    req: Request<Incoming>,
+    peer: SocketAddr,
+    collector_shard: usize,
+    state: Arc<ServerState>,
+) -> Result<HttpResponse, Infallible> {
+    handle_with_peer_inner(req, peer, Some(collector_shard), state).await
+}
+
+async fn handle_with_peer_inner(
     mut req: Request<Incoming>,
     peer: SocketAddr,
+    collector_shard: Option<usize>,
     state: Arc<ServerState>,
 ) -> Result<HttpResponse, Infallible> {
     if state.config.dev_mode && hmr::is_hmr_path(req.uri().path()) {
@@ -92,6 +111,7 @@ pub async fn handle_with_peer(
         RequestBodySource::Incoming(body),
         on_upgrade,
         peer.ip(),
+        collector_shard,
         state,
     )
     .await
@@ -108,6 +128,7 @@ pub async fn handle_buffered(
         RequestBodySource::Buffered(body),
         None,
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        None,
         state,
     )
     .await
@@ -118,9 +139,11 @@ async fn dispatch_request(
     body: RequestBodySource,
     on_upgrade: Option<OnUpgrade>,
     peer_ip: IpAddr,
+    collector_shard: Option<usize>,
     state: Arc<ServerState>,
 ) -> Result<HttpResponse, Infallible> {
-    let mut resp = dispatch_request_inner(parts, body, on_upgrade, peer_ip, &state).await;
+    let mut resp =
+        dispatch_request_inner(parts, body, on_upgrade, peer_ip, collector_shard, &state).await;
     if let Some(port) = state.http3_port {
         crate::http3::inject_alt_svc_header(
             resp.headers_mut(),
@@ -136,6 +159,7 @@ async fn dispatch_request_inner(
     body: RequestBodySource,
     on_upgrade: Option<OnUpgrade>,
     peer_ip: IpAddr,
+    collector_shard: Option<usize>,
     state: &Arc<ServerState>,
 ) -> HttpResponse {
     // Health endpoint sits above routing and backpressure so probes always
@@ -396,24 +420,23 @@ async fn dispatch_request_inner(
     debug!(handler_id, method = %method, path, "routed request");
 
     // 2. Collect bounded body and optionally decompress Content-Encoding.
-    let content_length = parts
-        .headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<usize>().ok());
-    let active_encoding = is_active_content_encoding(
-        parts
-            .headers
-            .get(header::CONTENT_ENCODING)
-            .and_then(|v| v.to_str().ok()),
-    )
-    .map(str::to_owned);
-
     let collected_res: Result<(Bytes, bool), PayloadError> = match body {
         RequestBodySource::Incoming(incoming) => {
             if incoming.size_hint().exact() == Some(0) {
                 Ok((Bytes::new(), false))
             } else {
+                let content_length = parts
+                    .headers
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.trim().parse::<usize>().ok());
+                let active_encoding = is_active_content_encoding(
+                    parts
+                        .headers
+                        .get(header::CONTENT_ENCODING)
+                        .and_then(|v| v.to_str().ok()),
+                )
+                .map(str::to_owned);
                 collect_bounded_body(
                     incoming,
                     content_length,
@@ -424,12 +447,26 @@ async fn dispatch_request_inner(
                 .map(|bytes| (bytes, active_encoding.is_some()))
             }
         }
-        RequestBodySource::Buffered(raw_bytes) => decode_buffered_body(
-            raw_bytes,
-            content_length,
-            active_encoding.as_deref(),
-            &state.config.payload_limits,
-        ),
+        RequestBodySource::Buffered(raw_bytes) => {
+            let content_length = parts
+                .headers
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<usize>().ok());
+            let active_encoding = is_active_content_encoding(
+                parts
+                    .headers
+                    .get(header::CONTENT_ENCODING)
+                    .and_then(|v| v.to_str().ok()),
+            )
+            .map(str::to_owned);
+            decode_buffered_body(
+                raw_bytes,
+                content_length,
+                active_encoding.as_deref(),
+                &state.config.payload_limits,
+            )
+        }
     };
 
     let body_bytes = match collected_res {
@@ -588,7 +625,11 @@ async fn dispatch_request_inner(
     };
 
     // 5. Send to collector for batching.
-    if state.get_collector().send(pending).await.is_err() {
+    let collector = match collector_shard {
+        Some(shard) => state.collector_for_shard(shard),
+        None => state.get_collector(),
+    };
+    if collector.send(pending).await.is_err() {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "server shutting down");
     }
 
@@ -689,7 +730,7 @@ fn circuit_state_str(state: CircuitState) -> &'static str {
     }
 }
 
-/// Encode an `http::HeaderMap` directly into compact binary `Bytes` in a single allocation.
+/// Encode an `http::HeaderMap` directly into compact binary `Bytes` in a single pass.
 ///
 /// Wire format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`.
 /// Duplicate header names are preserved in iteration order and oversized components are clamped.
@@ -698,14 +739,7 @@ pub fn encode_header_map_compact(headers: &HeaderMap) -> Bytes {
     if headers.is_empty() {
         return Bytes::new();
     }
-    let mut total_bytes = 0usize;
-    for (name, value) in headers.iter() {
-        let nlen = name.as_str().len().min(u8::MAX as usize);
-        let vlen = value.as_bytes().len().min(u16::MAX as usize);
-        total_bytes += 3 + nlen + vlen;
-    }
-
-    let mut buf = Vec::with_capacity(total_bytes);
+    let mut buf = Vec::with_capacity(headers.len().saturating_mul(32));
     for (name, value) in headers.iter() {
         let n = name.as_str().as_bytes();
         let v = value.as_bytes();
@@ -1765,5 +1799,28 @@ mod tests {
         assert_eq!(shm.in_flight(), 0);
         assert_eq!(shm.worker_in_flight(0), 0);
         assert_eq!(shm.worker_in_flight(1), 0);
+    }
+
+    #[test]
+    fn encode_header_map_compact_single_pass_roundtrips_duplicates_and_long_values() {
+        assert!(encode_header_map_compact(&HeaderMap::new()).is_empty());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("example.test"));
+        headers.append(header::SET_COOKIE, HeaderValue::from_static("a=1"));
+        headers.append(header::SET_COOKIE, HeaderValue::from_static("b=2"));
+        let long_val = "x".repeat(512);
+        headers.insert(
+            http::HeaderName::from_static("x-long-value"),
+            HeaderValue::from_str(&long_val).unwrap(),
+        );
+
+        let encoded = encode_header_map_compact(&headers);
+        let decoded: Vec<(&[u8], &[u8])> = iter_raw_headers(&encoded).collect();
+        assert_eq!(decoded.len(), 4);
+        assert!(decoded.contains(&(b"host".as_slice(), b"example.test".as_slice())));
+        assert!(decoded.contains(&(b"set-cookie".as_slice(), b"a=1".as_slice())));
+        assert!(decoded.contains(&(b"set-cookie".as_slice(), b"b=2".as_slice())));
+        assert!(decoded.contains(&(b"x-long-value".as_slice(), long_val.as_bytes())));
     }
 }
