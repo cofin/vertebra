@@ -689,6 +689,7 @@ async def test_agent_chat_controller_endpoints() -> None:
         context=user_ctx,
     )
     assert code == 200
+    assert isinstance(body, bytes)
     parsed = decode_json(body)
     assert parsed["response"] == "Controller response"
     assert isinstance(parsed["usage"], dict)

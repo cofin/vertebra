@@ -13,6 +13,9 @@ generated:
   by: flow/0.30.1
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
   - by: agent:flow-archive
     at: "2026-11-16T15:16:00Z"
     commit: 11020d84
@@ -99,12 +102,12 @@ sources:
 <!-- truth: start -->
 ## Core Stack Invariants
 
-- **Python (`>=3.12`; CI & wheel matrix `3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t`)**: Published on PyPI as `vertebra-core` (`0.3.0`, `import vertebra`), managed with `uv`, and built via `maturin` (`>=1.5,<2`) and `cibuildwheel` across `vertebra-core` plus 12 companion wheels (`bundler`, `storage`, `mysql`, `bigquery`, `mssql`, `spanner`, `duckdb`, `oracle`, `postgres`, `sqlite`, `redis`, `valkey`). Runtime dependencies: `anyio>=4.0`, `msgspec>=0.18`, `rich>=13.0`, `rich-click>=1.7`.
-- **Rust (`edition = "2024"`, version `0.3.0`, stable toolchain `>=1.91.0`)**: 17 workspace crates under `src/rs/`:
+- **Python (`>=3.12`; CI & wheel matrix `3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t`)**: Published on PyPI as `vertebra-core` (`0.4.0`, `import vertebra`), managed with `uv`, and built via `maturin` (`>=1.5,<2`) and `cibuildwheel` across `vertebra-core` plus 12 companion wheels (`bundler`, `storage`, `mysql`, `bigquery`, `mssql`, `spanner`, `duckdb`, `oracle`, `postgres`, `sqlite`, `redis`, `valkey`). Runtime dependencies: `anyio>=4.0`, `msgspec>=0.18`, `rich>=13.0`, `rich-click>=1.7`.
+- **Rust (`edition = "2024"`, version `0.4.0`, stable toolchain `>=1.91.0`)**: 17 workspace crates under `src/rs/`:
   - **Runtime & HTTP**: `vertebra-core` (IPC rings, `BatchBridge`, SHM broker/cache, JWT, compression, `gcp-auth`), `vertebra-http` (`vertebra-server` on `hyper 1`, `tokio 1.54`, `matchit 0.9`, `tokio-tungstenite 0.30`), and `vertebra-py` (`PyO3 0.30.1` `vertebra._vertebra`, `gil_used = false`).
   - **Frontend, Storage & DB Core**: `vertebra-bundler` (`oxc_* 0.155`, `rquickjs 0.14`, `rolldown-notify 11.0`), `vertebra-storage` (`object_store 0.13.2` + native OCI and signing), `vertebra-db` (shared streams, cloud dialers, Arrow SHM, wire codecs), and internal `vertebra-resp` `rlib` (linked by `_redis` and `_valkey`, no separate wheel).
-  - **Standalone Driver Extensions**: `vertebra-mysql` (`mysql_async 0.37`), `vertebra-bigquery` (`google-cloud-bigquery =0.19.0`), `vertebra-mssql` (`tiberius =0.13.0`), `vertebra-oracle` (`oracledb =26.0.0-beta.5`), `vertebra-spanner` (`google-cloud-spanner =0.34.8-preview`), `vertebra-duckdb` (bundled `duckdb =1.20000.1`), `vertebra-postgres` (`postgres-protocol =0.6.12`), `vertebra-sqlite` (bundled `rusqlite` SQLite `3.50.x`), `vertebra-redis`, and `vertebra-valkey`.
-- **TypeScript (`@vertebra/client` `0.3.0`)**: Managed by `bun`, bundled with `tsup ^8.5.1`, type-checked with `typescript ^5.9.3`, linted with Biome `^2.6.6`, tested with Vitest `^5.1.0`, and synced into `src/py/vertebra/server/_js/bundle/`. Optional peers: `react ^19`, `vue ^3.5`, `@angular/core ^22`, `vite ^8`.
+  - **Standalone Driver Extensions**: `vertebra-mysql` (`mysql_async =0.37.1`), `vertebra-bigquery` (`google-cloud-bigquery =0.19.0`), `vertebra-mssql` (`tiberius =0.13.0`), `vertebra-oracle` (`oracledb =26.0.0-beta.6`), `vertebra-spanner` (`google-cloud-spanner =0.34.8-preview`), `vertebra-duckdb` (bundled `duckdb =1.20000.2`), `vertebra-postgres` (`postgres-protocol =0.6.12`), `vertebra-sqlite` (bundled `rusqlite =0.41.1`), `vertebra-redis`, and `vertebra-valkey`.
+- **TypeScript (`@vertebra/client` `0.4.0`)**: Managed by `bun`, bundled with `tsup ^8.5.1`, type-checked with `typescript ^5.9.3`, linted with Biome `^2.6.9`, tested with Vitest `^5.1.2`, and synced into `src/py/vertebra/server/_js/bundle/`. Optional peers: `react ^19`, `vue ^3.5`, `@angular/core ^22`, `vite ^8`.
 - **Verification & Docs Toolchain**: `ruff` (`line-length = 120`, `py312`, `E,F,I,UP,B,SIM`), `mypy` (`strict = true`) + 13-extension `mypy.stubtest`, `pyright`, `pytest` + `pytest-cov`, `zensical` + `mkdocstrings-python`, `cargo fmt`, `cargo clippy --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings`, `cargo test`, `bunx biome check`, Criterion `0.8`, and `tools.benchmarks`.
 <!-- truth: end -->
 
@@ -134,7 +137,7 @@ sources:
 
 - **Distribution & Build Backend**: `[project] name = "vertebra-core"` publishes `vertebra_core-*.whl` while `[tool.maturin]` sets `python-source = "src/py"`, `python-packages = ["vertebra"]`, and `module-name = "vertebra._vertebra"`. `make dev` and `make build` install all 13 extensions via `maturin develop`; `make build-pgo` runs two-phase Rust PGO via `tools/pgo/rust_pgo.py`.
 - **CLI & SQLAlchemy Entrypoints**: `vtb = "vertebra.cli:cli"` ([`cli/__init__.py`](../../../src/py/vertebra/cli/__init__.py)[^src-cli-init-py]). Nine database engines (`postgresql`, `oracle`, `mysql`, `sqlite`, `mssql`, `duckdb`, `bigquery`, `spanner`, `spangres`) each register `.vertebra`, `.vtb`, `.vertebra_async`, and `.vtb_async` dialects (36 entry points) in `vertebra.extensions.sqlalchemy.dialects`.
-- **Optional Extras**: Cover `sqlspec` (`>=0.74.1`), `alchemy` (`advanced-alchemy>=1.13.0b3`, `sqlalchemy>=2.1.0`, `alembic>=1.18.0`), data codecs (`arrow`, `pydantic`, `attrs`, `polars`), host frameworks (`litestar`, `starlette`, `fastapi`, `flask`, `django>=6.0`), Litestar/agent add-ons (`queues`, `security`, `autowire`, `email`, `mcp`, `vite`, `asyncapi`, `htmx`, `embeddings`, `iap`), event loops (`uvloop`, `winloop`, `rloop`, `zuvloop`), and all 12 companion `vertebra-*==0.3.0` wheels.
+- **Optional Extras**: Cover `sqlspec` (`>=0.74.1`), `alchemy` (`advanced-alchemy>=1.13.0b3`, `sqlalchemy>=2.1.0`, `alembic>=1.18.0`), data codecs (`arrow`, `pydantic`, `attrs`, `polars`), host frameworks (`litestar`, `starlette`, `fastapi`, `flask`, `django>=6.0`), Litestar/agent add-ons (`queues`, `security`, `autowire`, `email`, `mcp`, `vite`, `asyncapi`, `htmx`, `embeddings`, `iap`), event loops (`uvloop`, `winloop`, `rloop`, `zuvloop`), and all 12 companion `vertebra-*==0.4.0` wheels.
 - **Dependency Groups**: `dev` (`test` + `lint` + `build`), `doc`, `bench` (`duckdb>=1.0; python_version < '3.14'`, `uvicorn`, `granian`, `spikard`), `duckdb` (`python_version < '3.14'`), and `postgres-bench` (`asyncpg`/`psycopg` on `<3.14`). `make install` runs `uv sync --all-extras --dev --group doc`.
 - **Mypy Rules**: `[tool.mypy]` sets `strict = true`, `python_version = "3.12"`, covering `src/py/vertebra`, `src/py/tests/{unit,integration}`, `tools/{scripts,pgo,docs,benchmarks}`, and `docs/examples`. `ignore_missing_imports = true` is limited to untyped C or uninstalled optional modules, and `disallow_subclassing_any = false` is scoped to third-party SQLAlchemy/cache/Django adapter bases.
 

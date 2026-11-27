@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: '2026-11-04T04:33:00Z'
 verified:
+- by: agent:flow-setup
+  at: '2026-11-27T22:10:00Z'
+  commit: f3b624a2
 - by: agent:flow-executor
   at: '2026-11-13T06:06:00Z'
   commit: 05d88d00
@@ -38,6 +41,12 @@ sources:
 - id: src-vertebra-py-src-msgspec-bridge-rs
   resource: src/rs/vertebra-py/src/msgspec_bridge.rs
   title: Rust implementation module (src/rs/vertebra-py/src/msgspec_bridge.rs)
+- id: src-vertebra-py-src-async-bridge-rs
+  resource: src/rs/vertebra-py/src/async_bridge.rs
+  title: Core ReadyAwaitable, TaskAwaitable, and TaskPanicError bridge
+- id: src-vertebra-py-src-broker-rs
+  resource: src/rs/vertebra-py/src/broker.rs
+  title: Native LeaseBroker, StatementCache, ShmCache, and pubsub_publish bindings
 - id: src-vertebra-py-src-gcp-auth-rs
   resource: src/rs/vertebra-py/src/gcp_auth.rs
   title: Native GCP token cache and HTTP/2 post exports in vertebra._vertebra
@@ -83,6 +92,9 @@ sources:
 - id: src-server-dispatch-py
   resource: src/py/vertebra/server/_dispatch.py
   title: Python implementation module (src/py/vertebra/server/_dispatch.py)
+- id: src-server-mounts-py
+  resource: src/py/vertebra/server/_mounts.py
+  title: Lazy import-string mount resolution (src/py/vertebra/server/_mounts.py)
 - id: src-server-loops-py
   resource: src/py/vertebra/server/_loops.py
   title: Python implementation module (src/py/vertebra/server/_loops.py)
@@ -121,52 +133,54 @@ sources:
 # PyO3 FFI & Vectorized Batch Dispatch
 
 <!-- truth: start -->
-- Extensions (`vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-duckdb`, `vertebra-mssql`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-spanner`) compile with `#[pymodule(gil_used = false)]` and stub coverage in `src/py/vertebra/*.pyi`.
-- `vertebra._vertebra` anchors `Request`, `Headers`, `Response`, and `RequestBatch` to `Arc<BatchSnapshot>` with PEP 688 zero-copy `memoryview` access and progressive `submit_stream_frame` / `max_stream_frame_payload` streaming.
-- `Worker` compiles routes into `BatchDispatchPlan` and `HandlerSpec` tables, flushes inline sync handlers via `submit_batch_raw`, streams tuple iterables progressively, and drives ASGI/RSGI/WSGI mounts directly from Rust.
-- Optional database extensions (`_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`) isolate per-loop completion drainers (`spawn_rust_db_task_with_attr` / `_and_future`), guard ordered replication leases with `PendingDeliveryGuard`, and transfer Arrow tables via `vertebra.ShmCapsule`.
+- All 13 PyO3 extensions (`vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-duckdb`, `vertebra-mssql`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-redis`, `vertebra-spanner`, `vertebra-sqlite`, `vertebra-valkey`) compile with `#[pymodule(gil_used = false)]` and stub coverage in `src/py/vertebra/_*.pyi`.
+- `vertebra._vertebra` anchors `Request`, `Headers`, `Response`, and `RequestBatch` to `Arc<BatchSnapshot>` with PEP 688 zero-copy `memoryview` access, owned `submit_batch_flushed` / `submit_batch_raw` batch flushes serialized by `ShmResponseLock` in SHM mode, and progressive `submit_stream_frame` / `max_stream_frame_payload` streaming.
+- `Worker` compiles routes into `HandlerSpec` tables, merges `all_sync_native` and `native_only` into a single pass (flushing sync replies via `submit_batch_raw` and driving async replies via `drive_native_batch`), streams tuple iterables progressively, resolves lazy string mounts on startup, and drives ASGI/RSGI/WSGI mounts directly from Rust.
+- Optional database extensions (`_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_redis`, `_spanner`, `_sqlite`, `_valkey`) isolate per-loop completion drainers (`spawn_rust_db_task_with_attr` / `_and_future` / `_and_cancel`), guard ordered replication and listener leases with RAII guards, and transfer Arrow tables via `vertebra.ShmCapsule`.
 <!-- truth: end -->
 
-[`vertebra-py`](../../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs] builds `vertebra._vertebra` (`#[pymodule(gil_used = false)]`, [`_vertebra.pyi`](../../../../../src/py/vertebra/_vertebra.pyi)[^src-vertebra-pyi]) alongside [`_bundler.pyi`](../../../../../src/py/vertebra/_bundler.pyi)[^src-bundler-pyi], [`_storage.pyi`](../../../../../src/py/vertebra/_storage.pyi)[^src-storage-pyi], [`_bigquery.pyi`](../../../../../src/py/vertebra/_bigquery.pyi)[^src-bigquery-pyi], `_duckdb.pyi`, `_mssql.pyi`, `_mysql.pyi`, `_oracle.pyi`, [`_postgres.pyi`](../../../../../src/py/vertebra/_postgres.pyi)[^src-postgres-pyi] ([`vertebra-postgres`](../../../../../src/rs/vertebra-postgres/src/lib.rs)[^src-vertebra-postgres-src-lib-rs]), and [`_spanner.pyi`](../../../../../src/py/vertebra/_spanner.pyi)[^src-spanner-pyi]. [`Worker`](../../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py] pulls `RequestBatch` snapshots across FFI, executes inline sync, WSGI (`drive_wsgi_batch`), and single-thread event-loop async/ASGI/RSGI batches (`drive_native_batch`, `drive_asgi_batch`, `drive_rsgi_batch`), and flushes responses to Rust.
+[`vertebra-py`](../../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs] builds `vertebra._vertebra` (`#[pymodule(gil_used = false)]`, [`_vertebra.pyi`](../../../../../src/py/vertebra/_vertebra.pyi)[^src-vertebra-pyi]) alongside 12 companion extensions ([`_bundler.pyi`](../../../../../src/py/vertebra/_bundler.pyi)[^src-bundler-pyi], [`_storage.pyi`](../../../../../src/py/vertebra/_storage.pyi)[^src-storage-pyi], [`_bigquery.pyi`](../../../../../src/py/vertebra/_bigquery.pyi)[^src-bigquery-pyi], `_duckdb.pyi`, `_mssql.pyi`, `_mysql.pyi`, `_oracle.pyi`, [`_postgres.pyi`](../../../../../src/py/vertebra/_postgres.pyi)[^src-postgres-pyi] from [`vertebra-postgres`](../../../../../src/rs/vertebra-postgres/src/lib.rs)[^src-vertebra-postgres-src-lib-rs], `_redis.pyi`, [`_spanner.pyi`](../../../../../src/py/vertebra/_spanner.pyi)[^src-spanner-pyi], `_sqlite.pyi`, and `_valkey.pyi`). [`Worker`](../../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py] pulls `RequestBatch` snapshots across FFI, executes inline sync, adaptive WSGI (`drive_wsgi_batch`), and event-loop async/ASGI/RSGI batches (`drive_native_batch`, `drive_asgi_batch`, `drive_rsgi_batch`), and flushes responses to Rust.
 
 ## Module surface (`lib.rs`, `transport.rs`)
 
 - **Runtime flags & hot classes**: `__version__`, `FREE_THREADED`, `GIL_USED` (`False`), `Request`, `Headers`, `HeadersIterator`, `Response`, `RequestBatch`, and `RequestBatchIterator`. Non-subclassed `#[pyclass]` types declare `immutable_type` (`Py_TPFLAGS_IMMUTABLETYPE`) and gate `freelist = 128` behind `#[cfg_attr(not(Py_GIL_DISABLED), ...)]` to avoid free-threaded global mutex contention.
-- **Protocol & stream drivers**: `AsgiScope`, `AsgiProtocol` (`body_bytes()`, `send_raw_response`, progressive `submit_stream_frame`), `EmptyAwaitable`, `ValueAwaitable`, `drive_asgi_batch`, `drive_native_batch`, `RsgiScope`, `RsgiHttpProtocol`, `RsgiTransport`, `_RsgiReadyAwaitable`, `drive_rsgi_batch`, `WsgiEnviron`, `WsgiInput`, `_WsgiStartResponse`, `drive_wsgi_batch`, and `stream_file_chunks` (see [ASGI, RSGI & WSGI Runners](asgi-and-wsgi-runners.md)).
-- **Transport & Dekker sleep FFI**: `init_transport(mode="inprocess", ...)` attaches `BatchBridge` or inherited `RingPair::from_env` FDs. `get_batch` and `try_get_batch` return zero-copy `RequestBatch` views checking `poll_batch_async` / `try_poll_batch` before `py.detach`. `get_request_notify_fd`, `clear_request_notification`, `prepare_request_sleep`, and `cancel_request_sleep` drive Dekker `SeqCst` wakeups. `submit_response_raw` and `submit_batch_raw` accept contiguous buffer-protocol objects inline for `<= 64 KiB` payloads; `submit_stream_frame` and `max_stream_frame_payload` manage chunked `VRSF` delivery (alongside `submit_response`, `submit_results`, `submit_raw_response`).
-- **Database, GCP auth/identity, vectors & text**: [`gcp_auth.rs`](../../../../../src/rs/vertebra-py/src/gcp_auth.rs)[^src-vertebra-py-src-gcp-auth-rs] & [`gcp_identity.rs`](../../../../../src/rs/vertebra-py/src/gcp_identity.rs)[^src-vertebra-py-src-gcp-identity-rs] export `SyncGcpTokenCache`, `AsyncGcpTokenCache`, `GcpTokenSnapshot`, `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, `GcpIdTokenSnapshot`, and `gcp_http2_post_{sync,async}`; [`db.rs`](../../../../../src/rs/vertebra-py/src/db.rs)[^src-py-arrow-cursor] & [`errors.rs`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs] export `TaskAwaitable`, `TaskPanicError`, canonical `DatabaseError`/`GoogleCloudError` subclasses, dialers, `ArrowCursor`, and `LeaseBroker`/`StatementCache`; [`vector.rs`](../../../../../src/rs/vertebra-py/src/vector.rs)[^src-vertebra-py-src-vector-rs] & [`text.rs`](../../../../../src/rs/vertebra-py/src/text.rs)[^src-vertebra-py-src-text-rs] export `VectorView`/`VectorCache`/`StaticEmbedderCore`, `encode_gemini_embed_contents_grpc_frame`, `decode_gemini_batch_embed_contents_grpc_frame`, and fail-loud `getrandom` UUID/NanoID primitives.
+- **Protocol & stream drivers**: `AsgiScope`, `AsgiProtocol` (`body_bytes()`, `send_raw_response`, progressive `submit_stream_frame`), `EmptyAwaitable`, `ValueAwaitable`, `drive_asgi_batch`, `drive_native_batch`, `RsgiScope`, `RsgiHttpProtocol`, `RsgiTransport`, `_RsgiReadyAwaitable`, `drive_rsgi_batch`, `WsgiEnviron`, `WsgiInput`, `WsgiFileWrapper`, `_WsgiStartResponse`, `run_wsgi_callable`, `drive_wsgi_batch`, `shutdown_wsgi_executor`, and `stream_file_chunks` (see [ASGI, RSGI & WSGI Runners](asgi-and-wsgi-runners.md)).
+- **Transport, `ShmResponseLock` & Dekker sleep FFI**: `init_transport(mode="inprocess", ...)` attaches `BatchBridge` or inherited `RingPair::from_env` FDs (`mode="shm"` is Unix-only and raises `RuntimeError` on Windows). `get_batch` and `try_get_batch` return zero-copy `RequestBatch` views checking `poll_batch_async` / `try_poll_batch` before `py.detach`. `get_request_notify_fd` (returns `-1` on Windows or multi-consumer Embedded), `clear_request_notification`, `prepare_request_sleep`, and `cancel_request_sleep` drive Dekker `SeqCst` wakeups. `submit_response_raw` and `submit_batch_raw` accept contiguous buffer-protocol objects inline for `<= 64 KiB` payloads; `ResponseSubmitter::submit_batch_flushed` moves owned `Vec<u8>` headers/bodies zero-copy into `Bytes` on Embedded mode and serializes multi-thread SHM response writes under `ShmResponseLock` (`lock_shm_response`, detaching the GIL on contention). `submit_stream_frame` and `max_stream_frame_payload` manage chunked `VRSF` delivery (alongside `submit_response`, `submit_results`, `submit_raw_response`).
+- **Async bridge, broker, GCP auth/identity, vectors & text**: [`async_bridge.rs`](../../../../../src/rs/vertebra-py/src/async_bridge.rs)[^src-vertebra-py-src-async-bridge-rs] exports `ReadyAwaitable`, `TaskAwaitable`, and `TaskPanicError`; [`broker.rs`](../../../../../src/rs/vertebra-py/src/broker.rs)[^src-vertebra-py-src-broker-rs] exports `LeaseBroker` (including `wake_seq`, `partition_count`, `record_timeout`, `wait_for_wake_async`), `BrokerAttachServer`, `BrokerAttachClient`, `BrokerEngineRegistry`, `StatementCache`, `ShmCache`, `stable_hash64`, and `pubsub_publish`; [`gcp_auth.rs`](../../../../../src/rs/vertebra-py/src/gcp_auth.rs)[^src-vertebra-py-src-gcp-auth-rs] & [`gcp_identity.rs`](../../../../../src/rs/vertebra-py/src/gcp_identity.rs)[^src-vertebra-py-src-gcp-identity-rs] export `SyncGcpTokenCache`, `AsyncGcpTokenCache`, `GcpTokenSnapshot`, `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, `GcpIdTokenSnapshot`, and `gcp_http2_post_{sync,async}`; [`db.rs`](../../../../../src/rs/vertebra-py/src/db.rs)[^src-py-arrow-cursor] & [`errors.rs`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs] export canonical `DatabaseError`/`GoogleCloudError` subclasses, dialers, and `ArrowCursor`; [`vector.rs`](../../../../../src/rs/vertebra-py/src/vector.rs)[^src-vertebra-py-src-vector-rs] & [`text.rs`](../../../../../src/rs/vertebra-py/src/text.rs)[^src-vertebra-py-src-text-rs] export `VectorView`/`VectorBatchView`/`VectorCache`/`StaticEmbedderCore`, `encode_gemini_embed_grpc_frame`, `encode_gemini_embed_contents_grpc_frame`, `encode_gemini_embed_grpc_response_frame`, `decode_gemini_embed_grpc_frame_to_batch`, and fail-loud `getrandom` UUID/NanoID primitives.
 
 ## Snapshot types & C-API zero-copy bridge (`request.rs`, `msgspec_bridge.rs`)
 
 - [`RequestBatch`](../../../../../src/rs/vertebra-py/src/request.rs)[^src-vertebra-py-src-request-rs] and `Request` share `Arc<BatchSnapshot>` without copying payloads; `Request.__getbuffer__` pins `slf.as_ptr()` in `PyBuffer_FillInfo` so `memoryview(req)` and `req.body_view` stay valid past `del req`.
-- [`msgspec_bridge.rs`](../../../../../src/rs/vertebra-py/src/msgspec_bridge.rs)[^src-vertebra-py-src-msgspec-bridge-rs] provides `Request.decode_msgspec` / `WsgiInput.decode_msgspec` / `AsgiScope.decode_msgspec`, `Request.decode_pydantic_json`, `hydrate_{one,rows}_vectorcall`, `instantiate_struct_vectorcall`, `orm_to_struct_vectorcall`, and `pack_grpc_lpm_frame` / `decode_grpc_lpm_frames_zero_copy`. [`_zero_copy.py`](../../../../../src/py/vertebra/utils/serializers/_zero_copy.py)[^src-utils-zero-copy-py] imports those native primitives directly from `vertebra._vertebra` with zero pure-Python fallbacks.
+- [`msgspec_bridge.rs`](../../../../../src/rs/vertebra-py/src/msgspec_bridge.rs)[^src-vertebra-py-src-msgspec-bridge-rs] provides `Request.decode_msgspec` / `WsgiInput.decode_msgspec` / `AsgiScope.decode_msgspec`, `Request.decode_pydantic_json` / `AsgiScope.decode_pydantic_json`, `Request.decode_grpc` / `decode_grpc_frames` / `AsgiScope.decode_grpc` / `decode_grpc_frames`, `hydrate_{one,rows}_vectorcall`, `instantiate_struct_vectorcall`, `orm_to_struct_vectorcall`, `call_vectorcall`, and `pack_grpc_lpm_frame`. [`_zero_copy.py`](../../../../../src/py/vertebra/utils/serializers/_zero_copy.py)[^src-utils-zero-copy-py] imports those native primitives directly from `vertebra._vertebra` with zero pure-Python fallbacks.
 - [`Headers`](../../../../../src/rs/vertebra-py/src/headers.rs)[^src-vertebra-py-src-headers-rs] and [`Response`](../../../../../src/rs/vertebra-py/src/response.rs)[^src-vertebra-py-src-response-rs] allocate via `PyBytes::new_with` and intern common header names via `pyo3::intern!`.
 
-## Startup compilation & batch execution (`worker.py`, `_dispatch.py`, `_loops.py`)
+## Startup compilation & batch execution (`worker.py`, `_dispatch.py`, `_mounts.py`, `_loops.py`)
 
-- [`compile_handler_table`](../../../../../src/py/vertebra/server/_dispatch.py)[^src-server-dispatch-py] compiles routes into frozen `HandlerSpec` entries (`sync_to_thread=False` default runs inline and flushes via `submit_batch_raw`). `_serialize_result` accepts `_RAW_BUFFER_TYPES` copy-free; returning `(status, headers, AsyncIterable | Iterable)` streams non-empty chunks progressively over `submit_stream_frame` / `max_stream_frame_payload`.
-- `drive_native_batch` steps `async def` handlers in C via `PyIter_Send`, flushing `PYGEN_RETURN` with zero `asyncio.Task` allocations and promoting `PYGEN_NEXT` coroutines after dropping local `Request` pins.
-- [`_fastpath_core.py`](../../../../../src/py/vertebra/server/_fastpath_core.py)[^src-server-fastpath-core-py] defines `CompiledRouteBase`, canonical `__vertebra_fastpath__` attachment helpers (`get_attached_fastpath` / `set_attached_fastpath`), `FastPathProvider`, and `DirectPlan`; [`attach_framework_fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] wraps mounted Litestar, FastAPI, Starlette, Flask, and Django apps in `O(1)` (`MOUNT_HANDLER_BASE | mount_idx`).
-- [`_loops.py`](../../../../../src/py/vertebra/server/_loops.py)[^src-server-loops-py] resolves `LoopBackend` (`uvloop`, `winloop`, `rloop`, `zuvloop`, `asyncio`) via `create_event_loop`; single-loop workers register `loop.add_reader(notify_fd, ...)` with Dekker guards.
+- [`compile_handler_table`](../../../../../src/py/vertebra/server/_dispatch.py)[^src-server-dispatch-py] compiles routes into frozen `HandlerSpec` entries (`sync_to_thread=False` default runs inline and flushes via `submit_batch_raw`). `_submit_coerced` / `_coerce_response` accept `_RAW_BUFFER_TYPES` copy-free; returning `(status, headers, AsyncIterable | Iterable)` streams non-empty chunks progressively over `submit_stream_frame` / `max_stream_frame_payload`.
+- `Worker._process_batch` merges pure-sync (`all_sync_native`) and mixed sync/async (`native_only`) batches into a single pass, flushing sync completions via `submit_batch_raw` and stepping `async def` handlers in C via `drive_native_batch` (`PyIter_Send`, zero `asyncio.Task` allocations on `PYGEN_RETURN`).
+- [`_mounts.py`](../../../../../src/py/vertebra/server/_mounts.py)[^src-server-mounts-py] validates and lazily resolves `module:attr` / `module:factory()` mount targets at worker startup; [`_fastpath_core.py`](../../../../../src/py/vertebra/server/_fastpath_core.py)[^src-server-fastpath-core-py] defines `CompiledRouteBase`, canonical `__vertebra_fastpath__` attachment helpers (`get_attached_fastpath` / `set_attached_fastpath`), `FastPathProvider`, and `DirectPlan`; [`attach_framework_fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] wraps mounted Litestar, FastAPI, Starlette, Flask, and Django apps resolved in `O(1)` (`MOUNT_HANDLER_BASE | mount_idx`, with longest boundary-safe prefix fallback).
+- [`_loops.py`](../../../../../src/py/vertebra/server/_loops.py)[^src-server-loops-py] resolves `LoopBackend` (`uvloop`, `winloop`, `rloop`, `zuvloop`, `asyncio`) via `create_event_loop`; single-loop workers register `_on_notify_readable` on `loop.add_reader(notify_fd, ...)` and delegate draining to `_drain_batches` with Dekker guards.
 
 ## Database & storage extension boundaries
 
 - `vertebra._vertebra` owns canonical database exceptions and `ArrowCursor`; optional drivers import them at runtime, drain per-loop queues through `spawn_rust_db_task_with_attr`[^src-db-py-async], and adopt unregistered `ShmCapsule`[^src-core-shm-capsule][^src-py-arrow-cursor] mappings zero-copy.
-- [`AsyncPostgresReplication`](../../../../../src/rs/vertebra-postgres/src/replication/mod.rs)[^src-vertebra-postgres-src-replication-mod-rs] uses `spawn_rust_db_task_with_attr_and_future` to re-check `py_fut.cancelled()` under the GIL before `delivery.publish()`, guarding pre-publish leases via `PendingDeliveryGuard` / `ReplicationEventDelivery`[^src-db-py-async].
-- `vertebra._storage` owns `TaskAwaitable`[^src-storage-native-completion], shares `GcpTokenCache`[^src-storage-core-gcp][^src-storage-python-facade], and coordinates synchronous PyArrow codec callbacks via `_CodecBridge`[^src-storage-codec-bridge]. See [ADR-004](../../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
+- [`AsyncPostgresReplication`](../../../../../src/rs/vertebra-postgres/src/replication/mod.rs)[^src-vertebra-postgres-src-replication-mod-rs] uses `spawn_rust_db_task_with_attr_and_future` to re-check `py_fut.cancelled()` under the GIL before `delivery.publish()`, guarding pre-publish leases via `ReplicationInFlightGuard` / `ReplicationEventDelivery`[^src-db-py-async].
+- `vertebra._storage` exports `TaskAwaitable`[^src-storage-native-completion], shares `GcpTokenCache`[^src-storage-core-gcp][^src-storage-python-facade], and coordinates synchronous PyArrow codec callbacks via `_CodecBridge`[^src-storage-codec-bridge]. See [ADR-004](../../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
 
 Provenance sources: [^src-vertebra-py-src-transport-rs].
 
 [^src-vertebra-py-src-lib-rs]: `src/rs/vertebra-py/src/lib.rs` — Rust implementation module.
-[^src-vertebra-py-src-transport-rs]: `src/rs/vertebra-py/src/transport.rs` — Rust transport & stream FFI.
+[^src-vertebra-py-src-transport-rs]: `src/rs/vertebra-py/src/transport.rs` — Rust transport, `ShmResponseLock`, `submit_batch_flushed`, and stream FFI.
 [^src-vertebra-py-src-request-rs]: `src/rs/vertebra-py/src/request.rs` — Zero-copy `RequestBatch` and `Request`.
 [^src-vertebra-py-src-headers-rs]: `src/rs/vertebra-py/src/headers.rs` — `Headers` native wrapper.
 [^src-vertebra-py-src-response-rs]: `src/rs/vertebra-py/src/response.rs` — `Response` native wrapper.
 [^src-vertebra-py-src-msgspec-bridge-rs]: `src/rs/vertebra-py/src/msgspec_bridge.rs` — C-API decode, vectorcall & LPM codecs.
+[^src-vertebra-py-src-async-bridge-rs]: `src/rs/vertebra-py/src/async_bridge.rs` — Core `ReadyAwaitable`, `TaskAwaitable`, and `TaskPanicError` bridge.
+[^src-vertebra-py-src-broker-rs]: `src/rs/vertebra-py/src/broker.rs` — Native `LeaseBroker`, `StatementCache`, `ShmCache`, and `pubsub_publish` bindings.
 [^src-vertebra-py-src-gcp-auth-rs]: `src/rs/vertebra-py/src/gcp_auth.rs` — Native GCP token cache & HTTP/2 post.
 [^src-vertebra-py-src-gcp-identity-rs]: `src/rs/vertebra-py/src/gcp_identity.rs` — Native GCP OIDC ID token cache exports.
 [^src-vertebra-py-src-errors-rs]: `src/rs/vertebra-py/src/errors.rs` — Canonical DB & Google Cloud exception classes.
-[^src-vertebra-py-src-vector-rs]: `src/rs/vertebra-py/src/vector.rs` — Vector views, cache & embedder core.
+[^src-vertebra-py-src-vector-rs]: `src/rs/vertebra-py/src/vector.rs` — Vector views, cache, Gemini gRPC frame codecs & embedder core.
 [^src-vertebra-py-src-text-rs]: `src/rs/vertebra-py/src/text.rs` — Native text & fail-loud UUID/NanoID bindings.
 [^src-vertebra-pyi]: `src/py/vertebra/_vertebra.pyi` — Core extension type stubs.
 [^src-bundler-pyi]: `src/py/vertebra/_bundler.pyi` — Bundler extension type stubs.
@@ -178,6 +192,7 @@ Provenance sources: [^src-vertebra-py-src-transport-rs].
 [^src-vertebra-postgres-src-replication-mod-rs]: `src/rs/vertebra-postgres/src/replication/mod.rs` — `AsyncPostgresReplication` cancel-safe delivery bridge.
 [^src-server-worker-py]: `src/py/vertebra/server/worker.py` — Worker batch loop & lifespan runner.
 [^src-server-dispatch-py]: `src/py/vertebra/server/_dispatch.py` — Route compilation & streaming dispatch.
+[^src-server-mounts-py]: `src/py/vertebra/server/_mounts.py` — Lazy import-string mount resolution.
 [^src-server-loops-py]: `src/py/vertebra/server/_loops.py` — Unified event loop backend resolution.
 [^src-server-fastpath-py]: `src/py/vertebra/server/_fastpath.py` — Framework FastPath attachment.
 [^src-server-fastpath-core-py]: `src/py/vertebra/server/_fastpath_core.py` — `CompiledRouteBase`, `__vertebra_fastpath__` helpers, `DirectPlan`.

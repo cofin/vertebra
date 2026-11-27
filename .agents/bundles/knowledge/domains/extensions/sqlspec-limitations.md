@@ -14,8 +14,11 @@ tags:
 generated:
   by: flow/0.30.1
   at: "2026-11-17T06:55:00Z"
-last_reviewed_commit: 9077dd3e
+last_reviewed_commit: f3b624a2
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-27T22:10:00Z"
+    commit: f3b624a2
   - by: agent:flow-executor
     at: "2026-11-22T01:02:00Z"
     commit: 9077dd3e
@@ -58,10 +61,16 @@ sources:
     title: MSSQL reset_session_on_release EXEC sp_reset_connection batch fallback
   - id: src-sqlspec-storage
     resource: src/py/vertebra/extensions/sqlspec/storage.py
-    title: SQLSpec StorageRegistry.register_alias delegation and direct ObjectStoreBackend construction
+    title: SQLSpec ObjectStoreRegistry, StorageRegistry.register_alias delegation, and direct ObjectStoreBackend construction
+  - id: src-sqlspec-adk
+    resource: src/py/vertebra/extensions/sqlspec/_adk.py
+    title: Shared ADK store bases and google-adk extra enforcement via ensure_module
+  - id: src-sqlspec-reconcile
+    resource: src/py/vertebra/extensions/sqlspec/_reconcile.py
+    title: Shared extension schema reconciler factory over public sqlspec helpers
   - id: src-sqlspec-postgres-adk
     resource: src/py/vertebra/extensions/sqlspec/adapters/postgres/adk.py
-    title: ADK memory and artifact store google-adk extra enforcement via ensure_module
+    title: PostgreSQL ADK memory and artifact store google-adk extra enforcement via ensure_module
   - id: src-sqlspec-bigquery-driver
     resource: src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py
     title: BigQuery tenant isolation rejection guard
@@ -84,7 +93,7 @@ sources:
 <!-- truth: start -->
 - **Native Cursor & Cache-Hit Seam**: `BaseSyncDriver.with_cursor` and `BaseAsyncDriver.with_cursor` yield the engine's native cursor so a SQLSpec cache hit performs one native `execute`; SQL and parameters pass through unchanged, and extra value conversions live in statement-config type converters [^src-sqlspec-driver].
 - **Dependency Floor & Schema Normalization**: `pyproject.toml` pins `"sqlspec>=0.74.1"` from PyPI with no git sources. Driver `to_schema` and tabular row hydrators default to `normalize_nested=True`, whereas standalone `sqlspec.utils.schema.to_schema` and `vertebra.utils.schema.to_schema` default to `normalize_nested=False` [^src-pyproject].
-- **Data Dictionaries & ADK**: All eight adapters subclass both sync and async upstream `sqlspec.data_dictionary.dialects.<dialect>.dictionary` classes [^src-sqlspec-mysql-dict] [^src-sqlspec-pg-dict]. Copied fallback ADK stores are removed; ADK memory and artifact stores require `google-adk` (`vertebra-core[adk]`) via `ensure_module` [^src-sqlspec-postgres-adk].
+- **Data Dictionaries & ADK**: All eight adapters subclass both sync and async upstream `sqlspec.data_dictionary.dialects.<dialect>.dictionary` classes [^src-sqlspec-mysql-dict] [^src-sqlspec-pg-dict]. Shared ADK bases in `_adk.py` and adapter `adk.py` modules provide no fallback stores and require `google-adk` (`vertebra-core[adk]`) via `ensure_module` [^src-sqlspec-adk] [^src-sqlspec-postgres-adk].
 - **Oracle Sessionless Gap & TxEventQ**: `vertebra._oracle` lacks native sessionless transaction FFI hooks, so `OracleSyncDriver` / `OracleAsyncDriver` raise `DialectNotSupportedError` on sessionless calls against `vertebra._oracle` [^src-sqlspec-oracle-driver]. `Oracle*EventsBackend` commits `DBMS_AQ.DEQUEUE` on dequeue and re-publishes on `nack()` [^src-sqlspec-oracle-events].
 - **Session Reset Bounds (`reset_session_on_release=True`)**: BigQuery skips stateless REST connections and calls `BQ.ABORT_SESSION` only when a `session_id` exists; Spanner clears only local transaction flags; DuckDB drops temporary objects/non-baseline catalogs and restores pragmas; MSSQL executes `EXEC sp_reset_connection` as a T-SQL batch rather than setting a TDS packet flag [^src-sqlspec-bigquery-typing] [^src-sqlspec-spanner-typing] [^src-sqlspec-duckdb-typing] [^src-sqlspec-mssql-typing].
 - **Storage Aliases, Tenant Guards & Replica Cloud Auth**: `register_storage_alias` preserves pre-configured store instances across `clear_cache()` (rejecting extra kwargs on pre-configured `ObjectStoreBackend`) [^src-sqlspec-storage]. BigQuery and Spanner reject `tenant_predicate` / `tenant_id` with `NotSupportedError` [^src-sqlspec-bigquery-driver] [^src-sqlspec-spanner-driver]. `derive_pool` preserves `token_provider` and CA bundles across PostgreSQL/MySQL replicas, though AWS SigV4 providers bind one `endpoint_host` and need per-replica overrides [^src-sqlspec-postgres-config] [^src-sqlspec-mysql-config] [^src-dbapi-sync].
@@ -101,8 +110,8 @@ sources:
 ### Schema Normalization, Data Dictionaries & ADK
 
 - **Nested `msgspec.Struct` Defaults**: Driver `to_schema` and Vertebra's row hydrators (`_hydrate_rows_with_schema`, `BigQueryCore.hydrate_query_rows`, `SpannerCore.hydrate_query_rows`) default to `normalize_nested=True` (opt-out with `False`), whereas standalone `to_schema` helpers default to `False` [^src-pyproject].
-- **Upstream Data Dictionaries & Reconcilers**: All eight adapters inherit upstream sync/async dialect dictionaries ([`mysql/data_dictionary.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/mysql/data_dictionary.py)[^src-sqlspec-mysql-dict], [`postgres/data_dictionary.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/data_dictionary.py)[^src-sqlspec-pg-dict]). All eight `reconcile.py` modules use public `sqlspec.extensions.events.resolve_backend_name` and `sqlspec.extensions.adk` helpers with zero private imports.
-- **Mandatory `google-adk` Extra**: ADK stores load `sqlspec.extensions.adk` through `ensure_module(..., package="google-adk", extra="adk")` ([`postgres/adk.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/adk.py)[^src-sqlspec-postgres-adk]) and raise `MissingDependencyError` when absent.
+- **Upstream Data Dictionaries & Reconcilers**: All eight adapters inherit upstream sync/async dialect dictionaries ([`mysql/data_dictionary.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/mysql/data_dictionary.py)[^src-sqlspec-mysql-dict], [`postgres/data_dictionary.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/data_dictionary.py)[^src-sqlspec-pg-dict]). All eight `reconcile.py` modules declare an `AdapterReconcilerSpec` delegating to [`_reconcile.py`](../../../../../src/py/vertebra/extensions/sqlspec/_reconcile.py)[^src-sqlspec-reconcile], which uses public `sqlspec.extensions.events.resolve_backend_name`, `sqlspec.migrations.schema`, and `sqlspec.utils.adapters` helpers with zero private imports.
+- **Mandatory `google-adk` Extra**: Shared ADK bases ([`_adk.py`](../../../../../src/py/vertebra/extensions/sqlspec/_adk.py)[^src-sqlspec-adk]) and adapter stores ([`postgres/adk.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/adk.py)[^src-sqlspec-postgres-adk]) load `sqlspec.extensions.adk` through `ensure_module(..., package="google-adk", extra="adk")` and raise `MissingDependencyError` when absent.
 
 ### Engine Session Reset, Oracle & Tenant Guards
 
@@ -116,7 +125,7 @@ sources:
 
 ### Storage Aliases & Cloud Auth Inheritance
 
-- **Storage Aliases**: [`sqlspec/storage.py`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py)[^src-sqlspec-storage] registers `"vertebra"` via `StorageRegistry.register_backend()`. Passing a live store or `ObjectStoreBackend` to `register_storage_alias` registers an instance alias surviving `clear_cache()`; passing `base_path` or extra kwargs with a pre-configured `ObjectStoreBackend` raises `ImproperConfigurationError`.
+- **Storage Aliases**: [`sqlspec/storage.py`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py)[^src-sqlspec-storage] registers `"vertebra"` via `ObjectStoreRegistry._register_native_backend` (`StorageRegistry.register_backend()`). Passing a live store or `ObjectStoreBackend` to `register_storage_alias` registers an instance alias surviving `clear_cache()`; passing `base_path` or extra kwargs with a pre-configured `ObjectStoreBackend` raises `ImproperConfigurationError`.
 - **Connector Retries & Replica Cloud Auth**: PostgreSQL ([`postgres/config.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/config.py)[^src-sqlspec-postgres-config]), MySQL ([`mysql/config.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/mysql/config.py)[^src-sqlspec-mysql-config]), and MSSQL configs forward `connector_retry_*` into Python Cloud SQL/AlloyDB dialers (Rust `vertebra-postgres` `CloudConnector` issues a single bounded request within the connect deadline). `derive_pool` preserves `token_provider` and CA bundles (`ca_pem` on PG, `ssl_ca` on MySQL unless overridden in the replica URL). Distinct AWS replica endpoints require explicit SigV4 `token_provider` overrides because SigV4 binds one `endpoint_host:port`. In PEP 249 `connect_args` ([`dbapi/_sync.py`](../../../../../src/py/vertebra/db/dbapi/_sync.py)[^src-dbapi-sync]), PG `ca_pem` and MySQL `ssl_ca` accept `str`, while MSSQL `ca_pem` requires `bytes`.
 
 [^src-sqlspec-driver]: `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` native cursor dispatch and statement config pass-through.
@@ -129,8 +138,10 @@ sources:
 [^src-sqlspec-spanner-typing]: `src/py/vertebra/extensions/sqlspec/adapters/spanner/_typing.py` — Spanner `reset_session_on_release` local flag cleanup.
 [^src-sqlspec-duckdb-typing]: `src/py/vertebra/extensions/sqlspec/adapters/duckdb/_typing.py` — DuckDB `reset_session_on_release` temporary object cleanup and baseline pragma restoration.
 [^src-sqlspec-mssql-typing]: `src/py/vertebra/extensions/sqlspec/adapters/mssql/_typing.py` — MSSQL `reset_session_on_release` `EXEC sp_reset_connection` batch fallback.
-[^src-sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py` — `StorageRegistry.register_alias` delegation and direct `ObjectStoreBackend` construction.
-[^src-sqlspec-postgres-adk]: `src/py/vertebra/extensions/sqlspec/adapters/postgres/adk.py` — ADK memory and artifact store `google-adk` extra enforcement via `ensure_module`.
+[^src-sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py` — `ObjectStoreRegistry`, `StorageRegistry.register_alias` delegation, and direct `ObjectStoreBackend` construction.
+[^src-sqlspec-adk]: `src/py/vertebra/extensions/sqlspec/_adk.py` — Shared ADK store bases and `google-adk` extra enforcement via `ensure_module`.
+[^src-sqlspec-reconcile]: `src/py/vertebra/extensions/sqlspec/_reconcile.py` — Shared extension schema reconciler factory over public `sqlspec` helpers.
+[^src-sqlspec-postgres-adk]: `src/py/vertebra/extensions/sqlspec/adapters/postgres/adk.py` — PostgreSQL ADK memory and artifact store `google-adk` extra enforcement via `ensure_module`.
 [^src-sqlspec-bigquery-driver]: `src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py` — BigQuery tenant isolation rejection guard.
 [^src-sqlspec-spanner-driver]: `src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py` — Spanner tenant isolation rejection guard.
 [^src-sqlspec-postgres-config]: `src/py/vertebra/extensions/sqlspec/adapters/postgres/config.py` — `PostgresSyncConfig` and `PostgresAsyncConfig` `derive_pool` cloud auth preservation.
