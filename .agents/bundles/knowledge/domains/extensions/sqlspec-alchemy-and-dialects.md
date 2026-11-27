@@ -14,8 +14,11 @@ tags:
 generated:
   by: flow/0.26.0
   at: '2026-11-04T04:33:00Z'
-last_reviewed_commit: 9077dd3e
+last_reviewed_commit: 4f64c6e5
 verified:
+- by: agent:flow-executor
+  at: '2026-11-27T21:12:00Z'
+  commit: 4f64c6e5
 - by: agent:flow-executor
   at: '2026-11-22T01:02:00Z'
   commit: 9077dd3e
@@ -175,7 +178,7 @@ Shared plugin wiring (`on_app_init`) installs state into `app_config.state` and 
 | [`BrokerConfig`](../../../../../src/py/vertebra/extensions/broker/transport.py)[^src-extensions-broker-transport-py], `BrokerMetrics`, `ChannelMessage` | Pool/TTL config (`acquire_timeout_ms`, `lease_ttl_ms`), metrics counters, and array-like pub/sub frame re-exported by [`alchemy/broker.py`](../../../../../src/py/vertebra/extensions/alchemy/broker.py)[^src-extensions-alchemy-broker-py]. |
 | `SyncBrokerLeaseSource` / `AsyncBrokerLeaseSource` & `*SHMSessionBroker` | Imported into `alchemy/broker.py` from `extensions/broker/transport.py`; manage `acquire`/`release`/`in_use` with `_active_leases` tracking (`AsyncSHMSessionBroker` rejects sync SQLAlchemy pool hooks with `InterfaceError`). |
 | `SyncConnectionLease` / `AsyncConnectionLease` | TTL-bound context managers; set `_released = True` only after native release succeeds (`AsyncConnectionLease.release_sync()` delegates or raises `InterfaceError`). |
-| `SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport` & `AsyncBrokerStream` | Attach to `LeaseBroker`, `StatementCache`, and `ShmChannelSlot` via named SHM or UDS `SCM_RIGHTS`. `AsyncSHMBrokerTransport` has no `*_sync` methods, offloads blocking native ops onto `SyncPool.default().submit_async(...)`, and streams DBRPC frames via `AsyncBrokerStream`. |
+| `SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport` & `AsyncBrokerStream` | Attach to `LeaseBroker`, `StatementCache`, and `ShmChannelSlot` via named SHM or UDS `SCM_RIGHTS`. `AsyncSHMBrokerTransport` has no `*_sync` methods, coordinates contended `acquire()` via per-loop FIFO local handoff and a single `LeaseBroker.wait_for_wake_async()` watcher (using `SyncPool.default()` only for DBRPC/reclaim or mock doubles), and streams DBRPC frames via `AsyncBrokerStream`. |
 | `BrokerPlugin` / `BrokerHost` / `SyncBrokerPool` | Installs broker state/metrics, tracks disposal failures in `ShutdownReport`, and backs SQLAlchemy pooling (`SyncBrokerPool` / `AsyncBrokerPool` with `reset_on_return` and `?broker=true` routing). |
 
 ## 3. Object-Storage & Caching Adapters
@@ -190,7 +193,7 @@ Shared plugin wiring (`on_app_init`) installs state into `app_config.state` and 
 | Component | Responsibility |
 |---|---|
 | `DIALECT_SCHEMES` / `ALL_DIALECT_SCHEMES` | Registers 36 sync/async entry points across 9 engines (`postgresql`, `oracle`, `mysql`, `sqlite`, `mssql`, `duckdb`, `bigquery`, `spanner`, `spangres`) using `+{vertebra,vtb,vertebra_async,vtb_async}`. |
-| Dialects ([`dialects/`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects/__init__.py)[^src-extensions-sqlalchemy-dialects-py], [`_base.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects/_base.py)[^src-extensions-sqlalchemy-dialects-base-py], [`pool.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/pool.py)[^src-extensions-sqlalchemy-pool-py]) | Subclass SQLAlchemy 2.1 base dialects (and optional upstream DuckDB/BigQuery/Spanner dialects via `ensure_module`; `Spangres` subclasses `PGDialect` with `supports_twophase = False`). Mixins handle `is_disconnect` (SQLSTATE, MySQL/Oracle/MSSQL/gRPC codes) and pool selection (`NullPool` for `?shm_broker=true` or BigQuery/Spanner, `SyncBrokerPool` for `?broker=true`, `StaticPool` for in-memory SQLite, `QueuePool` otherwise). |
+| Dialects ([`dialects/`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects/__init__.py)[^src-extensions-sqlalchemy-dialects-py], [`_base.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects/_base.py)[^src-extensions-sqlalchemy-dialects-base-py], [`pool.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/pool.py)[^src-extensions-sqlalchemy-pool-py]) | Subclass SQLAlchemy 2.1 base dialects (and optional upstream DuckDB/BigQuery/Spanner dialects via `ensure_module`; `Spangres` subclasses `PGDialect` with `supports_twophase = False`). Mixins handle `is_disconnect` (SQLSTATE, MySQL/Oracle/MSSQL/gRPC codes) and pool selection (`NullPool` for `?shm_broker=true` or BigQuery/Spanner, `SyncBrokerPool` for `?broker=true`, `StaticPool` for in-memory SQLite, `QueuePool` otherwise). SQLite `+vtb` / `+vtb_async` dialects default `max_readers=0` per SQLAlchemy pool slot (extracting and stripping case-insensitive `?max_readers=` URL query overrides) and skip implicit `BEGIN IMMEDIATE` on read-only `lazy_begin` queries. |
 | Async DB-API Adapter ([`async_adapter.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/async_adapter.py)[^src-extensions-sqlalchemy-async-adapter-py]) | `SQLAlchemyAsyncDBAPI`, `AsyncAdapt_vertebra_connection`, and `AsyncAdapt_vertebra_cursor` (`_aenter_cursor` returns the native async cursor directly without `__aenter__`) exposing `setinputsizes`, `var()`, `nextset()`, and `async_creator_fn`. |
 | Standalone PEP 249 (`vertebra.db.dbapi`[^src-db-dbapi-init-py]) | `SyncDBAPIConnection` / `AsyncDBAPIConnection` bind directly to the driver's native cursor factory, validate `connect_args` allowlists, re-export `vertebra._vertebra` exceptions without translation, and run without SQLAlchemy imports. |
 | Column Types ([`types.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/types.py)[^src-extensions-sqlalchemy-types-py]) | `Vector`, dialect vector types (`PgVector`, `HalfVector`, `SparseVector`, `OracleVector`, `SpannerVector`), `BigQueryGeography` with `_VectorDistance` distance operators, and `MsgspecJSON` (`JSONB` on PG/SQLite, `NVARCHAR(MAX)` on MSSQL, `JSON` on Oracle/others). |

@@ -12,6 +12,9 @@ generated:
   by: flow/0.30.1
   at: "2026-11-16T00:30:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-27T21:12:00Z"
+    commit: 4f64c6e5
   - by: agent:bb-executor
     at: "2026-11-21T01:40:00Z"
     commit: 06e99fbf
@@ -64,7 +67,7 @@ sources:
 
 ### Statement Routing & Cursor Semantics
 
-- **Lexical Reader/Writer Routing (`worker.rs`)**: When reader connections exist and no transaction is open, `SqlitePool::run` uses a lexical read-only check—so a `SELECT` mentioning a write keyword (e.g., a `created_at` column) runs on the writer. `rowcount` is `-1` for read-only statements; `run_many` returns the summed changed-row count only (`lastrowid` is `None`, and `last_insert_rowid()` is unchanged).
+- **Lexical Reader/Writer Routing & `lazy_begin` (`worker.rs`, `py_client.rs`)**: `analyze_statement_facts` runs a single-pass comment-, quote-, and bind-parameter-aware lexical scan (skipping leading whitespace, comments, `;`, `(`, string/identifier literals, and `:param`/`@param`/`$param` tokens), so read-only queries referencing audit columns such as `created_at` or `updated_at` classify as `read_only = true`. `SqlitePool` executes `WorkerSlot::with_conn` directly under `self.conn.lock()` (with no per-statement `mpsc::channel()` allocation) and keeps `in_transaction` synchronized strictly from `!conn.is_autocommit()` under the writer lock. `SyncSQLiteCursor::execute` and `AsyncSQLiteCursor::execute` skip implicit `BEGIN IMMEDIATE` on read-only statements and non-transactional control commands (`PRAGMA`, `BEGIN`, `COMMIT`, `ROLLBACK`) while keeping `BEGIN IMMEDIATE` for DML/DDL, `SAVEPOINT`, and non-empty `executemany`. `rowcount` is `-1` for read-only statements; `run_many` returns the summed changed-row count only (`lastrowid` is `None`, and `last_insert_rowid()` is unchanged) [^sqlite-worker] [^sqlite-py-cursor].
 - **Facts Cache & Cancellation Queue**: The per-SQL statement facts cache holds 256 entries and clears in full at capacity. Pre-cancelled ops fail at `begin_op` after acquiring the connection lock, and pre-cancelled IDs for closed connections sit in a 4,096-entry eviction queue [^sqlite-worker].
 - **Sync Cursor Locking (`py_client.rs`)**: `SyncSQLiteCursor` serializes `execute` / `executemany` per cursor (two cursors on one client still interleave on the writer). With `lazy_begin`, empty `executemany` opens no transaction. Results completing after `close()` on another thread are discarded [^sqlite-py-cursor].
 - **Async Cursor In-Flight Rules (`py_client.rs`)**: `AsyncSQLiteCursor` rejects concurrent `execute` / `executemany` with `InterfaceError("cursor is already executing")`. Cancelling or dropping an unawaited awaitable interrupts the statement and clears results, rejecting new statements until the worker finishes unwinding. Transactions opened by `lazy_begin` stay open on error or cancellation. Fetch methods drain buffered rows when called, so rows handed to a cancelled or unawaited fetch awaitable are lost [^sqlite-py-client].
