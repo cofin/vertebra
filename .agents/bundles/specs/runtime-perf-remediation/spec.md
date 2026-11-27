@@ -13,7 +13,7 @@ chapters:
   - ch02-embedded-bridge-and-batching
   - ch03-ingress-and-worker-hotpaths
   - ch04-data-benchmarks-and-verification
-current_chapter: ch02-embedded-bridge-and-batching
+current_chapter: ch03-ingress-and-worker-hotpaths
 current_task: null
 parent_flow: null
 chapter_id: null
@@ -22,9 +22,9 @@ depends_on_chapters: []
 replan_trigger: null
 plan_revision: 2
 plan_commit: "86527cf1"
-last_verified_checkpoint: "6768cf7c"
-last_reviewed_chapter: ch01-wsgi-adaptive-pool
-last_reviewed_commit: "6768cf7c"
+last_verified_checkpoint: "9df526b0"
+last_reviewed_chapter: ch02-embedded-bridge-and-batching
+last_reviewed_commit: "9df526b0"
 generated:
   by: flow/0.26.0
   at: "2026-11-27T01:36:00Z"
@@ -326,8 +326,8 @@ async def capture_advanced_alchemy_report(
 ## 5. Implementation Plan
 
 - [x] [6768cf7c] ch01-wsgi-adaptive-pool — Adaptive Rust `WsgiExecutor` pool and zero-allocation `WsgiServerConfig` (chapters/ch01-wsgi-adaptive-pool/spec.md)
-- [~] ch02-embedded-bridge-and-batching — Embedded 1w Tokio/shard right-sizing, batch-locked `BridgeCorrelation`, `BatchResponseSink`, and zero-copy bridge handoff (chapters/ch02-embedded-bridge-and-batching/spec.md)
-- [ ] ch03-ingress-and-worker-hotpaths — Lazy `IdleTimeoutStream`, connection-pinned shards, `BackpressureController`/`InFlightRequests`/`ShmDispatcher` hot paths, and Python/PyO3 worker/ASGI/RSGI/native optimizations (chapters/ch03-ingress-and-worker-hotpaths/spec.md)
+- [x] [9df526b0] ch02-embedded-bridge-and-batching — Embedded 1w Tokio/shard right-sizing, batch-locked `BridgeCorrelation`, `BatchResponseSink`, and zero-copy bridge handoff (chapters/ch02-embedded-bridge-and-batching/spec.md)
+- [~] ch03-ingress-and-worker-hotpaths — Lazy `IdleTimeoutStream`, connection-pinned shards, `BackpressureController`/`InFlightRequests`/`ShmDispatcher` hot paths, and Python/PyO3 worker/ASGI/RSGI/native optimizations (chapters/ch03-ingress-and-worker-hotpaths/spec.md)
 - [ ] ch04-data-benchmarks-and-verification — SQLite and PostgreSQL (native, SQLSpec, Advanced Alchemy) benchmark wiring, Granian/DB empirical verification gate, and OKF doc sync (chapters/ch04-data-benchmarks-and-verification/spec.md)
 
 ### Chapter / Phase Recovery Checkpoint
@@ -336,8 +336,8 @@ Each chapter runs a `< 60s` targeted Rust + Python unit test and lint gate (`car
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Active Chapter**: `ch02-embedded-bridge-and-batching` (`in_progress`; `ch01-wsgi-adaptive-pool` completed and reviewed at `6768cf7c`).
-- **Remaining Chapters**: `ch02-embedded-bridge-and-batching`, `ch03-ingress-and-worker-hotpaths`, `ch04-data-benchmarks-and-verification`.
+- **Active Chapter**: `ch03-ingress-and-worker-hotpaths` (`in_progress`; `ch01-wsgi-adaptive-pool` reviewed at `6768cf7c`, `ch02-embedded-bridge-and-batching` reviewed at `9df526b0`).
+- **Remaining Chapters**: `ch03-ingress-and-worker-hotpaths`, `ch04-data-benchmarks-and-verification`.
 - **Empirical Triggers**: `ch04-data-benchmarks-and-verification` is marked `empirical_dependent` to incorporate A/B measurements for Embedded 1w Tokio thread count (`1` vs `2`), `WsgiExecutor` stall threshold tuning, and live SQLite/PostgreSQL/SQLSpec/Advanced Alchemy profiles.
 
 [^src-wsgi-runner]: `src/rs/vertebra-py/src/wsgi/runner.rs::drive_wsgi_batch` — Native Rust WSGI batch runner currently executing requests serially.

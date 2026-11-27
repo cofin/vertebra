@@ -5,7 +5,7 @@ chapter_id: ch02-embedded-bridge-and-batching
 title: Right-size Embedded Tokio threads, RequestBatcher shards, and cgroup CPU detection
 description: Default non-free-threaded Embedded Tokio worker_threads to 1 when VERTEBRA_TOKIO_THREADS is unset, align RequestBatcher shard_count to active Python consumers, and use cgroup-aware config::num_cpus() in EmbeddedSupervisor and embedded worker startup.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -25,7 +25,7 @@ tests:
 estimated_loc: 110
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "3024aee2"
 sources:
   - id: src-http-config
     resource: src/rs/vertebra-http/src/config.rs::ServerConfig::from_env

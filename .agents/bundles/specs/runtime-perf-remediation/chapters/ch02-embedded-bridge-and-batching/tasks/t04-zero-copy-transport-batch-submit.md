@@ -5,7 +5,7 @@ chapter_id: ch02-embedded-bridge-and-batching
 title: Zero-copy owned-buffer ResponseSubmitter::submit_batch_flushed in vertebra-py
 description: Add ResponseSubmitter::submit_batch_flushed converting owned headers_raw and PreparedRawBody::Owned Vec<u8> buffers via Bytes::from without a second copy on Embedded mode, and eliminate redundant copies in submit_results and submit_response.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -21,7 +21,7 @@ tests:
 estimated_loc: 130
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "3024aee2"
 sources:
   - id: src-py-transport
     resource: src/rs/vertebra-py/src/transport.rs::ResponseSubmitter

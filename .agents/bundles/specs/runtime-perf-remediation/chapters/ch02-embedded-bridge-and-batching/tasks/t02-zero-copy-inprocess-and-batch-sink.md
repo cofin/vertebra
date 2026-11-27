@@ -5,7 +5,7 @@ chapter_id: ch02-embedded-bridge-and-batching
 title: Zero-copy PathAndQuery in InProcessRequest and BatchResponseSink on BatchBridge
 description: Store http::uri::PathAndQuery directly in InProcessRequest without Bytes::copy_from_slice while preserving InProcessRequest::new and BatchSnapshot APIs, and add BatchResponseSink to BatchBridge so submit_responses invokes the batch sink once.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -25,7 +25,7 @@ tests:
 estimated_loc: 160
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "3024aee2"
 sources:
   - id: src-core-transport
     resource: src/rs/vertebra-core/src/transport/mod.rs::InProcessRequest

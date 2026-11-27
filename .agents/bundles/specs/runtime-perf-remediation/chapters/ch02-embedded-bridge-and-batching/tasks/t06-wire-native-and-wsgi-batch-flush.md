@@ -5,7 +5,7 @@ chapter_id: ch02-embedded-bridge-and-batching
 title: Wire drive_wsgi_batch inline flush to submit_batch_flushed
 description: Switch the inline WSGI batch flush site in wsgi/pool.rs and wsgi/runner.rs to ResponseSubmitter::submit_batch_flushed while preserving ch01 concurrent WsgiExecutor immediate per-request submission.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 worksheet_format: compact
@@ -24,7 +24,7 @@ tests:
 estimated_loc: 35
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "3024aee2"
 sources:
   - id: src-py-transport
     resource: src/rs/vertebra-py/src/transport.rs::ResponseSubmitter

@@ -5,7 +5,7 @@ chapter_id: ch03-ingress-and-worker-hotpaths
 title: HTTP Ingress, Backpressure, SHM Batching, and Worker Hot Paths
 description: Eliminate per-request timer resets, atomic shard contention, BackpressureController allocations and fences, per-batch SHM scratch allocations, and Python/PyO3 request/scope/eventfd overhead.
 status: stable
-state: planned
+state: active
 planning_quality: standard
 planning_degraded_reason: null
 planning_status: complete

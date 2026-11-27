@@ -5,7 +5,7 @@ chapter_id: ch02-embedded-bridge-and-batching
 title: Embedded Runtime Sizing, Batch-Locked Bridge Correlation, and Zero-Copy Handoff
 description: Right-size 1-worker GIL Embedded Tokio threads and RequestBatcher shards, batch-lock BridgeCorrelation with BatchResponseSink, store PathAndQuery zero-copy in InProcessRequest, and transfer owned response buffers without double copies.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch01-wsgi-adaptive-pool
@@ -15,8 +15,8 @@ planning_degraded_reason: null
 plan_revision: 2
 plan_commit: "86527cf1"
 current_task: null
-last_verified_checkpoint: null
-last_reviewed_commit: null
+last_verified_checkpoint: "9df526b0"
+last_reviewed_commit: "9df526b0"
 generated:
   by: flow/0.26.0
   at: "2026-11-27T01:38:00Z"
@@ -236,12 +236,12 @@ impl ResponseSubmitter {
 
 ## 5. Implementation Plan
 
-- [ ] runtime-perf-remediation:ch02:t01 — Right-size Embedded Tokio threads, consumer-aligned RequestBatcher shards, and cgroup-aware CPU detection (tasks/t01-embedded-runtime-and-shard-sizing.md)
-- [ ] runtime-perf-remediation:ch02:t02 — Zero-copy PathAndQuery in InProcessRequest and BatchResponseSink on BatchBridge (tasks/t02-zero-copy-inprocess-and-batch-sink.md)
-- [ ] runtime-perf-remediation:ch02:t03 — Single-lock BridgeCorrelation batch allocation, BatchResponseSink registration, and single-shard complete_many fast path (tasks/t03-batch-locked-bridge-correlation.md)
-- [ ] runtime-perf-remediation:ch02:t04 — Zero-copy owned-buffer ResponseSubmitter::submit_batch_flushed in vertebra-py (tasks/t04-zero-copy-transport-batch-submit.md)
-- [ ] runtime-perf-remediation:ch02:t05 — Wire drive_asgi_batch, drive_native_batch, and drive_rsgi_batch to submit_batch_flushed (tasks/t05-wire-asgi-and-rsgi-batch-flush.md)
-- [ ] runtime-perf-remediation:ch02:t06 — Wire drive_wsgi_batch inline flush to submit_batch_flushed (tasks/t06-wire-native-and-wsgi-batch-flush.md)
+- [x] [3024aee2] runtime-perf-remediation:ch02:t01 — Right-size Embedded Tokio threads, consumer-aligned RequestBatcher shards, and cgroup-aware CPU detection (tasks/t01-embedded-runtime-and-shard-sizing.md)
+- [x] [3024aee2] runtime-perf-remediation:ch02:t02 — Zero-copy PathAndQuery in InProcessRequest and BatchResponseSink on BatchBridge (tasks/t02-zero-copy-inprocess-and-batch-sink.md)
+- [x] [3024aee2] runtime-perf-remediation:ch02:t03 — Single-lock BridgeCorrelation batch allocation, BatchResponseSink registration, and single-shard complete_many fast path (tasks/t03-batch-locked-bridge-correlation.md)
+- [x] [3024aee2] runtime-perf-remediation:ch02:t04 — Zero-copy owned-buffer ResponseSubmitter::submit_batch_flushed in vertebra-py (tasks/t04-zero-copy-transport-batch-submit.md)
+- [x] [3024aee2] runtime-perf-remediation:ch02:t05 — Wire drive_asgi_batch, drive_native_batch, and drive_rsgi_batch to submit_batch_flushed (tasks/t05-wire-asgi-and-rsgi-batch-flush.md)
+- [x] [3024aee2] runtime-perf-remediation:ch02:t06 — Wire drive_wsgi_batch inline flush to submit_batch_flushed (tasks/t06-wire-native-and-wsgi-batch-flush.md)
 
 ### Fast Chapter Gate (< 60s)
 
@@ -254,9 +254,8 @@ make lint-rs
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Chapter State**: `planned` (`planning_status: complete`, `plan_revision: 2`, `plan_commit: "86527cf1"`).
-- **Parallelizable Roots**: `t01` and `t02` are independent; `t03` and `t04` depend on `t02`; `t05` and `t06` depend on `t04`.
-- **Remaining Tasks**: `t01`, `t02`, `t03`, `t04`, `t05`, `t06`.
+- **Chapter State**: `completed` (`6/6` tasks completed across `3024aee2..9df526b0`, reviewed by `code-reviewer` + `quality-reviewer`).
+- **Remaining Tasks**: None.
 
 [^src-http-config]: `src/rs/vertebra-http/src/config.rs::ServerConfig::from_env` — Server configuration, Tokio thread defaults, and cgroup CPU detection.
 [^src-http-main]: `src/rs/vertebra-http/src/main.rs::run_server` — Tokio runtime builder, embedded Python worker spawn, and RequestBatcher shard sizing.

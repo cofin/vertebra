@@ -5,7 +5,7 @@ chapter_id: ch02-embedded-bridge-and-batching
 title: Wire drive_asgi_batch, drive_native_batch, and drive_rsgi_batch to submit_batch_flushed
 description: Switch shared flush_and_gather_inline (driving drive_asgi_batch and drive_native_batch in asgi.rs) and drive_rsgi_batch (rsgi/http.rs) to ResponseSubmitter::submit_batch_flushed while leaving scope and protocol struct layouts untouched for ch03.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 worksheet_format: compact
@@ -25,7 +25,7 @@ tests:
 estimated_loc: 45
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "3024aee2"
 sources:
   - id: src-py-transport
     resource: src/rs/vertebra-py/src/transport.rs::ResponseSubmitter

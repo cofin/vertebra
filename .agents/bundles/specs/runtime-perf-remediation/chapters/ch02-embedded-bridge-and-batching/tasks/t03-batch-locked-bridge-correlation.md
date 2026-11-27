@@ -5,7 +5,7 @@ chapter_id: ch02-embedded-bridge-and-batching
 title: Batch-lock BridgeCorrelation allocation and add single-shard complete_many fast path
 description: Acquire one shard Mutex and one active_requests fetch_add per batch in dispatch_bridge_vec, move PathAndQuery zero-copy, register BatchResponseSink in ensure_sink_registered, and add a zero-bucket single-shard fast path in complete_many.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 worksheet_format: compact
@@ -23,7 +23,7 @@ tests:
 estimated_loc: 170
 plan_revision: 2
 plan_commit: "86527cf1"
-commit: null
+commit: "3024aee2"
 sources:
   - id: src-http-bridge
     resource: src/rs/vertebra-http/src/dispatcher/bridge.rs::BridgeCorrelation
