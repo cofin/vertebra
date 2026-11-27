@@ -799,13 +799,18 @@ def partition_batch(
                     continue
 
             path = getattr(request, "path", "")
-            matched = False
+            best_prefix: str | None = None
+            best_len = -1
             for prefix, _adapter, _protocol in mount_runners:
-                if path.startswith(prefix):
-                    mounts_map.setdefault(prefix, []).append((idx, request))
-                    matched = True
-                    break
-            if matched:
+                if not prefix:
+                    if best_len < 0:
+                        best_prefix = prefix
+                        best_len = 0
+                elif (path == prefix or path.startswith(f"{prefix}/")) and len(prefix) > best_len:
+                    best_prefix = prefix
+                    best_len = len(prefix)
+            if best_prefix is not None:
+                mounts_map.setdefault(best_prefix, []).append((idx, request))
                 continue
 
         unmatched.append((idx, request))

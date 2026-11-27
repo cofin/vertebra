@@ -60,6 +60,7 @@ from vertebra.server._loops import (
     configure_worker_affinity,
     resolve_loop_shards,
 )
+from vertebra.server._mounts import resolve_mount_target
 from vertebra.server._protocol import InterfaceMode, detect_interface
 from vertebra.server._rsgi._adapter import RsgiAdapter
 from vertebra.server._wsgi._adapter import WsgiAdapter
@@ -94,9 +95,9 @@ _DEFAULT_LOOP_TELEMETRY_INTERVAL_SECONDS = 1.0
 
 
 class WorkerStartupError(VertebraError, RuntimeError):
-    """Raised when an ASGI lifespan or RSGI ``__rsgi_init__`` hook fails during worker startup."""
+    """Raised when a lazy mount import, ASGI lifespan, or RSGI ``__rsgi_init__`` hook fails during worker startup."""
 
-    def __init__(self, prefix: str, phase: Literal["lifespan", "rsgi_init"]) -> None:
+    def __init__(self, prefix: str, phase: Literal["import", "lifespan", "rsgi_init"]) -> None:
         self.prefix = prefix
         self.phase = phase
         super().__init__(f"Worker startup failed during {phase} for mount {prefix!r}")
@@ -303,6 +304,7 @@ def _instantiate_mount_runners(
     asgi_batch_timeout = _resolve_asgi_batch_timeout()
     result: list[tuple[str, Any, str]] = []
     for prefix, app, protocol in mounts:
+        app = resolve_mount_target(app, prefix=prefix)
         resolved: str = detect_interface(app, configured=configured_iface) if protocol == "auto" else protocol
         app = attach_framework_fastpath(app, mount_prefix=prefix, protocol=resolved)
         state = lifespan_states.get(prefix) if lifespan_states is not None else None
@@ -502,9 +504,24 @@ class Worker:
         shard_count = resolve_loop_shards(audit_report=self._gil_report)
         compiled_handlers = compile_handler_table(self._handlers)
         configured_iface = _resolve_configured_interface()
+        raw_native = os.environ.get("VERTEBRA_NATIVE", "1").strip().lower()
+        native_mode = raw_native not in {"0", "false", "no", "off"}
+        resolved_mounts: list[tuple[str, Any, str]] = []
+        for prefix, app_obj, protocol in self._mounts:
+            was_lazy = isinstance(app_obj, str)
+            try:
+                resolved_obj = resolve_mount_target(app_obj, prefix=prefix)
+            except Exception as exc:
+                logger.exception("Failed to resolve mount %r target %r", prefix, app_obj)
+                raise WorkerStartupError(prefix, "import") from exc
+            if was_lazy:
+                from vertebra.cli.plugin_registry import ensure_vertebra_integration
+
+                ensure_vertebra_integration(resolved_obj, native=native_mode)
+            resolved_mounts.append((prefix, resolved_obj, protocol))
         resolved_mount_protocols = [
             detect_interface(app_obj, configured=configured_iface) if protocol == "auto" else protocol
-            for _prefix, app_obj, protocol in self._mounts
+            for _prefix, app_obj, protocol in resolved_mounts
         ]
         has_async_handlers = any(spec.is_async for spec in compiled_handlers.values())
         has_sync_thread = any(spec.sync_to_thread for spec in compiled_handlers.values())
@@ -545,7 +562,7 @@ class Worker:
         lifespan_states: dict[str, dict[str, Any]] = {}
 
         try:
-            for (_prefix, app_obj, _protocol), resolved in zip(self._mounts, resolved_mount_protocols, strict=True):
+            for (_prefix, app_obj, _protocol), resolved in zip(resolved_mounts, resolved_mount_protocols, strict=True):
                 if resolved == "asgi":
                     try:
                         lifespan_stack.enter_context(enter_litestar_server_lifespan(app_obj))
@@ -556,7 +573,7 @@ class Worker:
                         raise WorkerStartupError(_prefix, "lifespan") from exc
 
             mount_runners = _instantiate_mount_runners(
-                self._mounts,
+                resolved_mounts,
                 loop_pool,
                 lifespan_states=lifespan_states,
             )

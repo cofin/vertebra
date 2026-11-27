@@ -21,6 +21,13 @@ from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.cli.plugin_registry import enter_app_server_lifespan, resolve_cli_app_path
 from vertebra.server._loops import LOOP_BACKEND_CHOICES
+from vertebra.server._mounts import (
+    MOUNT_ENTRYPOINT_APP_PATH,
+    MountSpec,
+    load_mounts_pyproject_config,
+    merge_mount_specs,
+    parse_mount_spec,
+)
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.utils.config_tools import get_env
 from vertebra.utils.serializers import decode_json
@@ -105,6 +112,12 @@ logger = logging.getLogger("vertebra.cli.run")
     default=None,
     help="Bearer token required for HTTP diagnostic Z-Pages",
 )
+@click.option(
+    "--mount",
+    "mount_specs_raw",
+    multiple=True,
+    help="Mount a sub-application as PREFIX=MODULE:ATTR[@PROTOCOL] (repeatable)",
+)
 @click.option("--no-banner", is_flag=True, help="Disable startup banner")
 def run(
     app: str | None,
@@ -130,11 +143,26 @@ def run(
     lane_concurrency: str | None,
     zpages: bool,
     zpages_token: str | None,
+    mount_specs_raw: tuple[str, ...],
     no_banner: bool,
 ) -> None:
     """Run the Vertebra server."""
     configure_logging(level=log_level, mode="prod")
-    resolved_app = resolve_cli_app_path(app)
+
+    try:
+        pyproject_mounts = load_mounts_pyproject_config(Path.cwd())
+        cli_mounts = tuple(parse_mount_spec(raw) for raw in mount_specs_raw)
+        effective_mounts: tuple[MountSpec, ...] = merge_mount_specs(pyproject_mounts, cli_mounts)
+    except ValueError as exc:
+        raise CLIError(str(exc), exit_code=EXIT_CONFIG_ERROR) from exc
+
+    base_app_path: str | None = None
+    if effective_mounts:
+        if app is not None:
+            base_app_path = resolve_cli_app_path(app)
+        resolved_app = MOUNT_ENTRYPOINT_APP_PATH
+    else:
+        resolved_app = resolve_cli_app_path(app)
 
     if worker_only and oneshot_job:
         raise CLIError(
@@ -201,6 +229,8 @@ def run(
         worker_lane_concurrency=effective_lanes,
         zpages=zpages,
         zpages_token=zpages_token,
+        mounts=effective_mounts,
+        base_app_path=base_app_path,
     )
     env = launch_env.to_environ()
     resolved_interface = "asgi" if asgi and interface.lower() == "auto" else interface.lower()
@@ -236,7 +266,8 @@ def run(
         banner_workers = _parse_positive_int(env.get("VERTEBRA_WORKERS"), default=1)
         render_banner(mode="serve", host=host, port=port, workers=banner_workers)
 
-    with enter_app_server_lifespan(resolved_app, app_path=resolved_app, native=not asgi) as offload_json:
+    lifespan_target = base_app_path or resolved_app
+    with enter_app_server_lifespan(lifespan_target, app_path=lifespan_target, native=not asgi) as offload_json:
         if offload_json:
             env["VERTEBRA_OFFLOAD_CONFIG"] = offload_json
         try:

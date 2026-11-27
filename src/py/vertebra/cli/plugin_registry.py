@@ -314,6 +314,8 @@ def ensure_vertebra_integration(app: Any, *, native: bool = True) -> Any:
 
     if isinstance(app, App):
         for _prefix, mounted_app, _protocol in app.mounts:
+            if isinstance(mounted_app, str):
+                continue
             ensure_vertebra_integration(mounted_app, native=native)
         return app
 
@@ -508,7 +510,7 @@ def _collect_app_plugins(app: Any) -> list[Any]:
     mounts = getattr(app, "mounts", None)
     if isinstance(mounts, (list, tuple)):
         for entry in mounts:
-            if isinstance(entry, tuple) and len(entry) >= 2:
+            if isinstance(entry, tuple) and len(entry) >= 2 and not isinstance(entry[1], str):
                 collected.extend(_collect_app_plugins(entry[1]))
 
     return collected
@@ -573,6 +575,8 @@ def _enter_framework_lifespans(
     if isinstance(app, App):
         stack.enter_context(app.lifespan())
         for _prefix, mounted_app, _protocol in app.mounts:
+            if isinstance(mounted_app, str):
+                continue
             _enter_framework_lifespans(stack, mounted_app, app_path=app_path)
         return
 
@@ -605,6 +609,8 @@ def _enter_framework_lifespans(
 def _extract_offload_config_json(app: Any) -> str | None:
     if isinstance(app, App):
         for _prefix, mounted_app, _protocol in app.mounts:
+            if isinstance(mounted_app, str):
+                continue
             nested = _extract_offload_config_json(mounted_app)
             if nested:
                 return nested

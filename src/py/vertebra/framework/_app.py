@@ -27,6 +27,7 @@ from vertebra.framework._welcome import WelcomePageRenderer
 from vertebra.framework.di import Container, DependencyGraph
 from vertebra.framework.openapi import OpenAPIConfig, OpenAPISpecBuilder
 from vertebra.framework.procedures import Procedure, ProcedureRouter
+from vertebra.server._mounts import resolve_mount_target, validate_mount_target_spec
 from vertebra.typing import LifecycleHook
 from vertebra.utils.serializers import encode_grpc_frame_into
 
@@ -436,15 +437,35 @@ class App:
             status_code=status_code,
         )
 
-    def mount(self, prefix: str, sub_app: Any, *, protocol: str = "auto") -> None:
-        """Mount a WSGI or ASGI sub-application under a path prefix."""
+    def mount(
+        self,
+        prefix: str,
+        sub_app: Any,
+        *,
+        protocol: str = "auto",
+        lazy: bool = True,
+    ) -> None:
+        """Mount a WSGI, ASGI, or RSGI sub-application under a path prefix.
+
+        Args:
+            prefix: URL path prefix where the sub-application is mounted.
+            sub_app: Live sub-application object or a ``module:attr`` / ``module:factory()``
+                import specification string.
+            protocol: Gateway protocol (``"auto"``, ``"asgi"``, ``"wsgi"``, or ``"rsgi"``).
+            lazy: When ``True`` (default) and ``sub_app`` is an import string, defer
+                importing until worker startup. When ``False``, resolve immediately.
+        """
         norm_prefix = _normalize_prefix(prefix)
+        resolved_sub_app = sub_app
+        if isinstance(sub_app, str):
+            validated = validate_mount_target_spec(sub_app, prefix=norm_prefix or "/")
+            resolved_sub_app = validated if lazy else resolve_mount_target(validated, prefix=norm_prefix or "/")
         if norm_prefix in {"", "/"} and self._welcome_route_active:
             welcome_id = _make_handler_id("GET", "/")
             self._handler_index.pop(welcome_id, None)
             self._handlers.pop(welcome_id, None)
             self._welcome_route_active = False
-        self._mounts.append((norm_prefix, sub_app, protocol))
+        self._mounts.append((norm_prefix, resolved_sub_app, protocol))
 
     def ensure_dev_welcome_route(self, *, force_dev: bool = False) -> bool:
         """Register the development welcome route on unclaimed ``GET /`` when debug or ``VERTEBRA_DEV`` is active."""
