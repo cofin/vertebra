@@ -530,3 +530,172 @@ def test_fullstack_cli_matrix_e2e_offline(
 
     drivers_used = {driver_name for driver_name, _ in dispatched}
     assert "ghz" in drivers_used
+
+
+@pytest.mark.parametrize(
+    ("adapter", "flavor"),
+    [
+        ("native", "vertebra"),
+        ("stdlib", "upstream"),
+        ("sqlspec", "vertebra"),
+        ("sqlspec", "upstream"),
+        ("advanced_alchemy", "vertebra"),
+        ("advanced_alchemy", "upstream"),
+    ],
+)
+def test_data_backend_four_adapters_sqlite_sync_and_async(
+    tmp_path: Path,
+    adapter: str,
+    flavor: str,
+) -> None:
+    """Verify SQLite sync and async fetch, update, and cache operations across all four benchmark adapters."""
+    from tools.benchmarks.apps._data_backend import DataBackend, DataBackendConfig, WorldRow
+
+    db_file = tmp_path / f"world_{adapter}_{flavor}.db"
+
+    async def _exercise() -> None:
+        backend = DataBackend(
+            DataBackendConfig(
+                db_backend="sqlite",
+                db_adapter=adapter,
+                db_adapter_flavor=flavor,
+                db_dsn=str(db_file),
+            )
+        )
+        try:
+            sync_row = backend.get_world_sync()
+            assert isinstance(sync_row, WorldRow)
+            assert len(backend.get_worlds_sync(3)) == 3
+            sync_updated = backend.update_worlds_sync(2)
+            assert len(sync_updated) == 2
+            assert len(backend.get_cached_worlds_sync(4)) == 4
+
+            async_row = await backend.get_world()
+            assert isinstance(async_row, WorldRow)
+            assert len(await backend.get_worlds(3)) == 3
+            async_updated = await backend.update_worlds(2)
+            assert len(async_updated) == 2
+            assert len(await backend.get_cached_worlds(4)) == 4
+        finally:
+            await backend.aclose()
+
+    asyncio.run(_exercise())
+
+
+def test_data_backend_validation_postgres_dsn_and_broker_pool_checkout(tmp_path: Path) -> None:
+    """Verify config validation, Postgres missing-DSN errors, URL rewriting, and BrokerPool/AsyncBrokerPool checkout."""
+    from tools.benchmarks.apps._data_backend import DataBackend, DataBackendConfig
+    from tools.benchmarks.apps._db_drivers import NativePostgresWorldDriver
+    from tools.benchmarks.apps._db_orm_drivers import rewrite_sqlalchemy_url
+
+    cfg = load_backend_config({})
+    assert cfg.db_backend == "memory"
+    assert cfg.db_adapter == "native"
+    assert cfg.db_adapter_flavor == "vertebra"
+
+    with pytest.raises(ValueError, match="db_adapter"):
+        load_backend_config({"VTB_BENCH_DB_ADAPTER": "bogus"})
+    with pytest.raises(ValueError, match="db_adapter_flavor"):
+        load_backend_config({"VTB_BENCH_DB_ADAPTER_FLAVOR": "bogus"})
+    with pytest.raises(ValueError, match="VTB_BENCH_DB_DSN"):
+        DataBackend(DataBackendConfig(db_backend="postgres", db_dsn=""))
+
+    pg_per_worker = NativePostgresWorldDriver(
+        DataBackendConfig(
+            db_backend="postgres",
+            db_dsn="postgresql://postgres:bench@127.0.0.1:5432/bench",
+            broker_mode="per_worker",
+        ),
+        pool_size=10,
+    )
+    assert pg_per_worker.pg_config.broker is None
+    assert pg_per_worker.pg_config.max_size == 10
+
+    pg_brokered = NativePostgresWorldDriver(
+        DataBackendConfig(
+            db_backend="postgres",
+            db_dsn="postgresql://postgres:bench@127.0.0.1:5432/bench",
+            broker_mode="shm_broker",
+        ),
+        pool_size=40,
+    )
+    assert pg_brokered.pg_config.broker is not None
+    assert pg_brokered.pg_config.max_size == 40
+
+    pg_url = "postgresql://user:pass@127.0.0.1:5432/bench"
+    assert rewrite_sqlalchemy_url("postgres", pg_url, flavor="vertebra", is_async=False) == (
+        "postgresql+vtb://user:pass@127.0.0.1:5432/bench"
+    )
+    assert rewrite_sqlalchemy_url("postgres", pg_url, flavor="vertebra", is_async=True) == (
+        "postgresql+vtb_async://user:pass@127.0.0.1:5432/bench"
+    )
+    assert rewrite_sqlalchemy_url("postgres", pg_url, flavor="upstream", is_async=False) == (
+        "postgresql+psycopg://user:pass@127.0.0.1:5432/bench"
+    )
+    assert rewrite_sqlalchemy_url("postgres", pg_url, flavor="upstream", is_async=True) == (
+        "postgresql+asyncpg://user:pass@127.0.0.1:5432/bench"
+    )
+
+    broker_db = tmp_path / "aa_broker.db"
+
+    async def _exercise_broker_pool() -> None:
+        backend = DataBackend(
+            DataBackendConfig(
+                db_backend="sqlite",
+                db_adapter="advanced_alchemy",
+                db_adapter_flavor="vertebra",
+                db_dsn=str(broker_db),
+                broker_mode="shm_broker",
+            )
+        )
+        try:
+            assert backend.get_world_sync().id >= 1
+            assert (await backend.get_world()).id >= 1
+        finally:
+            await backend.aclose()
+
+    asyncio.run(_exercise_broker_pool())
+
+
+def test_http_data_adapter_targets_ports_and_shm_broker_dsn_guard() -> None:
+    """Verify the ten new SQLSpec/AA/stdlib HTTP data targets, adapter tags, and Postgres-only shm_broker guard."""
+    from tools.benchmarks.targets import DATA_BASELINE_TARGETS, apply_shm_broker_dsn
+
+    ports = [target.port for target in ALL_TARGETS.values()]
+    assert len(ports) == len(set(ports))
+
+    expected_data = {
+        "vtb-data-sqlspec-native-4w": ("sqlspec", "sqlspec", "vertebra", "per_worker"),
+        "vtb-data-sqlspec-shm-4w-broker": ("sqlspec", "sqlspec", "vertebra", "shm_broker"),
+        "vtb-data-aa-native-4w": ("advanced_alchemy", "advanced_alchemy", "vertebra", "per_worker"),
+        "vtb-data-aa-shm-4w-broker": ("advanced_alchemy", "advanced_alchemy", "vertebra", "shm_broker"),
+    }
+    for name, (adapter_tag, env_adapter, env_flavor, broker_mode) in expected_data.items():
+        assert name in DATA_TARGETS
+        target = ALL_TARGETS[name]
+        assert target.adapter == adapter_tag
+        assert target.broker_mode == broker_mode
+        assert target.env["VTB_BENCH_DB_ADAPTER"] == env_adapter
+        assert target.env["VTB_BENCH_DB_ADAPTER_FLAVOR"] == env_flavor
+
+    expected_baselines = {
+        "granian-asgi-data-stdlib": ("stdlib", "stdlib", "upstream"),
+        "granian-asgi-data-sqlspec": ("sqlspec-upstream", "sqlspec", "upstream"),
+        "granian-asgi-data-aa": ("advanced_alchemy-vanilla", "advanced_alchemy", "upstream"),
+        "uvicorn-httptools-data-stdlib": ("stdlib", "stdlib", "upstream"),
+        "uvicorn-httptools-data-sqlspec": ("sqlspec-upstream", "sqlspec", "upstream"),
+        "uvicorn-httptools-data-aa": ("advanced_alchemy-vanilla", "advanced_alchemy", "upstream"),
+    }
+    for name, (adapter_tag, env_adapter, env_flavor) in expected_baselines.items():
+        assert name in DATA_BASELINE_TARGETS
+        target = ALL_TARGETS[name]
+        assert target.adapter == adapter_tag
+        assert target.env["VTB_BENCH_DB_ADAPTER"] == env_adapter
+        assert target.env["VTB_BENCH_DB_ADAPTER_FLAVOR"] == env_flavor
+
+    assert (
+        apply_shm_broker_dsn("postgresql://postgres:bench@127.0.0.1:5432/bench", broker_mode="shm_broker")
+        == "postgresql://postgres:bench@127.0.0.1:5432/bench?shm_broker=true"
+    )
+    assert apply_shm_broker_dsn("/tmp/world.db", broker_mode="shm_broker") == "/tmp/world.db"
+    assert apply_shm_broker_dsn(":memory:", broker_mode="shm_broker") == ":memory:"

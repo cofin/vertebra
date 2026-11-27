@@ -16,7 +16,7 @@ use crate::transport::ResponseSubmitter;
 use crate::wsgi::environ::WsgiServerConfig;
 use crate::wsgi::runner::execute_single_wsgi_item;
 
-const DEFAULT_STALL_THRESHOLD_US: u64 = 250;
+const DEFAULT_STALL_THRESHOLD_US: u64 = 2_000;
 const DEFAULT_HYSTERESIS_US: u64 = 2_000_000;
 const WATCHDOG_IDLE_GRACE_NS: u64 = 2_000_000;
 const MAX_WSGI_THREADS: usize = 512;
@@ -71,7 +71,7 @@ impl WsgiPoolConfig {
             })
             .unwrap_or(default_mode);
 
-        let default_threads = cpus.saturating_mul(4).clamp(32, 128);
+        let default_threads = cpus.saturating_mul(12).clamp(64, 128);
         let threads = get_env("VERTEBRA_WSGI_THREADS")
             .and_then(|raw| raw.trim().parse::<usize>().ok())
             .filter(|&v| v > 0)
@@ -710,7 +710,7 @@ impl WsgiExecutor {
                 return Ok(0);
             };
             let request_id = snapshot.node(snap_idx).correlation_id;
-            let start = now_ns();
+            let start = now;
             let flushed =
                 execute_single_wsgi_item(py, app, snapshot, snap_idx, server_config, request_id);
             let end = now_ns();
@@ -733,6 +733,7 @@ impl WsgiExecutor {
         self.publish_active_handoff(Arc::clone(&handoff));
 
         let mut completed = Vec::with_capacity(total);
+        let mut item_start = now;
         while let Some(idx) = handoff.state.claim_next_inline() {
             let (snapshot, snap_idx, cfg) = match &handoff.payload {
                 HandoffPayload::Wsgi {
@@ -749,7 +750,6 @@ impl WsgiExecutor {
                 HandoffPayload::Test(_) => unreachable!(),
             };
             let request_id = snapshot.node(snap_idx).correlation_id;
-            let item_start = now_ns();
             handoff.state.mark_item_start(item_start);
             let flushed = execute_single_wsgi_item(py, app, snapshot, snap_idx, cfg, request_id);
             let item_end = now_ns();
@@ -757,6 +757,7 @@ impl WsgiExecutor {
             completed.push(flushed);
 
             let elapsed = item_end.saturating_sub(item_start);
+            item_start = item_end;
             if handoff.state.handed_off.load(Ordering::Acquire)
                 || elapsed >= self.stall_threshold_ns
             {
@@ -870,13 +871,13 @@ mod tests {
     fn config_parsing_defaults_and_overrides() {
         let gil_default = WsgiPoolConfig::from_lookup(false, 12, lookup_map(&[]));
         assert_eq!(gil_default.mode, WsgiExecutionMode::Auto);
-        assert_eq!(gil_default.threads, 48);
-        assert_eq!(gil_default.stall_threshold_us, 250);
+        assert_eq!(gil_default.threads, 128);
+        assert_eq!(gil_default.stall_threshold_us, 2_000);
         assert_eq!(gil_default.hysteresis_us, 2_000_000);
 
         let ft_default = WsgiPoolConfig::from_lookup(true, 4, lookup_map(&[]));
         assert_eq!(ft_default.mode, WsgiExecutionMode::Concurrent);
-        assert_eq!(ft_default.threads, 32);
+        assert_eq!(ft_default.threads, 64);
 
         let many_cpus = WsgiPoolConfig::from_lookup(false, 64, lookup_map(&[]));
         assert_eq!(many_cpus.threads, 128);
@@ -908,8 +909,8 @@ mod tests {
             ]),
         );
         assert_eq!(invalid.mode, WsgiExecutionMode::Auto);
-        assert_eq!(invalid.threads, 32);
-        assert_eq!(invalid.stall_threshold_us, 250);
+        assert_eq!(invalid.threads, 96);
+        assert_eq!(invalid.stall_threshold_us, 2_000);
     }
 
     #[test]

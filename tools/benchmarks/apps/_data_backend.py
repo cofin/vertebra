@@ -2,20 +2,20 @@
 
 Provides matched connection pool budget parity across worker topologies,
 multi-cloud object storage configuration (blocking MinIO), deterministic offline
-memory and SQLite backends, and free-threaded GIL enforcement.
+memory and SQLite backends, real PostgreSQL and ORM/SQLSpec drivers, and
+free-threaded GIL enforcement.
 """
 
 from __future__ import annotations
 
 import os
 import random
-import sqlite3
 import sys
 import tempfile
 import threading
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import msgspec
 
@@ -32,9 +32,15 @@ from vertebra.storage import (
     SyncObjectStore,
 )
 
+if TYPE_CHECKING:
+    from tools.benchmarks.apps._db_drivers import WorldDriver
+
 __all__ = (
     "FORBIDDEN_STORAGE_BACKENDS",
     "JSON_HELLO_PAYLOAD",
+    "VALID_DB_ADAPTERS",
+    "VALID_DB_ADAPTER_FLAVORS",
+    "VALID_DB_BACKENDS",
     "WORLD_ROW_COUNT",
     "DataBackend",
     "DataBackendConfig",
@@ -49,6 +55,9 @@ __all__ = (
 WORLD_ROW_COUNT: Final[int] = 10_000
 JSON_HELLO_PAYLOAD: Final[bytes] = b'{"message":"Hello, World!"}'
 FORBIDDEN_STORAGE_BACKENDS: Final[frozenset[str]] = frozenset({"minio"})
+VALID_DB_BACKENDS: Final[frozenset[str]] = frozenset({"memory", "sqlite", "postgres"})
+VALID_DB_ADAPTERS: Final[frozenset[str]] = frozenset({"native", "sqlspec", "advanced_alchemy", "stdlib"})
+VALID_DB_ADAPTER_FLAVORS: Final[frozenset[str]] = frozenset({"vertebra", "upstream"})
 _FORBIDDEN_STORAGE_ERROR: Final[str] = "MinIO is forbidden; use rustfs, floci_s3, floci_gcs, azurite, local, or memory"
 _TRUTHY_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 
@@ -64,6 +73,8 @@ class DataBackendConfig(msgspec.Struct, frozen=True, gc=False):
     """Configuration for the shared benchmark data, cache, and storage backend."""
 
     db_backend: str = "memory"
+    db_adapter: str = "native"
+    db_adapter_flavor: str = "vertebra"
     db_dsn: str = ""
     cache_backend: str = "memory"
     cache_dsn: str = ""
@@ -103,6 +114,16 @@ def _validate_storage_backend(backend: str) -> str:
     return normalized
 
 
+def _validate_db_choice(name: str, raw: str, allowed: frozenset[str], default: str) -> str:
+    """Normalize and validate a database configuration selector against ``allowed``."""
+    normalized = raw.strip().lower() or default
+    if normalized not in allowed:
+        valid = ", ".join(sorted(allowed))
+        msg = f"Unsupported {name}: {raw!r}; expected one of: {valid}"
+        raise ValueError(msg)
+    return normalized
+
+
 def load_backend_config(env: Mapping[str, str] | None = None) -> DataBackendConfig:
     """Load benchmark backend configuration from environment variables.
 
@@ -114,15 +135,28 @@ def load_backend_config(env: Mapping[str, str] | None = None) -> DataBackendConf
         ``VERTEBRA_STRICT_FREE_THREADING``.
 
     Raises:
-        ValueError: If ``VTB_BENCH_STORAGE_BACKEND`` selects a forbidden backend.
+        ValueError: If storage or database backend selectors are invalid or forbidden.
     """
     source = os.environ if env is None else env
     storage_backend = _validate_storage_backend(source.get("VTB_BENCH_STORAGE_BACKEND", "memory"))
-    db_backend = source.get("VTB_BENCH_DB_BACKEND", "memory").strip().lower() or "memory"
+    db_backend = _validate_db_choice(
+        "db_backend", source.get("VTB_BENCH_DB_BACKEND", "memory"), VALID_DB_BACKENDS, "memory"
+    )
+    db_adapter = _validate_db_choice(
+        "db_adapter", source.get("VTB_BENCH_DB_ADAPTER", "native"), VALID_DB_ADAPTERS, "native"
+    )
+    db_adapter_flavor = _validate_db_choice(
+        "db_adapter_flavor",
+        source.get("VTB_BENCH_DB_ADAPTER_FLAVOR", "vertebra"),
+        VALID_DB_ADAPTER_FLAVORS,
+        "vertebra",
+    )
     cache_backend = source.get("VTB_BENCH_CACHE_BACKEND", "memory").strip().lower() or "memory"
     broker_mode = source.get("VTB_BENCH_BROKER_MODE", "none").strip().lower() or "none"
     return DataBackendConfig(
         db_backend=db_backend,
+        db_adapter=db_adapter,
+        db_adapter_flavor=db_adapter_flavor,
         db_dsn=source.get("VTB_BENCH_DB_DSN", "").strip(),
         cache_backend=cache_backend,
         cache_dsn=source.get("VTB_BENCH_CACHE_DSN", "").strip(),
@@ -216,9 +250,9 @@ class DataBackend:
         "_cache",
         "_cache_lock",
         "_db_lock",
+        "_driver",
         "_memory_rows",
-        "_rng",
-        "_sqlite_conn",
+        "_rng_local",
         "_store_lock",
         "_sync_store",
         "config",
@@ -228,14 +262,17 @@ class DataBackend:
         """Initialize the benchmark backend from an explicit or environment config."""
         resolved = load_backend_config() if config is None else config
         _validate_storage_backend(resolved.storage_backend)
+        _validate_db_choice("db_backend", resolved.db_backend, VALID_DB_BACKENDS, "memory")
+        _validate_db_choice("db_adapter", resolved.db_adapter, VALID_DB_ADAPTERS, "native")
+        _validate_db_choice("db_adapter_flavor", resolved.db_adapter_flavor, VALID_DB_ADAPTER_FLAVORS, "vertebra")
         self.config: DataBackendConfig = resolved
         self._db_lock = threading.Lock()
         self._cache_lock = threading.Lock()
         self._store_lock = threading.Lock()
-        self._rng = random.Random(42)
+        self._rng_local = threading.local()
         self._cache: dict[int, WorldRow] = {}
         self._memory_rows: list[int] = []
-        self._sqlite_conn: sqlite3.Connection | None = None
+        self._driver: WorldDriver | None = None
         self._sync_store: SyncObjectStore | None = None
         self._async_store: AsyncObjectStore | None = None
         self._init_database()
@@ -248,29 +285,9 @@ class DataBackend:
                 ((idx * 1_103_515_245 + 12_345) % WORLD_ROW_COUNT) + 1 for idx in range(WORLD_ROW_COUNT)
             ]
             return
-        if backend == "sqlite":
-            dsn = self.config.db_dsn.strip()
-            if not dsn or dsn == ":memory:":
-                db_target = ":memory:"
-            elif dsn.startswith("sqlite:///"):
-                db_target = dsn.removeprefix("sqlite:///")
-            else:
-                db_target = dsn
-            conn = sqlite3.connect(db_target, check_same_thread=False)
-            conn.execute("CREATE TABLE IF NOT EXISTS world (id INTEGER PRIMARY KEY, randomnumber INTEGER NOT NULL)")
-            cursor = conn.execute("SELECT COUNT(*) FROM world")
-            existing = int(cursor.fetchone()[0])
-            if existing < WORLD_ROW_COUNT:
-                rows = [
-                    (idx, ((idx * 1_103_515_245 + 12_345) % WORLD_ROW_COUNT) + 1)
-                    for idx in range(1, WORLD_ROW_COUNT + 1)
-                ]
-                conn.executemany("INSERT OR REPLACE INTO world (id, randomnumber) VALUES (?, ?)", rows)
-                conn.commit()
-            self._sqlite_conn = conn
-            return
-        msg = f"Unsupported db_backend: {self.config.db_backend!r}"
-        raise ValueError(msg)
+        from tools.benchmarks.apps._db_drivers import build_world_driver
+
+        self._driver = build_world_driver(self.config, pool_size=self.pool_size)
 
     @property
     def pool_size(self) -> int:
@@ -280,6 +297,15 @@ class DataBackend:
             self.config.broker_mode,
             self.config.total_pool_budget,
         )
+
+    def _thread_rng(self) -> random.Random:
+        """Return a thread-local deterministic PRNG avoiding shared mutex contention."""
+        rng: random.Random | None = getattr(self._rng_local, "rng", None)
+        if rng is None:
+            seed = 42 ^ (threading.get_ident() & 0xFFFF_FFFF)
+            rng = random.Random(seed)
+            self._rng_local.rng = rng
+        return rng
 
     def build_storage_config(self) -> StorageConfig:
         """Build the Vertebra ``StorageConfig`` matching ``self.config.storage_backend``.
@@ -364,56 +390,39 @@ class DataBackend:
 
     def _next_world_id(self) -> int:
         """Select a random World row ID in ``[1, WORLD_ROW_COUNT]``."""
-        return self._rng.randint(1, WORLD_ROW_COUNT)
-
-    def _fetch_world_locked(self, row_id: int) -> WorldRow:
-        """Read a single World row while holding ``self._db_lock``."""
-        if self._sqlite_conn is not None:
-            cursor = self._sqlite_conn.execute(
-                "SELECT id, randomnumber FROM world WHERE id = ?",
-                (row_id,),
-            )
-            found = cursor.fetchone()
-            if found is None:
-                return WorldRow(id=row_id, randomNumber=1)
-            return WorldRow(id=int(found[0]), randomNumber=int(found[1]))
-        return WorldRow(id=row_id, randomNumber=self._memory_rows[row_id - 1])
-
-    def _update_world_locked(self, row_id: int, new_value: int) -> WorldRow:
-        """Update a single World row while holding ``self._db_lock``."""
-        if self._sqlite_conn is not None:
-            self._sqlite_conn.execute(
-                "UPDATE world SET randomnumber = ? WHERE id = ?",
-                (new_value, row_id),
-            )
-            return WorldRow(id=row_id, randomNumber=new_value)
-        self._memory_rows[row_id - 1] = new_value
-        return WorldRow(id=row_id, randomNumber=new_value)
+        return self._thread_rng().randint(1, WORLD_ROW_COUNT)
 
     def get_world_sync(self) -> WorldRow:
         """Synchronously fetch a single random World row."""
+        row_id = self._next_world_id()
+        if self._driver is not None:
+            return self._driver.fetch_world_sync(row_id)
         with self._db_lock:
-            row_id = self._next_world_id()
-            return self._fetch_world_locked(row_id)
+            return WorldRow(id=row_id, randomNumber=self._memory_rows[row_id - 1])
 
     def get_worlds_sync(self, count: int) -> list[WorldRow]:
         """Synchronously fetch ``count`` random World rows."""
         resolved_count = clamp_query_count(count)
+        rng = self._thread_rng()
+        row_ids = [rng.randint(1, WORLD_ROW_COUNT) for _ in range(resolved_count)]
+        if self._driver is not None:
+            return self._driver.fetch_worlds_sync(row_ids)
         with self._db_lock:
-            return [self._fetch_world_locked(self._next_world_id()) for _ in range(resolved_count)]
+            return [WorldRow(id=row_id, randomNumber=self._memory_rows[row_id - 1]) for row_id in row_ids]
 
     def update_worlds_sync(self, count: int) -> list[WorldRow]:
         """Synchronously read and update ``count`` random World rows."""
         resolved_count = clamp_query_count(count)
-        updated: list[WorldRow] = []
-        with self._db_lock:
-            for _ in range(resolved_count):
-                row_id = self._next_world_id()
-                _ = self._fetch_world_locked(row_id)
-                new_value = self._rng.randint(1, WORLD_ROW_COUNT)
-                updated.append(self._update_world_locked(row_id, new_value))
-            if self._sqlite_conn is not None:
-                self._sqlite_conn.commit()
+        rng = self._thread_rng()
+        updates = [(rng.randint(1, WORLD_ROW_COUNT), rng.randint(1, WORLD_ROW_COUNT)) for _ in range(resolved_count)]
+        if self._driver is not None:
+            updated = self._driver.update_worlds_sync(updates)
+        else:
+            updated = []
+            with self._db_lock:
+                for row_id, new_value in updates:
+                    self._memory_rows[row_id - 1] = new_value
+                    updated.append(WorldRow(id=row_id, randomNumber=new_value))
         with self._cache_lock:
             for row in updated:
                 if row.id in self._cache:
@@ -423,17 +432,20 @@ class DataBackend:
     def get_cached_worlds_sync(self, count: int) -> list[WorldRow]:
         """Synchronously fetch ``count`` World rows using the process-local cache."""
         resolved_count = clamp_query_count(count)
+        rng = self._thread_rng()
+        row_ids = [rng.randint(1, WORLD_ROW_COUNT) for _ in range(resolved_count)]
         results: list[WorldRow] = []
-        for _ in range(resolved_count):
-            with self._db_lock:
-                row_id = self._next_world_id()
+        for row_id in row_ids:
             with self._cache_lock:
                 cached = self._cache.get(row_id)
             if cached is not None:
                 results.append(cached)
                 continue
-            with self._db_lock:
-                fetched = self._fetch_world_locked(row_id)
+            if self._driver is not None:
+                fetched = self._driver.fetch_world_sync(row_id)
+            else:
+                with self._db_lock:
+                    fetched = WorldRow(id=row_id, randomNumber=self._memory_rows[row_id - 1])
             with self._cache_lock:
                 self._cache[row_id] = fetched
             results.append(fetched)
@@ -455,19 +467,54 @@ class DataBackend:
 
     async def get_world(self) -> WorldRow:
         """Asynchronously fetch a single random World row."""
+        if self._driver is not None:
+            return await self._driver.fetch_world_async(self._next_world_id())
         return self.get_world_sync()
 
     async def get_worlds(self, count: int) -> list[WorldRow]:
         """Asynchronously fetch ``count`` random World rows."""
+        if self._driver is not None:
+            resolved_count = clamp_query_count(count)
+            rng = self._thread_rng()
+            row_ids = [rng.randint(1, WORLD_ROW_COUNT) for _ in range(resolved_count)]
+            return await self._driver.fetch_worlds_async(row_ids)
         return self.get_worlds_sync(count)
 
     async def update_worlds(self, count: int) -> list[WorldRow]:
         """Asynchronously read and update ``count`` random World rows."""
+        if self._driver is not None:
+            resolved_count = clamp_query_count(count)
+            rng = self._thread_rng()
+            updates = [
+                (rng.randint(1, WORLD_ROW_COUNT), rng.randint(1, WORLD_ROW_COUNT)) for _ in range(resolved_count)
+            ]
+            updated = await self._driver.update_worlds_async(updates)
+            with self._cache_lock:
+                for row in updated:
+                    if row.id in self._cache:
+                        self._cache[row.id] = row
+            return updated
         return self.update_worlds_sync(count)
 
     async def get_cached_worlds(self, count: int) -> list[WorldRow]:
         """Asynchronously fetch ``count`` World rows using the cache."""
-        return self.get_cached_worlds_sync(count)
+        if self._driver is None:
+            return self.get_cached_worlds_sync(count)
+        resolved_count = clamp_query_count(count)
+        rng = self._thread_rng()
+        row_ids = [rng.randint(1, WORLD_ROW_COUNT) for _ in range(resolved_count)]
+        results: list[WorldRow] = []
+        for row_id in row_ids:
+            with self._cache_lock:
+                cached = self._cache.get(row_id)
+            if cached is not None:
+                results.append(cached)
+                continue
+            fetched = await self._driver.fetch_world_async(row_id)
+            with self._cache_lock:
+                self._cache[row_id] = fetched
+            results.append(fetched)
+        return results
 
     async def get_object(self, key: str) -> bytes | None:
         """Asynchronously read an object payload by key, returning None when absent."""
@@ -483,12 +530,8 @@ class DataBackend:
         result = await async_store.put(key, data)
         return int(result.size)
 
-    def close(self) -> None:
-        """Release any open SQLite or object storage resources."""
-        with self._db_lock:
-            if self._sqlite_conn is not None:
-                self._sqlite_conn.close()
-                self._sqlite_conn = None
+    def _close_stores(self) -> None:
+        """Close lazily initialized sync and async object stores."""
         with self._store_lock:
             if self._async_store is not None:
                 self._async_store.close()
@@ -496,6 +539,20 @@ class DataBackend:
             if self._sync_store is not None:
                 self._sync_store.close()
                 self._sync_store = None
+
+    def close(self) -> None:
+        """Release any open database driver or object storage resources."""
+        if self._driver is not None:
+            self._driver.close()
+            self._driver = None
+        self._close_stores()
+
+    async def aclose(self) -> None:
+        """Asynchronously release open database pools and object storage resources."""
+        if self._driver is not None:
+            await self._driver.aclose()
+            self._driver = None
+        self._close_stores()
 
 
 _DEFAULT_BACKEND_LOCK = threading.Lock()

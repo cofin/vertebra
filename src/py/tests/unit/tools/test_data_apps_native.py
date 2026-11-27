@@ -247,20 +247,17 @@ def test_data_backend_offline_operations(db_backend: str, db_dsn: str) -> None:
 
 
 def test_sqlite_in_memory_isolation() -> None:
-    """Verify two SQLite :memory: backends keep independent state."""
+    """Verify two SQLite :memory: backends keep independent state through the driver API."""
     first = DataBackend(DataBackendConfig(db_backend="sqlite", db_dsn=":memory:"))
     second = DataBackend(DataBackendConfig(db_backend="sqlite", db_dsn=":memory:"))
     try:
-        assert first._sqlite_conn is not None
-        assert second._sqlite_conn is not None
-        first._sqlite_conn.execute("UPDATE world SET randomnumber = 99999 WHERE id = 1")
-        first._sqlite_conn.commit()
-        row_first = first._sqlite_conn.execute("SELECT randomnumber FROM world WHERE id = 1").fetchone()
-        row_second = second._sqlite_conn.execute("SELECT randomnumber FROM world WHERE id = 1").fetchone()
-        assert row_first is not None
-        assert row_second is not None
-        assert int(row_first[0]) == 99999
-        assert int(row_second[0]) != 99999
+        assert first._driver is not None
+        assert second._driver is not None
+        first._driver.update_worlds_sync([(1, 99999)])
+        row_first = first._driver.fetch_world_sync(1)
+        row_second = second._driver.fetch_world_sync(1)
+        assert row_first.randomNumber == 99999
+        assert row_second.randomNumber != 99999
     finally:
         first.close()
         second.close()

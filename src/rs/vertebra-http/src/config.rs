@@ -611,7 +611,7 @@ impl ServerConfig {
                     .clamp(1, 4)
                     .min(available_cpus);
             } else if self.topology == Topology::Embedded && !free_threaded {
-                self.worker_threads = 1;
+                self.worker_threads = available_cpus.clamp(1, 2);
             }
         }
     }
@@ -857,13 +857,20 @@ mod tests {
     }
 
     #[test]
-    fn runtime_thread_env_defaults_embedded_gil_to_single_thread_and_honors_overrides() {
+    fn runtime_thread_env_defaults_embedded_gil_and_honors_overrides() {
         let mut gil_embedded = ServerConfig {
             topology: Topology::Embedded,
             ..ServerConfig::default()
         };
         gil_embedded.apply_runtime_thread_env(12, false, |_| None);
-        assert_eq!(gil_embedded.worker_threads, 1);
+        assert_eq!(gil_embedded.worker_threads, 2);
+
+        let mut gil_single_core = ServerConfig {
+            topology: Topology::Embedded,
+            ..ServerConfig::default()
+        };
+        gil_single_core.apply_runtime_thread_env(1, false, |_| None);
+        assert_eq!(gil_single_core.worker_threads, 1);
 
         let mut gil_with_threads = ServerConfig {
             topology: Topology::Embedded,
@@ -873,7 +880,7 @@ mod tests {
             "VERTEBRA_THREADS" => Some("8".to_string()),
             _ => None,
         });
-        assert_eq!(gil_with_threads.worker_threads, 1);
+        assert_eq!(gil_with_threads.worker_threads, 2);
         assert_eq!(gil_with_threads.thread_count, 8);
 
         let mut gil_explicit_tokio = ServerConfig {
@@ -881,10 +888,10 @@ mod tests {
             ..ServerConfig::default()
         };
         gil_explicit_tokio.apply_runtime_thread_env(12, false, |k| match k {
-            "VERTEBRA_TOKIO_THREADS" => Some("2".to_string()),
+            "VERTEBRA_TOKIO_THREADS" => Some("1".to_string()),
             _ => None,
         });
-        assert_eq!(gil_explicit_tokio.worker_threads, 2);
+        assert_eq!(gil_explicit_tokio.worker_threads, 1);
 
         let mut ft_embedded = ServerConfig {
             topology: Topology::Embedded,

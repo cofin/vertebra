@@ -47,6 +47,7 @@ from vertebra.utils.module_loader import import_optional
 
 type MySQLEngine = Literal["mysql", "mariadb"]
 type SqlSpecEngine = Literal["sqlite", "duckdb", "postgres", "mysql", "oracle", "mssql"]
+type AdvancedAlchemyEngine = Literal["sqlite", "postgres"]
 type ComparatorStatus = Literal["pass", "fail", "allowed", "missing", "skipped"]
 
 SUPPORTED_SQL_ENGINES: Final[tuple[str, ...]] = (
@@ -61,6 +62,7 @@ SUPPORTED_SQL_ENGINES: Final[tuple[str, ...]] = (
     "bigquery",
     "sqlalchemy",
     "sqlspec",
+    "advanced_alchemy",
 )
 
 COMPARATOR_PAIRS: Final[dict[str, tuple[str, ...]]] = {
@@ -80,6 +82,10 @@ COMPARATOR_PAIRS: Final[dict[str, tuple[str, ...]]] = {
     "vertebra-sqlspec-sqlite-sync": ("sqlspec-sqlite-sync",),
     "vertebra-sqlspec-duckdb-sync": ("sqlspec-duckdb-sync",),
     "vertebra-sqlspec-postgres-async": ("sqlspec-asyncpg",),
+    "vertebra-aa-sqlite-sync": ("vanilla-aa-sqlite-sync",),
+    "vertebra-aa-sqlite-async": ("vanilla-aa-sqlite-async",),
+    "vertebra-aa-postgres-sync": ("vanilla-aa-postgres-sync",),
+    "vertebra-aa-postgres-async": ("vanilla-aa-postgres-async",),
     "vertebra-sync": ("psycopg-sync",),
     "vertebra-async": ("asyncpg",),
 }
@@ -127,6 +133,10 @@ _SQLSPEC_ENGINES: Final[tuple[SqlSpecEngine, ...]] = (
     "oracle",
     "mssql",
 )
+_ADVANCED_ALCHEMY_ENGINES: Final[tuple[AdvancedAlchemyEngine, ...]] = (
+    "sqlite",
+    "postgres",
+)
 
 _SQLITE_MULTI_ROW_QUERY: Final[str] = (
     "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt WHERE x < 10) SELECT x FROM cnt"
@@ -138,10 +148,12 @@ __all__ = (
     "COMPARATOR_ALLOW_LIST",
     "COMPARATOR_PAIRS",
     "SUPPORTED_SQL_ENGINES",
+    "AdvancedAlchemyEngine",
     "ComparatorCheckOutcome",
     "ComparatorStatus",
     "MySQLEngine",
     "SqlSpecEngine",
+    "capture_advanced_alchemy_report",
     "capture_bigquery_report",
     "capture_duckdb_report",
     "capture_mssql_report",
@@ -1374,6 +1386,222 @@ async def capture_sqlspec_report(
     )
 
 
+def _rewrite_aa_url(engine: AdvancedAlchemyEngine, dsn: str, *, dialect: str) -> str:
+    """Rewrite a SQLite path/URI or PostgreSQL DSN into an explicit SQLAlchemy URL."""
+    cleaned = dsn.strip()
+    if engine == "sqlite":
+        if not cleaned or cleaned == ":memory:":
+            return f"{dialect}:///:memory:"
+        if "://" in cleaned:
+            parsed = urlsplit(cleaned)
+            raw_path = parsed.path
+            if parsed.netloc == ":memory:" or (not parsed.netloc and raw_path in ("", "/", "/:memory:", ":memory:")):
+                return f"{dialect}:///:memory:"
+            target = raw_path[1:] if raw_path.startswith("//") else raw_path
+            return f"{dialect}:///{target.lstrip('/') if not target.startswith('/') else target}"
+        return f"{dialect}:///{cleaned}"
+    _, remainder = cleaned.split("://", 1) if "://" in cleaned else ("postgresql", cleaned)
+    return f"{dialect}://{remainder}"
+
+
+def _build_aa_bench_types() -> tuple[Any, Any, Any, Any, Any]:
+    """Build declarative ``aa_bench_world`` model and Advanced Alchemy sync/async services."""
+    sa_mod = import_optional("sqlalchemy")
+    sa_orm_mod = import_optional("sqlalchemy.orm")
+    aa_repo_mod = import_optional("advanced_alchemy.repository")
+    aa_svc_mod = import_optional("advanced_alchemy.service")
+    aa_filters_mod = import_optional("advanced_alchemy.filters")
+    if sa_mod is None or sa_orm_mod is None or aa_repo_mod is None or aa_svc_mod is None or aa_filters_mod is None:
+        msg = "sqlalchemy and advanced_alchemy are required to run capture_advanced_alchemy_report"
+        raise RuntimeError(msg)
+
+    base_cls = type("_BenchBase", (sa_orm_mod.DeclarativeBase,), {})
+    model_cls = type(
+        "_BenchWorld",
+        (base_cls,),
+        {
+            "__tablename__": "aa_bench_world",
+            "id": sa_orm_mod.mapped_column(sa_mod.Integer, primary_key=True, autoincrement=False),
+            "randomnumber": sa_orm_mod.mapped_column(sa_mod.Integer, nullable=False),
+        },
+    )
+    sync_repo_cls = type("_SyncRepo", (aa_repo_mod.SQLAlchemySyncRepository,), {"model_type": model_cls})
+    async_repo_cls = type("_AsyncRepo", (aa_repo_mod.SQLAlchemyAsyncRepository,), {"model_type": model_cls})
+    sync_svc_cls = type(
+        "_SyncService",
+        (aa_svc_mod.SQLAlchemySyncRepositoryService,),
+        {"repository_type": sync_repo_cls},
+    )
+    async_svc_cls = type(
+        "_AsyncService",
+        (aa_svc_mod.SQLAlchemyAsyncRepositoryService,),
+        {"repository_type": async_repo_cls},
+    )
+
+    limit_filter_cls = getattr(aa_filters_mod, "LimitOffsetFilter", None) or aa_filters_mod.LimitOffset
+    return base_cls, sync_svc_cls, async_svc_cls, limit_filter_cls, sa_mod
+
+
+def _seed_aa_bench_sync(engine: Any, base_cls: Any, sa_mod: Any, engine_kind: AdvancedAlchemyEngine) -> None:
+    """Idempotently create and seed 10 rows in ``aa_bench_world`` using a sync engine."""
+    base_cls.metadata.create_all(engine)
+    insert_sql = (
+        "INSERT OR IGNORE INTO aa_bench_world (id, randomnumber) VALUES (:id, :rn)"
+        if engine_kind == "sqlite"
+        else "INSERT INTO aa_bench_world (id, randomnumber) VALUES (:id, :rn) ON CONFLICT (id) DO NOTHING"
+    )
+    with engine.begin() as conn:
+        conn.execute(sa_mod.text(insert_sql), [{"id": idx, "rn": idx * 10} for idx in range(1, 11)])
+
+
+async def _seed_aa_bench_async(engine: Any, base_cls: Any, sa_mod: Any, engine_kind: AdvancedAlchemyEngine) -> None:
+    """Idempotently create and seed 10 rows in ``aa_bench_world`` using an async engine."""
+    insert_sql = (
+        "INSERT OR IGNORE INTO aa_bench_world (id, randomnumber) VALUES (:id, :rn)"
+        if engine_kind == "sqlite"
+        else "INSERT INTO aa_bench_world (id, randomnumber) VALUES (:id, :rn) ON CONFLICT (id) DO NOTHING"
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(base_cls.metadata.create_all)
+        await conn.execute(sa_mod.text(insert_sql), [{"id": idx, "rn": idx * 10} for idx in range(1, 11)])
+
+
+async def capture_advanced_alchemy_report(
+    engine: AdvancedAlchemyEngine,
+    dsn: str,
+    *,
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Measure Vertebra ``+vtb``/``+vtb_async`` Advanced Alchemy services against vanilla SQLAlchemy baselines."""
+    _validate_sampling(iterations, warmup)
+    if engine not in _ADVANCED_ALCHEMY_ENGINES:
+        msg = f"Unsupported Advanced Alchemy engine: {engine!r}"
+        raise ValueError(msg)
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+
+    base_cls, sync_service_cls, async_service_cls, limit_offset_cls, sa_mod = _build_aa_bench_types()
+    sa_orm_mod = import_optional("sqlalchemy.orm")
+    sa_async_mod = import_optional("sqlalchemy.ext.asyncio")
+    vtb_sa_mod = import_optional("vertebra.extensions.sqlalchemy")
+    if sa_orm_mod is None or sa_async_mod is None or vtb_sa_mod is None:
+        msg = "sqlalchemy, sqlalchemy.ext.asyncio, and vertebra.extensions.sqlalchemy are required"
+        raise RuntimeError(msg)
+
+    limit_filter = limit_offset_cls(limit=10, offset=0)
+    cases: list[AdapterBenchmarkCase] = []
+
+    def _run_sync_suite(url: str, driver_label: str) -> None:
+        sync_engine = sa_mod.create_engine(url)
+        try:
+            _seed_aa_bench_sync(sync_engine, base_cls, sa_mod, engine)
+            session_factory = sa_orm_mod.sessionmaker(bind=sync_engine, expire_on_commit=False)
+            with session_factory() as session:
+                service = sync_service_cls(session=session)
+                point_samples = sample_sync(lambda: service.get(1), iterations=iterations, warmup=warmup)
+                multi_samples = sample_sync(
+                    lambda: service.get_many(limit_filter), iterations=iterations, warmup=warmup
+                )
+        finally:
+            sync_engine.dispose()
+        cases.append(
+            compute_adapter_case_stats(
+                case="aa_point_select_1",
+                driver=driver_label,
+                category="orm",
+                driver_mode="sync_blocking",
+                latencies_ns=point_samples,
+                gil_enabled=gil_enabled,
+            )
+        )
+        cases.append(
+            compute_adapter_case_stats(
+                case="aa_multi_row_select_10",
+                driver=driver_label,
+                category="orm",
+                driver_mode="sync_blocking",
+                latencies_ns=multi_samples,
+                gil_enabled=gil_enabled,
+            )
+        )
+
+    async def _run_async_suite(url: str, driver_label: str) -> None:
+        async_engine = sa_async_mod.create_async_engine(url)
+        try:
+            await _seed_aa_bench_async(async_engine, base_cls, sa_mod, engine)
+            session_factory = sa_async_mod.async_sessionmaker(bind=async_engine, expire_on_commit=False)
+            async with session_factory() as session:
+                service = async_service_cls(session=session)
+                point_samples = await sample_async(lambda: service.get(1), iterations=iterations, warmup=warmup)
+                multi_samples = await sample_async(
+                    lambda: service.get_many(limit_filter),
+                    iterations=iterations,
+                    warmup=warmup,
+                )
+        finally:
+            await async_engine.dispose()
+        cases.append(
+            compute_adapter_case_stats(
+                case="aa_point_select_1",
+                driver=driver_label,
+                category="orm",
+                driver_mode="async_native",
+                latencies_ns=point_samples,
+                gil_enabled=gil_enabled,
+            )
+        )
+        cases.append(
+            compute_adapter_case_stats(
+                case="aa_multi_row_select_10",
+                driver=driver_label,
+                category="orm",
+                driver_mode="async_native",
+                latencies_ns=multi_samples,
+                gil_enabled=gil_enabled,
+            )
+        )
+
+    vtb_sync_dialect = "sqlite+vtb" if engine == "sqlite" else "postgresql+vtb"
+    vtb_async_dialect = "sqlite+vtb_async" if engine == "sqlite" else "postgresql+vtb_async"
+    _run_sync_suite(_rewrite_aa_url(engine, dsn, dialect=vtb_sync_dialect), f"vertebra-aa-{engine}-sync")
+    await _run_async_suite(_rewrite_aa_url(engine, dsn, dialect=vtb_async_dialect), f"vertebra-aa-{engine}-async")
+
+    if include_external:
+        if engine == "sqlite":
+            _run_sync_suite(_rewrite_aa_url(engine, dsn, dialect="sqlite"), "vanilla-aa-sqlite-sync")
+            if import_optional("aiosqlite") is not None:
+                gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+                await _run_async_suite(
+                    _rewrite_aa_url(engine, dsn, dialect="sqlite+aiosqlite"),
+                    "vanilla-aa-sqlite-async",
+                )
+        else:
+            if import_optional("psycopg") is not None:
+                gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+                _run_sync_suite(
+                    _rewrite_aa_url(engine, dsn, dialect="postgresql+psycopg"),
+                    "vanilla-aa-postgres-sync",
+                )
+            if import_optional("asyncpg") is not None:
+                gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+                await _run_async_suite(
+                    _rewrite_aa_url(engine, dsn, dialect="postgresql+asyncpg"),
+                    "vanilla-aa-postgres-async",
+                )
+
+    return AdapterBenchmarkReport(
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        category="orm",
+        engine=f"advanced_alchemy:{engine}",
+        generated_at=_utc_now_iso(),
+        target_redacted=redact_target_uri(dsn),
+        gil_enabled=gil_enabled,
+        cases=tuple(cases),
+    )
+
+
 async def _dispatch_capture(args: argparse.Namespace) -> AdapterBenchmarkReport:
     engine: str = args.engine
     include_external = not args.no_external
@@ -1413,6 +1641,9 @@ async def _dispatch_capture(args: argparse.Namespace) -> AdapterBenchmarkReport:
     if engine == "sqlspec":
         sqlspec_engine: SqlSpecEngine = args.sqlspec_engine
         return await capture_sqlspec_report(sqlspec_engine, args.dsn, **common_kwargs)
+    if engine == "advanced_alchemy":
+        aa_engine: AdvancedAlchemyEngine = args.aa_engine
+        return await capture_advanced_alchemy_report(aa_engine, args.dsn, **common_kwargs)
     msg = f"Unsupported SQL benchmark engine: {engine!r}"
     raise ValueError(msg)
 
@@ -1520,6 +1751,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=_SQLSPEC_ENGINES,
         default="sqlite",
         help="Underlying database engine when --engine=sqlspec.",
+    )
+    capture_cmd.add_argument(
+        "--aa-engine",
+        choices=_ADVANCED_ALCHEMY_ENGINES,
+        default="sqlite",
+        help="Underlying database engine when --engine=advanced_alchemy.",
     )
     capture_cmd.add_argument("--iterations", type=int, default=100, help="Measured iterations per workload.")
     capture_cmd.add_argument("--warmup", type=int, default=10, help="Warmup iterations per workload.")
