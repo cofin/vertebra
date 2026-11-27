@@ -1134,16 +1134,12 @@ impl SqlitePool {
                 return Err(err);
             }
         };
-        let res = self.dispatch_write(op_id, |slot| {
+        self.dispatch_write(op_id, |slot| {
             slot.with_conn(op_id, |conn, _| {
                 conn.execute_batch(begin_sql)
                     .map_err(SqliteClientError::from_rusqlite)
             })
-        });
-        if res.is_ok() {
-            self.in_transaction.store(true, Ordering::Release);
-        }
-        res
+        })
     }
 
     /// Commit the active transaction.
@@ -1153,14 +1149,12 @@ impl SqlitePool {
 
     /// Commit the active transaction using a caller-allocated `op_id`.
     pub fn commit_with_op_id(&self, op_id: u64) -> Result<(), SqliteClientError> {
-        let res = self.dispatch_write(op_id, |slot| {
+        self.dispatch_write(op_id, |slot| {
             slot.with_conn(op_id, |conn, _| {
                 conn.execute_batch("COMMIT")
                     .map_err(SqliteClientError::from_rusqlite)
             })
-        });
-        self.in_transaction.store(false, Ordering::Release);
-        res
+        })
     }
 
     /// Roll back the active transaction.
@@ -1170,14 +1164,12 @@ impl SqlitePool {
 
     /// Roll back the active transaction using a caller-allocated `op_id`.
     pub fn rollback_with_op_id(&self, op_id: u64) -> Result<(), SqliteClientError> {
-        let res = self.dispatch_write(op_id, |slot| {
+        self.dispatch_write(op_id, |slot| {
             slot.with_conn(op_id, |conn, _| {
                 conn.execute_batch("ROLLBACK")
                     .map_err(SqliteClientError::from_rusqlite)
             })
-        });
-        self.in_transaction.store(false, Ordering::Release);
-        res
+        })
     }
 
     /// Cancel all in-flight operations by triggering `InterruptHandle::interrupt()`.
@@ -1287,6 +1279,33 @@ mod tests {
             )
             .expect_err("pre-cancelled op must return Cancelled");
         assert!(matches!(err, SqliteClientError::Cancelled(_)));
+        pool.close();
+    }
+
+    #[test]
+    fn precancelled_commit_and_rollback_preserve_in_transaction() {
+        let pool = SqlitePool::open(SqliteClientConfig::default()).expect("open memory pool");
+        pool.begin("IMMEDIATE".to_string()).expect("begin");
+        assert!(pool.in_transaction());
+
+        let cancel_commit = pool.next_op_id();
+        assert!(pool.cancel_operation(cancel_commit));
+        let err = pool
+            .commit_with_op_id(cancel_commit)
+            .expect_err("pre-cancelled commit must return Cancelled");
+        assert!(matches!(err, SqliteClientError::Cancelled(_)));
+        assert!(pool.in_transaction());
+
+        let cancel_rollback = pool.next_op_id();
+        assert!(pool.cancel_operation(cancel_rollback));
+        let err = pool
+            .rollback_with_op_id(cancel_rollback)
+            .expect_err("pre-cancelled rollback must return Cancelled");
+        assert!(matches!(err, SqliteClientError::Cancelled(_)));
+        assert!(pool.in_transaction());
+
+        pool.rollback().expect("uncancelled rollback");
+        assert!(!pool.in_transaction());
         pool.close();
     }
 }
