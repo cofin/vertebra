@@ -29,6 +29,9 @@ sources:
   - id: src-src-live-index-ts
     resource: src/ts/vertebra-client/src/live/index.ts
     title: "TypeScript client module (src/ts/vertebra-client/src/live/index.ts)"
+  - id: src-live-counter-example
+    resource: docs/examples/live_state_and_ssr.py
+    title: "Native HTTP live-state counter example"
   - id: src-tests-live-test-ts
     resource: src/ts/vertebra-client/tests/live.test.ts
     title: "TypeScript client module (src/ts/vertebra-client/tests/live.test.ts)"
@@ -40,6 +43,7 @@ sources:
 - `LiveState` and `LiveStateRoom` synchronize server-authoritative state across Rust, Python, and `@vertebra/client/live` using 64-bit `HybridLogicalClock` (`48b wall_ms << 16 | 16b logical`) last-write-wins registers.
 - `LiveState.__init_subclass__` walks `reversed(cls.__mro__)` so subclasses inherit parent `__vertebra_field_map__` and `__vertebra_actions__` definitions.
 - `StateDeltaFrame` encodes compact positional MessagePack payloads keyed by deterministic FNV-1a hashes, and `StateDeltaFrame.decode` validates per-`StateOpcode` arity (`_OPCODE_ARITY`) and integer fields, raising `ValueError` on malformed frames.
+- Applications supply the transport and decoding. `LiveStateRoom.broadcast_pending()` invokes its optional async publisher with encoded frames, and `LiveStateClient.applyServerDelta()` accepts decoded messages with 64-bit fields represented as `bigint`.
 <!-- truth: end -->
 
 Vertebra's Live Event State protocol synchronizes reactive state objects across Rust (`vertebra_core::protocol`), Python (`vertebra.framework.live`), and TypeScript (`@vertebra/client/live`) using compact MessagePack array frames and 64-bit Hybrid Logical Clock (HLC) Last-Write-Wins (LWW) conflict resolution.
@@ -64,9 +68,14 @@ Vertebra's Live Event State protocol synchronizes reactive state objects across 
 - **[`LiveStateClient<TState>`](../../../../../src/ts/vertebra-client/src/live/index.ts)**: Tracks per-field HLC timestamps (`Map<number, bigint>`), applies optimistic local mutations via `mutate(key, value)` (queuing into [`OfflineDeltaQueue`](../../../../../src/ts/vertebra-client/src/live/index.ts) when disconnected and flushing on `setConnected(true)`), reconciles inbound server deltas in `applyServerDelta(delta)`, and notifies subscribers with immutable state snapshots.
 - **Invariant**: FNV-1a 64-bit state IDs and 32-bit field IDs must remain byte-for-byte identical across Rust, Python, and TypeScript.
 
+## 4. Native HTTP Counter
+
+The [counter example](../../../../../docs/examples/live_state_and_ssr.py)[^src-live-counter-example] serves an HTML page and a native SSE response. Each subscription owns a counter and a room. The stream sends the initial state, drains each mutation with `broadcast_pending()`, and projects each change into a JSON snapshot. The page closes its `EventSource` when it receives the completion event.
+
 Provenance sources: [^src-tests-live-test-ts].
 
 [^src-vertebra-core-src-protocol-mod-rs]: `src/rs/vertebra-core/src/protocol/mod.rs` — Rust implementation module (src/rs/vertebra-core/src/protocol/mod.rs).
 [^src-framework-live-py]: `src/py/vertebra/framework/live.py` — Python implementation module (src/py/vertebra/framework/live.py).
 [^src-src-live-index-ts]: `src/ts/vertebra-client/src/live/index.ts` — TypeScript client module (src/ts/vertebra-client/src/live/index.ts).
+[^src-live-counter-example]: `docs/examples/live_state_and_ssr.py` serves the native HTTP live-state example.
 [^src-tests-live-test-ts]: `src/ts/vertebra-client/tests/live.test.ts` — TypeScript client module (src/ts/vertebra-client/tests/live.test.ts).
