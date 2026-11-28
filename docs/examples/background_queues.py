@@ -1,48 +1,32 @@
-"""Background job queue service, TaskDef registration, and in-memory execution example."""
+"""Queue a report job and process it with a local worker."""
 
-import asyncio
-
-from vertebra.framework.queues.base import QueueConfig, QueueService, TaskDef
-from vertebra.framework.queues.scheduler import CronExpression
-
-__all__ = (
-    "main",
-    "run_queue_workflow",
-    "send_welcome_email",
-)
-
+__all__ = ("build_report", "main")
 
 # --8<-- [start:example]
-async def send_welcome_email(user_id: int) -> dict[str, int | str]:
-    """Deliver a welcome email for the given user_id."""
-    return {"user_id": user_id, "status": "sent"}
+import asyncio
+
+from vertebra.framework.queues import QueueConfig, QueueService, TaskDef
 
 
-async def run_queue_workflow() -> None:
-    """Register a TaskDef, enqueue an envelope, and drain the in-memory queue."""
-    service = QueueService(QueueConfig(backend_url="memory://"))
-    service.register(TaskDef(name="send_welcome_email", fn=send_welcome_email, lane="io"))
-
-    envelope = await service.enqueue("send_welcome_email", 42)
-    assert envelope.task_name == "send_welcome_email"
-    assert envelope.lane == "io"
-
-    outcomes = await service.drain_once(lanes=("io",))
-    assert outcomes == [{"user_id": 42, "status": "sent"}]
-
-    cron = CronExpression.parse("*/15 * * * *")
-    assert 0 in cron.minutes
-    assert 15 in cron.minutes
-    await service.close()
+async def build_report(customer: str, amounts: list[int]) -> dict[str, str | int]:
+    """Summarize the invoice amounts for one customer."""
+    return {"customer": customer, "total": sum(amounts)}
 
 
-def main() -> None:
-    """Execute the async background queue workflow."""
-    asyncio.run(run_queue_workflow())
-
-
-# --8<-- [end:example]
+async def main() -> None:
+    """Submit a report job and show its result in the local worker."""
+    queue = QueueService(QueueConfig(backend_url="memory://"))
+    queue.register(TaskDef(name="build_report", fn=build_report, lane="io"))
+    try:
+        job = await queue.enqueue("build_report", "Acme", [120, 80])
+        print(f"Queued {job.task_name} in the {job.lane} lane")
+        for report in await queue.drain_once(lanes=("io",)):
+            print(f"Report for {report['customer']}: {report['total']}")
+    finally:
+        await queue.close()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
+
+# --8<-- [end:example]

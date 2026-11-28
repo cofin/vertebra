@@ -113,5 +113,5 @@ Use `GilAuditReport` or set `VERTEBRA_STRICT_FREE_THREADING=1` to verify that im
 from vertebra.server._gil_audit import GilAuditReport, is_free_threaded
 
 report = GilAuditReport.capture()
-assert isinstance(is_free_threaded(), bool)
+print(f"Free-threaded interpreter: {is_free_threaded()}")
 ```
