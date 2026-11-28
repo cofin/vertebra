@@ -26,18 +26,52 @@ For existing Node.js or Vite build pipelines, the package exports standard packa
 
 ```typescript
 import { HttpClient } from "@vertebra/client";
-import { LiveStateClient } from "@vertebra/client/live";
 import { initHtmx } from "@vertebra/client/htmx";
 
 const client = new HttpClient({ baseURL: "http://localhost:8000" });
-const live = new LiveStateClient(
-  "counter",
-  { count: 0 },
-  { url: "ws://localhost:8000/ws/live" },
-);
 
 initHtmx({ headers: { "X-App-Client": "vertebra" } });
 ```
+
+## Live State
+
+`LiveStateClient` stores reactive state. Connect it to the application transport
+that decodes server frames into `StateDeltaMessage` objects. Use the Python
+`LiveState` class name when constructing the client so both sides derive the same
+state ID. Preserve `stateId` and `timestampNs` as `bigint` values when decoding
+MessagePack.
+
+```typescript
+import { LiveStateClient, type StateDeltaMessage } from "@vertebra/client/live";
+
+export function bindCounter(
+  output: HTMLOutputElement,
+  subscribeToDeltas: (
+    receive: (delta: StateDeltaMessage) => void,
+  ) => () => void,
+): () => void {
+  const live = new LiveStateClient("CounterLive", { count: 0 });
+  const render = ({ count }: { count: number }) => {
+    output.value = String(count);
+  };
+
+  render(live.getSnapshot());
+  const unsubscribe = live.subscribe(render);
+  const disconnect = subscribeToDeltas((delta) => {
+    live.applyServerDelta(delta);
+  });
+
+  return () => {
+    disconnect();
+    unsubscribe();
+  };
+}
+```
+
+Pass the transport's decoded-message subscription as `subscribeToDeltas` and
+call the returned function when the UI unmounts. The optional `onSend` callback
+receives locally produced deltas. Set the `connected` option for the initial
+connection state and call `setConnected()` when it changes.
 
 ## Framework Adapters
 

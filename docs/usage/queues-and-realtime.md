@@ -61,24 +61,28 @@ Run workers standalone with `vtb workers run app:app`, or alongside HTTP workers
 
 ## LiveState & Pub/Sub Channels
 
-Sync server state to browser clients over binary WebSocket deltas with `LiveState` and `@live_action`. Broadcast topic events across nodes with `create_channels_backend` using Memory, Valkey, Redis, PostgreSQL, or Oracle:
+Run the [live counter example](../examples/index.md#live-state) from the repository root.
 
-```python
-from vertebra.framework.channels import create_channels_backend
-from vertebra.framework.live import LiveState, LiveStateRoom, live_action
-
-
-class CounterState(LiveState):
-    count: int = 0
-
-    @live_action
-    def increment(self, step: int = 1) -> None:
-        self.count += step
-
-
-room = LiveStateRoom("room:lobby", CounterState())
-bus = create_channels_backend(backend="valkey", url="valkey://localhost:6379/0")
+```bash
+vtb run docs.examples.live_state_and_ssr:app
 ```
+
+Open [http://127.0.0.1:8000/live](http://127.0.0.1:8000/live). The page uses an
+`EventSource` to receive the initial counter value and three updates. Each
+subscription creates its own `LiveState` and `LiveStateRoom`. The handler calls
+an `@live_action` method to change the counter and uses `broadcast_pending()`
+to drain the room. The HTTP stream sends a JSON snapshot for each change and a
+`complete` event that closes the browser subscription.
+
+For applications that send binary deltas, the room encodes changes as MessagePack.
+Pass an async `publish_fn(channel, payload)` to `LiveStateRoom` to forward each
+encoded frame to your transport. The transport owns connections and delivery.
+You can adapt the callback to `bus.publish(payload, [channel])` on a
+`create_channels_backend()` bus. The [TypeScript SDK guide](typescript-sdk.md#live-state)
+shows how to deliver decoded frames to the UI.
+
+Inertia supplies page props on navigation. Live updates arrive through the
+application's event stream or another transport.
 
 ## Key-Value Stores & Email
 
