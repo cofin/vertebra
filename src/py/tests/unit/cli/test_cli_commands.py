@@ -2,6 +2,7 @@
 
 import io
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from vertebra.cli.errors import CLIError
 from vertebra.cli.plugin_registry import ensure_vertebra_integration
 from vertebra.cli.theme import Console
 from vertebra.framework._app import _make_handler_id
+from vertebra.server._dispatch import compile_handler_table
 from vertebra.server.worker import Worker, WorkerStartupError
 from vertebra.supervisor import _supervisor as supervisor_mod
 from vertebra.supervisor import _worker as supervisor_worker
@@ -42,9 +44,7 @@ def test_vtb_init_default_scaffolding(tmp_path: Path) -> None:
     assert 'app = "app:app"' in pyproject
     assert "entry =" not in pyproject
 
-    app_py = (app_dir / "app.py").read_text(encoding="utf-8")
-    assert "from vertebra import App" in app_py
-    assert '@app.get("/health")' in app_py
+    _check_generated_health_route(app_dir / "app.py")
 
 
 def test_vtb_init_web_template_scaffolding(tmp_path: Path) -> None:
@@ -57,6 +57,18 @@ def test_vtb_init_web_template_scaffolding(tmp_path: Path) -> None:
     pyproject = (app_dir / "pyproject.toml").read_text(encoding="utf-8")
     assert 'entry = "src/main.ts"' in pyproject
     assert (app_dir / "src" / "main.ts").is_file()
+    _check_generated_health_route(app_dir / "app.py")
+
+
+def _check_generated_health_route(path: Path) -> None:
+    """Import the generated app and invoke the registered health route."""
+    source = path.read_text(encoding="utf-8")
+    assert '@get("/health")' in source
+    assert "App(route_handlers=[health])" in source
+    app = runpy.run_path(str(path))["app"]
+    assert isinstance(app, App)
+    handler = compile_handler_table(app._handlers)[_make_handler_id("GET", "/health")]
+    assert handler.invoker(None) == {"status": "ok"}
 
 
 def test_vtb_init_refuses_non_empty_directory(tmp_path: Path) -> None:
