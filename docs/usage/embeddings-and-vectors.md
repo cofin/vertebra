@@ -110,6 +110,21 @@ Async brokers isolate state per running event loop so concurrent loops do not sh
 --8<-- "docs/examples/embeddings_app.py:example"
 ```
 
+Run the example from the repository root and search the supplied documents.
+
+```bash
+vtb run docs.examples.embeddings_app:app
+```
+
+```bash
+curl -X POST http://localhost:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"inventory","documents":["inventory levels","weather report"]}'
+```
+
+The response contains the vector dimension and ranked hits. The example uses a
+deterministic local embedder to run without a downloaded model.
+
 ## Staging Models & Co-Located Workers
 
 Stage model bundles into GCS, S3, R2, Azure, or OCI so containers do not rely on Hugging Face at runtime. Warm the shared-memory cache on container startup and run co-located workers alongside HTTP ingress:

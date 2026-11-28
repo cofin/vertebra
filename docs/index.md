@@ -46,17 +46,18 @@ The `@vertebra/client` TypeScript SDK ships inside the Python wheel and is serve
 
 ## First Application
 
-Define routes on `App` and run them with `vtb`:
+Define handlers in `app.py` and pass them to `App`.
 
 ```python
-from vertebra import App
-
-app = App()
+from vertebra import App, get
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
+@get("/health")
+async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+app = App(route_handlers=[health])
 ```
 
 Run the server:

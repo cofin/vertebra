@@ -1,6 +1,0 @@
-name = "http-ingress-reviewer"
-description = "Reviews HTTP/1.1, HTTP/2, HTTP/3, gRPC ingress pipelines, payload bounds, connection draining, and realtime transports in src/rs/vertebra-http."
-sandbox_mode = "read-only"
-model_reasoning_effort = "high"
-nickname_candidates = ["http ingress reviewer", "http-ingress reviewer"]
-developer_instructions = "Read and follow .agents/agents/http-ingress-reviewer.md and .agents/skills/review-http-ingress/SKILL.md directly in read-only mode. Audit against .agents/skills/review-core/references/checklist.md and .agents/skills/review-core/references/false-positive-suppressions.md, and emit findings in .agents/skills/review-core/references/ledger-format.md grammar."

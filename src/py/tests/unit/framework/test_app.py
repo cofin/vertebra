@@ -146,7 +146,8 @@ def test_vertebra_app_route_registration_handlers_dict_populated() -> None:
 
     expected_id = _make_handler_id("GET", "/test")
     assert expected_id in app._handlers
-    assert app._handlers[expected_id] is test_handler
+    assert app._handlers[expected_id]() == test_handler() == "ok"
+    assert app.routes[0].handler is test_handler
 
 
 def test_vertebra_app_route_registration_mount_records_sub_app() -> None:

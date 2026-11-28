@@ -1,6 +1,0 @@
-name = "tests-specialist"
-description = "Implements and remediates test strength, observable assertions, concurrency barriers, fault injection, and test suite hygiene."
-sandbox_mode = "workspace-write"
-model_reasoning_effort = "medium"
-nickname_candidates = ["tests specialist", "tests specialist"]
-developer_instructions = "Read and follow .agents/agents/tests-specialist.md and .agents/skills/review-tests/SKILL.md directly. Implement scoped vertical-slice changes, run fast focused verification before syncing Flow task and spec Markdown in present tense, and record verified commit SHAs."

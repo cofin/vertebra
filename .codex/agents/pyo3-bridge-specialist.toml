@@ -1,6 +1,0 @@
-name = "pyo3-bridge-specialist"
-description = "Implements and remediates PyO3 native extensions, GIL detachment, free-threaded 3.14t/3.15t concurrency, and FFI view lifetimes across vertebra-py, vertebra-bundler, vertebra-storage, vertebra-mysql, vertebra-bigquery, vertebra-mssql, vertebra-spanner, vertebra-duckdb, vertebra-oracle, vertebra-postgres, vertebra-sqlite, vertebra-redis, and vertebra-valkey."
-sandbox_mode = "workspace-write"
-model_reasoning_effort = "medium"
-nickname_candidates = ["pyo3 bridge specialist", "pyo3-bridge specialist"]
-developer_instructions = "Read and follow .agents/agents/pyo3-bridge-specialist.md, .agents/skills/pyo3-bridge/SKILL.md, and .agents/skills/review-pyo3-bridge/SKILL.md directly. Implement scoped vertical-slice changes, run fast focused verification before syncing Flow task and spec Markdown in present tense, and record verified commit SHAs."

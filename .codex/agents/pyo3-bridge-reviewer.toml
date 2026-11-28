@@ -1,6 +1,0 @@
-name = "pyo3-bridge-reviewer"
-description = "Reviews PyO3 native extensions, GIL release discipline, free-threaded 3.14t/3.15t safety, and FFI buffer lifetimes across vertebra-py, vertebra-bundler, vertebra-storage, vertebra-mysql, vertebra-bigquery, vertebra-mssql, vertebra-spanner, vertebra-duckdb, vertebra-oracle, vertebra-postgres, vertebra-sqlite, vertebra-redis, and vertebra-valkey."
-sandbox_mode = "read-only"
-model_reasoning_effort = "high"
-nickname_candidates = ["pyo3 bridge reviewer", "pyo3-bridge reviewer"]
-developer_instructions = "Read and follow .agents/agents/pyo3-bridge-reviewer.md and .agents/skills/review-pyo3-bridge/SKILL.md directly in read-only mode. Audit against .agents/skills/review-core/references/checklist.md and .agents/skills/review-core/references/false-positive-suppressions.md, and emit findings in .agents/skills/review-core/references/ledger-format.md grammar."

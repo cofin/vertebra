@@ -1,64 +1,75 @@
-"""Reactive LiveState component, LiveStateRoom, and Inertia v3 page object example."""
+"""Push server-owned counter updates to a browser over server-sent events."""
 
-import asyncio
-
-from vertebra.framework.inertia import InertiaConfig, SyncInertiaMiddleware, inertia
-from vertebra.framework.live import LiveState, LiveStateRoom, live_action
-
-__all__ = (
-    "CounterLive",
-    "main",
-    "run_live_and_inertia_demo",
-)
-
+__all__ = ("CounterLive", "app", "counter_events", "counter_page")
 
 # --8<-- [start:example]
+import asyncio
+from collections.abc import AsyncIterator
+
+from vertebra import App, get
+from vertebra.framework.live import LiveState, LiveStateRoom, live_action
+from vertebra.utils.serializers import encode_json_bytes
+
+
 class CounterLive(LiveState):
-    """Server-owned reactive counter component with LWW delta synchronization."""
+    """Track a server-owned counter and record each mutation."""
 
     count: int = 0
-    step: int = 1
 
     @live_action
-    async def increment(self) -> int:
-        """Increment the counter by the configured step."""
-        self.count += self.step
-        return self.count
+    def increment(self) -> None:
+        """Increment the counter."""
+        self.count += 1
 
 
-async def run_live_and_inertia_demo() -> None:
-    """Mutate a LiveState component, broadcast deltas, and build an Inertia page."""
-    state = CounterLive(count=0, step=2)
-    room = LiveStateRoom("counter:room", state)
+@get("/live")
+def counter_page() -> tuple[int, list[tuple[str, str]], bytes]:
+    """Serve a page that subscribes to counter updates."""
+    return (
+        200,
+        [("content-type", "text/html; charset=utf-8")],
+        b"""<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live counter</title>
+<h1>Live counter</h1>
+<p>Count: <output id="count" aria-live="polite">Connecting</output></p>
+<script type="module">
+  const count = document.querySelector("#count");
+  const events = new EventSource("/live/events");
 
-    await state.increment()
-    assert state.count == 2
-
-    frames = await room.broadcast_pending()
-    assert len(frames) == 1
-    snap = state.snapshot()
-    assert snap["count"] == 2 and snap["step"] == 2
-
-    middleware = SyncInertiaMiddleware(InertiaConfig(enabled=True, version="1.0.0"))
-    response = inertia("Dashboard/Overview", {"count": state.count})
-
-    class DummyRequest:
-        method = "GET"
-        path = "/dashboard"
-        headers: dict[str, str] = {"X-Inertia": "true"}
-
-    page = middleware.build_page_object(DummyRequest(), response)
-    assert page["component"] == "Dashboard/Overview"
-    assert page["props"]["count"] == 2
+  events.onmessage = (event) => {
+    count.textContent = String(JSON.parse(event.data).count);
+  };
+  events.addEventListener("complete", () => events.close());
+</script>
+</html>""",
+    )
 
 
-def main() -> None:
-    """Execute the LiveState and Inertia verification workflow."""
-    asyncio.run(run_live_and_inertia_demo())
+@get("/live/events")
+async def counter_events() -> tuple[int, list[tuple[str, str]], AsyncIterator[bytes]]:
+    """Stream one counter per subscription and close after three updates."""
+    state = CounterLive()
+    room = LiveStateRoom("counter", state)
 
+    async def events() -> AsyncIterator[bytes]:
+        yield b"data: " + encode_json_bytes(state.snapshot()) + b"\n\n"
+        for _ in range(3):
+            await asyncio.sleep(0.5)
+            state.increment()
+            if await room.broadcast_pending():
+                yield b"data: " + encode_json_bytes(state.snapshot()) + b"\n\n"
+        yield b"event: complete\ndata: {}\n\n"
+
+    return (
+        200,
+        [("content-type", "text/event-stream"), ("cache-control", "no-cache")],
+        events(),
+    )
+
+
+app = App(route_handlers=[counter_page, counter_events])
 
 # --8<-- [end:example]
-
-
-if __name__ == "__main__":
-    main()

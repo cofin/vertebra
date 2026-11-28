@@ -6,7 +6,7 @@ import inspect
 import os
 import threading
 import weakref
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, Any
@@ -17,7 +17,7 @@ import pytest
 from vertebra._vertebra import Request, init_transport
 from vertebra.build.codegen.markers import FromCookie, FromHeader, FromQuery, MsgPackBody, Parameter
 from vertebra.framework._app import App
-from vertebra.framework._router import Controller, Router, get, post
+from vertebra.framework._router import Controller, Router, get, handler_id, post
 from vertebra.framework.di import Inject, Provide
 from vertebra.framework.security import Principal, requires_role
 from vertebra.server import _dispatch, worker
@@ -756,13 +756,7 @@ def test_sync_to_thread_route_executes_once_on_executor() -> None:
     """Routes decorated with sync_to_thread=True offload once to ThreadPoolExecutor while defaults stay inline."""
     app = App()
     caller_tid = threading.get_ident()
-    fast_tids: list[int] = []
     blocking_tids: list[int] = []
-
-    @app.get("/fast")
-    def fast_route() -> bytes:
-        fast_tids.append(threading.get_ident())
-        return b"fast"
 
     @app.get("/blocking", sync_to_thread=True)
     def blocking_route() -> bytes:
@@ -771,16 +765,19 @@ def test_sync_to_thread_route_executes_once_on_executor() -> None:
 
     router = Router(prefix="/v1")
 
-    @get("/slow", sync_to_thread=True)
-    def router_blocking() -> bytes:
-        blocking_tids.append(threading.get_ident())
-        return b"router-slow"
+    route_tids: dict[str, int] = {}
 
-    router.register(router_blocking)
+    @get("/fast")
+    @get("/slow", sync_to_thread=True)
+    def router_handler(request: Request) -> bytes:
+        route_tids[request.path] = threading.get_ident()
+        return b"router"
+
+    router.register(router_handler)
     app.register(router)
 
     compiled = compile_handler_table(app._handlers)
-    fast_id = next(hid for hid, info in app.handler_index.items() if info.path == "/fast")
+    fast_id = next(hid for hid, info in app.handler_index.items() if info.path == "/v1/fast")
     block_id = next(hid for hid, info in app.handler_index.items() if info.path == "/blocking")
     router_id = next(hid for hid, info in app.handler_index.items() if info.path == "/v1/slow")
 
@@ -793,7 +790,7 @@ def test_sync_to_thread_route_executes_once_on_executor() -> None:
     pool = EventLoopPool(size=1)
     try:
         batch = [
-            MockRequest(handler_id=fast_id, request_id=101, path="/fast"),
+            MockRequest(handler_id=fast_id, request_id=101, path="/v1/fast"),
             MockRequest(handler_id=block_id, request_id=102, path="/blocking"),
             MockRequest(handler_id=router_id, request_id=103, path="/v1/slow"),
         ]
@@ -811,8 +808,9 @@ def test_sync_to_thread_route_executes_once_on_executor() -> None:
         submitted = collector.wait_for(3)
         assert len(submitted) == 3
         assert exec_spy.submit_calls == 2
-        assert fast_tids == [caller_tid]
-        assert len(blocking_tids) == 2
+        assert route_tids["/v1/fast"] == caller_tid
+        assert route_tids["/v1/slow"] != caller_tid
+        assert len(blocking_tids) == 1
         assert all(tid != caller_tid for tid in blocking_tids)
     finally:
         exec_spy.shutdown(wait=True)
@@ -1041,6 +1039,116 @@ class _TenantService:
 
     def format_tenant(self, raw_tenant: str) -> str:
         return f"{self.prefix}:{raw_tenant}"
+
+
+def test_shared_root_handler_uses_each_apps_dependencies() -> None:
+    """Compile all apps after registration so cross-app mutation affects observable dispatch."""
+
+    @get("/")
+    def home(service: str = "default") -> dict[str, str]:
+        return {"service": service}
+
+    apps = (
+        App(route_handlers=[home], dependencies={"service": "one"}),
+        App(route_handlers=[home], dependencies={"service": "two"}),
+        App(route_handlers=[home]),
+    )
+    batch = [MockRequest(handler_id=handler_id("GET", "/"), path="/")]
+    for app, expected in zip(apps, ("one", "two", "default"), strict=True):
+        compiled = compile_handler_table(app._handlers)
+        replies = dispatch_batch(partition_batch(batch, compiled, []), compiled, [], MockResponse)
+        assert replies is not None
+        assert replies[0].status == 200
+        assert decode_json(replies[0].body) == {"service": expected}
+
+
+def test_implicit_root_dependency_does_not_enter_app_graph() -> None:
+    """An explicit injection on a bare root is inferred only for its own invocation."""
+
+    @get("/")
+    def home(service: Annotated[_TenantService, Inject()]) -> dict[str, str]:
+        return {"prefix": service.prefix}
+
+    @get("/other")
+    def other(service: _TenantService | None = None) -> dict[str, str | None]:
+        return {"prefix": service.prefix if service else None}
+
+    app = App(route_handlers=[home, other])
+    compiled = compile_handler_table(app._handlers)
+    batch = [MockRequest(handler_id=handler_id("GET", path), path=path) for path in ("/", "/other")]
+    replies = dispatch_batch(partition_batch(batch, compiled, []), compiled, [], MockResponse)
+    assert replies is not None
+    assert [decode_json(reply.body) for reply in replies] == [{"prefix": "acme"}, {"prefix": None}]
+    assert not app.container.graph.providers
+
+
+def test_router_and_controller_bindings_preserve_guard_order_and_dispatch() -> None:
+    """Ensure nested guards short-circuit and the effective controller callable keeps its signature."""
+    guard_calls: list[str] = []
+
+    def record_guard(layer: str) -> Callable[[Request], bool]:
+        def guard(request: Request) -> bool:
+            guard_calls.append(layer)
+            return request.headers.get("x-deny") != layer
+
+        return guard
+
+    @get("/{item_id:int}", status_code=202)
+    def item(item_id: int, service: str) -> dict[str, str | int]:
+        return {"id": item_id, "service": service}
+
+    class ItemController(Controller):
+        path = "/items"
+        guards = (record_guard("controller"),)
+
+        def __init__(self, service: _TenantService) -> None:
+            self.service = service
+
+        @get("/{item_id:int}", guards=(record_guard("route"),))
+        def details(self, item_id: int) -> dict[str, str | int]:
+            guard_calls.append("handler")
+            return {"id": item_id, "service": self.service.prefix}
+
+    app = App(
+        guards=(record_guard("app"),),
+        route_handlers=[
+            Router(
+                "/outer",
+                guards=(record_guard("outer"),),
+                dependencies={"service": _TenantService("outer")},
+                route_handlers=[
+                    Router("/inner", guards=(record_guard("inner"),), route_handlers=[ItemController]),
+                ],
+            ),
+            Router("/first", dependencies={"service": "first"}, route_handlers=[item]),
+            Router("/second", dependencies={"service": "second"}, route_handlers=[item]),
+        ],
+    )
+    compiled = compile_handler_table(app._handlers)
+    template = "/outer/inner/items/{item_id:int}"
+    request = MockRequest(handler_id=handler_id("GET", template), path="/outer/inner/items/42")
+    replies = dispatch_batch(partition_batch([request], compiled, []), compiled, [], MockResponse)
+    assert replies is not None
+    assert decode_json(replies[0].body) == {"id": 42, "service": "outer"}
+    assert guard_calls == ["app", "outer", "inner", "controller", "route", "handler"]
+
+    guard_calls.clear()
+    request.headers["x-deny"] = "inner"
+    replies = dispatch_batch(partition_batch([request], compiled, []), compiled, [], MockResponse)
+    assert replies is not None
+    assert replies[0].status == 403
+    assert guard_calls == ["app", "outer", "inner"]
+
+    batch = [
+        MockRequest(handler_id=handler_id("GET", f"/{prefix}/{{item_id:int}}"), path=f"/{prefix}/7")
+        for prefix in ("first", "second")
+    ]
+    replies = dispatch_batch(partition_batch(batch, compiled, []), compiled, [], MockResponse)
+    assert replies is not None
+    assert [(reply.status, decode_json(reply.body)) for reply in replies] == [
+        (202, {"id": 7, "service": "first"}),
+        (202, {"id": 7, "service": "second"}),
+    ]
 
 
 def test_native_dispatch_typed_params_json_msgpack_di_guards_and_generator_teardown() -> None:

@@ -2,7 +2,22 @@
 
 All notable changes to Vertebra are documented on this page.
 
-## Unreleased
+## 0.5.0
+
+### Added
+
+- Added runnable browser examples for server-sent live-state updates and for WebAssembly execution. [PR #165](https://github.com/cofin/vertebra/pull/165)
+
+### Changed
+
+- `vtb init` generates standalone route declarations and assembles them through `App(route_handlers=[...])` in both templates. The routing guide shows controllers, nested routers, and layered guards. [PR #165](https://github.com/cofin/vertebra/pull/165)
+- The documentation examples expose importable apps or runnable workflows with commands and expected results. [PR #165](https://github.com/cofin/vertebra/pull/165)
+
+### Fixed
+
+- Native route registration keeps dependency injection and thread offload settings local to each registration, including when apps share a handler or one function declares multiple routes. [PR #165](https://github.com/cofin/vertebra/pull/165)
+
+## 0.4.0
 
 ### Added
 

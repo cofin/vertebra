@@ -1,14 +1,15 @@
 # Quickstart
 
-Build a typed Vertebra app, run it locally, and test its routes in `pytest`.
+Define typed HTTP routes, assemble an application, and run it locally.
 
-## 1. Create an Application
+## Create an application
 
-Create `app.py` with a health check and a `POST` route:
+Save this example as `app.py`.
 
 ```python
 import msgspec
-from vertebra import App
+
+from vertebra import App, get, post
 
 
 class CreateItemRequest(msgspec.Struct):
@@ -22,59 +23,46 @@ class ItemResponse(msgspec.Struct):
     quantity: int
 
 
-app = App()
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
+@get("/health")
+async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/items")
-def create_item(body: CreateItemRequest) -> ItemResponse:
+@post("/items", status_code=201)
+async def create_item(body: CreateItemRequest) -> ItemResponse:
     return ItemResponse(id=1, name=body.name, quantity=body.quantity)
+
+
+app = App(route_handlers=[health, create_item])
+app.enable_docs()
 ```
 
-## 2. Run the Server
+`get` and `post` declare handlers. The `App` call registers them and supplies the
+routing configuration. The `msgspec.Struct` types describe the JSON request and response.
 
-Start the dev server with live reload:
+## Run the server
 
 ```bash
-vtb dev app:app --port 8000
+vtb run app:app --host 127.0.0.1 --port 8000
 ```
 
-Run in production across multiple workers:
+For local changes, use `vtb dev app:app --port 8000` to reload on edits.
+
+## Make a request
 
 ```bash
-vtb run app:app --host 0.0.0.0 --port 8000 --workers 4
+curl -i http://127.0.0.1:8000/health
+curl -i http://127.0.0.1:8000/items \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Notebook","quantity":2}'
 ```
 
-## 3. Test Routes in `pytest`
+The health check returns HTTP 200 with `{"status":"ok"}`. Creating the item returns
+HTTP 201 with `{"id":1,"name":"Notebook","quantity":2}`. Open
+`http://127.0.0.1:8000/docs` to view the generated API documentation.
 
-Test route lookup and path parameter extraction directly in memory without opening a socket:
+## Next steps
 
-```python
-from vertebra import App, extract_path_params, handler_id
-
-
-def test_routes_and_handlers() -> None:
-    app = App()
-
-    @app.get("/items/{item_id:int}")
-    def get_item(item_id: int) -> dict[str, int]:
-        return {"id": item_id}
-
-    params = extract_path_params("/items/{item_id:int}", "/items/42")
-    assert params == {"item_id": "42"}
-
-    hid = handler_id("GET", "/items/{item_id:int}")
-    info = app.get_handler_by_id(hid)
-    assert info is not None
-    assert info.fn(int(params["item_id"])) == {"id": 42}
-```
-
-## Next Steps
-
-- Tune worker modes and environment variables in [Configuration](configuration.md).
-- Learn about routers, controllers, dependency injection, and guards in [Routing & Handlers](../usage/routing-and-handlers.md).
-- Browse runnable scripts in [Examples](../examples/index.md).
+- Group handlers and configure guards in [Routing & Handlers](../usage/routing-and-handlers.md).
+- Set up worker modes and environment variables in [Configuration](configuration.md).
+- Exercise application routes from pytest in [Testing](../usage/testing.md).

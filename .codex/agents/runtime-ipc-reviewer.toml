@@ -1,6 +1,0 @@
-name = "runtime-ipc-reviewer"
-description = "Reviews Rust shared-memory rings, futex and ulock handshakes, atomic orderings, SHM lifecycle, and unsafe code across vertebra-core, vertebra-storage, vertebra-db, and vertebra-postgres."
-sandbox_mode = "read-only"
-model_reasoning_effort = "high"
-nickname_candidates = ["runtime ipc reviewer", "runtime-ipc reviewer"]
-developer_instructions = "Read and follow .agents/agents/runtime-ipc-reviewer.md and .agents/skills/review-runtime-ipc/SKILL.md directly in read-only mode. Audit against .agents/skills/review-core/references/checklist.md and .agents/skills/review-core/references/false-positive-suppressions.md, and emit findings in .agents/skills/review-core/references/ledger-format.md grammar."

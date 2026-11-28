@@ -204,7 +204,8 @@ def compile_handler_spec(
     container: Container | None = None,
 ) -> HandlerSpec:
     """Compile parameter extractors, DI plan, guards, and invocation strategy for a handler."""
-    bound_route = route or getattr(handler, "__vertebra_bound_route__", None)
+    registered_route: Route | None = getattr(handler, "__vertebra_bound_route__", None)
+    bound_route = route or registered_route
     if bound_route is None:
         attached_routes: Sequence[Route] = getattr(handler, "__vertebra_routes__", ())
         if len(attached_routes) == 1:
@@ -213,6 +214,12 @@ def compile_handler_spec(
     bound_container: Container | None = container or getattr(handler, "__vertebra_container__", None)
     if bound_container is None and bound_route is not None and bound_route.dependencies:
         bound_container = Container(bound_route.dependencies)
+
+    if registered_route is not None:
+        handler = registered_route.handler
+        default_sync_to_thread = (route or registered_route).sync_to_thread
+    else:
+        default_sync_to_thread = bool(getattr(handler, "__vertebra_sync_to_thread__", False))
 
     guards: tuple[Callable[..., Any], ...] = bound_route.guards if bound_route is not None else ()
     segments: tuple[str | ParamSpec, ...] = bound_route.segments if bound_route is not None else ()
@@ -266,9 +273,9 @@ def compile_handler_spec(
         param_plans.append(plan)
 
     effective_is_async = handler_is_async or has_async_di or has_async_guards
-    resolved_sync_to_thread = (
-        bool(getattr(handler, "__vertebra_sync_to_thread__", False)) if sync_to_thread is None else sync_to_thread
-    ) and not effective_is_async
+    resolved_sync_to_thread = (default_sync_to_thread if sync_to_thread is None else sync_to_thread) and (
+        not effective_is_async
+    )
 
     if not has_params and not guards:
 

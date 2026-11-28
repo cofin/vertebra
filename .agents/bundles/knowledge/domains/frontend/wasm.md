@@ -60,6 +60,13 @@ Vertebra provides a capability-scoped WebAssembly plugin host in Python ([`verte
 - **[`WASMClient`](../../../../../src/ts/vertebra-client/src/wasm.ts) & [`WASM_MAGIC_BYTES`](../../../../../src/ts/vertebra-client/src/wasm.ts)**: Validates the 8-byte `0x00 0x61 0x73 0x6d 0x01 0x00 0x00 0x00` header via `WASMClient.isValidBinary(bytes)`, tracks `memoryLimitBytes` (`maxMemoryPages * 65536`, default `256` pages = `16 MiB`), and instantiates validated modules via `instantiateBytes(bytes)` with configured `WebAssembly.Imports`.
 - **Packaging Note**: `WASMClient` and `WASM_MAGIC_BYTES` are re-exported from the `@vertebra/client` root entrypoint (`src/ts/vertebra-client/src/index.ts`) as well as `src/ts/vertebra-client/src/wasm.ts`.
 
+## 3. Browser example
+
+The [browser calculator](../../../../../docs/examples/wasm_in_browser.py) serves
+its guest module through a native `application/wasm` route. The browser loads and
+executes the import-free `add` export. The [SDK guide](../../../../../docs/usage/typescript-sdk.md#webassembly)
+loads the same module using `WASMClient.instantiateBytes()`.
+
 Provenance sources: [^src-tests-wasm-test-ts].
 
 [^src-wasm-init-py]: `src/py/vertebra/wasm/__init__.py` — Python implementation module (src/py/vertebra/wasm/__init__.py).

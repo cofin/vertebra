@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:codex
+    at: "2026-11-28T04:11:05Z"
+    commit: 1b934b31942f637a62633a0b768ea2e1613b488b
   - by: agent:flow-executor
     at: "2026-11-17T08:02:00Z"
     commit: 5a833832
@@ -133,6 +136,8 @@ flowchart LR
 ## Inertia v3 (`framework/inertia/__init__.py`)
 
 [`SyncInertiaMiddleware(config=None, ssr_client=None)` and `AsyncInertiaMiddleware(config=None, ssr_client=None)`](../../../../../src/py/vertebra/framework/inertia/__init__.py)[^src-framework-inertia-init-py] inherit `_BaseInertiaMiddleware` and turn an `InertiaResponse(component, props, encrypt_history, clear_history)` (helper `inertia()`) into an `InertiaHttpResponse(status, headers, body, early_hints)`. `AsyncInertiaMiddleware` awaits async prop callables and async iterables via `_resolve_async_value`, while `SyncInertiaMiddleware` resolves synchronous callables.
+
+A [native route](../../../../../docs/usage/frontend-and-ssr.md#inertia-v3) awaits `AsyncInertiaMiddleware.process(request, inertia(component, props))` and returns its status, headers, and body through the native response tuple.
 
 - **Version**: `get_version()` returns `InertiaConfig.version`, else the first 8 hex chars of the BLAKE2b digest (`digest_size=4`) of `manifest_path` (`dist/.vite/manifest.json`), else `"dev"`.
 - **Headers & URLs**: Header lookups (`_get_header`) are case-insensitive across mapping and sequence header formats, and `_build_request_url` preserves query strings on `page["url"]` and `409` conflict redirects.

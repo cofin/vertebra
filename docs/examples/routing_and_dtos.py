@@ -1,33 +1,25 @@
-"""Controller, Router composition, dependency injection, msgspec DTOs, and ProcedureRouter example."""
+"""Inventory routes with typed request bodies, dependency injection, and guards."""
 
-import asyncio
+# --8<-- [start:example]
+import os
+from hmac import compare_digest
 
 import msgspec
 
 from vertebra import App, Controller, Provide, Router, get, post
-from vertebra.framework.procedures import ProcedureRouter
-
-__all__ = (
-    "CreateItemRequest",
-    "InventoryService",
-    "ItemController",
-    "ItemResponse",
-    "build_items_router",
-    "build_procedures",
-    "main",
-)
+from vertebra._vertebra import Request
+from vertebra.framework.security import Principal, requires_role, requires_scope
 
 
-# --8<-- [start:example]
 class CreateItemRequest(msgspec.Struct):
-    """Incoming payload for creating an inventory item."""
+    """Fields clients supply when registering an item."""
 
     sku: str
     quantity: int
 
 
 class ItemResponse(msgspec.Struct):
-    """Serialized inventory item returned to callers."""
+    """Inventory item fields returned to the client."""
 
     id: int
     sku: str
@@ -35,59 +27,74 @@ class ItemResponse(msgspec.Struct):
 
 
 class InventoryService:
-    """Domain service injected into controllers and routes."""
+    """Inventory operations for the local example."""
 
     def fetch(self, item_id: int) -> ItemResponse:
-        """Fetch an item by identifier."""
+        """Return the sample item for the requested ID."""
         return ItemResponse(id=item_id, sku="VTB-100", quantity=5)
+
+    def register(self, body: CreateItemRequest) -> ItemResponse:
+        """Build the item representation for a registration request."""
+        return ItemResponse(id=1, sku=body.sku, quantity=body.quantity)
 
 
 class ItemController(Controller):
-    """Controller grouping item routes under a shared path and dependencies."""
+    """Group inventory routes under a common path and provider."""
 
     path = "/items"
-    dependencies = {"service": Provide(InventoryService, scope="singleton")}
-
-    @post("/", status_code=201)
-    def create_item(self, body: CreateItemRequest) -> ItemResponse:
-        """Create a new item from a typed msgspec payload."""
-        return ItemResponse(id=1, sku=body.sku, quantity=body.quantity)
+    dependencies = {"inventory": Provide(InventoryService, scope="singleton")}
 
     @get("/{item_id:int}")
-    def get_item(self, item_id: int, service: InventoryService) -> ItemResponse:
-        """Return an item using the injected InventoryService."""
-        return service.fetch(item_id)
+    async def get_item(self, item_id: int, inventory: InventoryService) -> ItemResponse:
+        """Return an item by ID."""
+        return inventory.fetch(item_id)
+
+    @post("/", status_code=201, guards=[requires_scope("inventory:write")])
+    async def create_item(self, body: CreateItemRequest, inventory: InventoryService) -> ItemResponse:
+        """Register an inventory item."""
+        return inventory.register(body)
 
 
-def build_items_router() -> Router:
-    """Build a modular router mounting ItemController under /api/v1."""
-    return Router(prefix="/api/v1", route_handlers=[ItemController])
+@get("/health")
+async def health() -> dict[str, str]:
+    """Report the service status on a public route."""
+    return {"status": "ok"}
 
 
-def build_procedures() -> ProcedureRouter:
-    """Build a typed RPC router with query and mutation procedures."""
-    rpc = ProcedureRouter(prefix="/_rpc")
+def create_app(token: str | None = None) -> App:
+    """Assemble a fresh app using the local inventory credential."""
+    secret = token if token is not None else os.environ.get("VERTEBRA_INVENTORY_TOKEN", "")
 
-    @rpc.mutation(input_type=CreateItemRequest, output_type=ItemResponse)
-    async def reserve_item(payload: CreateItemRequest) -> ItemResponse:
-        return ItemResponse(id=9, sku=payload.sku, quantity=payload.quantity)
+    def provide_principal(request: Request) -> Principal | None:
+        """Authenticate the local bearer token and supply the inventory principal."""
+        authorization = request.headers.get("authorization") or ""
+        scheme, _, supplied = authorization.partition(" ")
+        if secret and scheme.lower() == "bearer" and compare_digest(supplied.encode(), secret.encode()):
+            return Principal(
+                subject="local-inventory",
+                roles=frozenset({"inventory"}),
+                scopes=frozenset({"inventory:write"}),
+            )
+        return None
 
-    return rpc
+    version = Router(prefix="/v1", route_handlers=[ItemController])
+    api = Router(prefix="/api", route_handlers=[version], guards=[requires_role("inventory")])
+    return App(
+        route_handlers=[health, api],
+        dependencies={"principal": Provide(provide_principal, scope="request")},
+    )
 
 
-def main() -> None:
-    """Mount the items router on an App and invoke the typed RPC procedure."""
-    app = App(route_handlers=[build_items_router()])
-    assert len(app.routes) == 2
-
-    rpc = build_procedures()
-    req = CreateItemRequest(sku="VTB-001", quantity=12)
-    result = asyncio.run(rpc.call("reserve_item", req))
-    assert result == ItemResponse(id=9, sku="VTB-001", quantity=12)
-
-
+app = create_app()
 # --8<-- [end:example]
 
 
-if __name__ == "__main__":
-    main()
+__all__ = (
+    "CreateItemRequest",
+    "InventoryService",
+    "ItemController",
+    "ItemResponse",
+    "app",
+    "create_app",
+    "health",
+)

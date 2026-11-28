@@ -39,12 +39,12 @@ def init(name: str, template: str) -> None:
 
     app_content = (
         '"""Vertebra application entrypoint."""\n\n'
-        "from vertebra import App\n\n"
-        "app = App()\n\n\n"
-        '@app.get("/health")\n'
+        "from vertebra import App, get\n\n\n"
+        '@get("/health")\n'
         "def health() -> dict[str, str]:\n"
         '    """Health check endpoint."""\n'
-        '    return {"status": "ok"}\n'
+        '    return {"status": "ok"}\n\n\n'
+        "app = App(route_handlers=[health])\n"
     )
     (target_dir / "app.py").write_text(app_content, encoding="utf-8")
 

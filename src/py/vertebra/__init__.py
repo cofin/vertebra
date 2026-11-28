@@ -2,14 +2,15 @@
 
 Example::
 
-    from vertebra import App
-
-    app = App()
+    from vertebra import App, get
 
 
-    @app.get("/hello")
-    def hello() -> str:
+    @get("/hello")
+    async def hello() -> str:
         return "world"
+
+
+    app = App(route_handlers=[hello])
 """
 
 from typing import TYPE_CHECKING, Any
@@ -67,7 +68,7 @@ __all__ = (
     "subscription",
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __lazy_modules__ = [
     "vertebra.agent",

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "vertebra-core"
-version = "0.4.0"
+version = "0.5.0"
 description = "One runtime for Python and TypeScript — backend, frontend, web, gRPC, workers, and standalone apps."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -193,40 +193,40 @@ zstandard = [
     "zstandard>=0.23",
 ]
 bigquery = [
-    "vertebra-bigquery==0.4.0",
+    "vertebra-bigquery==0.5.0",
 ]
 bundler = [
-    "vertebra-bundler==0.4.0",
+    "vertebra-bundler==0.5.0",
 ]
 duckdb = [
-    "vertebra-duckdb==0.4.0",
+    "vertebra-duckdb==0.5.0",
 ]
 mssql = [
-    "vertebra-mssql==0.4.0",
+    "vertebra-mssql==0.5.0",
 ]
 mysql = [
-    "vertebra-mysql==0.4.0",
+    "vertebra-mysql==0.5.0",
 ]
 oracle = [
-    "vertebra-oracle==0.4.0",
+    "vertebra-oracle==0.5.0",
 ]
 postgres = [
-    "vertebra-postgres==0.4.0",
+    "vertebra-postgres==0.5.0",
 ]
 redis = [
-    "vertebra-redis==0.4.0",
+    "vertebra-redis==0.5.0",
 ]
 spanner = [
-    "vertebra-spanner==0.4.0",
+    "vertebra-spanner==0.5.0",
 ]
 sqlite = [
-    "vertebra-sqlite==0.4.0",
+    "vertebra-sqlite==0.5.0",
 ]
 storage = [
-    "vertebra-storage==0.4.0",
+    "vertebra-storage==0.5.0",
 ]
 valkey = [
-    "vertebra-valkey==0.4.0",
+    "vertebra-valkey==0.5.0",
 ]
 uvloop = [
     "uvloop>=0.23.0; sys_platform != 'win32'",
@@ -473,7 +473,7 @@ ignore_missing_imports = true
 allow_dirty = true
 commit = false
 commit_args = "--no-verify"
-current_version = "0.4.0"
+current_version = "0.5.0"
 ignore_missing_files = false
 ignore_missing_version = false
 message = "chore(release): bump to v{new_version}"

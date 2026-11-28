@@ -4,9 +4,7 @@ title: Database Drivers & Cloud Dialers
 description: Per-adapter database and cache contracts, standalone driver wheels, shared Rust transport and Arrow SHM bridges, cloud IAM token providers, and Cloud SQL, AlloyDB, AWS, and Azure dialers.
 status: stable
 tags:
-  - domains
   - database
-  - drivers
   - postgres
   - oracle
   - cloud-sql

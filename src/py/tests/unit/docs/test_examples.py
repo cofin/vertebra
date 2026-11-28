@@ -10,17 +10,23 @@ import re
 import sys
 import textwrap
 import tokenize
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 from tools.docs.generate_cli_docs import ensure_native_stub_module
 
+from vertebra import App, handler_id
+from vertebra._vertebra import Request, Response
 from vertebra.db.adapters.postgres import PostgresEmbeddingPushdown, PostgresNotifyConfig
 from vertebra.db.cdc import ChangeFeed
 from vertebra.db.driver import EmbeddingPushdown
 from vertebra.embeddings import PushdownEmbedder
+from vertebra.framework.security import PermissionDeniedError
+from vertebra.server._dispatch import _coerce_response, build_error_response, compile_handler_table
 from vertebra.typing import MissingDependencyError
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
     "test_analytics_cdc_example_executes",
@@ -30,8 +36,11 @@ __all__ = (
     "test_examples_define_valid_snippet_sections",
     "test_examples_directory_inventory",
     "test_examples_do_not_reference_pytest_tmp_path",
+    "test_live_example_streams_state",
+    "test_native_example_responses",
     "test_markdown_code_blocks_and_snippets_fit_viewport_width",
     "test_standalone_example_executes",
+    "test_wasm_example_serves_page_and_module",
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -135,7 +144,7 @@ def test_examples_do_not_reference_pytest_tmp_path() -> None:
 
 
 def test_examples_define_standalone_structure() -> None:
-    """Verify every example defines a docstring, top-level imports, __all__, and main()."""
+    """Verify each example defines a docstring, exports, and an app or workflow."""
     _, _, example_modules = _discover_python_files()
     violations: list[str] = []
     for path in example_modules:
@@ -159,9 +168,21 @@ def test_examples_define_standalone_structure() -> None:
             for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main"
         ]
-        if not main_defs:
-            violations.append(f"{rel}: missing top-level def main() entrypoint")
-            continue
+        has_app = any(
+            isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "app" for target in node.targets)
+            or isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "app"
+            for node in tree.body
+        )
+        if has_app == bool(main_defs):
+            violations.append(f"{rel}: expected exactly one app or main() entrypoint")
+        violations.extend(
+            f"{rel}:{node.lineno}: move example assertions to pytest"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assert)
+        )
 
         for func_node in main_defs:
             violations.extend(
@@ -207,13 +228,18 @@ def test_examples_define_valid_snippet_sections() -> None:
             violations.append(f"{rel}: snippet section is empty")
             continue
 
+        snippet = ast.parse("\n".join(dedented), filename=rel)
+        workflow = any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main" for node in snippet.body
+        )
+        has_launcher = 'if __name__ == "__main__":' in "\n".join(dedented)
+        if workflow != has_launcher:
+            violations.append(f"{rel}: only workflow snippets include a launch guard")
         for offset, line in enumerate(dedented, start=start_idx + 2):
             if len(line) > 120:
                 violations.append(f"{rel}:{offset}: dedented line exceeds 120 chars ({len(line)}): {line[:60]}...")
             if "__all__" in line:
                 violations.append(f"{rel}:{offset}: snippet section leaks __all__")
-            if 'if __name__ == "__main__":' in line:
-                violations.append(f"{rel}:{offset}: snippet section leaks __main__ block")
 
     assert not violations, f"Snippet section violations ({len(violations)}):\n" + "\n".join(violations[:30])
 
@@ -296,21 +322,129 @@ def test_markdown_code_blocks_and_snippets_fit_viewport_width() -> None:
     _discover_python_files()[2],
     ids=lambda p: p.relative_to(EXAMPLES_DIR).as_posix(),
 )
-def test_standalone_example_executes(example_path: Path) -> None:
-    """Import each documentation example and execute main()."""
+def test_standalone_example_executes(example_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Import each example and run its workflow or inspect its application."""
     rel = example_path.relative_to(EXAMPLES_DIR).as_posix()
     try:
         module = _load_example_module(example_path)
     except (ModuleNotFoundError, MissingDependencyError) as exc:
         pytest.skip(f"Optional dependency not installed for {rel}: {exc}")
 
-    assert hasattr(module, "main"), f"{rel} must expose main()"
+    if hasattr(module, "app"):
+        assert isinstance(module.app, App)
+        assert module.app.routes
+        return
+
     entrypoint = module.main
     assert callable(entrypoint)
-
     outcome = entrypoint()
     if inspect.iscoroutine(outcome):
         asyncio.run(outcome)
+    expected = {"background_queues": "Report for Acme: 200", "storage_and_db": '{"quarter": "Q1"}'}
+    assert expected[example_path.stem] in capsys.readouterr().out
+
+
+async def _example_response(
+    app: App,
+    method: str,
+    path: str,
+    *,
+    template: str | None = None,
+    body: object = None,
+    extra_headers: list[tuple[str, str]] | None = None,
+) -> Response:
+    """Run one documented app route through the startup dispatch compiler."""
+    handlers = compile_handler_table(app._handlers)
+    handler = handlers[handler_id(method, template or path)]
+    headers = [("content-type", "application/json"), *(extra_headers or [])]
+    request = Request.from_parts(method, path, encode_json_bytes(body) if body is not None else b"", headers=headers)
+    try:
+        result = handler.invoker(request)
+        if inspect.isawaitable(result):
+            result = await result
+    except PermissionDeniedError as exc:
+        response = build_error_response(exc, request, vr_cls=Response)
+    else:
+        response = _coerce_response(result, request.request_id, Response, status_code=handler.status_code)
+    assert isinstance(response, Response)
+    return response
+
+
+@pytest.mark.anyio
+async def test_native_example_responses() -> None:
+    """Dispatch the documented quickstart, inventory, search, and MCP requests."""
+    quickstart = _load_example_module(EXAMPLES_DIR / "quickstart_app.py")
+    response = await _example_response(quickstart.app, "GET", "/health")
+    assert response.status == 200
+    assert decode_json(response.body)["status"] == "ok"
+
+    inventory = _load_example_module(EXAMPLES_DIR / "routing_and_dtos.py")
+    app = inventory.create_app(token="local-inventory")
+    path = "/api/v1/items/42"
+    template = "/api/v1/items/{item_id:int}"
+    denied = await _example_response(app, "GET", path, template=template)
+    assert denied.status == 403
+    allowed = await _example_response(
+        app, "GET", path, template=template, extra_headers=[("authorization", "Bearer local-inventory")]
+    )
+    assert allowed.status == 200
+    assert decode_json(allowed.body)["id"] == 42
+
+    embeddings = _load_example_module(EXAMPLES_DIR / "embeddings_app.py")
+    response = await _example_response(
+        embeddings.app, "POST", "/search", body={"query": "inventory", "documents": ["inventory", "weather"]}
+    )
+    assert response.status == 200
+    search = decode_json(response.body)
+    assert search["dimensions"] == 256
+    assert search["hits"][0]["document"] == "inventory"
+
+    mcp = _load_example_module(EXAMPLES_DIR / "agent_mcp_tools.py")
+    response = await _example_response(
+        mcp.app,
+        "POST",
+        "/mcp",
+        body={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        extra_headers=[("accept", "application/json, text/event-stream")],
+    )
+    assert response.status == 200
+    assert decode_json(response.body)["result"]["tools"][0]["name"] == "check_stock"
+
+
+@pytest.mark.anyio
+async def test_live_example_streams_state() -> None:
+    """Consume two independent native event streams and observe published changes."""
+    live = _load_example_module(EXAMPLES_DIR / "live_state_and_ssr.py")
+
+    spec = compile_handler_table(live.app._handlers)[handler_id("GET", "/live/events")]
+    for _ in range(2):
+        status, headers, stream = await spec.invoker(Request.from_parts("GET", "/live/events", b""))
+        assert status == 200
+        assert ("content-type", "text/event-stream") in headers
+        assert isinstance(stream, AsyncIterator)
+        events = [chunk async for chunk in stream]
+        assert events == [
+            b'data: {"count":0}\n\n',
+            b'data: {"count":1}\n\n',
+            b'data: {"count":2}\n\n',
+            b'data: {"count":3}\n\n',
+            b"event: complete\ndata: {}\n\n",
+        ]
+
+
+@pytest.mark.anyio
+async def test_wasm_example_serves_page_and_module() -> None:
+    """Serve the browser form and its versioned WebAssembly module."""
+    wasm = _load_example_module(EXAMPLES_DIR / "wasm_in_browser.py")
+    page = await _example_response(wasm.app, "GET", "/")
+    assert page.status == 200
+    assert (b"content-type", b"text/html; charset=utf-8") in page.headers
+    assert b"WebAssembly.instantiateStreaming(response)" in page.body
+
+    module = await _example_response(wasm.app, "GET", "/add.wasm")
+    assert module.status == 200
+    assert (b"content-type", b"application/wasm") in module.headers
+    assert module.body.startswith(b"\x00asm\x01\x00\x00\x00")
 
 
 def _validate_python_fence(

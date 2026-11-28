@@ -13,6 +13,9 @@ generated:
   by: flow/0.29.1
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:codex
+    at: "2026-11-28T04:11:05Z"
+    commit: 1b934b31942f637a62633a0b768ea2e1613b488b
   - by: agent:bb-executor
     at: "2026-11-21T21:30:00Z"
     commit: 06e99fbf
@@ -26,6 +29,9 @@ verified:
     at: "2026-11-14T22:49:00Z"
     commit: ff9f78cb
 sources:
+  - id: src-docs-example-tests
+    resource: src/py/tests/unit/docs/test_examples.py
+    title: "Native app and workflow documentation examples"
   - id: src-makefile
     resource: Makefile
     title: Canonical polyglot build, test, lint, docs, and benchmark targets
@@ -224,6 +230,8 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 
 ## 4. Suite Inventory, Shared-Memory Hygiene & Boundary Evidence
 
+The docs example harness imports native `App` entry points or runs workflow `main()` entry points and checks their output. It parses named snippets and checks workflow launch guards. Native dispatch coverage includes guarded inventory, independent SSE subscriptions, and WebAssembly MIME and magic bytes. [^src-docs-example-tests]
+
 - **Python**: `src/py/tests/unit/` mirrors `src/py/vertebra/` 1:1 with `__init__.py` and top-level imports (`PLC0415`).
   - Server and storage suites cover hotpaths and free-threaded sharding[^src-tests-unit-server-hotpath-py], core ranges, Arrow streaming, and bulk checksums[^src-storage-core-tests][^src-storage-arrow-tests][^src-storage-bulk-tests].
   - Database suites cover drivers, channels, dialers, unified SQL contracts, and capability purity checks[^src-db-channels-dialers-tests][^src-db-unified-contracts-tests][^src-db-capabilities-purity-tests].
@@ -284,3 +292,4 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 [^src-postgres-arrow-streams-tests]: `src/py/tests/unit/db/test_postgres_native_arrow_streams.py` — PostgreSQL native Arrow stream unit tests.
 [^src-postgres-listener-tests]: `src/py/tests/unit/db/test_postgres_native_listener.py` — PostgreSQL native async/sync LISTEN and NOTIFY unit tests.
 [^src-postgres-notify-source-tests]: `src/py/tests/unit/db/test_postgres_notification_source.py` — PostgreSQL notification source and OAuth token refresh unit tests.
+[^src-docs-example-tests]: `src/py/tests/unit/docs/test_examples.py` exercises documentation examples.

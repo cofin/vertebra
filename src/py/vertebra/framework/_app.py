@@ -208,37 +208,17 @@ class App:
             sync_to_thread=effective_route.sync_to_thread,
         )
         self._handler_index[handler_id] = info
-        handler_fn = effective_route.handler
-
+        handler_fn = _wrap_registered_handler(effective_route.handler)
+        cast("Any", handler_fn).__vertebra_bound_route__ = effective_route
         route_container = self._container.create_child(effective_route.dependencies)
-        has_route_meta = bool(
+        if (
             effective_route.segments
             or effective_route.dependencies
             or effective_route.guards
             or effective_route.status_code != 200
             or route_container.graph.providers
-        )
-
-        existing_route = getattr(handler_fn, "__vertebra_bound_route__", None)
-        if existing_route is not None and existing_route != effective_route:
-            handler_fn = _clone_handler_callable(handler_fn)
-
-        if effective_route.sync_to_thread and not getattr(handler_fn, "__vertebra_sync_to_thread__", False):
-            try:
-                cast("Any", handler_fn).__vertebra_sync_to_thread__ = True
-            except (AttributeError, TypeError):
-                handler_fn = _clone_handler_callable(handler_fn)
-                cast("Any", handler_fn).__vertebra_sync_to_thread__ = True
-
-        if has_route_meta:
-            try:
-                cast("Any", handler_fn).__vertebra_bound_route__ = effective_route
-                cast("Any", handler_fn).__vertebra_container__ = route_container
-            except (AttributeError, TypeError):
-                handler_fn = _clone_handler_callable(handler_fn)
-                cast("Any", handler_fn).__vertebra_bound_route__ = effective_route
-                cast("Any", handler_fn).__vertebra_container__ = route_container
-
+        ):
+            cast("Any", handler_fn).__vertebra_container__ = route_container
         self._handlers[handler_id] = handler_fn
 
     def register(self, target: Any) -> Any:
@@ -668,17 +648,17 @@ class App:
                 await result
 
 
-def _clone_handler_callable(handler_fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Create a thin wrapper around handler_fn when attribute assignment or reuse requires isolation."""
+def _wrap_registered_handler(handler_fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Keep registration metadata separate from the original callable's attributes."""
     if inspect.iscoroutinefunction(handler_fn):
 
-        @functools.wraps(handler_fn)
+        @functools.wraps(handler_fn, updated=())
         async def _async_wrapper(*args: Any, **kwargs: Any) -> Any:
             return await handler_fn(*args, **kwargs)
 
         return _async_wrapper
 
-    @functools.wraps(handler_fn)
+    @functools.wraps(handler_fn, updated=())
     def _sync_wrapper(*args: Any, **kwargs: Any) -> Any:
         return handler_fn(*args, **kwargs)
 
