@@ -46,7 +46,7 @@ Create a native `app.py`:
 
 ```python
 import msgspec
-from vertebra import App
+from vertebra import App, get, post
 
 
 class Item(msgspec.Struct):
@@ -54,17 +54,17 @@ class Item(msgspec.Struct):
     quantity: int = 1
 
 
-app = App()
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
+@get("/health")
+async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/items")
-def create_item(body: Item) -> Item:
+@post("/items")
+async def create_item(body: Item) -> Item:
     return body
+
+
+app = App(route_handlers=[health, create_item])
 ```
 
 Run the development server with live reload, or run across multiple workers in production:

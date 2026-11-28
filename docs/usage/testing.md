@@ -28,11 +28,11 @@ def test_controller_and_params() -> None:
     app = App(route_handlers=[OrderController])
 
     params = extract_path_params("/orders/{order_id:int}", "/orders/7")
-    assert params == {"order_id": "7"}
+    assert params == {"order_id": 7}
 
     hid = handler_id("GET", "/orders/{order_id:int}")
-    info = app.get_handler_by_id(hid)
-    assert info is not None
+    info = app.handler_index[hid]
+    assert info.path == "/orders/{order_id:int}"
 ```
 
 ## Testing Async Queues & Storage
@@ -41,8 +41,12 @@ Use `pytest` and `anyio` to test async handlers, `memory://` queues, and in-memo
 
 ```python
 import pytest
-from vertebra.framework.queues import QueueConfig, QueueService
+from vertebra.framework.queues import QueueConfig, QueueService, TaskDef
 from vertebra.storage import SyncObjectStore
+
+
+async def process_item(item_id: int) -> int:
+    return item_id
 
 
 @pytest.mark.anyio
@@ -52,8 +56,12 @@ async def test_memory_queue_and_storage() -> None:
     assert store.get("items/7.json") == b'{"item_id": 7}'
 
     queue = QueueService(QueueConfig(backend_url="memory://"))
-    env = await queue.enqueue("jobs.process", item_id=7)
-    assert env.task_name == "jobs.process"
+    queue.register(TaskDef(name="jobs.process", fn=process_item))
+    try:
+        env = await queue.enqueue("jobs.process", item_id=7)
+        assert env.task_name == "jobs.process"
+    finally:
+        await queue.close()
 ```
 
 ## In-Memory Backends for Fast Tests

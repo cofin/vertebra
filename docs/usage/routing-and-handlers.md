@@ -2,48 +2,92 @@
 
 Vertebra routes incoming HTTP requests through its Rust router directly to typed Python functions, controllers, modular routers, or RPC procedures.
 
-## Route Decorators, Controllers & Routers
+## Compose an application
 
-Register routes on an `App` using HTTP method decorators (GET, POST, PUT, PATCH, DELETE), or group related endpoints into controllers and routers:
+Declare handlers with `get`, `post`, `put`, `patch`, and `delete`. Group related
+handlers on a controller or nest routers to apply a common URL prefix. Save
+the controller and its dependencies in a domain module such as `inventory.py`.
 
 ```python
-from vertebra import App, Controller, Provide, Router, get, post
+from vertebra import Controller, Provide, get
 
 
-class UserService:
-    def get_name(self, user_id: int) -> str:
-        return f"user-{user_id}"
+class InventoryService:
+    def fetch(self, item_id: int) -> dict[str, int | str]:
+        return {"id": item_id, "sku": "VTB-100"}
 
 
-class UserController(Controller):
-    path = "/users"
-    dependencies = {"users": Provide(UserService, scope="singleton")}
-    tags = ("users",)
+class ItemController(Controller):
+    path = "/items"
+    dependencies = {"inventory": Provide(InventoryService, scope="singleton")}
 
-    @get("/{user_id:int}")
-    def get_user(self, user_id: int, users: UserService) -> dict[str, int | str]:
-        return {"id": user_id, "username": users.get_name(user_id)}
-
-    @post("/", status_code=201)
-    def create_user(self, payload: dict[str, str]) -> dict[str, str]:
-        return {"status": "created", **payload}
-
-
-api_router = Router(prefix="/api/v1", route_handlers=[UserController])
-app = App(route_handlers=[api_router])
+    @get("/{item_id:int}")
+    async def read_item(
+        self, item_id: int, inventory: InventoryService
+    ) -> dict[str, int | str]:
+        return inventory.fetch(item_id)
 ```
 
-You can also construct `Route` descriptors directly when building route tables programmatically:
+Import the controller where you assemble the app. Create routers in the factory
+so each app gets fresh routing groups.
 
 ```python
-from vertebra import Route
+from inventory import ItemController
+
+from vertebra import App, Router, get
 
 
-def ping() -> dict[str, str]:
+@get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+def create_app() -> App:
+    version = Router(prefix="/v1", route_handlers=[ItemController])
+    api = Router(prefix="/api", route_handlers=[version])
+    return App(route_handlers=[health, api])
+
+
+app = create_app()
+```
+
+With both files in the same directory, run `vtb run app:app` and request
+`GET /api/v1/items/42`. The response is `{"id":42,"sku":"VTB-100"}`.
+
+Use `app.register(target)` to add handlers, controllers, and routers during
+assembly. `@app.get` and the other app-bound decorators register immediately.
+
+## Apply guards
+
+Guards run before the handler in this order.
+
+| Layer | Configuration |
+| --- | --- |
+| Application | `App(guards=[...])` |
+| Routers, outer to inner | `Router(guards=[...])` |
+| Controller | `Controller.guards` |
+| Handler | `@get(..., guards=[...])` |
+
+A guard returning `False` or raising `PermissionDeniedError` stops dispatch
+and returns HTTP 403. Native role and scope guards evaluate the authenticated
+`Principal` supplied by the request or by a dependency. The guarded inventory
+example registers a request-scoped principal provider that verifies a bearer
+credential. [Inventory app](../examples/index.md#controllers-routers-guards)
+
+## Construct a route directly
+
+Use `Route` for a programmatically defined method, path, and handler.
+
+```python
+from vertebra import App, Route
+
+
+async def ping() -> dict[str, str]:
     return {"ping": "pong"}
 
 
-ping_route = Route(path="/ping", fn=ping, methods=("GET",))
+ping_route = Route(method="GET", path="/ping", handler=ping)
+app = App(route_handlers=[ping_route])
 ```
 
 ## Path, Query, Header & Cookie Parameters
@@ -53,14 +97,11 @@ Extract path parameters from placeholders like `{name}` or typed variants (int, 
 ```python
 from typing import Annotated
 
-from vertebra import App
+from vertebra import App, get
 from vertebra.build.codegen import FromCookie, FromHeader, FromQuery, Parameter
 
-app = App()
-
-
-@app.get("/search")
-def search_items(
+@get("/search")
+async def search_items(
     q: FromQuery[str],
     limit: Annotated[int, Parameter(query="limit", default=20)] = 20,
     request_id: Annotated[
@@ -74,6 +115,9 @@ def search_items(
         "request_id": request_id,
         "session_id": session_id,
     }
+
+
+app = App(route_handlers=[search_items])
 ```
 
 ## Request & Response Models
@@ -82,7 +126,8 @@ Use `msgspec.Struct` models for fast JSON and MessagePack request validation and
 
 ```python
 import msgspec
-from vertebra import App
+
+from vertebra import App, post
 
 
 class CreateOrderInput(msgspec.Struct):
@@ -96,12 +141,12 @@ class OrderSummary(msgspec.Struct):
     quantity: int
 
 
-app = App()
-
-
-@app.post("/orders", status_code=201)
-def create_order(body: CreateOrderInput) -> OrderSummary:
+@post("/orders", status_code=201)
+async def create_order(body: CreateOrderInput) -> OrderSummary:
     return OrderSummary(order_id=101, sku=body.sku, quantity=body.quantity)
+
+
+app = App(route_handlers=[create_order])
 ```
 
 ## RPC Procedures
@@ -129,27 +174,32 @@ app = App(route_handlers=[procedures])
 
 In tests or internal services, call registered procedures directly with `await app.call_procedure("archive_order", {"order_id": 42})`.
 
-## Lifecycle Hooks, Sub-Apps & Auto-Wiring
+## Application setup
 
-Register startup and shutdown hooks, mount sub-applications under a prefix, enable OpenAPI and Scalar docs, or auto-discover controllers and routers across domain packages with `AutowireLoader`:
+Configure OpenAPI after registering routes. Use `app.on_startup` and
+`app.on_shutdown` to manage process-local resources. Use `App.mount` to add
+an ASGI, RSGI, or WSGI app under a URL prefix.
 
 ```python
-from vertebra import App
-from vertebra.framework.autowire import AutowireConfig, AutowireLoader
-
-app = App()
-app.enable_docs(title="Orders Service", version="1.0.0", docs_path="/docs")
+from vertebra import App, get
+from vertebra.framework.openapi import OpenAPIConfig, ScalarDocsConfig
 
 
-@app.on_startup
-async def connect_resources() -> None:
-    pass
+@get("/orders")
+async def list_orders() -> list[dict[str, int]]:
+    return [{"id": 101}]
 
 
-@app.on_shutdown
-async def close_resources() -> None:
-    pass
-
-
-loader = AutowireLoader(AutowireConfig(domain_packages=("myapp.domains",)))
+app = App(route_handlers=[list_orders])
+app.enable_docs(
+    OpenAPIConfig(
+        title="Orders Service",
+        version="1.0.0",
+        scalar=ScalarDocsConfig(path="/docs"),
+    )
+)
 ```
+
+`AutowireLoader` can discover controllers and routers across domain packages.
+See [DI, Security & OpenAPI](framework-features.md) for provider scopes and
+policy configuration.

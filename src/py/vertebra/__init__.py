@@ -2,14 +2,15 @@
 
 Example::
 
-    from vertebra import App
-
-    app = App()
+    from vertebra import App, get
 
 
-    @app.get("/hello")
-    def hello() -> str:
+    @get("/hello")
+    async def hello() -> str:
         return "world"
+
+
+    app = App(route_handlers=[hello])
 """
 
 from typing import TYPE_CHECKING, Any
