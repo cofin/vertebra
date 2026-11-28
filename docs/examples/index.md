@@ -1,6 +1,7 @@
 # Examples
 
-Run these examples from the repository root after installing Vertebra.
+Run these examples from the repository root after installing Vertebra. Start
+the server in one terminal and send requests from a second terminal.
 
 ## Quickstart App
 
@@ -9,6 +10,9 @@ the service name and status.
 
 ```bash
 vtb run docs.examples.quickstart_app:app
+```
+
+```bash
 curl http://localhost:8000/health
 ```
 
@@ -23,6 +27,9 @@ with the bearer token returns item 42. Omitting the header produces HTTP 403.
 
 ```bash
 VERTEBRA_INVENTORY_TOKEN=local-inventory vtb run docs.examples.routing_and_dtos:app
+```
+
+```bash
 curl -H 'Authorization: Bearer local-inventory' \
   http://localhost:8000/api/v1/items/42
 ```
@@ -78,6 +85,9 @@ discovery from the terminal, use the protocol request below.
 
 ```bash
 vtb run docs.examples.agent_mcp_tools:app
+```
+
+```bash
 curl http://localhost:8000/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
@@ -96,6 +106,9 @@ deterministic local embedder.
 
 ```bash
 vtb run docs.examples.embeddings_app:app
+```
+
+```bash
 curl -X POST http://localhost:8000/search \
   -H 'Content-Type: application/json' \
   -d '{"query":"inventory","documents":["inventory levels","weather report"]}'
@@ -104,3 +117,32 @@ curl -X POST http://localhost:8000/search \
 ```python title="docs/examples/embeddings_app.py"
 --8<-- "docs/examples/embeddings_app.py:example"
 ```
+
+
+## WebAssembly in the Browser
+
+Start the app and open [localhost:8000](http://localhost:8000). Enter two integers
+and select **Add**. The browser loads the module and executes its `add` export.
+The default inputs produce `19 + 23 = 42`. Addition wraps at 32 bits, as defined
+by the module's `i32.add` instruction.
+
+```bash
+vtb run docs.examples.wasm_in_browser:app
+```
+
+```python title="docs/examples/wasm_in_browser.py"
+--8<-- "docs/examples/wasm_in_browser.py:example"
+```
+
+The embedded bytes implement this WebAssembly text format (WAT) module.
+
+```wat
+(module
+  (func (export "add") (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.add))
+```
+
+See [the TypeScript SDK guide](../usage/typescript-sdk.md#webassembly) for loading
+the same module with `WASMClient`.

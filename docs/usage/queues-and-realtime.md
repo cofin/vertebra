@@ -40,7 +40,7 @@ from vertebra.framework.queues import (
     task,
 )
 
-queue = QueueService(QueueBackendSettings(kind="memory", backend_url="memory://"))
+queue = QueueService(QueueBackendSettings(kind="memory"))
 
 
 @task(

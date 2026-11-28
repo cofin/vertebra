@@ -1,10 +1,10 @@
 # TypeScript SDK & Framework Adapters
 
-Vertebra packages `@vertebra/client` inside `vertebra-core` and serves its subpath entrypoints from `/__vertebra/client/*`. It also works with Vite, Webpack, and Bun toolchains.
+Vertebra packages `@vertebra/client` inside `vertebra-core`. The SDK works with Vite, Webpack, and Bun.
 
 ## Built-In Browser Distribution
 
-When running Vertebra, the server exposes `@vertebra/client` and its subpath modules under `/__vertebra/client/*` (for example `/__vertebra/client/index.js` or `/__vertebra/client/react/index.js`). Import them directly in HTML without Node or npm:
+Apps using `vertebra.framework.dev.DevMiddleware` can import the bundled SDK from `/__vertebra/client/*` directly in HTML:
 
 ```html
 <script type="module">
@@ -13,11 +13,12 @@ When running Vertebra, the server exposes `@vertebra/client` and its subpath mod
 </script>
 ```
 
-Run `vtb js install` to link packaged TypeScript declarations into `.vertebra/client` and generate an import map for editor autocomplete and type checking:
+Run `vtb js install` to link packaged TypeScript declarations into `.vertebra/client` and generate an import map for editor autocomplete and type checking.
+The types command reads the app from `[tool.vertebra]` in `pyproject.toml`.
 
 ```bash
 vtb js install
-vtb js generate-types app:app --output frontend/src/generated
+vtb js generate-types --output frontend/src/generated
 ```
 
 ## External Bundlers & Vite
@@ -72,6 +73,28 @@ Pass the transport's decoded-message subscription as `subscribeToDeltas` and
 call the returned function when the UI unmounts. The optional `onSend` callback
 receives locally produced deltas. Set the `connected` option for the initial
 connection state and call `setConnected()` when it changes.
+
+## WebAssembly
+
+The [browser example](../examples/index.md#webassembly-in-the-browser) serves
+`/add.wasm` and computes the sum using an exported function in the page. In an app
+bundled with the TypeScript SDK, load the same module with `WASMClient`.
+
+```typescript
+import { WASMClient } from "@vertebra/client/wasm";
+
+const response = await fetch("/add.wasm");
+if (!response.ok) {
+  throw new Error(`WebAssembly request failed: ${response.status}`);
+}
+
+const bytes = new Uint8Array(await response.arrayBuffer());
+const { instance } = await new WASMClient().instantiateBytes(bytes);
+const add = instance.exports.add;
+if (typeof add === "function") {
+  console.log(add(19, 23));
+}
+```
 
 ## Framework Adapters
 

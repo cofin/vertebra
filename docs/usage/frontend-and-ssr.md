@@ -73,7 +73,7 @@ app = App(route_handlers=[dashboard])
 Send `X-Inertia: true` to receive the page as JSON. In a browser, configure
 the asset manifest and root template for the initial HTML response. Inertia
 page props travel with the page response. For server-pushed changes after
-the page loads, see [Live State & Pub/Sub Channels](queues-and-realtime.md#livestate--pubsub-channels).
+the page loads, see [Live State & Pub/Sub Channels](queues-and-realtime.md#livestate-pubsub-channels).
 
 ## QuickJS Server-Side Rendering
 
@@ -104,7 +104,7 @@ from vertebra.framework.htmx import HTMXRequest, HTMXResponse
 
 hx = HTMXRequest.from_headers({"HX-Request": "true", "HX-Target": "items-list"})
 response = HTMXResponse(
-    "<li>New item</li>",
+    html="<li>New item</li>",
     trigger="itemAdded",
     retarget="#items-list",
     reswap="beforeend",

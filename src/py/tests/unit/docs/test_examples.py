@@ -40,6 +40,7 @@ __all__ = (
     "test_native_example_responses",
     "test_markdown_code_blocks_and_snippets_fit_viewport_width",
     "test_standalone_example_executes",
+    "test_wasm_example_serves_page_and_module",
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -362,8 +363,11 @@ async def _example_response(
         if inspect.isawaitable(result):
             result = await result
     except PermissionDeniedError as exc:
-        return build_error_response(exc, request, vr_cls=Response)
-    return _coerce_response(result, request.request_id, Response, status_code=handler.status_code)
+        response = build_error_response(exc, request, vr_cls=Response)
+    else:
+        response = _coerce_response(result, request.request_id, Response, status_code=handler.status_code)
+    assert isinstance(response, Response)
+    return response
 
 
 @pytest.mark.anyio
@@ -419,8 +423,28 @@ async def test_live_example_streams_state() -> None:
         assert ("content-type", "text/event-stream") in headers
         assert isinstance(stream, AsyncIterator)
         events = [chunk async for chunk in stream]
-        assert events[:2] == [b'data: {"count":0}\n\n', b'data: {"count":1}\n\n']
-        assert events[-1] == b"event: complete\ndata: {}\n\n"
+        assert events == [
+            b'data: {"count":0}\n\n',
+            b'data: {"count":1}\n\n',
+            b'data: {"count":2}\n\n',
+            b'data: {"count":3}\n\n',
+            b"event: complete\ndata: {}\n\n",
+        ]
+
+
+@pytest.mark.anyio
+async def test_wasm_example_serves_page_and_module() -> None:
+    """Serve the browser form and its versioned WebAssembly module."""
+    wasm = _load_example_module(EXAMPLES_DIR / "wasm_in_browser.py")
+    page = await _example_response(wasm.app, "GET", "/")
+    assert page.status == 200
+    assert (b"content-type", b"text/html; charset=utf-8") in page.headers
+    assert b"WebAssembly.instantiateStreaming(response)" in page.body
+
+    module = await _example_response(wasm.app, "GET", "/add.wasm")
+    assert module.status == 200
+    assert (b"content-type", b"application/wasm") in module.headers
+    assert module.body.startswith(b"\x00asm\x01\x00\x00\x00")
 
 
 def _validate_python_fence(
