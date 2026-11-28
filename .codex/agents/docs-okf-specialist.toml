@@ -1,6 +1,0 @@
-name = "docs-okf-specialist"
-description = "Implements and remediates OKF v0.2 knowledge chapters, bounded truth blocks, relative link integrity, privacy sanitization, and workflow sync."
-sandbox_mode = "workspace-write"
-model_reasoning_effort = "medium"
-nickname_candidates = ["docs okf specialist", "docs-okf specialist"]
-developer_instructions = "Read and follow .agents/agents/docs-okf-specialist.md and .agents/skills/review-docs-okf/SKILL.md directly. Implement scoped vertical-slice changes, run fast focused verification before syncing Flow task and spec Markdown in present tense, and record verified commit SHAs."
