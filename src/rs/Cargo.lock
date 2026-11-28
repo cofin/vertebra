@@ -6574,7 +6574,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vertebra-bigquery"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -6600,7 +6600,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-bundler"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "crossbeam-channel",
@@ -6622,7 +6622,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -6653,7 +6653,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-db"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -6685,7 +6685,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-duckdb"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -6703,7 +6703,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-http"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "brotli",
@@ -6751,7 +6751,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-mssql"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -6776,7 +6776,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-mysql"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -6805,7 +6805,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-oracle"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -6828,7 +6828,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-postgres"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -6865,7 +6865,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-py"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -6884,7 +6884,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-redis"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "parking_lot",
@@ -6897,7 +6897,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-resp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "lru 0.16.4",
@@ -6916,7 +6916,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-spanner"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -6947,7 +6947,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-sqlite"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -6967,7 +6967,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-storage"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6996,7 +6996,7 @@ dependencies = [
 
 [[package]]
 name = "vertebra-valkey"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "parking_lot",

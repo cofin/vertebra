@@ -2,6 +2,21 @@
 
 All notable changes to Vertebra (`vertebra-core`) are documented in this file.
 
+## 0.5.0
+
+### Added
+
+- Added runnable browser examples for server-sent live-state updates and for WebAssembly execution. [PR #165](https://github.com/cofin/vertebra/pull/165)
+
+### Changed
+
+- `vtb init` generates standalone route declarations and assembles them through `App(route_handlers=[...])` in both templates. The routing guide shows controllers, nested routers, and layered guards. [PR #165](https://github.com/cofin/vertebra/pull/165)
+- The documentation examples expose importable apps or runnable workflows with commands and expected results. [PR #165](https://github.com/cofin/vertebra/pull/165)
+
+### Fixed
+
+- Native route registration keeps dependency injection and thread offload settings local to each registration, including when apps share a handler or one function declares multiple routes. [PR #165](https://github.com/cofin/vertebra/pull/165)
+
 ## 0.4.0
 
 Performance, API-alignment, packaging, and documentation release delivering an adaptive Rust WSGI executor pool, zero-copy embedded bridge and HTTP ingress hot-path optimizations, SQLite SQLAlchemy fastpaths, lock-free per-loop async SHM broker handoff with single-waiter futex wakeups, lazy import-string mounts (`vtb run --mount`), clean-break domain naming and a config-first `vertebra.build.Bundler`, complete PyPI package metadata, and plain-English documentation with themed SVG diagrams.
