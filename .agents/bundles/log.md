@@ -1,5 +1,7 @@
 # Bundle Activity Log
 
+- **2026-11-28 `archive` (`detached-routing`)**: Archived the reviewed, completed implementation (`d48d6c86..1b934b31`, six tasks, closeout `192f34f2`). Routing, live state, and Wasm knowledge preserve the core contracts. Dispatch patterns, runtime gotchas, frontend architecture, and the test matrix record the runtime and example evidence.
+
 - **2026-11-28 `chapter-complete` (`detached-routing`)**: Completed and reviewed six tasks through `1b934b31`. Isolated native bindings, made standalone decorators the starter default, published runnable app examples, and verified real browser LiveState and WebAssembly.
 
 - **2026-11-27 `setup` (`align`)**: Aligned `.agents/` to Flow OKF v0.2 against `f3b624a2`: installed `~/.local/bin/flow` CLI shim, migrated `.agents/setup-state.json` (`stop_gate` -> `stop_check: "enforce"`), synced `product/tech-stack.md` (`0.4.0` + updated Rust/TS dependency versions) and `knowledge/workflow.md` (`dev-ext`, `stubtest`, `lint-{ts,py,rs}`, `bench-tools`, `bench-run`, `bench-all-run`), backfilled missing `generated:` frontmatter on `adr-005`, `adr-006`, and `object-storage.md`, removed `6` spent archived-flow briefs from `research/` (keeping `upstream-sqlspec-direct-arrow-write.md` as `state: open` and syncing `research/index.md` + `index.md`), and ran a 4-way parallel domain refresh across `32` drifted `knowledge/**` chapters (`27` repaired in place, `5` verified accurate).

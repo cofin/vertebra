@@ -4,7 +4,6 @@ title: Framework Extension Limitations
 description: Operational boundaries across Django driver-free DatabaseWrapper backends, Flask-Caching extra requirements, Starlette/FastAPI init_app idempotency, ShmQueueRing macOS 31-byte POSIX SHM hashing, and optional host import gates.
 status: stable
 tags:
-  - domains
   - framework
   - extensions
   - django

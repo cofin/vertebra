@@ -14,6 +14,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:codex
+    at: "2026-11-28T04:11:05Z"
+    commit: 1b934b31942f637a62633a0b768ea2e1613b488b
   - by: agent:flow-setup
     at: "2026-11-27T22:10:00Z"
     commit: f3b624a2
@@ -153,6 +156,8 @@ sources:
 - **`PyBuffer_FillInfo` Ownership & Writable `PyBuffer` Detach Hazard**: In [`Request::__getbuffer__`](../../../../src/rs/vertebra-py/src/request.rs)[^src-vertebra-py-src-request-rs], pass borrowed `slf.as_ptr()` to `PyBuffer_FillInfo` — never `slf.into_ptr()` — because `PyBuffer_FillInfo` calls `Py_XNewRef` internally. `Request.body_view` delegates to `PyMemoryView_FromObject(slf)` to keep `Arc<BatchSnapshot>` anchored, paired with PEP 688 `__buffer__` in [`_vertebra.pyi`](../../../../src/py/vertebra/_vertebra.pyi)[^src-vertebra-pyi]. Never hold a borrowed slice into a writable (`!py_buf.readonly()`) or non-contiguous `PyBuffer<u8>` (`bytearray`, strided `memoryview`) across `py.detach`: [`transport.rs`](../../../../src/rs/vertebra-py/src/transport.rs)[^src-vertebra-py-src-transport-rs] (`with_buffer_slice`, `submit_raw_response`) and `webtransport.rs` (`extract_buffer_bytes`) copy non-readonly or non-contiguous buffers via `py_buf.to_vec(py)?` and drop `PyBuffer` before releasing the GIL.
 - **Non-Instantiable `.pyi` Constructors & `Buffer` Typing**: Classes with no native Python constructor (`Request`, `Headers`, `HeadersIterator`, `RequestBatch`, `RequestBatchIterator`, `AsgiScopeIterator`, `WsgiEnviron`, `WsgiEnvironIterator`, `_WsgiStartResponse`, `RsgiTransport`) must omit `__new__` in [`_vertebra.pyi`](../../../../src/py/vertebra/_vertebra.pyi)[^src-vertebra-pyi], and buffer-protocol parameters (such as `RsgiHttpProtocol.response_bytes`) must be typed as `collections.abc.Buffer` without `Any` leakage so `mypy.stubtest vertebra._vertebra` and `pyright` pass.
 - **`PYO3_PYTHON`, Root `maturin develop` & Binary Freshness**: Build `vertebra-http` with `PYO3_PYTHON="$(CURDIR)/.venv/bin/python"` while `prepare_embedded_python_env` and `ensure_embedded_python_path` in [`main.rs`](../../../../src/rs/vertebra-http/src/main.rs) anchor `.venv` resolution. Crate-local `pyproject.toml` files in `vertebra-{bundler,storage,bigquery,duckdb,mssql,mysql,oracle,postgres,redis,sqlite,spanner,valkey}` require `-m <Cargo.toml>`, whereas `vertebra-py` uses root [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml] and must run `maturin develop` from repository root without `-m`. [`find_server_binary()`](../../../../src/py/vertebra/supervisor/_supervisor.py)[^src-supervisor-supervisor-py] checks `VERTEBRA_SERVER_BINARY`, `CARGO_TARGET_DIR`, packaged `vertebra/bin`, and then workspace target directories (`release` before `debug`, newest by `st_mtime_ns`); keep `duckdb`, `spikard`, and `granian` isolated in `[dependency-groups].bench`.
+
+A default root route with no segments, dependencies, guards, or providers carries its route metadata without the app container. The compiler's local fallback then resolves implicit `Inject` providers for that route. Attaching the empty shared container would introduce those providers into sibling routes. [Regression coverage](../../../../src/py/tests/unit/server/test_runner.py).
 
 ## 3. Litestar v2/v3 Offload, Batched Audit Logs & Driver Teardown
 
